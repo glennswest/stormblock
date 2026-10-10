@@ -181,26 +181,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Ride through an HBA reset on the system slab's drive (2026-10-10, #391, P0) — IN PROGRESS
+### Ride through an HBA reset on the system slab's drive (2026-10-10, #391, P0) — DONE (golden-stormblock-049ae1a488af)
 
-Owner: "The problem is the 'reset' of the controller." The Dell's `sda` shares
-an mpt3sas HBA with the NetApp shelf; a host reset makes I/O fail for seconds.
-- [x] `drive::ridethrough` around every local block device (open_path,
-      open_one_drive): transport errors (EIO, ENXIO, ENODEV, ENOLINK,
-      ETIMEDOUT, EAGAIN, EBUSY, EREMOTEIO, ESHUTDOWN, ECONNRESET, not ready)
-      retried 100 ms → 2 s for 60 s (`STORMBLOCK_TRANSPORT_WINDOW_SECS`);
-      medium errors / EINVAL not; metric `stormblock_transport_retries_total`
-- [x] past the window: ERROR, health `drives_unreachable` `gave_up`, each
-      I/O tries once; any I/O that goes through clears it (fix found by the
-      unit test: a first-try success after a give-up never cleared it)
-- [x] unit tests 3/3; `ci-hba-reset-verify.sh` (virtio-scsi slab disk
-      `offline`/`running`; virtio-scsi has no `host_reset`): ride phase ALL
-      PASS at 137716f (8 s out, no EIO, 646 blocks acked across it, data
-      exact, health named then cleared). Give-up phase: its probe wrote
-      nothing (script bug), fixed, rerunning
-- [x] docs (durability rule 14, README health), CHANGELOG
-- [ ] check.sh; golden; close. A Kubernetes Event on give-up: the engine
-      emits none anywhere; health + ERROR line for now (follow-up issue)
+- [x] `drive::ridethrough` on every local block device: transport errors
+      retried 100 ms → 2 s for 60 s (`STORMBLOCK_TRANSPORT_WINDOW_SECS`),
+      medium errors not; past it ERROR + health `drives_unreachable`
+      `gave_up`; any I/O that goes through clears it
+- [x] unit tests 3/3; `ci-hba-reset-verify.sh` ALL PASS 11/11 (virtio-scsi
+      slab disk offline 8 s under write+fsync: no EIO, data exact; 30 s past
+      a 20 s window: gave_up, logged, write failed at 21 s, recovered);
+      check.sh at 9f0b9cd and 47eb44c ALL PASS (1134/1134); docs, CHANGELOG
+- Not covered: a real host_reset (virtio-scsi has none), the Dell's mpt3sas;
+  the Event is #394. Found: 14 release-build warnings (fixed, 47eb44c);
+  test-target warnings and deny-warnings are #398
 
 ### Pallet signatures in the format (2026-10-10, #378, P2) — DONE (golden-stormblock-7b232505a559)
 
@@ -223,7 +216,7 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### Benches in their own crate (2026-10-10, #211) — PAUSED for P0 #391 (back in line)
+### Benches in their own crate (2026-10-10, #211) — PAUSED for P0 #391 (back in line; #391 done)
 
 - [x] `benches/Cargo.toml` (`stormblock-benches`, criterion, `publish =
       false`), workspace member; criterion and `[[bench]]` out of the root;
