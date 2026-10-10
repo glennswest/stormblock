@@ -1973,7 +1973,7 @@ What earlier docs described and the code does not do, each with its issue:
 - **NVMe userspace (VFIO) driver** — a stub; NVMe drives are served through
   the kernel, opened `O_DIRECT` (#167).
 - **RAID sets** (`docs/raid-sets.md` "Not here"): no reshape or growth of a
-  parity set (#387); Q has no SIMD path; bay LEDs are
+  parity set (#387); bay LEDs are
   stormdrive's (stormdrive#44); `[[arrays]]` in the config is not acted on
   (#165).
 - **io_uring zero-copy send, the StormFS shared-ring IPC server**: code with

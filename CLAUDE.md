@@ -181,6 +181,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — IN PROGRESS
+
+- [x] `parity.rs`: AVX2 and NEON P+Q in one pass (Horner, g·x = shift +
+      masked 0x1D), q_step, constant multiply by split-nibble pshufb/vqtbl1q;
+      `q_update` and recovery dispatch on the level (`simd()`, detected once)
+- [x] test `every_simd_level_matches_the_portable_code` (1–12 strips, odd
+      lengths, every constant); bench `raid6_9+2` (generic vs detected);
+      `ci-parity-aarch64.sh` (the module alone for aarch64 under qemu-user)
+- [ ] build VM: raid/parity tests, bench numbers, NEON run; docs
+      (raid-sets.md "Not here", README), CHANGELOG; check.sh; golden; close
+
 ### Ride through an HBA reset on the system slab's drive (2026-10-10, #391, P0) — DONE (golden-stormblock-049ae1a488af)
 
 - [x] `drive::ridethrough` on every local block device: transport errors

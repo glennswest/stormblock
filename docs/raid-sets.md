@@ -201,8 +201,6 @@ any. Metrics: `stormblock_raid_state{array,name}` (0 clean, 1 rebuilding,
   next assembly (`POST /api/v1/arrays/assemble`, or a restart), not on its
   own.
 - **Discard** is passed down by RAID-1 only.
-- **SIMD for Q**: P uses AVX2/NEON; Q and recovery are portable code (eight
-  lanes at a time for g·x, log tables otherwise).
 - **Version-1 superblocks** (before this, never reassembled) are not read. A
   drive carrying one counts as blank.
 - **`[[arrays]]` in the config file** is still not acted on (#165). Sets are
