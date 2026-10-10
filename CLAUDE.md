@@ -202,7 +202,7 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### Volumes can be renamed (2026-10-10, #219) — IN PROGRESS
+### Volumes can be renamed (2026-10-10, #219) — PAUSED for P0 #385 (back in line)
 
 - [x] `PATCH /api/v1/volumes/{id} {name, force?}` (destructive): sealed
       refused without force, taken name 409, persisted (catalog republished)
@@ -210,7 +210,9 @@ area; the superblock CRC covers it.
       golden_only_with_force`; README, CHANGELOG. The optional startup rename
       of owned `standby-…` volumes is not done (the PVC name rule is
       rustkube-node's)
-- [ ] build, check.sh, golden, close
+- [x] targeted 348/348 at f6f0c5d
+- [ ] check.sh at f6f0c5d (started when paused; read it or run again), golden,
+      close
 
 ### StormFS heartbeat sends a bearer (2026-10-10, #214) — DONE (golden-stormblock-b8014211fe11)
 
