@@ -185,19 +185,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 Owner: "The problem is the 'reset' of the controller." The Dell's `sda` shares
 an mpt3sas HBA with the NetApp shelf; a host reset makes I/O fail for seconds.
-- [ ] a ride-through layer on every local block device: transport-class
-      errors (EIO, ENOLINK, ENXIO, ENODEV, ETIMEDOUT, EAGAIN, EBUSY,
-      EREMOTEIO) retried with backoff for a window (60 s,
-      `STORMBLOCK_TRANSPORT_WINDOW_SECS`); a medium/protection error
-      (ENODATA, EILSEQ) not; callers (ublk requests, persists) just wait
-- [ ] after the window: the error goes up, the drive is listed in health
-      (`drives_unreachable`), an ERROR line; recovery said with its duration
-- [ ] unit tests (a device that fails then answers; medium error at once;
-      the window running out); QEMU verify: a virtio-scsi slab disk taken
-      `offline` then `running`, and `host_reset`, under a write load: no EIO
-      in the writer, data verifies
-- [ ] docs, CHANGELOG, check.sh, golden, close
-
+- [x] `drive::ridethrough` around every local block device (open_path,
+      open_one_drive): transport errors (EIO, ENXIO, ENODEV, ENOLINK,
+      ETIMEDOUT, EAGAIN, EBUSY, EREMOTEIO, ESHUTDOWN, ECONNRESET, not ready)
+      retried 100 ms → 2 s for 60 s (`STORMBLOCK_TRANSPORT_WINDOW_SECS`);
+      medium errors / EINVAL not; metric `stormblock_transport_retries_total`
+- [x] past the window: ERROR, health `drives_unreachable` `gave_up`, each
+      I/O tries once; any I/O that goes through clears it (fix found by the
+      unit test: a first-try success after a give-up never cleared it)
+- [x] unit tests 3/3; `ci-hba-reset-verify.sh` (virtio-scsi slab disk
+      `offline`/`running`; virtio-scsi has no `host_reset`): ride phase ALL
+      PASS at 137716f (8 s out, no EIO, 646 blocks acked across it, data
+      exact, health named then cleared). Give-up phase: its probe wrote
+      nothing (script bug), fixed, rerunning
+- [x] docs (durability rule 14, README health), CHANGELOG
+- [ ] check.sh; golden; close. A Kubernetes Event on give-up: the engine
+      emits none anywhere; health + ERROR line for now (follow-up issue)
 
 ### Pallet signatures in the format (2026-10-10, #378, P2) — DONE (golden-stormblock-7b232505a559)
 
