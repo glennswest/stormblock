@@ -61,6 +61,7 @@ fn pool<'a>(report: &'a serde_json::Value, name: &str) -> &'a serde_json::Value 
 /// Reported: the same claim is admitted.
 #[tokio::test]
 async fn a_data_claim_past_what_the_pool_can_promise_is_refused_and_overcommit_admits_it() {
+    stormblock::mgmt::metrics::init_metrics();
     let dir = TempDir::new().unwrap();
     let (url, _state) = node(&dir, Some("enforce")).await;
     let c = reqwest::Client::new();
