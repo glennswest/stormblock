@@ -180,6 +180,13 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Closing a drive with an API-formatted slab (2026-10-10, #66) — DONE (golden-stormblock-18d96b22dae0)
+
+`slab_on` (DELETE /api/v1/drives) matched by pointer; `POST /api/v1/slabs`
+opens its own device. Now `slab_is_on` (device, path or disk), as the listing.
+Test `integration_destructive::a_drive_carrying_an_api_formatted_slab_is_
+not_closed`; targeted 154/154; check.sh at 67b68cb ALL PASS (1112/1112).
+
 ### #369 reopened: unmarked release volumes still refused (2026-10-09, P0) — DONE (golden-stormblock-ac8207f40ae4)
 
 12.02 on the Dell (96bb3b7, with bfd5d16): the same 8 volumes refused. Their
