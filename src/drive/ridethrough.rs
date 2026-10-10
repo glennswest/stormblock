@@ -24,6 +24,7 @@
 //! that quietly lost its disk.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -114,11 +115,14 @@ pub fn wrap_box(dev: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
 pub struct RideThrough {
     inner: Arc<dyn BlockDevice>,
     window: Duration,
+    /// Listed in [`stalls`]: the next I/O that goes through clears it, even
+    /// one that never failed itself (after a give-up each I/O tries once).
+    stalled: AtomicBool,
 }
 
 impl RideThrough {
     pub fn new(inner: Arc<dyn BlockDevice>, window: Duration) -> Self {
-        RideThrough { inner, window }
+        RideThrough { inner, window, stalled: AtomicBool::new(false) }
     }
 
     /// Wrap `dev` with the environment's window, or hand it back as it is
@@ -141,6 +145,7 @@ impl RideThrough {
             return Err(e);
         }
         let path = self.path();
+        self.stalled.store(true, Ordering::Release);
         let first = started.is_none();
         started.get_or_insert_with(Instant::now);
         metrics::counter!("stormblock_transport_retries_total", "drive" => path.clone()).increment(1);
@@ -186,6 +191,7 @@ impl RideThrough {
     /// The I/O went through: the drive is no longer listed, and how long it
     /// was out is said.
     fn on_success(&self, started: Option<Instant>) {
+        self.stalled.store(false, Ordering::Release);
         let removed = stalls_map().lock().unwrap_or_else(|p| p.into_inner()).remove(&self.path());
         if let Some(st) = removed {
             let took = started.map(|t| t.elapsed().as_millis()).unwrap_or(0);
@@ -232,7 +238,7 @@ impl BlockDevice for RideThrough {
         loop {
             match self.inner.read(offset, buf).await {
                 Ok(n) => {
-                    if started.is_some() {
+                    if started.is_some() || self.stalled.load(Ordering::Acquire) {
                         self.on_success(started);
                     }
                     return Ok(n);
@@ -247,7 +253,7 @@ impl BlockDevice for RideThrough {
         loop {
             match self.inner.write(offset, buf).await {
                 Ok(n) => {
-                    if started.is_some() {
+                    if started.is_some() || self.stalled.load(Ordering::Acquire) {
                         self.on_success(started);
                     }
                     return Ok(n);
@@ -262,7 +268,7 @@ impl BlockDevice for RideThrough {
         loop {
             match self.inner.flush().await {
                 Ok(()) => {
-                    if started.is_some() {
+                    if started.is_some() || self.stalled.load(Ordering::Acquire) {
                         self.on_success(started);
                     }
                     return Ok(());
@@ -277,7 +283,7 @@ impl BlockDevice for RideThrough {
         loop {
             match self.inner.discard(offset, len).await {
                 Ok(()) => {
-                    if started.is_some() {
+                    if started.is_some() || self.stalled.load(Ordering::Acquire) {
                         self.on_success(started);
                     }
                     return Ok(());
@@ -292,7 +298,7 @@ impl BlockDevice for RideThrough {
         loop {
             match self.inner.write_zeroes(offset, len).await {
                 Ok(()) => {
-                    if started.is_some() {
+                    if started.is_some() || self.stalled.load(Ordering::Acquire) {
                         self.on_success(started);
                     }
                     return Ok(());
