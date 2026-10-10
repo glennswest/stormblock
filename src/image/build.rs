@@ -1476,11 +1476,11 @@ members = [ {{ name = "cmdline", role = "cmdline", kind = "bootconfig", text = "
             .unwrap()
         };
         let out = dir.path().join("never.img");
-        let e = ImageBuilder::new(spec("tries = 0")).build(&out).await.unwrap_err().to_string();
+        let e = crate::image::ImageBuilder::new(spec("tries = 0")).build(&out).await.unwrap_err().to_string();
         assert!(e.contains("tries = 0"), "{e}");
 
         let out = dir.path().join("proven.img");
-        let report = ImageBuilder::new(spec("tries = 0\nsuccessful = true")).build(&out).await.unwrap();
+        let report = crate::image::ImageBuilder::new(spec("tries = 0\nsuccessful = true")).build(&out).await.unwrap();
         let id = report.partitions.iter().find_map(|p| p.pallet_id).unwrap();
         let dev = crate::drive::open_path(out.to_str().unwrap(), true).await.unwrap();
         let mut store = crate::pallet::PalletStore::new(Vec::new());
@@ -1490,7 +1490,7 @@ members = [ {{ name = "cmdline", role = "cmdline", kind = "bootconfig", text = "
         assert!(loc.attributes.successful, "marked proven by the spec");
 
         let out = dir.path().join("plain.img");
-        let report = ImageBuilder::new(spec("")).build(&out).await.unwrap();
+        let report = crate::image::ImageBuilder::new(spec("")).build(&out).await.unwrap();
         let id = report.partitions.iter().find_map(|p| p.pallet_id).unwrap();
         let dev = crate::drive::open_path(out.to_str().unwrap(), true).await.unwrap();
         let mut store = crate::pallet::PalletStore::new(Vec::new());
