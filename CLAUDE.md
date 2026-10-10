@@ -202,7 +202,7 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### A digest endpoint for a sealed volume (2026-10-10, #271) — IN PROGRESS
+### A digest endpoint for a sealed volume (2026-10-10, #271) — DONE (golden-stormblock-274ac466c320)
 
 - [x] `GET /api/v1/volumes/{id}/digest` (ordinary): sealed only, sha256 of
       capacity bytes (`goldens::digest`), on a task; kept on the handle per
@@ -210,8 +210,8 @@ area; the superblock CRC covers it.
       later one), `?refresh=true`
 - [x] test `integration_destructive::a_sealed_volumes_digest_is_every_byte_
       and_kept_for_its_seal`; README, CHANGELOG
-- [ ] build, check.sh, golden, close; tell sectionsystems#1, the compliance
-      checker (stormblock-compliance-operations#1)
+- [x] targeted 84/84; check.sh at 93d9451 ALL PASS (1130/1130); golden golden-stormblock-274ac466c320;
+      told sectionsystems#1, stormblock-compliance-operations#1
 
 ### RAID sets: proactive replacement, bitmap re-add (2026-10-10, #256, P3) — DONE (golden-stormblock-8479b8d8b54e)
 
