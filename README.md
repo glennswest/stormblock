@@ -181,39 +181,30 @@ golden is built `--locked`; `cargo update` is a commit of its own.
 
 ### The test container (short, medium, long)
 
-`test/` is stormblock's test image under stormcentral's `docs/test-standard.md`
-(#139). There is one image for all three suites, run as a Job with
-`/test short|medium|long`. `test/build.sh` builds `stormblock` and
-`stormblock-test` static (musl) on the build box, and `test/Containerfile`
-packages them `FROM scratch` (context: the repo root). `test/stormblock-test.yaml`
-is the Job, with the test's metadata.
+stormblock's test container lives in its own repo,
+**glennswest/stormblock-test** (#371, stormcentral#601), under stormcentral's
+`docs/test-standard.md`. It builds against stormblock's `main`, or a commit
+the runner names, and runs the `stormblock` of that commit inside the pod with
+no privileges. It has three suites:
+- `short`: create, attach, write, claim, delete;
+- `medium`: auth, restarts, snapshots, a failed mirror leg, discard;
+- `long`: waves until the night ends.
 
-The test runs the `stormblock` of the same commit **inside the pod**, as its
-child: two sparse files under `/results/work` with a data slab each, NVMe/TCP
-on loopback. It drives it through its API with the token it mints, and reads
-and writes volumes with the engine's own userspace NVMe/TCP initiator. No
-privileges, devices or tools are needed, so it runs the same on every machine
-(`requires: []`). The node's own engine gets the public health probe on
-`STORM_NODE:9090`. Its authenticated checks need `STORM_STORMBLOCK_TOKEN`,
-which stormcentral's test runner does not hand a Job yet (stormcentral#133),
-and are a *skip* without it.
+`stormcentral test run stormblock short` runs it on a test machine (first
+passed on C2NR0Q2 in run 35325a71aa, stormblock-test#3).
 
-| suite | budget | what |
-|---|---|---|
-| `short` | < 2 min | the node's engine is up; create, attach, write and read back, claim a clone of an ext4 blank, delete; nothing left behind |
-| `medium` | < 30 min | the API is closed without the token; flushed data survives SIGTERM and SIGKILL restarts; a group snapshot restores its point in time; a `mirror:2@shelf` volume survives a failed drive and its rebuild; a golden refuses a read-write attach; discard gives space back |
-| `long` | the night | waves of claim, attach, write, verify, detach and delete, sized from the pod's CPUs and memory (`STORM_WAVE_MAX` caps them). Per wave it reports time, what is left, and the engine's memory and fds; it fails on residue, slowdown or growth |
+**What it relies on from this repo:**
+- `stormblock::http::Client`;
+- `stormblock::drive::BlockDevice` (the userspace NVMe/TCP initiator);
+- `.cargo/config.toml`'s rustflags;
+- `admin_token_file` (#274);
+- the `stormblock` binary.
 
-Output is one JSON object per test on stdout and in `/results/results.jsonl`,
-then a summary. The exit is 0 when all passed, 1 when one failed, and 2 when
-the run could not happen. By hand:
+A change to any of these needs a stormblock-test issue.
 
-```bash
-sc-build 'sh test/build.sh && podman run --rm --user 65532 --tmpfs /results:rw,mode=1777 stormblock-test short'
-```
-
-`STORM_ONLY=<name>` runs the matching tests; `STORM_KEEP_WORK=1` keeps the
-engine's files and log.
+`check.sh` builds the static (musl) `stormblock` the image carries. With
+`STORMBLOCK_TEST_DIR=<a stormblock-test checkout>`, it also runs that repo's
+own check (`test/check.sh`, the `short` suite) against this checkout.
 
 **Features** (`Cargo.toml`): `default = ["nvmeof", "iscsi", "stormfs-data"]`;
 `cluster` is opt-in since #209.
@@ -723,8 +714,8 @@ stale: rust 1.75, no `--locked`, and not the RouterOS profile (#196).
 `Containerfile.iscsi-test` is an old external-iSCSI test image.
 `deploy/terragrunt/` makes test VMs on Proxmox and `deploy/m0/` is the M0
 baseline setup; `scripts/build-stormblock-initramfs.sh` builds the initramfs
-and `scripts/build-stormbase-iso.sh` an ISO. The test container is `test/`
-("The test container" above).
+and `scripts/build-stormbase-iso.sh` an ISO. The test container is
+glennswest/stormblock-test ("The test container" above).
 
 ## Using it
 
@@ -2036,7 +2027,7 @@ What earlier docs described and the code does not do, each with its issue:
 ## Source layout
 
 99k lines of Rust in `src/`, 12k in `tests/it/` and 3.5k in `tests-runtime/`,
-about 920 tests, plus the test container's crate (`test/`, 1.1k).
+about 920 tests; the test container is glennswest/stormblock-test (#371).
 
 ```
 src/mgmt/       21.2k  management API (axum): every /api/v1 surface, /v1, kube resources,
@@ -2062,7 +2053,6 @@ src/*.rs        10.3k  cli.rs (CLI, daemon, subcommands; main.rs wraps it), rebu
                        state, boot,
                        boot_iscsi, migrate, stormfs registration, http client
 crates/pallet-format   the no_std pallet reader stormuefi links
-test/                  stormblock-test: the short/medium/long test container
 tests/it/              the in-process integration tests, one binary (nextest)
 tests-runtime/         tests against the built binary, devices or privileges (#222)
 ```

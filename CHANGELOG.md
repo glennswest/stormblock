@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **chore:** #371: the test container moved to glennswest/stormblock-test (stormcentral#601). Its `short` suite passed on C2NR0Q2 from there, in run 35325a71aa (stormblock-test#3).
+  - **Removed here:** `test/` and its workspace member; `Cargo.lock` loses `stormblock-test` in its own commit.
+  - **`check.sh` stage 1:** now the musl release build of `stormblock`, plus that repo's own check when `STORMBLOCK_TEST_DIR` names a checkout. It is private, so a build VM does not clone it.
+  - **Docs:** README and CLAUDE.md point there, with what it relies on from here.
 - **feat:** #378 (stormuefi#18 decided): pallet signatures in the format.
   - **Where it sits:** one Ed25519 signature with a 16-byte key id (SHA-256 of the public key), in the superblock's reserved area (180–263). It is covered by the superblock CRC and invisible to older readers.
   - **What it covers:** `"STORMPAL-SIG-V1\0"` ‖ manifest digest ‖ pallet version ‖ kind.

@@ -5,29 +5,29 @@
 #
 # What a commit must pass before it is called done, in one command, so no part
 # of it is skipped by accident:
-#   1. the test image (test/build.sh): the musl release build of `stormblock`
-#      and `stormblock-test`, packaged FROM scratch. 87d2d99 reached main
-#      compiling neither its tests nor this image; the test machines found it.
-#      Then the image's `short` suite (the in-pod engine, #139), with podman.
+#   1. the musl release build of `stormblock`, the static binary nodes and
+#      stormblock-test's image run. 87d2d99 reached main not compiling; the
+#      test machines found it. The suites themselves live in
+#      glennswest/stormblock-test (#371): with STORMBLOCK_TEST_DIR set to a
+#      checkout of it, its own check (test/check.sh, `short`) runs against
+#      this checkout too.
 #   2. every initramfs shell test, under sh and busybox sh where it is there.
 #   3. the whole suite with cargo-nextest (installed when the build VM has
 #      none, stormcentral#534).
 #   4. the runtime tests against this commit's binary (ci-runtime-tests.sh).
-# Stops at the first stage that fails. CHECK_SKIP_IMAGE=1 leaves out the
-# podman packaging (stage only), for a box without podman.
+# Stops at the first stage that fails.
 set -eu
 root=$(cd "$(dirname "$0")" && pwd)
 cd "$root"
 mkdir -p tmp
 export TMPDIR="$root/tmp"
 
-echo "== check: the test image (test/build.sh)"
-if [ "${CHECK_SKIP_IMAGE:-0}" = 1 ] || ! command -v podman >/dev/null 2>&1; then
-    STAGE_ONLY=1 sh test/build.sh
-else
-    sh test/build.sh
-    echo "== check: the test image's short suite"
-    podman run --rm --user 65532 --tmpfs /results:rw,mode=1777 stormblock-test short
+echo "== check: the musl release build"
+command -v rustup >/dev/null 2>&1 && rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
+cargo build --release --locked --target x86_64-unknown-linux-musl -p stormblock
+if [ -n "${STORMBLOCK_TEST_DIR:-}" ]; then
+    echo "== check: stormblock-test's short suite against this checkout"
+    STORM_COMPONENT_DIR="$root" sh "$STORMBLOCK_TEST_DIR/test/check.sh"
 fi
 
 echo "== check: initramfs tests"

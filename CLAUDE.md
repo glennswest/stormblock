@@ -30,11 +30,11 @@ scratch tree: dev's `/tmp/stormblock-*` directories are root-owned from old
 builds (stormcentral#61). No known-red tests since #134 (the LUN table written behind attaches) and
 #173 (a first write zeroes its slot without writing it).
 
-The test container (#139): `test/build.sh` builds `stormblock` and
-`stormblock-test` (musl) and the `FROM scratch` image;
-`sc-build 'sh test/build.sh && podman run --rm --user 65532 --tmpfs /results:rw,mode=1777 stormblock-test short'`
-runs a suite the way the Job does (`medium`, `long` likewise; `STORM_WAVE_MAX`
-caps long's waves).
+The test container is its own repo since #371: glennswest/stormblock-test
+(builds against this repo's main; `stormcentral test run stormblock short` on
+a test machine). A change to what it relies on (`http::Client`, the NVMe/TCP
+initiator `BlockDevice`, `.cargo/config.toml`, `admin_token_file`, the binary)
+needs a stormblock-test issue.
 
 ## Build
 ```bash
@@ -61,9 +61,10 @@ The golden itself is built by stormcos's `deploy/build-goldens.sh` with
 - `src/main.rs` is a wrapper; the command line is `stormblock::cli`, compiled
   and tested once as part of the library.
 
-**The routine check is `check.sh`** (#357): the test image (`test/build.sh`,
-the musl release build of `stormblock` and `stormblock-test`), every initramfs
-test under sh and busybox sh, the whole nextest suite, the runtime tests. Run
+**The routine check is `check.sh`** (#357): the musl release build of
+`stormblock` (and stormblock-test's own check with `STORMBLOCK_TEST_DIR`, #371),
+every initramfs test under sh and busybox sh, the whole nextest suite, the
+runtime tests. Run
 it on a commit before calling it done: 87d2d99 reached main with neither its
 tests nor the test image compiling (#357). A narrower `sc-build '…'` is for
 iterating, never the last word on a commit.
@@ -140,7 +141,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `src/cluster/` — openraft membership, heartbeat, replication (feature `cluster`, opt-in)
 - `src/rebuild.rs` (automatic per-volume rebuild), `src/drain.rs`, `src/state.rs` (engine state in the `stormblock-state` volume), `src/boot.rs`, `src/boot_iscsi.rs` (opens its own slab, formats only a blank target or with `--format`, #162), `src/migrate.rs`, `src/stormfs.rs` (registration, served by stormstorage, #170), `src/http.rs`
 - `src/cli.rs` — CLI, the daemon, and every subcommand (`open_slabs_resuming`: a flow-over cut short claims a fresh clone, #171); `src/main.rs` only calls `stormblock::cli::run` (#209)
-- `test/` — `stormblock-test`, the test container: short/medium/long suites that run the engine of the same commit in the pod (#139)
+- the test container is glennswest/stormblock-test (#371; it was `test/`, #139)
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222)
 
 ## Current State
@@ -156,8 +157,8 @@ per-volume LBA 512|4096, metadata V9 (#228); the install stopgap and
 being emptied (#239, durability rules 10–11); and in the initramfs: every
 `console=` (#237), the firmware's boot name from EFI variables (#249),
 mlx4_en and late netdevs (#250), the NTP clock step (#251). 99k lines in `src/`, 12k
-in `tests/it/`, 3.5k in `tests-runtime/`, ~920 tests, plus the test container
-crate (`test/`). The full suite (nextest) passes on dev apart from #134 when
+in `tests/it/`, 3.5k in `tests-runtime/`, ~920 tests; the test container is
+glennswest/stormblock-test (#371). The full suite (nextest) passes on dev apart from #134 when
 the box is busy; #120 is now in `tests-runtime/`, run by `ci-runtime-tests.sh` (#222).
 v20.0.0 was cut at the owner's request on #148 (2026-09-28); the forge rollout
 (settings, rollback = VM snapshot only) is answered there. #171 (power-cut
