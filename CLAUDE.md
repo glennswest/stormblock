@@ -180,14 +180,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Pallet priority/tries past four bits refused (2026-10-11, #102, P3) — IN PROGRESS
+### Pallet priority/tries past four bits refused (2026-10-11, #102, P3) — DONE
 
 - [x] `check_attributes` (priority, tries ≤ 15): image spec parse + build,
       `PalletManager::publish` (API 400, CLI), `compose/disk` partitions
 - [x] tests: image (20 refused, tries 16 refused, a code-made spec refused
       before anything is written, 15/15 lands as 15/15), compose/disk;
       docs (pallets.md §2.2, images.md, composed-disks.md), CHANGELOG
-- [ ] sc-build: the tests, check.sh; golden; close
+- [x] image/disk/pallet tests 76/76; the built binary: `priority = 20`
+      refused (no image written), 15 lists `pri=15`; check.sh at c69a2dd
+      ALL PASS; golden; closed
 
 ### golden names the entries a check rejects (2026-10-11, #86, P3) — DONE
 
