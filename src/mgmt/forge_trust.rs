@@ -24,7 +24,7 @@
 //! directory is absent, and the client says so and waits.
 
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -141,6 +141,10 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     let tmp = dir.join(format!(".{name}.tmp"));
     let _ = std::fs::remove_file(&tmp);
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(&tmp)?;
+    // The mode set, not the mode the process's umask leaves: under umask 077
+    // `ca.crt` and `url` came out 0600, unreadable to the services that read
+    // them.
+    f.set_permissions(std::fs::Permissions::from_mode(mode))?;
     f.write_all(bytes)?;
     drop(f);
     std::fs::rename(&tmp, path)

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **fix:** #381: forge's trust handed to a node (`ca.crt`, `url`, `from`) is written 0644 whatever the process's umask. Under umask 077 they came out 0600, unreadable to the services that read them. Found by `check.sh` on a build VM whose umask had become 077.
 - **perf:** #401: the install's flow-over writes the way a slow (SMR) disk wants it.
   - **Coalesced:** a window's sources are read from the appliance in parallel. Their copies are written to the local disk in slot order, neighbours merged into one write of up to 32 MiB (`STORMBLOCK_FLOW_RUN_MB`), read back once per write and published with one sweep of the maps. Before, each extent was its own 1 MiB write and read-back, 8 at once in whatever order they finished, and each swept every map. A fence is never waited for while others are held: a slot in use moves on its own afterwards. `STORMBLOCK_FLOW_COALESCE=0` restores the old path, for measuring.
   - **Zeros not copied:** an extent that reads as all zeros is unmapped from every map naming it (a golden and its clones) and reads as zeros. One with another leg, or in a volume with parity, is copied as before.
