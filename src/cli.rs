@@ -1487,7 +1487,7 @@ pub async fn run() -> anyhow::Result<()> {
                 // listen address is useless to a remote initiator (#26).
                 let advertised_addr = config.management
                     .advertised_host()
-                    .and_then(|h| format!("{h}:{}", listen_addr.port()).parse().ok());
+                    .and_then(|h| target::nvmeof::advertise_at(&h, listen_addr.port()));
                 let nvmeof_config = target::nvmeof::NvmeofConfig {
                     listen_addr,
                     nqn: config.nvmeof.as_ref().map(|n| n.nqn.clone()).unwrap_or_else(mgmt::config::default_nvmeof_nqn),

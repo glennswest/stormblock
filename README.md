@@ -393,7 +393,7 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 | `require_auth` | unset = required | `false` opens the API deliberately (and says so every boot) |
 | `node_name` | env, then hostname | this node's name in `/v1` |
 | `topology` | `{}` | rungs above the node: `[management.topology] site = …, rack = …` |
-| `advertised_addr` | derived | host (or host:port) consumers should dial |
+| `advertised_addr` | derived | host (or host:port) consumers should dial. An NVMe-oF discovery record carries an address: a name here is resolved where a target is made (IPv4 first), and one that does not resolve leaves the record unset, with a warning (#116) |
 | `discovery_disabled` | `false` | no UDP multicast beacon (239.255.42.99:7447) |
 | `beacon_secs`, `peer_stale_secs` | `5`, `30` | discovery timing |
 | `ublk_transport` | `true` | offer ublk for a local attach; per request, `"transport": "nvme_tcp"` asks for the network instead |

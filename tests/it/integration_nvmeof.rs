@@ -356,3 +356,34 @@ async fn a_command_on_a_connection_that_went_silent_fails_in_bounded_time_and_th
     proxy_task.abort();
     server.abort();
 }
+
+/// #116: the discovery record says where to dial, never the bind address. A
+/// target listening on a wildcard, advertised by a host *name* (which used
+/// to fail the address parse and fall back to `0.0.0.0` and the bound
+/// port), names the address the name resolves to and the advertised port.
+#[tokio::test]
+async fn the_discovery_record_names_a_dialable_address_for_a_host_name() {
+    let (_dir, vol, _vm) = common::setup_raid1_volume(64 * 1024 * 1024, 32 * 1024 * 1024).await;
+    let advertised = stormblock::target::nvmeof::advertise_at("localhost", 3319).expect("localhost resolves");
+    let config = NvmeofConfig {
+        listen_addr: "0.0.0.0:4420".parse().unwrap(),
+        nqn: SUBSYSTEM_NQN.into(),
+        advertised_addr: Some(advertised),
+        ..Default::default()
+    };
+    let (addr, server) = common::start_nvmeof_target(vol, config).await;
+    let mut init = NvmeofInitiator::connect(addr).await.unwrap();
+    init.ic_handshake().await.unwrap();
+    init.fabric_connect("nqn.2014-08.org.nvmexpress.discovery", HOST_NQN, 0).await.unwrap();
+    let page = init.get_log_page(0x70, 4096).await.unwrap();
+    let numrec = u64::from_le_bytes(page[8..16].try_into().unwrap()) as usize;
+    assert!(numrec >= 1, "the subsystem is listed");
+    let field = |b: &[u8]| String::from_utf8_lossy(b).trim_end_matches(['\0', ' ']).to_string();
+    let e = &page[1024..2048];
+    let (trsvcid, subnqn, traddr) = (field(&e[32..64]), field(&e[256..512]), field(&e[512..768]));
+    assert_eq!(subnqn, SUBSYSTEM_NQN);
+    assert_eq!(traddr, advertised.ip().to_string(), "the resolved address, not 0.0.0.0");
+    assert!(traddr == "127.0.0.1" || traddr == "::1", "{traddr}");
+    assert_eq!(trsvcid, "3319", "the advertised port, not the bound one");
+    server.abort();
+}

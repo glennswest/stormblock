@@ -28,6 +28,38 @@ use pdu::*;
 use fabric::*;
 
 /// NVMe-oF/TCP target configuration.
+/// Where an initiator should dial a target listening on `port`, from the
+/// host the node advertises (#116): an IP literal as it is (IPv6 needs no
+/// brackets here), a name resolved to its first address, IPv4 first. A
+/// discovery record's `traddr` must be an address (Linux's `connect-all`
+/// takes nothing else), and a host that does not parse or resolve used to
+/// leave the record at the bind address, `0.0.0.0` on a wildcard listener.
+/// Resolved once, where a target is made (start, or forge switched on).
+pub fn advertise_at(host: &str, port: u16) -> Option<SocketAddr> {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() {
+        return None;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return (!ip.is_unspecified()).then(|| SocketAddr::new(ip, port));
+    }
+    use std::net::ToSocketAddrs;
+    match (host, port).to_socket_addrs() {
+        Ok(addrs) => {
+            let addrs: Vec<SocketAddr> = addrs.filter(|a| !a.ip().is_unspecified()).collect();
+            let pick = addrs.iter().find(|a| a.is_ipv4()).or(addrs.first()).copied();
+            if let Some(a) = pick {
+                tracing::info!("NVMe-oF: advertising {host} as {a}");
+            }
+            pick
+        }
+        Err(e) => {
+            tracing::warn!("NVMe-oF: the advertised host {host:?} does not resolve ({e}): not advertised");
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NvmeofConfig {
     /// Listen address (default: 0.0.0.0:4420).
@@ -553,6 +585,15 @@ impl NvmeofTarget {
     /// A target whose subsystem admits any host — a test harness, or an
     /// engine whose caller sets [`Subsystem::set_access`] before serving.
     pub fn new(config: NvmeofConfig) -> Self {
+        if config.advertised_addr.is_none() && config.listen_addr.ip().is_unspecified() {
+            tracing::warn!(
+                "NVMe-oF {}: listening on {} with no advertised address: its discovery log page says {} \
+                 (#116), which no initiator can dial. Set [management] advertised_addr",
+                config.nqn,
+                config.listen_addr,
+                config.listen_addr
+            );
+        }
         let default = Arc::new(Subsystem::new(config.nqn.clone(), HostAccess::Any));
         let first_cntlid = config.cntlid_min.max(1);
         NvmeofTarget {
@@ -1573,6 +1614,19 @@ impl NvmeofTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #116: an advertised host as a dialable address.
+    #[test]
+    fn an_advertised_host_is_an_address_or_nothing() {
+        assert_eq!(advertise_at("192.168.31.202", 3319), Some("192.168.31.202:3319".parse().unwrap()));
+        assert_eq!(advertise_at("fd00::5", 4420), Some("[fd00::5]:4420".parse().unwrap()), "bare IPv6");
+        assert_eq!(advertise_at("[fd00::5]", 4420), Some("[fd00::5]:4420".parse().unwrap()), "bracketed");
+        assert_eq!(advertise_at("0.0.0.0", 4420), None, "a wildcard is no address to dial");
+        assert_eq!(advertise_at("", 4420), None);
+        let lh = advertise_at("localhost", 7).expect("localhost resolves");
+        assert!(lh.ip().is_loopback() && lh.port() == 7, "{lh}");
+        assert_eq!(advertise_at("no-such-host.invalid", 4420), None);
+    }
 
     #[test]
     fn nvmeof_config_defaults() {

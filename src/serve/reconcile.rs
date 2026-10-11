@@ -656,7 +656,7 @@ pub(crate) async fn nvme_listener(ctx: &Arc<ServeContext>) -> anyhow::Result<(Ar
     let target = Arc::new(NvmeofTarget::new(NvmeofConfig {
         listen_addr: addr,
         nqn: format!("{}:serve", ctx.cfg.nqn_prefix),
-        advertised_addr: format!("{}:{}", ctx.cfg.advertise_addr, port).parse().ok(),
+        advertised_addr: crate::target::nvmeof::advertise_at(&ctx.cfg.advertise_addr, port),
         ..Default::default()
     }));
     target.default_subsystem().set_access(crate::target::nvmeof::HostAccess::none());

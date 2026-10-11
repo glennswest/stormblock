@@ -181,6 +181,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Discovery records advertise the bind address (2026-10-11, #116) — IN PROGRESS
+
+The per-volume subsystems the issue's comment named are serve-listener
+subsystems since #188; every target sets `advertised_addr`. Left: a host
+name (or bare IPv6) failed `format!("{h}:{p}").parse()` → fallback to the
+bind address (`0.0.0.0`).
+- [x] `target::nvmeof::advertise_at` (IP literal, else resolved, IPv4
+      first) at the shared target, forge, the serve listener; a warning when
+      a wildcard is left advertised
+- [x] tests (unit; discovery page read off the wire); README, CHANGELOG
+- [ ] build VM; check.sh; golden; close
+
 ### The web UI behind the token (2026-10-11, #166) — DONE
 
 `/ui` was nested after `api::router`'s layer (outside the check). Now

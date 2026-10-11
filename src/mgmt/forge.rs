@@ -114,7 +114,7 @@ pub fn target_from(
     }
     let advertised_addr = management
         .advertised_host()
-        .and_then(|h| format!("{h}:{}", listen_addr.port()).parse().ok());
+        .and_then(|h| crate::target::nvmeof::advertise_at(&h, listen_addr.port()));
     Ok(NvmeofTarget::new(NvmeofConfig {
         listen_addr,
         nqn: settings.nqn.clone(),
