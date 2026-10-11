@@ -87,7 +87,7 @@ head -c $((4 << 20)) /dev/urandom > "$W/pattern.bin"
 I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,tmp,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
-for a in sh mount insmod sleep cat echo ls dd cmp poweroff dmesg grep tail head md5sum sync; do
+for a in sh mount insmod sleep cat echo ls dd cmp poweroff dmesg grep tail head md5sum sync sed tr cut wc; do
     ln -sf busybox "$I/bin/$a"
 done
 cp "$W/pattern.bin" "$I/pattern.bin"
