@@ -181,6 +181,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Dead code and empty features (2026-10-11, #169) — DONE
+
+- [x] removed `target/nvmeof/zerocopy.rs`, `drive::IoOp`/`IoCompletion`,
+      the `arm64`/`mikrotik` features (they gated nothing)
+- [x] kept the ring IPC server for #82, said so (module doc, README)
+- [x] found: the small build did not compile (#364 moved the
+      `stormfs-data` gate from `chunk` onto `catalog`); fixed, and two
+      iSCSI-only warnings there. Small, nvmeof+iscsi, default, cluster: 0
+      warnings
+- [x] check.sh at 6020a56 ALL PASS (1150/1150; a first run lost #333's
+      race). Closed; no golden (the default build's code is unchanged)
+
 ### A ublk device left by a test (2026-10-11, #135) — DONE
 
 Since stormcentral#107 a build is a fresh VM, destroyed after: an orphan can
