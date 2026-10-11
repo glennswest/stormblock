@@ -80,7 +80,7 @@ echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
 left() { ls /sys/class/ublk-char 2>/dev/null | wc -l; }
 run() { # name, env: the test once, its exit, its output kept
     env $2 /bin/ublk_resize --ignored --exact a_live_ublk_device_follows_its_volume_growing \
-        --test-threads 1 > /tmp/$1.out 2>&1
+        --test-threads 1 --nocapture > /tmp/$1.out 2>&1
     echo $? > /tmp/$1.rc
     grep -E "SWEEP|GUARD|panicked|test result" /tmp/$1.out | sed "s/^/LOG $1: /"
 }
