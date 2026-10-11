@@ -123,7 +123,7 @@ async fn v1_attach_refuses_vhost_user_blk() {
     let dir = TempDir::new().unwrap();
     let (_state, base) = node(&dir).await;
     let c = reqwest::Client::new();
-    let (s, v) = call(&c, reqwest::Method::POST, format!("{base}/v1/volumes"), Some(json!({ "name": "pvc-1", "size_bytes": 4u64 << 20 }))).await;
+    let (s, v) = call(&c, reqwest::Method::POST, format!("{base}/v1/volumes"), Some(json!({ "name": "pvc-1", "size_bytes": 4u64 << 20, "replica_tier": { "slaves": 0 } }))).await;
     assert!(s == 200 || s == 201, "{v}");
     let id = v["id"].as_str().unwrap();
     let (s, v) = call(&c, reqwest::Method::POST, format!("{base}/v1/volumes/{id}/attach"), Some(json!({ "node": "n1", "mode": "read_write", "transport": "vhost-user-blk" }))).await;
