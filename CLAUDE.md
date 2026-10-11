@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### migrate-boot never paid owed frees (2026-10-11, #121) — IN PROGRESS
+### migrate-boot never paid owed frees (2026-10-11, #121) — DONE (golden-stormblock-3b051585c805)
 
 - [x] `migrate_to_slab`: sync the destination (its slot table is the
       record), then `release_owed`, then sync the source (the frees on
@@ -189,7 +189,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 - [x] `boot_iscsi::migrate_boot_volumes_between_slabs` checks the source's
       slots freed, in memory and reopened; CHANGELOG
 - [x] migrate/boot_iscsi 24/24, clippy clean; check.sh at c71b637 ALL PASS (1150/1150)
-- [ ] golden; close
+- [x] golden golden-stormblock-3b051585c805 (fa68d3e); closed
 
 ### A drive added grows the pool and is used (2026-10-11, #154, P3) — PARTLY BUILT; DECISION 3 WAITS ON THE OWNER
 
