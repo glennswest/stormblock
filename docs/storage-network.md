@@ -43,6 +43,46 @@ Unset, there is one network and everything is as before.
 API's own `listen_addr` is never narrowed: callers on the node reach it on
 loopback. Bind it to the LAN address to keep it off the storage network.
 
+## Several NICs: multipath (#90)
+
+One TCP connection is one flow, and LACP hashes a flow to one member link:
+a volume over one connection never exceeds one link, however the bond is
+built. Two storage NICs as two paths remove the bond from the question.
+
+```toml
+[storage]
+interfaces = ["ens2f0", "ens2f1"]   # both on one subnet, or each on its own
+```
+
+Set on the node (stormpump#17's network reconciler, not this engine) for two
+NICs on one subnet: `arp_ignore = 1` and `arp_announce = 2` on both, or each
+NIC answers ARP for the other's address and the two paths collapse onto one.
+
+- **The target** listens on every storage address (a wildcard listen
+  becomes all of them), and each listener is bound to its NIC
+  (`SO_BINDTODEVICE`), so a connection's replies leave by the NIC it arrived
+  on. Without that the routing table sends every reply out of the first NIC
+  on the subnet, whose peers ignore it: found by `ci-nvme-multipath-verify.sh`.
+- **Attach replies** carry every address in `addresses`; **the discovery log**
+  has one record per address per subsystem, so a Linux host's
+  `nvme connect-all` makes a path through each and its own nvme-multipath
+  (`iopolicy` round-robin or queue-depth) spreads the I/O.
+- **Boot claims** keep `address` and `uri` (the first path, for callers that
+  read one) and add `addresses` and `uri_multipath`, which the engine's own
+  `boot-claim` passes on.
+- **The engine's own initiator** (boot root, remote slabs, RAID legs) takes
+  `nvme-tcp://a:4420,b:4420/<nqn>?nsid=N[&iopolicy=round-robin|queue-depth]`.
+  Each address is a path with its own connections (`STORMBLOCK_NVME_TCP_QUEUES`
+  each, 4). Each connection is bound to the local storage interface on the
+  path's subnet (device and source address, the owner's decision on #90): the
+  `n`th path to a subnet leaves by the `n`th storage NIC on it. An operation
+  takes a path by `iopolicy`: `round-robin` (default) or `queue-depth` (fewest
+  commands in flight). A path whose connection fails is skipped for 5 s and the
+  retry goes by another; with every path down, every path is tried.
+- A process that read no configuration (`boot-local`, the CLI) takes its
+  storage interfaces from `$STORMBLOCK_STORAGE_INTERFACE` (comma-separated).
+- iSCSI listens on the first storage address only.
+
 ## Failure: a node whose data path is down is not a dead node
 
 - **Health** (`GET /api/v1/health`, the control channel) reports
@@ -67,6 +107,15 @@ loopback. Bind it to the LAN address to keep it off the storage network.
   to diagnose, so it is said rather than left to be found.
 
 ## Checked
+
+- `ci-nvme-multipath-verify.sh` (#90): two QEMU guests joined by two links,
+  every NIC on one /24 with `arp_ignore=1`/`arp_announce=2`. A, the engine with
+  two storage interfaces, has forge's target on both addresses. B, the engine's
+  initiator, attaches a volume (the reply names both addresses) and imports a
+  48 MB golden over the two-path URI.
+  - B sent 27.6 MB on eth0 and 29.7 MB on eth1, and A received on both (the
+    per-interface counters the owner asked for, not the total).
+  - With B's eth1 down, a second import completed over eth0 alone.
 
 - unit tests: `netif` (addresses on `lo`, a fake sysfs for a link that is
   down), the config's per-role hosts, the beacon and the peer table;

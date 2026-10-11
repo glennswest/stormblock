@@ -47,6 +47,10 @@ One listener (`:4420`) carries several subsystems:
   as `duplicate IDs in subsystem`. Attaching a volume that is already served
   there answers with the NSID it has.
 
+A node with several storage NICs (`[storage] interfaces`, #90) lists each
+subsystem once per address in the discovery log and in an attach reply's
+`addresses`; see [storage-network.md](storage-network.md#several-nics-multipath-90).
+
 ## Attaching for a host
 
 Every door that serves a volume over NVMe/TCP takes the host:

@@ -352,7 +352,7 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_METADATA_FORMAT` | `1` keeps new slabs (and the data directory) in metadata format 1 and migrates nothing (#158), where no `[metadata] format` is read | `2` |
 | `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
-| `STORMBLOCK_STORAGE_INTERFACE` | the storage network's interface, before `[storage] interface` (#85) | one network |
+| `STORMBLOCK_STORAGE_INTERFACE` | the storage network's interfaces, comma-separated, before `[storage] interface(s)` (#85, #90). A process with no configuration (a CLI command, `boot-local` in the initramfs) binds its NVMe/TCP paths to them | one network |
 | `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
 | `STORMBLOCK_DHCHAP_SECRET` | the DH-HMAC-CHAP secret (`DHHC-1:…`) the engine's NVMe/TCP initiator answers with when a target asks and the drive was given none (`dhchap_secret`, #213) (#210) | no secret: a target that requires one refuses |
 | `STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS` | how long one NVMe/TCP command (or connect) of the engine's initiator may take before the connection is dropped and the command fails (#358) | `30`, like Linux's `nvme_core.io_timeout` |
@@ -366,7 +366,7 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_FLOW_RUN_MB` | the largest write a flow-over makes on its destination: neighbouring slots merged into one (#401) | `32` |
 | `STORMBLOCK_FLOW_COALESCE` | `0`: one write and read-back per extent, as before #401, for measuring | on |
 | `STORMBLOCK_FLOW_FLUSH_BOUND_MS` | the destination disk's flush time (p90, 30 s) above which a flow-over halves its window and pauses for one flush after each (#282) | `1000`; `0` off |
-| `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per attached NVMe/TCP namespace (#331) | `4` |
+| `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per path of an attached NVMe/TCP namespace (#331, #90) | `4` |
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
 | `STORMBLOCK_BOOT_TAG` | this machine's name for that claim; the initramfs exports the name it resolved (#259) | the firmware's `StormBootTag` EFI variable, else SMBIOS serial, else SMBIOS UUID (#249) |
@@ -409,6 +409,7 @@ subnet and MTU. Unset: one network, as before.
 
 | key | default | |
 |---|---|---|
+| `interfaces` | `[]` | more storage NICs, after `interface` (#90): the targets listen on and advertise every one's address (one discovery record each), and the engine's own initiator makes a path through each. [docs/storage-network.md](docs/storage-network.md#several-nics-multipath-90) |
 | `interface` | — | `eth1.100`; `$STORMBLOCK_STORAGE_INTERFACE` first. The NVMe/TCP and iSCSI targets (shared, forge, `/serve/v1`) listening on a wildcard bind its address instead; attach replies, boot claims, discovery log pages and `/serve/v1` advertise it. The beacon, the forge trust URL and the API stay on the control side |
 | `address` | its first IPv4, else first global IPv6 | which of the interface's addresses |
 | `advertised_addr` | the address | what initiators dial, when it is not the address (host only) |
