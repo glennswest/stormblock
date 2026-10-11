@@ -312,8 +312,9 @@ struct Ring {
 }
 
 // SAFETY: the pointers are into the shared guest memory, which the worker
-// keeps alive with an `Arc<GuestMemory>`.
+// keeps alive with an `Arc<GuestMemory>`; shared access only reads them.
 unsafe impl Send for Ring {}
+unsafe impl Sync for Ring {}
 
 impl Ring {
     fn avail_idx(&self) -> u16 {
@@ -809,14 +810,16 @@ async fn request(
         counters.errors.fetch_add(1, Ordering::Relaxed);
         return 0;
     };
-    // SAFETY: inside the segment.
-    let status_ptr = unsafe { last.ptr.add(last.len - 1) };
+    // The status byte, inside the guest's buffer; written last.
+    let set_status = |v: u8| {
+        // SAFETY: the last byte of the last writable segment.
+        unsafe { std::ptr::write_volatile(last.ptr.add(last.len - 1), v) }
+    };
     let readable: Vec<&Seg> = segs.iter().filter(|s| !s.writable).collect();
     let mut header = [0u8; 16];
     if gather(&readable, 0, &mut header) < 16 {
         counters.errors.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: the status byte, inside the guest's buffer.
-        unsafe { std::ptr::write_volatile(status_ptr, S_IOERR) };
+        set_status(S_IOERR);
         return 1;
     }
     let kind = u32::from_le_bytes(header[0..4].try_into().unwrap());
@@ -887,8 +890,7 @@ async fn request(
     if status != S_OK {
         counters.errors.fetch_add(1, Ordering::Relaxed);
     }
-    // SAFETY: the status byte, inside the guest's buffer.
-    unsafe { std::ptr::write_volatile(status_ptr, status) };
+    set_status(status);
     written as u32 + 1
 }
 
