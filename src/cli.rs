@@ -4689,14 +4689,20 @@ pub async fn run() -> anyhow::Result<()> {
         if let Some((p, _)) = slabs.iter().find(|(_, s)| s.slot_size() != slot) {
             anyhow::bail!("slab {p} has another slot size than {}", slabs[0].0);
         }
+        // As `open_slabs_on` opens an empty slab: a new array of its own, its
+        // records written to it, so every later open names the same array.
         let mut mgr = VolumeManager::new(slot);
         let mut ids = Vec::new();
         for (path, slab) in slabs {
             ids.push(slab.slab_id());
-            println!("Attached empty {} slab {path} (freshly formatted)", slab.role());
-            mgr.add_slab(slab).await;
+            let role = slab.role();
+            let array = RaidArrayId(uuid::Uuid::new_v4());
+            mgr.attach_slab(array, slab)
+                .await
+                .map_err(|e| anyhow::anyhow!("attach slab {path}: {e}"))?;
+            println!("Attached empty {role} slab {path} (freshly formatted, array {array})");
         }
-        mgr.keep_metadata_in_first(&ids);
+        mgr.persist_to_slabs(ids);
         Ok(mgr)
     }
 
@@ -11942,8 +11948,13 @@ mod offline_clone_tests {
         ext4_image(&base, 64 * 1024 * 1024, &[("/etc/os-release", "NAME=base\n")]).await;
         let slabs = vec![slab.clone()];
 
-        // Import + clone; a second clone imports nothing.
+        // Import + clone into the freshly formatted slab; a second clone
+        // imports nothing.
         handle_clone(&slabs, None, &base, "work1", None).await.unwrap();
+        let arrays = |m: &VolumeManager| m.array_slab_pairs().into_iter().map(|(a, _)| a).collect::<Vec<_>>();
+        let first = arrays(&open_slabs_and_restore(&slabs, None).await.unwrap());
+        assert_eq!(first.len(), 1);
+        assert_eq!(arrays(&open_slabs_and_restore(&slabs, None).await.unwrap()), first, "one array, every open");
         handle_clone(&slabs, None, &base, "work2", Some("128M")).await.unwrap();
         let err = handle_clone(&slabs, None, &base, "work1", None).await.unwrap_err();
         assert!(err.to_string().contains("already holds a volume named work1"), "{err}");
