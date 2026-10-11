@@ -181,6 +181,13 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### StormFS registration names its target (2026-10-11, #170, P3) — WAITING ON THE OWNER
+
+The route is stormstorage's (#214, stormstorage#6, #77); the names say
+StormFS. Asked on #170 (needs-owner): A rename to `[registration] url`
+(old `[stormfs]` accepted with a warning), B leave it, C StormFS gets the
+route. Recommended A. Nothing built.
+
 ### Dead code and empty features (2026-10-11, #169) — DONE
 
 - [x] removed `target/nvmeof/zerocopy.rs`, `drive::IoOp`/`IoCompletion`,
