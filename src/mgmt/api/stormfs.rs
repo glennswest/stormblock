@@ -401,13 +401,11 @@ async fn copy(State(state): State<Arc<AppState>>, Json(req): Json<CopyRequest>) 
     let st = state.stormfs.lock().await;
     let (src_dev, dst_dev) = {
         let vm = state.volume_manager.lock().await;
-        let find = |v: Uuid| {
-            vm.get_volume_handle(&VolumeId(v))
-                .ok_or_else(|| ApiError::not_found(format!("volume {v} not found")))
-        };
+        let find = |v: Uuid| vm.get_volume_handle(&VolumeId(v));
         match (find(req.from.volume), find(req.to.volume)) {
-            (Ok(s), Ok(d)) => (s, d),
-            (Err(r), _) | (_, Err(r)) => return r,
+            (Some(s), Some(d)) => (s, d),
+            (None, _) => return ApiError::not_found(format!("volume {} not found", req.from.volume)),
+            (_, None) => return ApiError::not_found(format!("volume {} not found", req.to.volume)),
         }
     };
     if dst_dev.is_sealed() {
