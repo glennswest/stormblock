@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### image build: `clones = [...]` made (2026-10-11, #124) — IN PROGRESS
+### image build: `clones = [...]` made (2026-10-11, #124) — DONE (golden-stormblock-17aefc2dba61)
 
 - [x] `fill_slab`: the first clone and every `clones` name, each stamped,
       named distinctly, counted in space; the report lists them
@@ -192,7 +192,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
       by the builder's `rest` and the pallet manager's fit checks
 - [x] image/pallet tests 101/101, clippy clean on the changed lines;
       check.sh at 0d39fd5 ALL PASS (1148/1148)
-- [ ] golden; close
+- [x] golden golden-stormblock-17aefc2dba61 (9453c4b); closed
 
 ### Scrub: compare mirror legs and parity (2026-10-11, #160, P3) — WAITING ON THE OWNER
 
