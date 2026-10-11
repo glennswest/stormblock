@@ -4596,7 +4596,7 @@ pub async fn run() -> anyhow::Result<()> {
             Some(s) => Some(crate::mgmt::config::parse_size(s).map_err(|e| anyhow::anyhow!("--size {s}: {e}"))?),
             None => None,
         };
-        let mgr = open_slabs_and_restore(slab_paths, meta).await?;
+        let mgr = open_slabs_or_fresh(slab_paths, meta).await?;
         let vm: Arc<crate::fs::template::VmLock> = Arc::new(crate::lockwatch::TrackedMutex::new(mgr));
         offline::clone_name_free(&vm, name).await.map_err(|e| anyhow::anyhow!(e))?;
 
@@ -4658,6 +4658,46 @@ pub async fn run() -> anyhow::Result<()> {
         );
         println!("attach it with: stormblock attach --slab {} --volume {name} --mount <dir>", slab_paths.join(" --slab "));
         Ok(())
+    }
+
+    /// The slabs as `open_slabs_and_restore` opens them, or — when none of
+    /// them carries records yet because each was just formatted (`slab
+    /// format`: a metadata region of its own, not one slot allocated) — an
+    /// empty manager over them whose records go to those slabs (#87).
+    /// Anything else that carries no records is refused as before.
+    async fn open_slabs_or_fresh(slab_paths: &[String], meta: Option<&str>) -> anyhow::Result<VolumeManager> {
+        let err = match open_slabs_and_restore(slab_paths, meta).await {
+            Ok(m) => return Ok(m),
+            Err(e) => e,
+        };
+        if meta.is_some() || !err.to_string().contains("no volume metadata") {
+            return Err(err);
+        }
+        let mut slabs = Vec::new();
+        for path in slab_paths {
+            let dev = open_storage(path).await?;
+            let slab = Slab::open(dev).await.map_err(|e| anyhow::anyhow!("open slab {path}: {e}"))?;
+            if !slab.has_metadata_region() || slab.allocated_slots() > 0 {
+                return Err(err);
+            }
+            if crate::volume::metav2::read_slab(&slab).await.ok().flatten().is_some() {
+                return Err(err);
+            }
+            slabs.push((path.clone(), slab));
+        }
+        let slot = slabs[0].1.slot_size();
+        if let Some((p, _)) = slabs.iter().find(|(_, s)| s.slot_size() != slot) {
+            anyhow::bail!("slab {p} has another slot size than {}", slabs[0].0);
+        }
+        let mut mgr = VolumeManager::new(slot);
+        let mut ids = Vec::new();
+        for (path, slab) in slabs {
+            ids.push(slab.slab_id());
+            println!("Attached empty {} slab {path} (freshly formatted)", slab.role());
+            mgr.add_slab(slab).await;
+        }
+        mgr.keep_metadata_in_first(&ids);
+        Ok(mgr)
     }
 
     /// `golden --from-volume` — a volume of a slab written out as a golden
