@@ -306,6 +306,12 @@ pub trait BlockDevice: Send + Sync {
         self.id().clone()
     }
 
+    /// Where this device's byte 0 is on the drive [`drive_id`](Self::drive_id)
+    /// names: 0 for a drive, a partition's start for a partition (#176).
+    fn drive_offset(&self) -> u64 {
+        0
+    }
+
     /// Total capacity in bytes.
     fn capacity_bytes(&self) -> u64;
 

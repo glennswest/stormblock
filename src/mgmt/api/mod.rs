@@ -10,6 +10,7 @@ pub mod images;
 pub mod pallets;
 pub mod slabs;
 pub mod placement;
+pub mod legs;
 pub mod rebuilds;
 pub mod erasures;
 pub mod usage;

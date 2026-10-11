@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #176 (#51 item 3): `GET /api/v1/volumes/{id}/legs[?start=&limit=]` says where every leg of a volume's extents is on its drive, for a reader that must not reconstruct RAID and takes one good leg instead.
+  - **What it reports:** each mapped extent's legs (primary, then mirrors) with the drive (path, serial, WWN, model: the disk, not the partition), the slot's absolute byte offset on it, and `ok`, `failed` or `missing`. A parity volume's stripes carry their P and Q legs apart. Pages of up to 65536 extents, with `next`.
+  - **How the offset is found:** `BlockDevice::drive_offset` (a partition adds its start).
+  - **Test:** `integration_placement::each_legs_place_on_its_drive_holds_the_extents_bytes` (slabs on partitions 1 MiB into three drive files; every mirror and data leg read off the file at its offset; P is the XOR of its stripe; pages; by name).
 - **feat:** #165: config sections that were parsed and never acted on.
   - **`[[arrays]]` and `[[volumes]]` now act at the daemon's start**, and `--raid`/`--volume` are the command line's way of declaring them, as `merge_cli` already merged them. Never destructive:
     - an array whose name is a set already assembled is that set, never made again;

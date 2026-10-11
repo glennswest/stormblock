@@ -3115,6 +3115,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
         .route("/{id}/pallet-signature", get(pallet_signature).post(sign_pallet_volume))
         .route("/{id}/digest", get(volume_digest))
+        .route("/{id}/legs", get(super::legs::volume_legs))
         .route("/{id}/access", get(get_access).put(set_access))
         .route("/{id}/clone", axum::routing::post(clone_volume))
         .route("/{id}/lineage", get(volume_lineage))

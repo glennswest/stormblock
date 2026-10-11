@@ -789,8 +789,11 @@ Guaranteed, and asserted by tests:
 Not done here:
 
 - **Signing.** The format reserves the signed quantity; key handling is undecided.
-- **Per-leg physical offsets** (#51 item 3) — moot for a *pallet* mirror,
+- **Per-leg physical offsets** (#51 item 3): moot for a *pallet* mirror,
   where each leg is a complete partition (see `docs/redundancy.md`, "Pallet-
-  level mirror"); still open for a read-only consumer of a parity *volume*.
+  level mirror"). For a *volume* (mirrored or parity) they are reported by
+  `GET /api/v1/volumes/{id}/legs` (#176): each extent's legs with the drive
+  and the slot's byte offset on it, a parity stripe's P and Q apart. Nothing
+  records them on the drives: a reader needs the engine's answer.
 - Multi-extent (sparse) members: the reader handles them, the writer emits one
   extent per member.

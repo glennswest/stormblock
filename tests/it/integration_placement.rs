@@ -250,3 +250,92 @@ async fn the_generation_moves_on_attach_detach_and_slab_state() {
     assert!(gen0(&body) > g);
     server.abort();
 }
+
+/// #176: every leg's place on its drive. A reader that must not reconstruct
+/// RAID reads the drive itself at the offset given and finds the extent's
+/// bytes: each mirror leg, a parity volume's data legs, and P = the XOR of
+/// its stripe. Slabs sit on partitions 1 MiB into their drives, so the
+/// offset is the drive's, not the slab's. Pages with `next`.
+#[tokio::test]
+async fn each_legs_place_on_its_drive_holds_the_extents_bytes() {
+    use std::os::unix::fs::FileExt;
+    let dir = TempDir::new().unwrap();
+    let mut vm = VolumeManager::new(SLOT);
+    let mut files = Vec::new();
+    for tag in ["a", "b", "c"] {
+        let path = dir.path().join(format!("{tag}.disk")).to_string_lossy().to_string();
+        let disk: Arc<dyn BlockDevice> = Arc::new(FileDevice::open_with_capacity(&path, 10 << 20).await.unwrap());
+        let part = Arc::new(PartitionDevice::new(disk, 1 << 20, 8 << 20).unwrap());
+        assert_eq!(part.drive_offset(), 1 << 20);
+        vm.add_slab(Slab::format(part, SLOT, StorageTier::Hot).await.unwrap()).await;
+        files.push(path);
+    }
+    let byte = |vol: u8, e: u64| vol.wrapping_mul(16).wrapping_add(e as u8 + 1);
+    let mut ids = Vec::new();
+    for (vol, policy) in [(1u8, RedundancyPolicy::mirror(2)), (2u8, RedundancyPolicy::parse("raid5:2+1").unwrap())] {
+        let id = vm.create_volume_with(&format!("v{vol}"), 1 << 20, CreateOptions::redundant(policy)).await.unwrap();
+        let v = vm.get_volume(&id).unwrap();
+        for e in 0..4u64 {
+            v.write(e * SLOT, &vec![byte(vol, e); SLOT as usize]).await.unwrap();
+        }
+        v.flush().await.unwrap();
+        ids.push((vol, id));
+    }
+    let (_state, base, server) = serve(&dir, vm).await;
+    let c = reqwest::Client::new();
+    let read_at = |path: &str, at: u64| {
+        let f = std::fs::File::open(path).unwrap();
+        let mut b = vec![0u8; SLOT as usize];
+        f.read_exact_at(&mut b, at).unwrap();
+        b
+    };
+
+    for (vol, id) in &ids {
+        let got: serde_json::Value =
+            c.get(format!("{base}/api/v1/volumes/{}/legs", id.0)).send().await.unwrap().json().await.unwrap();
+        assert_eq!(got["extent_bytes"], SLOT, "{got:#}");
+        let extents = got["extents"].as_array().unwrap();
+        assert_eq!(extents.len(), 4, "{got:#}");
+        for x in extents {
+            let e = x["extent"].as_u64().unwrap();
+            assert_eq!(x["offset"].as_u64().unwrap(), e * SLOT);
+            let legs = x["legs"].as_array().unwrap();
+            assert_eq!(legs.len(), if *vol == 1 { 2 } else { 1 }, "{x}");
+            for leg in legs {
+                let path = leg["drive"]["path"].as_str().unwrap();
+                assert!(files.iter().any(|f| f == path), "the drive, not the partition: {leg}");
+                assert_eq!(leg["state"], "ok");
+                let at = leg["drive_offset"].as_u64().unwrap();
+                assert!(at >= 1 << 20, "past the partition's start: {leg}");
+                assert!(read_at(path, at).iter().all(|b| *b == byte(*vol, e)), "volume {vol} extent {e} at {path}:{at}");
+            }
+        }
+        if *vol == 2 {
+            let parity = got["parity"].as_array().unwrap();
+            assert_eq!(parity.len(), 2, "two stripes of two: {got:#}");
+            for s in parity {
+                let members: Vec<u64> = s["members"].as_array().unwrap().iter().map(|m| m.as_u64().unwrap()).collect();
+                let p = &s["legs"][0];
+                let want: Vec<u8> = (0..SLOT as usize).map(|_| members.iter().fold(0u8, |a, m| a ^ byte(2, *m))).collect();
+                assert_eq!(read_at(p["drive"]["path"].as_str().unwrap(), p["drive_offset"].as_u64().unwrap()), want, "P of {members:?}");
+            }
+        } else {
+            assert!(got.get("parity").is_none(), "no parity on a mirror");
+        }
+    }
+
+    // Pages.
+    let id = ids[0].1;
+    let page: serde_json::Value =
+        c.get(format!("{base}/api/v1/volumes/{}/legs?limit=3", id.0)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(page["extents"].as_array().unwrap().len(), 3);
+    let next = page["next"].as_u64().expect("a next page");
+    let rest: serde_json::Value = c
+        .get(format!("{base}/api/v1/volumes/{}/legs?start={next}&limit=3", id.0))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(rest["extents"].as_array().unwrap().len(), 1);
+    assert!(rest.get("next").is_none());
+    let by_name = c.get(format!("{base}/api/v1/volumes/v1/legs")).send().await.unwrap();
+    assert_eq!(by_name.status(), 200, "by name too (#112)");
+    server.abort();
+}

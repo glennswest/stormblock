@@ -108,6 +108,10 @@ impl BlockDevice for PartitionDevice {
         self.inner.drive_id()
     }
 
+    fn drive_offset(&self) -> u64 {
+        self.inner.drive_offset() + self.start
+    }
+
     fn capacity_bytes(&self) -> u64 {
         self.len
     }

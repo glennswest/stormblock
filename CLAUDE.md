@@ -181,6 +181,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Per-leg physical offsets for a read-only reader (2026-10-10, #176, P3) — IN PROGRESS
+
+#51 item 3: "expose offsets per leg so a reader can take one good leg and
+stop". A pallet's mirror legs are whole partitions (moot); for volumes:
+- [x] `GET /api/v1/volumes/{id}/legs` (`mgmt/api/legs.rs`): per extent, each
+      leg's drive and the slot's byte offset on it; parity P/Q per stripe;
+      paged; `BlockDevice::drive_offset` (partition start)
+- [x] test `integration_placement::each_legs_place_on_its_drive_holds_the_
+      extents_bytes`; README, pallets.md, CHANGELOG
+- [ ] on a build VM; check.sh; golden; close
+
 ### Boot clone read-only with a writable overlay (2026-10-10, #193, P3) — WAITING ON THE OWNER
 
 #107's point 3 ("consider"). Today: a fresh CoW clone per boot, the sealed
