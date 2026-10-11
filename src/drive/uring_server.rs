@@ -2,9 +2,9 @@
 //! block I/O through shared-memory ring buffers.
 //!
 //! **Nothing starts it** (#169): no flag, config key or socket path. It is
-//! kept, tested, as the starting point #82 (a vhost-user-blk backend) would
-//! build on, and as the counterpart of the client StormFS carries. Wiring it
-//! is #82's to decide.
+//! kept, tested, as the counterpart of the client StormFS carries. #82's
+//! vhost-user-blk backend (`drive::vhost_user_blk`) did not build on it: the
+//! VMM owns the ring and its memory there.
 //!
 //! Each client gets its own memfd + eventfd pair. A worker thread per client
 //! polls the submission queue and dispatches reads/writes to the underlying
