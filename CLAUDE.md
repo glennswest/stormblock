@@ -181,6 +181,13 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Non-redundant volumes: drive affinity (2026-10-11, #153, P3) — WAITING ON THE OWNER
+
+Decision 1 of multi-drive §2. Asked on #153 (needs-owner): A affinity for
+`none` (spill when full), B keep spreading, C per-volume `placement:
+affine|spread`, default affine. Recommended C. Either way the #154
+rebalance must keep an affine volume whole. Nothing built.
+
 ### Erasure coding k+m (2026-10-11, #159, P3) — WAITING ON THE OWNER
 
 Asked on #159 (needs-owner): (1) widths: any K+M with M 3–4 and K+M ≤ 24 /
