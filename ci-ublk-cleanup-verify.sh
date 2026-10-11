@@ -49,7 +49,7 @@ say "guest initramfs: busybox, the test binary, ublk_drv"
 I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
-for a in sh mount insmod sleep cat echo ls grep poweroff dmesg tail wc sed; do
+for a in sh mount insmod sleep cat echo ls grep poweroff dmesg tail wc sed env; do
     ln -sf busybox "$I/bin/$a"
 done
 cp "$TEST" "$I/bin/ublk_resize"
@@ -90,7 +90,8 @@ run clean ""
 [ "$(left)" = 0 ] && r clean-leaves-nothing PASS || r clean-leaves-nothing "FAIL ($(ls /sys/class/ublk-char))"
 
 run panic "STORMBLOCK_TEST_UBLK_PANIC=1"
-[ "$(cat /tmp/panic.rc)" != 0 ] && r panic-fails-the-test PASS || r panic-fails-the-test FAIL
+# A panic is the test failing (101), not the binary missing (127).
+[ "$(cat /tmp/panic.rc)" = 101 ] && r panic-fails-the-test PASS || r panic-fails-the-test "FAIL (exit $(cat /tmp/panic.rc))"
 [ "$(left)" = 0 ] && r panic-leaves-nothing PASS || r panic-leaves-nothing "FAIL ($(ls /sys/class/ublk-char))"
 
 run abort "STORMBLOCK_TEST_UBLK_ABORT=1"
