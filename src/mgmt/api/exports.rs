@@ -307,6 +307,7 @@ async fn create_export(
     // Wire the export into the running target. Both protocols can now do this
     // without a restart — iSCSI via add_lun_dynamic, NVMe-oF via
     // add_namespace_dynamic (#26) — so an export goes straight to active.
+    #[cfg_attr(not(feature = "iscsi"), allow(unused_mut))]
     let mut lun_id = None;
     let mut nsid = None;
     let mut status = ExportStatus::PendingRestart;

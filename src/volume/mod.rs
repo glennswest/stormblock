@@ -5,6 +5,7 @@
 //! (NVMe-oF, iSCSI) see volumes as plain block devices.
 
 pub mod catalog;
+#[cfg(feature = "stormfs-data")]
 pub mod chunk;
 pub mod extent;
 pub mod fence;

@@ -32,7 +32,9 @@ use uuid::Uuid;
 
 #[cfg(feature = "iscsi")]
 use crate::mgmt::api::luns;
-use crate::mgmt::{ExportEntry, ExportProtocol, ExportStatus, LunBacking};
+use crate::mgmt::{ExportEntry, ExportProtocol, ExportStatus};
+#[cfg(feature = "iscsi")]
+use crate::mgmt::LunBacking;
 #[cfg(feature = "iscsi")]
 use crate::target::iscsi::{IscsiConfig, IscsiTarget};
 #[cfg(feature = "nvmeof")]
