@@ -62,9 +62,10 @@ fn yes() -> bool {
 }
 
 const DEFAULT_MAX_MOVES: usize = 10_000;
-/// A slab within this much of its pool's mean fill is not a source. One above
-/// it gives extents until it is at its share, to slabs below theirs.
-const TOLERANCE: f64 = 0.02;
+/// A slab within this share of its own slots of its target (the pool's mean
+/// fill) is not a source (at least one slot). One past it gives extents until
+/// it is at its target, to slabs below theirs.
+const TOLERANCE: f64 = 0.01;
 const YIELD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// One extent to move.
@@ -161,8 +162,11 @@ pub fn plan(
             // Where each slab is going: its share of the pool's fill.
             let target: HashMap<SlabId, u64> =
                 ids.iter().map(|id| (*id, (mean * total[id] as f64).ceil() as u64)).collect();
-            let over: Vec<SlabId> =
-                ids.iter().copied().filter(|id| fill(used[id], total[id]) > mean + TOLERANCE).collect();
+            let over: Vec<SlabId> = ids
+                .iter()
+                .copied()
+                .filter(|id| used[id] > target[id] + ((TOLERANCE * total[id] as f64) as u64).max(1))
+                .collect();
             let mut seen: HashSet<Leg> = HashSet::new();
             // Where an extent's legs will be once the moves planned so far
             // are made: two legs of one extent must never be planned onto
