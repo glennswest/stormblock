@@ -1161,6 +1161,40 @@ pub fn devices() -> DriveResult<Vec<u32>> {
     Ok(ids)
 }
 
+/// Stop and delete a device: what `ublk del -n <id>` does (#135). For a
+/// device nobody serves, which nothing else will ever take down: a test's,
+/// whose server died. Never a node's own: a quiesced device with no server is
+/// the handover's gap, and the next engine adopts it.
+pub fn remove(dev_id: u32) -> DriveResult<()> {
+    let ctrl = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/ublk-control")
+        .map_err(|e| DriveError::Other(anyhow::anyhow!("cannot open /dev/ublk-control: {e} (is ublk_drv loaded?)")))?;
+    let mut ring: IoUring<squeue::Entry128> = IoUring::builder()
+        .build(8)
+        .map_err(|e| DriveError::Other(anyhow::anyhow!("io_uring create failed: {e}")))?;
+    // STOP first: DEL waits for a started device to stop. A device that was
+    // never started (or is stopped) refuses STOP, which is fine.
+    let _ = submit_ctrl_cmd(&mut ring, ctrl.as_raw_fd(), UBLK_U_CMD_STOP_DEV, dev_id, 0, 0, 0);
+    submit_ctrl_cmd(&mut ring, ctrl.as_raw_fd(), UBLK_U_CMD_DEL_DEV, dev_id, 0, 0, 0)
+        .map(|_| ())
+        .map_err(|e| DriveError::Other(anyhow::anyhow!("deleting /dev/ublkb{dev_id}: {e}")))
+}
+
+/// Devices whose server process is gone (#135): `(id, the pid it had)`. A
+/// report only; whether to remove one is the caller's (see [`remove`]).
+pub fn orphans() -> DriveResult<Vec<(u32, i32)>> {
+    let mut out = Vec::new();
+    for id in devices()? {
+        let pid = server_pid(id)?.unwrap_or(-1);
+        if pid <= 0 || !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            out.push((id, pid));
+        }
+    }
+    Ok(out)
+}
+
 /// Devices served by the same processes as `dev_ids`, but not in that list.
 ///
 /// Standing a server down stops **every** device it serves, not the ones the

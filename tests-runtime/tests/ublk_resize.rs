@@ -36,6 +36,58 @@ fn kernel_capacity(dev_path: &str) -> Option<u64> {
     raw.trim().parse::<u64>().ok().map(|sectors| sectors * 512)
 }
 
+/// Remove every ublk device whose server is gone, saying which (#135). A test
+/// that died with a device up leaves it: with no server, a non-recoverable
+/// device fails its I/O, a recoverable one holds it, and on a shared machine
+/// every `sync` then hangs behind it. A run starts clean.
+fn sweep_orphans() {
+    match stormblock::drive::ublk::orphans() {
+        Ok(found) => {
+            for (id, pid) in found {
+                match stormblock::drive::ublk::remove(id) {
+                    Ok(()) => eprintln!("SWEEP removed /dev/ublkb{id}: its server (pid {pid}) is gone"),
+                    Err(e) => eprintln!("SWEEP could not remove /dev/ublkb{id} (pid {pid} gone): {e}"),
+                }
+            }
+        }
+        Err(e) => eprintln!("SWEEP could not list ublk devices: {e}"),
+    }
+}
+
+/// The ublk server a test runs, taken down whatever the test does (#135):
+/// on drop (a failed assertion, a panic) it tells the server to stop, waits
+/// for it, and if the device is still there, stops and deletes it.
+struct Served {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    server: Arc<UblkServer>,
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+        if let Some(t) = self.thread.take() {
+            for _ in 0..100 {
+                if t.is_finished() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if t.is_finished() {
+                let _ = t.join();
+            }
+        }
+        if let Some(id) = self.server.dev_id() {
+            if stormblock::drive::ublk::devices().unwrap_or_default().contains(&id) {
+                match stormblock::drive::ublk::remove(id) {
+                    Ok(()) => eprintln!("GUARD removed /dev/ublkb{id}, left by the test"),
+                    Err(e) => eprintln!("GUARD could not remove /dev/ublkb{id}: {e}"),
+                }
+            }
+        }
+    }
+}
+
 /// Grow a live ublk device and check the kernel agrees, with I/O never stopped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
@@ -43,6 +95,7 @@ async fn a_live_ublk_device_follows_its_volume_growing() {
     if !std::path::Path::new("/dev/ublk-control").exists() {
         panic!("/dev/ublk-control missing — modprobe ublk_drv (this test is about the kernel)");
     }
+    sweep_orphans();
 
     let dir = TempDir::new().unwrap();
     let devices = common::create_file_devices(&dir, 2, 1024 * 1024 * 1024).await;
@@ -74,6 +127,8 @@ async fn a_live_ublk_device_follows_its_volume_growing() {
             }
         })
         .unwrap();
+    // Down on every way out of this test, not only the last line (#135).
+    let _served = Served { shutdown, thread: Some(thread), server: server.clone() };
 
     // Wait for the device: the id is assigned inside run(), so the path is not
     // known until ADD_DEV has come back.
@@ -95,6 +150,16 @@ async fn a_live_ublk_device_follows_its_volume_growing() {
         server.dev_path(),
         failure.lock().unwrap()
     );
+    // What a test that dies looks like, for ci-ublk-cleanup-verify.sh: a
+    // panic (the guard takes the device down) or an abort (nothing runs; the
+    // next run's sweep does).
+    if std::env::var_os("STORMBLOCK_TEST_UBLK_PANIC").is_some() {
+        panic!("STORMBLOCK_TEST_UBLK_PANIC: dying with {dev_path} up");
+    }
+    if std::env::var_os("STORMBLOCK_TEST_UBLK_ABORT").is_some() {
+        eprintln!("STORMBLOCK_TEST_UBLK_ABORT: aborting with {dev_path} up");
+        std::process::abort();
+    }
     let before = kernel_capacity(&dev_path).expect("device present");
     assert_eq!(before, START, "{dev_path} came up at the wrong size");
     assert!(
@@ -145,9 +210,6 @@ async fn a_live_ublk_device_follows_its_volume_growing() {
     .await
     .unwrap();
     assert!(read_back.is_ok(), "reading past the old end failed: {:?}", read_back.err());
-
-    let _ = shutdown.send(true);
-    let _ = thread.join();
 }
 
 /// A resize the volume layer refuses never reaches the kernel.
