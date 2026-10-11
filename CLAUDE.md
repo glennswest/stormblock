@@ -829,7 +829,7 @@ inline in the request.
 - Slabs formatted before this keep their whole table: open still reads all
   of it until they are re-laid
 
-### Every remote call retries (2026-10-09, #359, P1 owner) — BACK IN LINE (P0 #364); code in golden-stormblock-02660bcdb1aa
+### Every remote call retries (2026-10-09, #359, P1 owner) — DONE (golden-stormblock-02660bcdb1aa)
 
 - [x] `src/retry.rs` (policies, classify io/status, attempts logged,
       infra vs real); tests
@@ -844,7 +844,9 @@ inline in the request.
 - [x] docs/retries.md (the inventory), CHANGELOG
 - [x] check.sh at 52fee27 ALL PASS (1056/1056); in golden
       golden-stormblock-02660bcdb1aa (staged for #364 at f7cffa1)
-- [ ] close when handed back
+- [x] closed 2026-10-10: each review item re-read in main; retry, http,
+      iSCSI, NVMe/TCP, import, transport, stormfs, kubeauth tests 180/180
+      at 8aad131
 
 ### Goldens lost extents at every restart (2026-10-08, #370, P0 data) — DONE (golden-stormblock-7318bc78894f)
 
