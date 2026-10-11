@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Flow-over fast on SMR disks (2026-10-10, #401, P1) — IN PROGRESS
+### Flow-over fast on SMR disks (2026-10-10, #401, P1) — DONE (golden-stormblock-8903710adfc5)
 
 X9 blades (ST2000DM008, drive-managed SMR): 16–21k extents left after Ready.
 Before: each move a 1 MiB read from forge, 1 MiB write, 1 MiB read back; 8
@@ -203,8 +203,9 @@ map) per move.
 - [x] check.sh at b494a3a ALL PASS (1140/1140). Found first: the build
       VMs' umask is now 077 and forge trust files came out 0600 (fixed:
       mode set explicitly, #381's code)
-- [ ] golden, comment, shipped. Metal (an X9, the Dell): the install
-      records with health `flow_over`. golden-stormblock-5f8bc680a12b
+- [x] golden golden-stormblock-8903710adfc5 (5b87a3a), commented,
+      shipped. Metal (an X9, the Dell): the install records with health
+      `flow_over`. golden-stormblock-5f8bc680a12b
       (staged for #300) carries f991f31, unchecked: stormcos#467 told
 
 ### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — WAITS ON fio.ext4.rs#13 (1 PiB seal)
