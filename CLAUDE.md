@@ -180,16 +180,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### golden names the entries a check rejects (2026-10-11, #86, P3) — IN PROGRESS
+### golden names the entries a check rejects (2026-10-11, #86, P3) — DONE
 
-- [ ] `fs::ext4::explain`: each non-note problem with the paths of the
+- [x] `fs::ext4::explain`: each non-note problem with the paths of the
       inodes its message names (one walk), a count per code
-- [ ] `stormblock golden`: the first 20 findings (WARN + stderr), the error
-      carries the per-code counts
-- [ ] tests: the paths named (links, root, orphan); a tar with SELinux
-      labels and POSIX ACLs unpacked and checked (the tinyanvil case)
-- [ ] docs, CHANGELOG; sc-build; what SELinux/ACL attrs do (filed where
-      the fault is, if any)
+- [x] `stormblock golden`: the first 20 findings at WARN (stderr); the
+      error carries the per-code counts
+- [x] tests: the paths named (links, root, an orphan); a SELinux + ACL tar
+      unpacked and checked (ignored until mkfs.ext4.rs#25)
+- [x] found with it: tinyanvil's failure is mkfs-ext4's checker not
+      counting `i_file_acl` (e2fsck 1.47.3 clean on the image):
+      mkfs.ext4.rs#25; fio-ext4 stores POSIX ACLs in the userspace v2
+      format, which the kernel cannot read: fio.ext4.rs#14
+- [x] the built binary on a SELinux + ACL tar names /etc/f0.conf etc.;
+      check.sh at 04c2959 ALL PASS; README, CHANGELOG
 
 ### CSI integration test on the 4-node cluster (2026-10-11, #15, P3) — WAITING ON THE OWNER
 
