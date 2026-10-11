@@ -180,6 +180,20 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### vhost-user-blk backend (2026-10-11, #82, P3) — IN PROGRESS
+
+- [x] `drive::vhost_user_blk`: control thread on the socket (SCM_RIGHTS),
+      memfd guest memory, split rings served on the engine's runtime;
+      IN/OUT/FLUSH/GET_ID/DISCARD/WRITE_ZEROES; RO at the device; MQ, CONFIG,
+      REPLY_ACK; one VMM at a time, reconnect; no dirty log / inflight /
+      indirect (said in the module doc)
+- [ ] tests: an in-process frontend (`vhost_user_blk::tests`)
+- [ ] `mgmt::vhost_export` + `transport: vhost-user-blk` on
+      `/api/v1/volumes/{id}/attach` (local node only, never the default;
+      `/v1` unchanged), holds, detach, what_is_serving
+- [ ] `ci-vhost-user-blk-verify.sh`: QEMU guest over vhost-user-blk
+- [ ] docs, CHANGELOG; follow-ups (dirty log, #169's ring IPC)
+
 ### Secrets volume class (2026-10-11, #74, P3) — WAITING ON THE OWNER
 
 Found: stormcos's `stormcert-data` (the node CA key) is an ordinary volume,

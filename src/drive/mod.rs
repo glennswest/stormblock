@@ -33,6 +33,8 @@ pub mod slottable;
 pub mod ublk;
 pub mod uring_channel;
 pub mod uring_server;
+#[cfg(target_os = "linux")]
+pub mod vhost_user_blk;
 
 use std::fmt;
 
