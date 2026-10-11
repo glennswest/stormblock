@@ -181,6 +181,21 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### A drive added grows the pool and is used (2026-10-11, #154, P3) — IN PROGRESS
+
+Decision 3 (automatic, or on an operator's word) asked on #154 (A/B/C, C
+recommended). Built meanwhile, the operator's tools either way:
+- [ ] `POST /api/v1/slabs/rebalance {dry_run (default true), pool?,
+      max_moves?, max_bytes_per_sec?}`; `GET` status, `DELETE` cancel.
+      Plan read-only (per pool = role + slot size; above the pool's mean
+      fill → below it; never onto a dedicated, quarantined or draining
+      slab; the volume's rung kept); move each extent with its fence only
+      (`migrate_leg_unlocked`), persist + release every 64, yield to live I/O
+- [ ] the drain: data legs copied with only the fence held (it held the map
+      and the registry for each copy, #269's shape), and yielding to live I/O
+- [ ] tests; docs (multi-drive.md §4, README); then the automatic part per
+      the answer
+
 ### image build: `clones = [...]` made (2026-10-11, #124) — DONE (golden-stormblock-17aefc2dba61)
 
 - [x] `fill_slab`: the first clone and every `clones` name, each stamped,
