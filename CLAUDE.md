@@ -184,23 +184,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 ### Flow-over fast on SMR disks (2026-10-10, #401, P1) — IN PROGRESS
 
 X9 blades (ST2000DM008, drive-managed SMR): 16–21k extents left after Ready.
-Today each move: 1 MiB read from forge, 1 MiB write, 1 MiB read back; 8 at
-once completing in any order; a persist (slot table + metadata) per 64.
-- [ ] discard the partition before a fresh slab is laid (and the system
-      partition before it is re-laid): the disk knows every zone is empty
-- [ ] a window's copies coalesced: sources read in parallel (fences taken
-      with a bound, never waited on while holding others), destination
-      slots allocated together, written in slot order as runs of up to
-      32 MiB, read back per run, published per extent; one persist
-- [ ] an extent that reads all zeros is unmapped, not copied (single-leg,
-      non-parity volumes; the source owed as for a move)
-- [ ] health `flow_over`: bytes, extents moved, zero extents skipped, MB/s,
-      ETA, beside `flow_over_remaining`; the progress line too
-- [ ] tests: destination writes coalesced and ascending (a recording
-      device), zero extents unmapped and reading zeros, every byte after a
-      reopen; the existing flow-over and power-cut tests; the rate model
-      before/after; docs, CHANGELOG, check.sh, golden. Metal (an X9, the
-      Dell) is stormcentral's install
+Before: each move a 1 MiB read from forge, 1 MiB write, 1 MiB read back; 8
+at once completing in any order; a persist per 64; `rewrite_legs` (every
+map) per move.
+- [x] discard the drive before a fresh lay, the system partition before a
+      re-lay; `SasDevice` discards when `queue/discard_max_bytes` > 0 (was:
+      never on an HDD)
+- [x] `PlacementEngine::migrate_window_unlocked`: fences by `try_exclusive`
+      (never waited while others held; the rest move one at a time),
+      sources read in parallel, slots allocated together, runs ≤ 32 MiB in
+      slot order, one read-back per run, one `rewrite_legs`
+- [x] all-zero extents unmapped (`GlobalExtentMap::unmap_legs_everywhere`)
+- [x] `flowprogress::FLOW`; health `flow_over`; the progress line
+- [x] found: an emulated drive's large zero built a page per 64 KiB on a
+      volatile drive (7.6 GB, the power-cut test killed); fixed + test
+- [x] targeted 134/134; the new test; rate model (no SMR there: copy phase
+      ~25 % longer idle, no worse with a foreground writer); docs, CHANGELOG
+- [ ] check.sh, golden, comment, shipped. Metal (an X9, the Dell): the
+      install records with health `flow_over`
 
 ### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — WAITS ON fio.ext4.rs#13 (1 PiB seal)
 
