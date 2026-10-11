@@ -206,7 +206,9 @@ r() { echo "RESULT $1 $2"; }
 echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
 if nvme connect -t tcp -a 10.0.2.2 -s "$PORT" -n "$SUB" --hostnqn "$H1" >/tmp/o 2>&1; then
     sleep 3
-    dev_of() { for b in /sys/block/nvme*n*; do [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return; done; }
+    # Native multipath lists the hidden path node (nvme0c0n1) beside the
+    # head (nvme0n1): the head is the device.
+    dev_of() { for b in /sys/block/nvme*n*; do case "${b##*/}" in nvme*c*n*) continue ;; esac; [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return; done; }
     c=$(dev_of "$NS_C"); p=$(dev_of "$NS_P")
     echo "GUEST boot clone nsid $NS_C = /dev/$c, plain nsid $NS_P = /dev/$p"
     lbs=$(cat /sys/block/$c/queue/logical_block_size); pbs=$(cat /sys/block/$c/queue/physical_block_size)

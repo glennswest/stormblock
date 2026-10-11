@@ -138,7 +138,12 @@ echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
 if nvme connect -t tcp -a 10.0.2.2 -s "$PORT" -n "$SUB" --hostnqn "$H1" >/tmp/o 2>&1; then
     sleep 3
     d=""
-    for b in /sys/block/nvme*n*; do [ "$(cat $b/nsid 2>/dev/null)" = "$NSID" ] && d=$(basename $b); done
+    # Native multipath lists the hidden path node (nvme0c0n1) beside the
+    # head (nvme0n1): the head is the device.
+    for b in /sys/block/nvme*n*; do
+        case "${b##*/}" in nvme*c*n*) continue ;; esac
+        [ "$(cat $b/nsid 2>/dev/null)" = "$NSID" ] && d=$(basename $b)
+    done
     echo "GUEST composed disk nsid $NSID = /dev/$d"
     lbs=$(cat /sys/block/$d/queue/logical_block_size)
     [ "$lbs" = 4096 ] && r sectors-4096 PASS || r sectors-4096 "FAIL ($lbs)"
