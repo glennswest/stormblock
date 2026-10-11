@@ -18,10 +18,6 @@ pub struct ClusterConfig {
     pub heartbeat_interval_ms: u64,
     /// Heartbeat timeout in milliseconds (suspect after this many ms without response).
     pub heartbeat_timeout_ms: u64,
-    /// Replication mode: "sync" or "async".
-    pub replication_mode: String,
-    /// Number of replicas for each volume (including the primary).
-    pub replication_factor: usize,
     /// Enable TLS for inter-node cluster RPCs (Raft, heartbeat, join).
     /// When true, all cluster HTTP clients use HTTPS.
     /// The server side shares the management API's TLS cert/key.
@@ -39,8 +35,6 @@ impl Default for ClusterConfig {
             seed_nodes: Vec::new(),
             heartbeat_interval_ms: 1000,
             heartbeat_timeout_ms: 5000,
-            replication_mode: "async".to_string(),
-            replication_factor: 2,
             tls_enabled: false,
             tls_ca_cert: None,
         }
@@ -119,11 +113,6 @@ impl ClusterConfig {
             .map_err(|e| anyhow::anyhow!("failed to build cluster HTTP client: {e}"))
     }
 
-    /// Whether this is a sync replication cluster.
-    pub fn is_sync_replication(&self) -> bool {
-        self.replication_mode == "sync"
-    }
-
     /// Number of missed heartbeats before marking a node suspect.
     pub fn suspect_threshold(&self) -> u64 {
         self.heartbeat_timeout_ms / self.heartbeat_interval_ms
@@ -142,8 +131,6 @@ mod tests {
         assert!(cfg.seed_nodes.is_empty());
         assert_eq!(cfg.heartbeat_interval_ms, 1000);
         assert_eq!(cfg.heartbeat_timeout_ms, 5000);
-        assert_eq!(cfg.replication_mode, "async");
-        assert_eq!(cfg.replication_factor, 2);
     }
 
     #[test]
@@ -178,16 +165,12 @@ data_dir = "/data/raft"
 seed_nodes = ["10.0.0.1:9090", "10.0.0.2:9090"]
 heartbeat_interval_ms = 500
 heartbeat_timeout_ms = 3000
-replication_mode = "sync"
-replication_factor = 3
 "#;
         let cfg: ClusterConfig = toml::from_str(toml_str).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.data_dir, "/data/raft");
         assert_eq!(cfg.seed_nodes.len(), 2);
         assert_eq!(cfg.heartbeat_interval_ms, 500);
-        assert!(cfg.is_sync_replication());
-        assert_eq!(cfg.replication_factor, 3);
     }
 
     #[test]

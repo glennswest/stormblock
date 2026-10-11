@@ -29,12 +29,15 @@ path = "/dev/sda"
 [[drives]]
 path = "/dev/sdb"
 
+# Made at start when no set of this name is assembled, only from drives that
+# carry nothing (no slab, no set). Never made again (#165).
 [[arrays]]
 name = "data"
 level = "Raid1"
 drives = ["/dev/sda", "/dev/sdb"]
 stripe_kb = 64
 
+# Made when no volume of this name exists; never resized.
 [[volumes]]
 name = "vol0"
 size = "100G"
@@ -60,7 +63,5 @@ pin_cores = true
 # seed_nodes = ["10.0.0.1:9090", "10.0.0.2:9090"]
 # heartbeat_interval_ms = 1000
 # heartbeat_timeout_ms = 5000
-# replication_mode = "async"
-# replication_factor = 2
 # tls_enabled = true                          # use HTTPS for inter-node RPCs
 # tls_ca_cert = "/etc/stormblock/ca.pem"      # CA cert for verifying peer nodes

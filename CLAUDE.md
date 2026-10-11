@@ -181,6 +181,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Config sections parsed and never acted on (2026-10-10, #165) — IN PROGRESS
+
+Per section, act or remove: `[[arrays]]`/`[[volumes]]` act (startup reads
+the merged config; `merge_cli` already turned `--raid`/`--volume` into
+them), `[reactor]` acts, `[boot]` and `[cluster] replication_mode/factor`
+removed with a load-time warning (no iPXE server here; replication is
+stormstorage's, #179; `ReplicatedVolume` has no callers, #169).
+- [x] `startup_arrays_and_volumes`: by name, never over a drive with a slab
+      or another set's; volumes made when absent; export = first volume,
+      else first array
+- [x] `[reactor]` from the config; `retired_keys` warnings
+- [x] tests `cli::config_arrays_tests`; README, raid-sets.md, example,
+      CHANGELOG
+- [ ] on a build VM: the tests, config/raid/cluster tests, `--features
+      cluster`, check.sh; golden; close
+
 ### server3 VM/container probes slower on 11.65 than 11.64 (2026-10-10, #263) — CLOSED: not stormblock's
 
 bc89136..953cba6 (the only member change): #259's resume of a cut-short

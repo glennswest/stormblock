@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **feat:** #165: config sections that were parsed and never acted on.
+  - **`[[arrays]]` and `[[volumes]]` now act at the daemon's start**, and `--raid`/`--volume` are the command line's way of declaring them, as `merge_cli` already merged them. Never destructive:
+    - an array whose name is a set already assembled is that set, never made again;
+    - otherwise it is made only from drives that opened, are no set's member and carry no slab, or not at all, with the drive and the reason named;
+    - a volume is made when none of its name exists, never resized.
+  - **`[reactor]`'s `cores` and `pin_cores` are used**; `--reactor-cores` wins over `cores`.
+  - **`[boot]` and `[cluster] replication_mode`/`replication_factor` are removed.** Nothing serves iPXE templates, and cross-node copies are stormstorage's (#179). A file that still sets them loads, with a warning naming each.
+  - **Tests:** `cli::config_arrays_tests` (made once, found again after a restart with the data kept; not made over a drive holding a slab; retired keys warned).
 - **fix:** #230: `ci-compose-disk-verify.sh` runs unprivileged on a build VM (`sc-build 'cargo build --locked && bash ci-compose-disk-verify.sh'`). It took its binary from `/build/cargo/…`, which no longer exists, worked under `/build/work`, and needed root for a ublk attach, a mount, and shim and grub out of `/boot/efi`.
   - **Now:** the composed disk is served over NVMe/TCP. The host's kernel in QEMU checks 4096-byte sectors, the two partitions, the ESP and the kernel's digest inside the pallet. `stormblock pallet verify` reads the namespace through the engine's own initiator. OVMF boots the disk as a 4Kn NVMe drive, with stormuefi (built from its repo) starting the pallet's kernel, command line and initramfs.
   - **Also:** both it and `ci-boot512-verify.sh` now name the admin token in the engine's config. Creating a slab has been a destructive verb since #274, and `ci-boot512-verify.sh` stopped at it. Both also skip native multipath's hidden path node (`nvme0c0n1`) when looking up the device, as `ci-media-verify.sh` does.

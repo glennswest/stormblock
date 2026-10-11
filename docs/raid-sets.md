@@ -203,6 +203,7 @@ any. Metrics: `stormblock_raid_state{array,name}` (0 clean, 1 rebuilding,
 - **Discard** is passed down by RAID-1 only.
 - **Version-1 superblocks** (before this, never reassembled) are not read. A
   drive carrying one counts as blank.
-- **`[[arrays]]` in the config file** is still not acted on (#165). Sets are
-  made through the API (or `--raid`), and the daemon finds them again from
-  their superblocks.
+- **`[[arrays]]` in the config file** (#165) makes a named set at the
+  daemon's start when no set of that name was assembled, only from drives
+  that hold nothing (no slab, no set). No spares or pools from the file: those
+  are the API's (`/api/v1/spares`).

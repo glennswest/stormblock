@@ -25,8 +25,6 @@ pub struct StormBlockConfig {
     #[cfg(feature = "nvmeof")]
     pub nvmeof: Option<NvmeofExportConfig>,
     pub reactor: ReactorCfg,
-    #[serde(default)]
-    pub boot: Option<BootConfig>,
     #[cfg(feature = "cluster")]
     #[serde(default)]
     pub cluster: crate::cluster::config::ClusterConfig,
@@ -327,7 +325,6 @@ impl Default for StormBlockConfig {
             #[cfg(feature = "nvmeof")]
             nvmeof: None,
             reactor: ReactorCfg::default(),
-            boot: None,
             #[cfg(feature = "cluster")]
             cluster: crate::cluster::config::ClusterConfig::default(),
             stormfs: crate::stormfs::StormFsConfig::default(),
@@ -884,6 +881,9 @@ impl StormBlockConfig {
         }
         let contents = std::fs::read_to_string(path)?;
         let config: StormBlockConfig = toml::from_str(&contents)?;
+        for key in retired_keys(&contents) {
+            tracing::warn!("{path}: {key} is set and does nothing (#165)");
+        }
         if let Some(f) = config.metadata.format {
             anyhow::ensure!(f == 1 || f == 2, "[metadata] format = {f}: 1 or 2");
             crate::drive::slab::set_default_format(f);
@@ -1165,19 +1165,26 @@ pub struct LunConfig {
     pub readonly: bool,
 }
 
-/// Configuration for the boot volume manager.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BootConfig {
-    /// Directory for boot volume templates.
-    #[serde(default = "default_templates_dir")]
-    pub templates_dir: String,
-    /// StormBlock server address for iPXE scripts.
-    #[serde(default)]
-    pub server_addr: String,
-}
-
-fn default_templates_dir() -> String {
-    "/var/lib/stormblock/templates".to_string()
+/// Settings the file may still carry that nothing builds (#165), each with
+/// why: `[boot]` (an iPXE template server that is not this engine's), and
+/// `[cluster]`'s replication mode and factor (volumes are replicated across
+/// nodes by stormstorage's heads, #179, not by the engine). Read with a
+/// warning, never refused: a node with an older file still starts.
+pub fn retired_keys(contents: &str) -> Vec<&'static str> {
+    let Ok(v) = toml::from_str::<serde_json::Value>(contents) else { return Vec::new() };
+    let mut out = Vec::new();
+    if v.get("boot").is_some() {
+        out.push("[boot] (no iPXE template server in this engine)");
+    }
+    if let Some(c) = v.get("cluster") {
+        if c.get("replication_mode").is_some() {
+            out.push("[cluster] replication_mode (cross-node copies are stormstorage's, #179)");
+        }
+        if c.get("replication_factor").is_some() {
+            out.push("[cluster] replication_factor (cross-node copies are stormstorage's, #179)");
+        }
+    }
+    out
 }
 
 /// Parse a human-readable size string into bytes.

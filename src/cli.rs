@@ -1250,6 +1250,8 @@ pub async fn run() -> anyhow::Result<()> {
             });
         }
 
+        // Drives that carry a slab: never formatted into an array (#165).
+        let mut holding_slabs: Vec<Arc<dyn BlockDevice>> = Vec::new();
         // Take on the storage that is already on them. For an appliance whose
         // drives *are* its storage pool this is the difference between coming
         // back up holding what it held and coming back up empty: slabs were
@@ -1269,7 +1271,11 @@ pub async fn run() -> anyhow::Result<()> {
             // a two-drive volume came back after a restart.
             let mut found = Vec::new();
             for dev in &drives {
-                found.extend(crate::drive::discover::slabs_in_partitions(dev).await);
+                let on = crate::drive::discover::slabs_in_partitions(dev).await;
+                if !on.is_empty() {
+                    holding_slabs.push(dev.clone());
+                }
+                found.extend(on);
             }
             if !found.is_empty() {
                 let mut vm = state.volume_manager.lock().await;
@@ -1293,140 +1299,11 @@ pub async fn run() -> anyhow::Result<()> {
             drives.iter().map(|d| d.capacity_bytes() as f64).sum::<f64>()
         );
 
-        // Phase 2: Create RAID array if requested — unless the drives already
-        // carry one, which was assembled above: re-creating it on every start
-        // formatted the data away.
-        if cli.raid.is_some() && assembled_sets {
-            tracing::info!("--raid: the drives already carry a RAID set (assembled above); not creating another");
-            let vm = state.volume_manager.lock().await;
-            if let Some((id, ..)) = vm.list_volumes().await.first() {
-                export_device = vm.get_volume(id);
-            }
-        } else if let Some(level) = cli.raid {
-            let stripe_size = cli.stripe_kb * 1024;
-            tracing::info!(
-                "Creating {} array with {} members, stripe_size={}KB",
-                level, drives.len(), cli.stripe_kb,
-            );
-
-            match RaidArray::create(level, drives, Some(stripe_size)).await {
-                Ok(array) => {
-                    tracing::info!(
-                        "{} array {} ready — capacity={} bytes ({:.1} GB), members={}, stripe={}KB",
-                        array.level(),
-                        array.array_id(),
-                        array.capacity_bytes(),
-                        array.capacity_bytes() as f64 / (1024.0 * 1024.0 * 1024.0),
-                        array.member_count(),
-                        array.stripe_size() / 1024,
-                    );
-                    for (idx, member_state) in array.member_states() {
-                        tracing::info!("  member {idx}: {member_state}");
-                    }
-
-                    let array_id = array.array_id();
-                    let array_level = array.level();
-                    let array_member_count = array.member_count();
-                    let array_capacity = array.capacity_bytes();
-                    let array_stripe = array.stripe_size();
-
-                    // Phase 3: Create volumes if requested
-                    if !cli.volumes.is_empty() {
-                        let arc_array = Arc::new(array);
-                        let backing: Arc<dyn BlockDevice> = arc_array.clone();
-
-                        // Register array in state + volume manager. The slab
-                        // carries its volumes' records, so a restart that
-                        // reassembles the array finds them (#252).
-                        {
-                            let mut vm = state.volume_manager.lock().await;
-                            if let Err(e) = vm.add_array_slab(array_id, backing, false).await {
-                                tracing::error!("formatting the slab on array {array_id}: {e}");
-                            }
-                        }
-                        let _ = (array_level, array_member_count, array_capacity, array_stripe);
-                        crate::mgmt::raid_sets::register(&state, arc_array).await;
-
-                        // Try restoring persisted volumes first
-                        let mut restored = false;
-                        {
-                            let mut vm = state.volume_manager.lock().await;
-                            match vm.restore().await {
-                                Ok(()) => {
-                                    let existing = vm.list_volumes().await;
-                                    if !existing.is_empty() {
-                                        restored = true;
-                                        tracing::info!("Restored {} volume(s) from metadata", existing.len());
-                                        for (id, name, vsize, allocated) in &existing {
-                                            if export_device.is_none() {
-                                                export_device = vm.get_volume(id);
-                                            }
-                                            let _ = (name, vsize, allocated); // logged by restore()
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Volume restore failed: {e}, creating from config");
-                                }
-                            }
-                        }
-
-                        if !restored {
-                            for spec in &cli.volumes {
-                                let mut vm = state.volume_manager.lock().await;
-                                let created = if spec.redundancy.is_none() {
-                                    vm.create_volume(&spec.name, spec.size, array_id).await
-                                } else {
-                                    vm.create_volume_with(
-                                        &spec.name,
-                                        spec.size,
-                                        crate::volume::CreateOptions::redundant(spec.redundancy.clone()),
-                                    )
-                                    .await
-                                };
-                                match created {
-                                    Ok(vol_id) => {
-                                        tracing::info!(
-                                            "Volume '{}' ({}) created — virtual={} bytes ({:.1} GB)",
-                                            spec.name, vol_id, spec.size,
-                                            spec.size as f64 / (1024.0 * 1024.0 * 1024.0),
-                                        );
-                                        // Export the first volume via target protocols
-                                        if export_device.is_none() {
-                                            export_device = vm.get_volume(&vol_id);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to create volume '{}': {e}", spec.name);
-                                    }
-                                }
-                            }
-                        }
-
-                        let vm = state.volume_manager.lock().await;
-                        let vols = vm.list_volumes().await;
-                        tracing::info!("{} volume(s) ready:", vols.len());
-                        for (id, name, vsize, allocated) in &vols {
-                            tracing::info!(
-                                "  {} ({}) — virtual={:.1} GB, allocated={:.1} MB",
-                                name, id,
-                                *vsize as f64 / (1024.0 * 1024.0 * 1024.0),
-                                *allocated as f64 / (1024.0 * 1024.0),
-                            );
-                        }
-                        metrics::gauge!("stormblock_volumes_total").set(vols.len() as f64);
-                    } else {
-                        // No volumes specified — export the raw array
-                        let arc_array = Arc::new(array);
-                        crate::mgmt::raid_sets::register(&state, arc_array.clone()).await;
-                        export_device = Some(arc_array);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to create RAID array: {e}");
-                    return Err(e.into());
-                }
-            }
+        // Phase 2: the arrays and volumes the config declares (#165); `--raid`
+        // and `--volume` are the command line's way of declaring them
+        // (`merge_cli`). Created when they are not there, never re-created.
+        if !config.arrays.is_empty() {
+            export_device = startup_arrays_and_volumes(&state, &config, &drives, &holding_slabs, assembled_sets).await?;
         } else if !drives.is_empty() {
             // No RAID and no volumes: the drives themselves are what this
             // node serves, each as its own namespace. `drives.len() == 1`
@@ -1490,9 +1367,11 @@ pub async fn run() -> anyhow::Result<()> {
     };
 
     // Phase 4: Start target protocols
+    // `[reactor]` (#165): the file's cores and pinning; `--reactor-cores`
+    // wins over its cores (`merge_cli`).
     let reactor_config = ReactorConfig {
-        core_count: cli.reactor_cores,
-        pin_cores: cfg!(target_os = "linux"),
+        core_count: config.reactor.cores,
+        pin_cores: config.reactor.pin_cores,
     };
     // One pool shared by both targets, kept alive for the process lifetime —
     // the accept loops run in spawned tasks and dispatch onto it.
@@ -6510,7 +6389,167 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     #[cfg(target_os = "linux")]
-    async fn handle_adopt_ublk(
+    /// The `[[arrays]]` and `[[volumes]]` of the config, at the daemon's start
+/// (#165): `--raid` and `--volume` are the command line's way of declaring
+/// them, merged in by `merge_cli`. Returns what the targets export: the first
+/// configured volume, else the first array.
+///
+/// Declarative, and never destructive:
+/// - an array whose name is a set already assembled from its superblocks is
+///   that set (and the unnamed set an older `--raid` made is "cli-array");
+/// - an array is created only from drives that are opened, are no set's
+///   member or spare, and carry no slab; otherwise it is not created and
+///   the start says which drive and why. Creating formats its members, so
+///   nothing that holds data is ever one;
+/// - a volume is created when no volume of its name exists, on its array, at
+///   its size and redundancy; one that exists is left as it is (never
+///   resized). A volume that names no configured array is not created.
+async fn startup_arrays_and_volumes(
+    state: &Arc<AppState>,
+    config: &StormBlockConfig,
+    free: &[Arc<dyn BlockDevice>],
+    holding_slabs: &[Arc<dyn BlockDevice>],
+    assembled_sets: bool,
+) -> anyhow::Result<Option<Arc<dyn BlockDevice>>> {
+    use crate::raid::RaidArrayId;
+    let same = |a: &Arc<dyn BlockDevice>, b: &Arc<dyn BlockDevice>| std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b));
+    let opened: Vec<(String, Arc<dyn BlockDevice>)> =
+        state.drives.read().await.iter().map(|d| (d.path.clone(), d.device.clone())).collect();
+    let set_named = |name: &str| {
+        let state = state.clone();
+        let name = name.to_string();
+        async move {
+            state
+                .arrays
+                .read()
+                .await
+                .iter()
+                .find(|(_, i)| i.array.name() == name)
+                .map(|(id, i)| (*id, i.array.clone()))
+        }
+    };
+
+    let mut arrays: Vec<(String, RaidArrayId, Arc<crate::raid::RaidArray>)> = Vec::new();
+    for spec in &config.arrays {
+        if let Some((id, a)) = set_named(&spec.name).await {
+            tracing::info!("array '{}': assembled from its drives ({id}), not created again", spec.name);
+            arrays.push((spec.name.clone(), id, a));
+            continue;
+        }
+        if spec.name == "cli-array" && assembled_sets {
+            // A set an older `--raid` made carries no name: the drives
+            // already hold it, and creating again formatted the data away.
+            let first = state.arrays.read().await.iter().next().map(|(id, i)| (*id, i.array.clone()));
+            if let Some((id, a)) = first {
+                tracing::info!("--raid: the drives already carry a RAID set ({id}); not creating another");
+                arrays.push((spec.name.clone(), id, a));
+            }
+            continue;
+        }
+        let mut members = Vec::with_capacity(spec.drives.len());
+        let mut refused = None;
+        for path in &spec.drives {
+            let Some((_, dev)) = opened.iter().find(|(p, _)| p == path) else {
+                refused = Some(format!("{path} is not an opened drive (not in [[drives]], or it did not open)"));
+                break;
+            };
+            if !free.iter().any(|d| same(d, dev)) {
+                refused = Some(format!("{path} is a member or spare of another RAID set"));
+                break;
+            }
+            if holding_slabs.iter().any(|d| same(d, dev)) {
+                refused = Some(format!("{path} carries a slab (its data would be formatted away)"));
+                break;
+            }
+            members.push(dev.clone());
+        }
+        if let Some(why) = refused {
+            tracing::error!("array '{}' not created: {why}", spec.name);
+            continue;
+        }
+        let name = if spec.name == "cli-array" { String::new() } else { spec.name.clone() };
+        let array = crate::raid::RaidArray::create_with(crate::raid::CreateOptions {
+            level: spec.level,
+            members,
+            stripe_size: Some(spec.stripe_kb * 1024),
+            name,
+            pool: String::new(),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("creating array '{}': {e}", spec.name))?;
+        let id = array.array_id();
+        tracing::info!(
+            "array '{}' created: {} over {} drive(s), {} bytes, stripe {} KiB ({id})",
+            spec.name,
+            array.level(),
+            array.member_count(),
+            array.capacity_bytes(),
+            spec.stripe_kb
+        );
+        let array = Arc::new(array);
+        // The slab carries its volumes' records, so a restart that
+        // reassembles the array finds them (#252).
+        {
+            let backing: Arc<dyn BlockDevice> = array.clone();
+            let mut vm = state.volume_manager.lock().await;
+            if let Err(e) = vm.add_array_slab(id, backing, false).await {
+                tracing::error!("formatting the slab on array '{}': {e}", spec.name);
+            }
+        }
+        crate::mgmt::raid_sets::register(state, array.clone()).await;
+        arrays.push((spec.name.clone(), id, array));
+    }
+
+    let mut export: Option<Arc<dyn BlockDevice>> = None;
+    if !config.volumes.is_empty() {
+        let mut vm = state.volume_manager.lock().await;
+        if vm.list_volumes().await.is_empty() {
+            if let Err(e) = vm.restore().await {
+                tracing::warn!("volume restore: {e}");
+            }
+        }
+        let existing = vm.list_volumes().await;
+        for spec in &config.volumes {
+            if let Some((id, ..)) = existing.iter().find(|(_, n, ..)| *n == spec.name) {
+                tracing::info!("volume '{}': there ({id}), left as it is", spec.name);
+                if export.is_none() {
+                    export = vm.get_volume(id);
+                }
+                continue;
+            }
+            let Some((_, array_id, _)) = arrays.iter().find(|(n, ..)| *n == spec.array) else {
+                tracing::error!("volume '{}' not created: it names array '{}', which is not configured or was not created", spec.name, spec.array);
+                continue;
+            };
+            let size = match crate::mgmt::config::parse_size(&spec.size) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::error!("volume '{}' not created: size '{}': {e}", spec.name, spec.size);
+                    continue;
+                }
+            };
+            let created = if spec.redundancy.is_none() {
+                vm.create_volume(&spec.name, size, *array_id).await
+            } else {
+                vm.create_volume_with(&spec.name, size, crate::volume::CreateOptions::redundant(spec.redundancy.clone())).await
+            };
+            match created {
+                Ok(id) => {
+                    tracing::info!("volume '{}' created ({id}), {size} bytes, on array '{}'", spec.name, spec.array);
+                    if export.is_none() {
+                        export = vm.get_volume(&id);
+                    }
+                }
+                Err(e) => tracing::error!("volume '{}' not created: {e}", spec.name),
+            }
+        }
+        metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
+    }
+    // No volume to export: the first array, raw, as `--raid` alone did.
+    Ok(export.or_else(|| arrays.first().map(|(_, _, a)| a.clone() as Arc<dyn BlockDevice>)))
+}
+
+async fn handle_adopt_ublk(
         slab_paths: &[String],
         volumes: &[String],
         meta: Option<&str>,
@@ -12119,5 +12158,119 @@ mod first_local_boot_tests {
         assert!(r.reason.unwrap().contains("409"));
         assert_eq!(super::report_first_local_boot(dir.path()).await, None);
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+}
+
+/// #165: `[[arrays]]` and `[[volumes]]` act at the daemon's start: created
+/// once, found again by name, never formatted over a drive that holds data.
+#[cfg(test)]
+mod config_arrays_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::mgmt::config::{ArrayConfig, VolumeConfig};
+    use crate::mgmt::DriveInfo;
+
+    /// A daemon's start over `paths`: drives opened, sets assembled, slabs
+    /// adopted, then the config's arrays and volumes.
+    async fn start(dir: &std::path::Path, paths: &[String], config: &StormBlockConfig) -> (Arc<AppState>, Option<Arc<dyn BlockDevice>>) {
+        let mut config = config.clone();
+        config.management.data_dir = Some(dir.join("data").display().to_string());
+        let vm = VolumeManager::new(crate::drive::slab::DEFAULT_SLOT_SIZE);
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let state = Arc::new(AppState::new(config.clone(), vm, reg, gem));
+        let mut drives: Vec<Arc<dyn BlockDevice>> = Vec::new();
+        for p in paths {
+            let dev = Arc::new(FileDevice::open_with_capacity(p, 256 << 20).await.unwrap()) as Arc<dyn BlockDevice>;
+            state.drives.write().await.push(DriveInfo { device: dev.clone(), path: p.clone(), labels: Default::default(), dhchap: false });
+            drives.push(dev);
+        }
+        let (report, claimed) = crate::mgmt::raid_sets::assemble_and_adopt(&state, &drives).await;
+        let assembled = report.arrays.iter().any(|a| !a.already);
+        drives.retain(|d| !claimed.iter().any(|c| std::ptr::addr_eq(Arc::as_ptr(c), Arc::as_ptr(d))));
+        let mut holding = Vec::new();
+        let mut found = Vec::new();
+        for d in &drives {
+            let on = crate::drive::discover::slabs_in_partitions(d).await;
+            if !on.is_empty() {
+                holding.push(d.clone());
+            }
+            found.extend(on);
+        }
+        if !found.is_empty() {
+            state.volume_manager.lock().await.adopt_slabs(found).await.unwrap();
+        }
+        let export = super::startup_arrays_and_volumes(&state, &config, &drives, &holding, assembled).await.unwrap();
+        (state, export)
+    }
+
+    fn config(drives: &[String]) -> StormBlockConfig {
+        let mut c = StormBlockConfig::default();
+        c.arrays = vec![ArrayConfig { name: "data".into(), level: crate::raid::RaidLevel::Raid1, drives: drives.to_vec(), stripe_kb: 64 }];
+        c.volumes = vec![
+            VolumeConfig { name: "vol0".into(), size: "64M".into(), array: "data".into(), redundancy: None },
+            VolumeConfig { name: "lost".into(), size: "64M".into(), array: "nowhere".into(), redundancy: None },
+        ];
+        c
+    }
+
+    #[tokio::test]
+    async fn the_configs_arrays_and_volumes_are_made_once_and_found_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<String> = (0..2).map(|i| dir.path().join(format!("d{i}.img")).display().to_string()).collect();
+        let cfg = config(&paths);
+
+        let (state, export) = start(dir.path(), &paths, &cfg).await;
+        let names: Vec<String> = state.arrays.read().await.values().map(|i| i.array.name()).collect();
+        assert_eq!(names, vec!["data".to_string()], "the array is made, under its name");
+        let vols = state.volume_manager.lock().await.list_volumes().await;
+        assert_eq!(vols.iter().map(|v| v.1.as_str()).collect::<Vec<_>>(), vec!["vol0"], "vol0 made; 'lost' names no array");
+        let export = export.expect("the volume is what is exported");
+        assert_eq!(export.capacity_bytes(), 64 << 20);
+        export.write(0, &[0x5A; 4096]).await.unwrap();
+        export.flush().await.unwrap();
+        state.volume_manager.lock().await.persist().await;
+        let first = vols[0].0;
+        drop((state, export));
+
+        // A restart: the set is assembled from its drives, found by name, and
+        // vol0 is the same volume with the same bytes.
+        let (state, export) = start(dir.path(), &paths, &cfg).await;
+        assert_eq!(state.arrays.read().await.len(), 1, "not created a second time");
+        let vols = state.volume_manager.lock().await.list_volumes().await;
+        assert_eq!(vols.len(), 1);
+        assert_eq!(vols[0].0, first, "the same volume");
+        let mut b = vec![0u8; 4096];
+        export.unwrap().read(0, &mut b).await.unwrap();
+        assert!(b.iter().all(|x| *x == 0x5A), "its data kept");
+    }
+
+    #[tokio::test]
+    async fn an_array_is_never_made_over_a_drive_that_holds_a_slab() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<String> = (0..2).map(|i| dir.path().join(format!("d{i}.img")).display().to_string()).collect();
+        // The second drive already carries a slab.
+        let dev = Arc::new(FileDevice::open_with_capacity(&paths[1], 256 << 20).await.unwrap()) as Arc<dyn BlockDevice>;
+        crate::drive::slab::Slab::format_with(
+            dev,
+            crate::drive::slab::SlabFormat::new(crate::drive::slab::DEFAULT_SLOT_SIZE, crate::placement::topology::StorageTier::Hot)
+                .with_auto_metadata(256 << 20),
+        )
+        .await
+        .unwrap();
+        let (state, _) = start(dir.path(), &paths, &config(&paths)).await;
+        assert!(state.arrays.read().await.is_empty(), "not created");
+        let again = Arc::new(FileDevice::open_with_capacity(&paths[1], 256 << 20).await.unwrap()) as Arc<dyn BlockDevice>;
+        assert!(!crate::drive::discover::slabs_in_partitions(&again).await.is_empty(), "the slab is still there");
+    }
+
+    #[test]
+    fn a_file_that_sets_what_nothing_builds_is_told_so() {
+        let keys = crate::mgmt::config::retired_keys(
+            "[boot]\ntemplates_dir = \"/x\"\n[cluster]\nenabled = true\nreplication_mode = \"sync\"\nreplication_factor = 3\n",
+        );
+        assert_eq!(keys.len(), 3, "{keys:?}");
+        assert!(crate::mgmt::config::retired_keys("[cluster]\nenabled = true\n[reactor]\ncores = 2\n").is_empty());
+        let c: StormBlockConfig = toml::from_str("[boot]\nserver_addr = \"x\"\n[reactor]\ncores = 3\npin_cores = false\n").unwrap();
+        assert_eq!((c.reactor.cores, c.reactor.pin_cores), (3, false), "a file with [boot] still loads; [reactor] is read");
     }
 }

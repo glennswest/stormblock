@@ -246,9 +246,10 @@ it does not parse), then, in order:
    the eraser (`[erase]`, #286; `adopt-ublk` starts it too)
    and the pool-pressure watcher (`[pressure]`, off by default);
 3. opens the drives (`-d` or `[[drives]]`) and **adopts the slabs already on
-   them**, their volumes included; with `--raid`, builds an array from them,
-   and with `--volume` too, creates volumes on it; with neither, every drive
-   becomes a raw NVMe namespace;
+   them**, their volumes included; makes the `[[arrays]]` and `[[volumes]]`
+   the config declares that are not there yet (`--raid` and `--volume` are
+   the command line's way of declaring them, #165); with neither, every
+   drive becomes a raw NVMe namespace;
 4. starts the cluster engine (`[cluster] enabled`, with `--features cluster`) and StormFS registration
    (`[stormfs] enabled`);
 5. starts the **iSCSI target** (unless `--no-iscsi`) and the **NVMe-oF/TCP
@@ -494,8 +495,9 @@ slab, **formatted** if not) or `kind = "directory"` (`path`, `slab_bytes`).
 **`[cluster]`** (`cluster`) — `enabled` (`false`), `data_dir`
 (`/var/lib/stormblock/raft`), `seed_nodes`, `heartbeat_interval_ms` (`1000`),
 `heartbeat_timeout_ms` (`5000`), `tls_enabled` (`false`, needs management TLS),
-`tls_ca_cert`. `replication_mode` and `replication_factor` are parsed and not
-used.
+`tls_ca_cert`. `replication_mode` and `replication_factor` are gone (#165):
+volumes are copied across nodes by stormstorage's heads (#179). A file that
+still sets them loads, with a warning.
 
 **`[stormfs]`** — `enabled` (`false`), `metadata_url`, `heartbeat_secs`
 (`30`), `advertise_addr`: announce this node's volumes to
@@ -506,9 +508,25 @@ Bearer` on register and deregister, so stormstorage can require it
 that cannot be read leaves registration off, with an error, rather than
 registering without it.
 
-**Parsed and not acted on:** `[[arrays]]` and `[[volumes]]` (validated, so a
-bad value still stops startup — use `--raid`/`--volume`, or the API),
-`[reactor]` (use `--reactor-cores`) and `[boot]` (#165).
+**`[[arrays]]` and `[[volumes]]`** (#165) — `name`, `level`, `drives` (paths
+as in `[[drives]]`), `stripe_kb` (`64`); `name`, `size`, `array`,
+`redundancy`. At the daemon's start, declarative and never destructive:
+- an array whose name is a set already assembled from its drives is that set
+  (the unnamed set an older `--raid` made is `cli-array`), never made again;
+- otherwise it is made only from drives that opened, are no set's member or
+  spare and carry no slab; a drive that does not qualify is named and the
+  array is not made (making it formats its members);
+- a volume is made when none of its name exists, on its array, at its size
+  and redundancy; one that exists is left as it is (never resized). One that
+  names no configured array is not made.
+`--raid` and `--volume` replace them, as before (an array `cli-array` over
+every drive).
+
+**`[reactor]`** — `cores` (`0` = one per core; `--reactor-cores` wins),
+`pin_cores` (`true` on Linux) (#165).
+
+**`[boot]`** is gone (#165): nothing in this engine serves iPXE templates. A
+file that still sets it loads, with a warning.
 
 ## Ports
 
@@ -2002,11 +2020,9 @@ What earlier docs described and the code does not do, each with its issue:
   the kernel, opened `O_DIRECT` (#167).
 - **RAID sets** (`docs/raid-sets.md` "Not here"): no reshape or growth of a
   parity set (#387); bay LEDs are
-  stormdrive's (stormdrive#44); `[[arrays]]` in the config is not acted on
-  (#165).
+  stormdrive's (stormdrive#44).
 - **io_uring zero-copy send, the StormFS shared-ring IPC server**: code with
   nothing starting it; `arm64`/`mikrotik` gate nothing (#169).
-- **Config the daemon ignores** — see *The config file* (#163, #164, #165).
 - **The `ui` feature's pages are outside the token check** (#166).
 - **Scrub** of mirror legs and parity on a schedule (#160), **erasure coding
   beyond P+Q** (#159), metadata at 40 PB a node (#155–#158), drive affinity,

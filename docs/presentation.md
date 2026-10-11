@@ -206,8 +206,7 @@ clock). Full suite green on dev apart from a timing test on a loaded box (#134).
   iSCSI target runs open (#164); the optional `ui` pages bypass the token
   (#166).
 - **Correctness**: `boot-iscsi` formats its target every run, and a unit runs
-  it every boot (#162); `--data-dir` reaches only the volume manager (#163);
-  config sections parsed and ignored (#165).
+  it every boot (#162); `--data-dir` reaches only the volume manager (#163).
 - **Decisions waiting**: VFIO (#167), the StormFS registration target (#170),
   scrub without checksums (#160).
 
