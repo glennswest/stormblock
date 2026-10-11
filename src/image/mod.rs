@@ -31,6 +31,7 @@ pub mod stage;
 pub mod install;
 pub mod decode;
 pub mod import;
+pub mod offline;
 pub mod fat;
 pub mod formats;
 pub mod iso;

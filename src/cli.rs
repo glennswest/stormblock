@@ -159,13 +159,35 @@ enum SubCommand {
     /// privileges: the filesystem is written directly through the ext4 writer.
     ///
     ///   podman export "$cid" | stormblock golden --out fedora.img --size 512M
+    ///
+    /// Or from a volume in a slab, with no engine running (#87): the round
+    /// trip back from `stormblock clone`:
+    ///
+    ///   stormblock golden --slab work.slab --from-volume work1 --out new.img
     Golden {
         /// Where to write the image.
         #[arg(long)]
         out: String,
-        /// How big to make it, e.g. `512M`, `2G`.
+        /// How big to make it, e.g. `512M`, `2G`. Needed when building from
+        /// tars; a volume's image is the volume's size.
         #[arg(long)]
-        size: String,
+        size: Option<String>,
+        /// Write this volume (name or UUID) of `--slab` out as the image,
+        /// instead of building one from tars (#87). Sparse; an ext4 volume is
+        /// checked first (`--fsck`).
+        #[arg(long = "from-volume")]
+        from_volume: Option<String>,
+        /// The slab (device, partition or image file) `--from-volume` is in.
+        /// Repeatable.
+        #[arg(long)]
+        slab: Vec<String>,
+        /// Metadata directory, if the slab does not carry its own.
+        #[arg(long)]
+        meta: Option<String>,
+        /// With `--from-volume`: also seal the volume in the slab, so it is a
+        /// golden there too and can be cloned again with `clone --golden`.
+        #[arg(long)]
+        seal: bool,
         /// Filesystem label. Defaults to the output file's stem.
         #[arg(long)]
         label: Option<String>,
@@ -196,6 +218,36 @@ enum SubCommand {
         /// check out is one every clone of it inherits.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         fsck: bool,
+    },
+    /// Import a golden into a slab and CoW-clone it as a volume (#87).
+    ///
+    /// With no engine running: the golden image (raw, qcow2, vmdk) is
+    /// imported once as a sealed volume `golden-<stem>-<sha16>`, found again
+    /// by its content's sha256 the next time, and a copy-on-write clone of it
+    /// is made with its own filesystem UUID, checked, and recorded in the
+    /// slab. Then `attach --slab … --volume <name> --mount <dir>` mounts it,
+    /// and `golden --from-volume <name>` writes the result out.
+    ///
+    ///   stormblock slab format --device work.slab --size 8G
+    ///   stormblock clone --slab work.slab --golden fedora.img --name work1
+    ///   stormblock attach --slab work.slab --volume work1 --mount /mnt
+    Clone {
+        /// Slab device, partition or image file. Repeatable.
+        #[arg(long, required = true)]
+        slab: Vec<String>,
+        /// Metadata directory, if the slab does not carry its own.
+        #[arg(long)]
+        meta: Option<String>,
+        /// The golden: an image file to import (once), or the name or UUID of
+        /// a sealed volume already in the slab.
+        #[arg(long)]
+        golden: String,
+        /// The clone's name.
+        #[arg(long)]
+        name: String,
+        /// Grow the clone to this size (`2G`); never smaller than the golden.
+        #[arg(long)]
+        size: Option<String>,
     },
     /// Attach a slab and export (and optionally mount) any volume in it.
     ///
@@ -979,8 +1031,23 @@ pub async fn run() -> anyhow::Result<()> {
                     slab, meta.as_deref(), out, volumes, *no_contents, *max_file_mb,
                 ).await;
             }
-            SubCommand::Golden { out, size, label, tars, whiteouts, fsck, read_only } => {
+            SubCommand::Golden { out, size, from_volume, slab, meta, seal, label, tars, whiteouts, fsck, read_only } => {
+                if let Some(volume) = from_volume {
+                    if !tars.is_empty() {
+                        anyhow::bail!("--from-volume writes a volume out; it takes no --tar");
+                    }
+                    if slab.is_empty() {
+                        anyhow::bail!("--from-volume needs the --slab it is in");
+                    }
+                    return handle_golden_from_volume(slab, meta.as_deref(), volume, out, *fsck, *seal).await;
+                }
+                let Some(size) = size else {
+                    anyhow::bail!("--size is needed to build a golden from tars (or give --from-volume)");
+                };
                 return handle_golden(out, size, label.as_deref(), tars, *whiteouts, *fsck, *read_only).await;
+            }
+            SubCommand::Clone { slab, meta, golden, name, size } => {
+                return handle_clone(slab, meta.as_deref(), golden, name, size.as_deref()).await;
             }
             SubCommand::Attach { slab, meta, volumes, all, mount, ro, force } => {
                 return handle_attach(
@@ -4516,6 +4583,131 @@ pub async fn run() -> anyhow::Result<()> {
         Ok(())
     }
 
+    /// `clone` — a golden into a slab (once) and a CoW clone of it (#87).
+    async fn handle_clone(
+        slab_paths: &[String],
+        meta: Option<&str>,
+        golden: &str,
+        name: &str,
+        size: Option<&str>,
+    ) -> anyhow::Result<()> {
+        use crate::image::offline;
+        let size_bytes = match size {
+            Some(s) => Some(crate::mgmt::config::parse_size(s).map_err(|e| anyhow::anyhow!("--size {s}: {e}"))?),
+            None => None,
+        };
+        let mgr = open_slabs_and_restore(slab_paths, meta).await?;
+        let vm: Arc<crate::fs::template::VmLock> = Arc::new(crate::lockwatch::TrackedMutex::new(mgr));
+        offline::clone_name_free(&vm, name).await.map_err(|e| anyhow::anyhow!(e))?;
+
+        // A sealed volume already in the slab, by name or id; else a file.
+        let in_slab = {
+            let m = vm.lock().await;
+            match m.find_volume(golden).await {
+                Some(id) if m.is_sealed(&id) => Some(id),
+                Some(_) => anyhow::bail!("{golden} is a volume in the slab and is not sealed: seal it first (golden --from-volume … --seal)"),
+                None => None,
+            }
+        };
+        let source = match in_slab {
+            Some(id) => {
+                println!("  golden {golden}: in the slab");
+                id
+            }
+            None => {
+                let path = std::path::Path::new(golden);
+                if !path.exists() {
+                    anyhow::bail!("{golden}: no such file, and no sealed volume of that name in the slab");
+                }
+                let imp = offline::import_golden(&vm, path).await.map_err(|e| anyhow::anyhow!(e))?;
+                if imp.imported {
+                    println!(
+                        "  golden {}: imported from {golden} ({} written, sha256 {})",
+                        imp.name,
+                        crate::mgmt::config::human_size(imp.written),
+                        imp.sha256
+                    );
+                    // Kept even if the clone fails: the next run finds it.
+                    vm.lock()
+                        .await
+                        .persist_checked()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}: imported and its record did not reach the slab: {e}", imp.name))?;
+                } else {
+                    println!("  golden {}: already in the slab (sha256 {})", imp.name, imp.sha256);
+                }
+                imp.id
+            }
+        };
+        let mut spec = crate::fs::template::CloneSpec::new(name);
+        spec.size_bytes = size_bytes;
+        let r = crate::fs::template::clone_volume(&vm, source, &spec)
+            .await
+            .map_err(|e| anyhow::anyhow!("clone {name}: {e}"))?;
+        vm.lock()
+            .await
+            .persist_checked()
+            .await
+            .map_err(|e| anyhow::anyhow!("the clone is made and its record did not reach the slab: {e}"))?;
+        println!(
+            "cloned: {name} ({}, {}{}) from {}",
+            r.volume_id,
+            crate::mgmt::config::human_size(r.size_bytes),
+            r.fs_uuid.map(|u| format!(", filesystem {u}")).unwrap_or_default(),
+            r.source
+        );
+        println!("attach it with: stormblock attach --slab {} --volume {name} --mount <dir>", slab_paths.join(" --slab "));
+        Ok(())
+    }
+
+    /// `golden --from-volume` — a volume of a slab written out as a golden
+    /// image (#87), with no engine running.
+    async fn handle_golden_from_volume(
+        slab_paths: &[String],
+        meta: Option<&str>,
+        volume: &str,
+        out: &str,
+        fsck: bool,
+        seal: bool,
+    ) -> anyhow::Result<()> {
+        let mut mgr = open_slabs_and_restore(slab_paths, meta).await?;
+        let id = resolve_boot_volume(&mgr, volume).await?;
+        let dev = mgr.get_volume(&id).ok_or_else(|| anyhow::anyhow!("{volume} has no handle"))?;
+        let fs = crate::fs::disk::probe(&dev).await;
+        if fsck && fs.as_ref().is_some_and(|f| f.kind.starts_with("ext")) {
+            let check = crate::fs::ext4::check(&dev).await?;
+            if !check.is_clean() {
+                let ex = crate::fs::ext4::explain(&dev, &check).await;
+                for f in ex.findings.iter().take(GOLDEN_FINDINGS) {
+                    tracing::warn!("{volume}: {f}");
+                }
+                anyhow::bail!(
+                    "{volume} does not check out — {} problem(s): {}; not writing a golden every clone would inherit",
+                    ex.findings.len(),
+                    ex.summary()
+                );
+            }
+            println!("  {volume}: checks out");
+        }
+        let written = crate::image::offline::export_volume(&dev, std::path::Path::new(out))
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        drop(dev);
+        if seal && !mgr.is_sealed(&id) {
+            mgr.seal_volume(id, fs).await.map_err(|e| anyhow::anyhow!("seal {volume}: {e}"))?;
+            mgr.persist_checked()
+                .await
+                .map_err(|e| anyhow::anyhow!("{volume} sealed and its record did not reach the slab: {e}"))?;
+            println!("  {volume}: sealed in the slab");
+        }
+        println!(
+            "built: {out} ({}, {} of data) from {volume}",
+            crate::mgmt::config::human_size(mgr.get_volume(&id).map(|d| d.capacity_bytes()).unwrap_or(0)),
+            crate::mgmt::config::human_size(written)
+        );
+        Ok(())
+    }
+
     /// `attach` — open a slab and export, or list, what is in it.
     ///
     /// Everything a node does with its storage happens through a volume it has
@@ -4676,6 +4868,14 @@ pub async fn run() -> anyhow::Result<()> {
         let stuck = join_ublk_threads(threads, std::time::Duration::from_secs(10));
         if stuck > 0 {
             eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
+        }
+        // What was written allocated slots; the records naming them go back
+        // to the slab, so the next open (a `golden --from-volume`, #87) reads
+        // the maps rather than reconciling them from the slot tables.
+        if !read_only {
+            if let Err(e) = mgr.persist_checked().await {
+                eprintln!("WARNING: the volume records were not written back to the slab: {e}");
+            }
         }
         Ok(())
     }
@@ -11656,6 +11856,120 @@ mod slab_cat_tests {
             Err((2, _)) => {}
             other => panic!("no such volume is exit 2: {other:?}"),
         }
+    }
+}
+
+/// `clone` and `golden --from-volume` (#87): a golden into a slab with no
+/// engine, a CoW clone of it written as a consumer would, and the result out
+/// again as a golden image.
+#[cfg(test)]
+mod offline_clone_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::SlabFormat;
+    use crate::fs::files::{read_file, write_files, SeedFile};
+
+    async fn ext4_image(path: &str, size: u64, files: &[(&str, &str)]) {
+        let dev = Arc::new(FileDevice::open_with_capacity(path, size).await.unwrap()) as Arc<dyn BlockDevice>;
+        crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default()).await.unwrap();
+        let seeds: Vec<SeedFile> = files.iter().map(|(p, c)| SeedFile::new(*p, *c)).collect();
+        write_files(&dev, &seeds).await.unwrap();
+        dev.flush().await.unwrap();
+    }
+
+    async fn read_from(path: &str, file: &str) -> Option<Vec<u8>> {
+        let dev = Arc::new(FileDevice::open(path).await.unwrap()) as Arc<dyn BlockDevice>;
+        read_file(&dev, file).await.ok()
+    }
+
+    #[tokio::test]
+    async fn a_golden_is_cloned_in_a_slab_written_and_written_out_again() {
+        const SLOT: u64 = 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        let slab = p("work.slab");
+        {
+            let dev = Arc::new(FileDevice::open_with_capacity(&slab, 512 * 1024 * 1024).await.unwrap())
+                as Arc<dyn BlockDevice>;
+            Slab::format_with(
+                dev,
+                SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::Data).with_metadata(4 * 1024 * 1024),
+            )
+            .await
+            .unwrap();
+        }
+        let base = p("fedora.img");
+        ext4_image(&base, 64 * 1024 * 1024, &[("/etc/os-release", "NAME=base\n")]).await;
+        let slabs = vec![slab.clone()];
+
+        // Import + clone; a second clone imports nothing.
+        handle_clone(&slabs, None, &base, "work1", None).await.unwrap();
+        handle_clone(&slabs, None, &base, "work2", Some("128M")).await.unwrap();
+        let err = handle_clone(&slabs, None, &base, "work1", None).await.unwrap_err();
+        assert!(err.to_string().contains("already holds a volume named work1"), "{err}");
+        let (golden, golden_fs, w1_fs, w2_size) = {
+            let mgr = open_slabs_and_restore(&slabs, None).await.unwrap();
+            let names = mgr.list_volumes().await;
+            let goldens: Vec<_> = names.iter().filter(|(_, n, ..)| n.starts_with("golden-fedora-")).collect();
+            assert_eq!(goldens.len(), 1, "imported once: {names:?}");
+            let g = goldens[0].0;
+            assert!(mgr.is_sealed(&g));
+            let w1 = mgr.find_volume("work1").await.unwrap();
+            let w2 = mgr.find_volume("work2").await.unwrap();
+            assert!(!mgr.is_sealed(&w1));
+            (
+                g,
+                mgr.fs_info(&g).and_then(|f| f.uuid),
+                mgr.fs_info(&w1).and_then(|f| f.uuid),
+                mgr.get_volume(&w2).unwrap().capacity_bytes(),
+            )
+        };
+        assert!(golden_fs.is_some() && w1_fs.is_some() && golden_fs != w1_fs, "a clone has its own identity");
+        assert!(w2_size >= 128 * 1024 * 1024);
+
+        // A consumer writes into the clone (what `attach --mount` hands over),
+        // and releases it: the records go back to the slab.
+        {
+            let mgr = open_slabs_and_restore(&slabs, None).await.unwrap();
+            let w1 = mgr.find_volume("work1").await.unwrap();
+            let h = mgr.get_volume(&w1).unwrap();
+            write_files(&h, &[SeedFile::new("/usr/bin/tool", "installed\n")]).await.unwrap();
+            h.flush().await.unwrap();
+            mgr.persist_checked().await.unwrap();
+        }
+
+        // Out again as a golden image, and sealed in the slab too.
+        let out = p("new.img");
+        handle_golden_from_volume(&slabs, None, "work1", &out, true, true).await.unwrap();
+        assert_eq!(read_from(&out, "/usr/bin/tool").await.as_deref(), Some(&b"installed\n"[..]));
+        assert_eq!(read_from(&out, "/etc/os-release").await.as_deref(), Some(&b"NAME=base\n"[..]));
+        assert!(std::fs::metadata(&out).unwrap().len() >= 64 * 1024 * 1024);
+
+        // The golden did not change; the sealed work1 clones again by name.
+        {
+            let mgr = open_slabs_and_restore(&slabs, None).await.unwrap();
+            let g = mgr.get_volume(&golden).unwrap();
+            assert!(read_file(&g, "/usr/bin/tool").await.is_err(), "the golden is untouched");
+            let w1 = mgr.find_volume("work1").await.unwrap();
+            assert!(mgr.is_sealed(&w1));
+        }
+        handle_clone(&slabs, None, "work1", "work3", None).await.unwrap();
+        {
+            let mgr = open_slabs_and_restore(&slabs, None).await.unwrap();
+            let w3 = mgr.find_volume("work3").await.unwrap();
+            let h = mgr.get_volume(&w3).unwrap();
+            assert_eq!(read_file(&h, "/usr/bin/tool").await.unwrap(), b"installed\n");
+        }
+
+        // The written-out image is a golden of its own: a different content,
+        // so a second import, next to the first.
+        handle_clone(&slabs, None, &out, "work4", None).await.unwrap();
+        let mgr = open_slabs_and_restore(&slabs, None).await.unwrap();
+        let goldens = mgr.list_volumes().await.into_iter().filter(|(_, n, ..)| n.starts_with("golden-")).count();
+        assert_eq!(goldens, 2);
+        // An unsealed volume is not a golden to clone.
+        let err = handle_clone(&slabs, None, "work2", "work5", None).await.unwrap_err();
+        assert!(err.to_string().contains("not sealed"), "{err}");
     }
 }
 
