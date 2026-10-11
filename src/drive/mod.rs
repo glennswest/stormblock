@@ -201,23 +201,6 @@ pub struct SmartData {
     pub healthy: bool,
 }
 
-/// A single I/O operation for batch submission.
-#[derive(Debug, Clone)]
-pub enum IoOp {
-    Read { offset: u64, buf_idx: u32, len: u32 },
-    Write { offset: u64, buf_idx: u32, len: u32 },
-    Flush,
-    Discard { offset: u64, len: u64 },
-}
-
-/// Result of a completed I/O operation.
-#[derive(Debug)]
-pub struct IoCompletion {
-    pub op_idx: u32,
-    pub result: DriveResult<u32>,
-    pub latency_ns: u64,
-}
-
 /// Unified interface for all physical drive types.
 ///
 /// Implemented by NvmeDevice (VFIO), SasDevice (io_uring), and FileDevice (tokio).

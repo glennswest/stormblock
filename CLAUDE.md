@@ -81,9 +81,9 @@ every build: adding one costs every build.
 
 Features: `default = ["nvmeof", "iscsi", "stormfs-data"]` (`cluster` opt-in
 since #209); `ui` is
-the old web UI (off since v12.2.0, stormview is the UI); `arm64` and
-`mikrotik` are profile names that gate no code (#169). Without `nvmeof` the
-tree does not compile (#161).
+the old web UI (off since v12.2.0, stormview is the UI). `arm64` and
+`mikrotik` gated no code and were removed (#169). Without `nvmeof` the tree
+does not compile (#161).
 
 **RouterOS: not shipping** (owner, 2026-09-28) — the profile is neither built
 nor checked. Kept as history of what it was and why:
@@ -128,7 +128,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 (stormblock-csi, `/v1`) is for third-party drivers only.
 
 ## Architecture (bottom-up)
-- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slottable.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171; the table read through a bounded page cache, no per-slot record in memory, #155), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything (#169)
+- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slottable.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171; the table read through a bounded page cache, no per-slot record in memory, #155), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART; `nvme.rs` is a VFIO stub (#167); `uring_server.rs` is not started by anything, kept for #82 (#169)
 - `src/raid/` — drive-level RAID 1/5/6/10 sets (#252): `layout.rs` (P/Q rotation, RAID-10 pairs), `superblock.rs` (v2: slot table, events, name, pool), `bitmap.rs` (on-disk write-intent bitmap), `spares.rs` (hot spares by pool), `rebuild.rs` (progress, rates); `mod.rs`: stripe locks, degraded I/O, assembly, rebuild onto a spare, scrub. `src/mgmt/raid_sets.rs` joins them to slabs and the API (`docs/raid-sets.md`)
 - `src/volume/` — thin volumes (`thin.rs`), the compact extent table (`extable.rs`, #155), the slot fence (`fence.rs`: I/O shared, a move exclusive, #239), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V9; V8 written when every volume is 4096), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
 - `src/fs/` — templates (`template.rs`), ext4 (`ext4.rs`) and XFS (`xfs.rs`) seams, disk identity (`disk.rs`), files, image survey (`survey.rs`)
@@ -4362,7 +4362,7 @@ Master checklist lives in **stormblock-registry/CLAUDE.md**, "Layered goldens
 - [x] `nvmeof/admin.rs` — Identify Controller/Namespace, Active NS List, Get Log Page
 - [x] `nvmeof/io.rs` — NVMe I/O: Read, Write, Flush, Dataset Management (TRIM)
 - [x] `nvmeof/mod.rs` — NVMe-oF target server (ICReq/ICResp handshake, command loop)
-- [x] `nvmeof` — io_uring zero-copy send for C2H data
+- [x] `nvmeof` — io_uring zero-copy send for C2H data (never wired; removed, #169)
 - [x] `iscsi/pdu.rs` — iSCSI PDU parsing (48-byte BHS, CRC32C digests, text params)
 - [x] `iscsi/login.rs` — iSCSI login state machine (security + operational negotiation)
 - [x] `iscsi/chap.rs` — CHAP MD5 authentication (constant-time verify)

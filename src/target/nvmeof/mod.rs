@@ -10,8 +10,6 @@ pub mod discovery;
 pub mod auth;
 pub mod ana;
 pub mod nsid;
-#[cfg(target_os = "linux")]
-pub mod zerocopy;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

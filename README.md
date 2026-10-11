@@ -218,18 +218,19 @@ own check (`test/check.sh`, the `short` suite) against this checkout.
 | `cluster` (opt-in) | openraft membership, heartbeats, replication, `[cluster]`, `/api/v1/cluster`, `/raft/*` |
 | `stormfs-data` | the StormFS data path, `/api/v1/stormfs` (`docs/stormfs-api.md`) |
 | `ui` | the old embedded web UI at `/ui` (off since v12.2.0; stormview is the UI) |
-| `arm64`, `mikrotik` | profile names only — no code is gated on them |
 
 Profiles:
 
 ```bash
 cargo build --release --locked --target x86_64-unknown-linux-musl                 # a full node
 cargo build --release --locked --target aarch64-unknown-linux-musl \
-    --no-default-features --features "mikrotik,nvmeof"                            # RouterOS (NVMe-TCP only)
+    --no-default-features --features nvmeof                                       # RouterOS (NVMe-TCP only)
 ```
 
 **Nothing ships for RouterOS** (owner, 2026-09-28): the RouterOS profile is
 no longer built or checked, and the command above is kept for reference only.
+The `arm64` and `mikrotik` feature names it used to carry gated no code and
+are gone (#169).
 When it did ship it served containers, PVCs and sbregistry over NVMe-TCP; iSCSI
 sharing and PXE boot on RouterOS are mkube's. `--no-default-features` without
 `nvmeof` does not currently compile (#161).
@@ -2022,8 +2023,9 @@ What earlier docs described and the code does not do, each with its issue:
 - **RAID sets** (`docs/raid-sets.md` "Not here"): no reshape or growth of a
   parity set (#387); bay LEDs are
   stormdrive's (stormdrive#44).
-- **io_uring zero-copy send, the StormFS shared-ring IPC server**: code with
-  nothing starting it; `arm64`/`mikrotik` gate nothing (#169).
+- **The StormFS shared-ring IPC server** (`drive/uring_server.rs`): built and
+  tested, started by nothing; kept as #82's (vhost-user-blk) starting point
+  and the counterpart of StormFS's client (#169).
 - **Scrub** of mirror legs and parity on a schedule (#160), **erasure coding
   beyond P+Q** (#159), metadata at 40 PB a node (#155–#158), drive affinity,
   overcommit and StorageClass policy for claims (#151–#154).

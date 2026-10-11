@@ -167,8 +167,8 @@ default = ["nvmeof", "iscsi", "stormfs-data"]
 nvmeof = []
 iscsi = []
 # The StormFS data-path surface: chunk lifecycle, versioned-map commits and
-# version pins (#49, #50). Off in the `mikrotik` profile, which reaches this
-# by building --no-default-features: a RouterOS node with 256 MB serves
+# version pins (#49, #50). Off with --no-default-features (what the RouterOS
+# build was, before RouterOS stopped shipping): a node with 256 MB serves
 # container volumes over NVMe-TCP, it is not a StormFS data node, so the
 # surface would be weight in the binary and an invitation to call something
 # that node should not serve.
@@ -178,8 +178,9 @@ iscsi = []
 stormfs-data = []
 cluster = ["dep:openraft"]
 ui = ["dep:askama", "dep:rust-embed", "dep:mime_guess"]
-arm64 = []
-mikrotik = []
+# `arm64` and `mikrotik` are gone (#169): they gated no code, so
+# `--features mikrotik` stripped nothing. A small build is
+# `--no-default-features --features nvmeof`.
 
 [dev-dependencies]
 # Integration tests read engine-written pallets through the firmware path.
