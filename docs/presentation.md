@@ -203,8 +203,7 @@ clock). Full suite green on dev apart from a timing test on a loaded box (#134).
 - **Security**: the `/serve/v1` reconciler serves every export, host-bound
   ones included, on a portal any host can reach (#217, P0);
   CHAP in the config file is ignored, so a CHAP-configured
-  iSCSI target runs open (#164); the optional `ui` pages bypass the token
-  (#166).
+  iSCSI target runs open (#164).
 - **Correctness**: `boot-iscsi` formats its target every run, and a unit runs
   it every boot (#162); `--data-dir` reaches only the volume manager (#163).
 - **Decisions waiting**: VFIO (#167), the StormFS registration target (#170),

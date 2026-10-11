@@ -704,19 +704,9 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
         _ => None,
     });
 
-    // `api::router` carries `/metrics` and the credential check over it.
-    #[cfg_attr(not(feature = "ui"), allow(unused_mut))]
-    let mut router = api::router(state.clone());
-
-    // Mount web UI at /ui when the ui feature is enabled
-    #[cfg(feature = "ui")]
-    {
-        router = router
-            .nest("/ui", ui::ui_router(state.clone()))
-            .route("/", axum::routing::get(|| async {
-                axum::response::Redirect::permanent("/ui/")
-            }));
-    }
+    // `api::router` carries `/metrics`, the web UI (feature `ui`) and the
+    // credential check over all of it.
+    let router = api::router(state.clone());
 
     let listener = TcpListener::bind(listen_addr).await?;
 

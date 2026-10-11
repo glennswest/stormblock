@@ -243,6 +243,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     // else.
     let r = r.merge(crate::mgmt::metrics::metrics_router(state.clone()));
 
+    // The web UI (feature `ui`), here and not beside this router (#166): a
+    // `Router::layer` wraps only the routes that exist when it is called, so
+    // `/ui` nested after the check below was served to anyone, its create and
+    // delete forms included.
+    #[cfg(feature = "ui")]
+    let r = r
+        .nest("/ui", crate::mgmt::ui::ui_router(state.clone()))
+        .route("/", axum::routing::get(|| async { axum::response::Redirect::permanent("/ui/") }));
+
     // One credential check, over every surface this router serves (#107).
     //
     // It goes on last so it wraps `/api/v1`, `/v1`, `/serve/v1` and the kube

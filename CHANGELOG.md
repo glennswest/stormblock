@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-10-11
+- **fix:** #166: with `--features ui`, `/ui` (and `/`) were served without the API token, their create and delete forms included. They were nested after the credential layer, and `Router::layer` wraps only the routes that exist when it is called. They are now nested inside `api::router` before the check. A UI page needs the node token, and a UI change (any POST or DELETE under `/ui`) is destructive: it needs the admin token or a storage-admin review (#274). Tests: `serve::api::tests::a_ui_change_is_destructive_and_its_pages_are_reads`; `integration_destructive::the_web_ui_is_behind_the_token_and_its_forms_behind_the_admin_gate` (with `--features ui`).
+
 ### 2026-10-10
 - **docs:** #345: `docs/boot-hooks.md` documents the boot's storage inventory: what it prints, the WARNING for a controller with no driver, and the bounded wait for drives (`STORM_STORAGE_WAIT`, 30 s). `ci-storage-inventory-verify.sh` (the inventory on a real kernel in QEMU) now carries the shelves block the inventory calls since #347.
 - **feat:** #176 (#51 item 3): `GET /api/v1/volumes/{id}/legs[?start=&limit=]` says where every leg of a volume's extents is on its drive, for a reader that must not reconstruct RAID and takes one good leg instead.

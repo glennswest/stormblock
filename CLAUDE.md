@@ -181,6 +181,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### The web UI behind the token (2026-10-11, #166) — IN PROGRESS
+
+`/ui` was nested after `api::router`'s layer (outside the check). Now
+nested inside it; UI POST/DELETE are destructive (admin gate, #274).
+- [x] `api::router` nests `/ui` + `/` (feature `ui`); `is_ui_change`
+- [x] tests: classify unit; `integration_destructive::the_web_ui_is_behind_
+      the_token_and_its_forms_behind_the_admin_gate` (feature `ui`); docs
+- [ ] on a build VM with `--features ui`; check.sh; close (`ui` is off in
+      every golden: no golden needed)
+
 ### Per-leg physical offsets for a read-only reader (2026-10-10, #176, P3) — DONE (golden-stormblock-dfc1c805a509)
 
 #51 item 3: "expose offsets per leg so a reader can take one good leg and

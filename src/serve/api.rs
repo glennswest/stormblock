@@ -397,13 +397,21 @@ pub fn classify(method: &Method, path: &str, query: Option<&str>) -> Class {
             return Class::Ordinary;
         }
     }
-    if is_destructive(method, path, query) || is_destructive_274(method, path) {
+    if is_destructive(method, path, query) || is_destructive_274(method, path) || is_ui_change(method, path) {
         return Class::Destructive;
     }
     if let Some(host) = attestation_read(method, path) {
         return Class::Attestation(host);
     }
     Class::Ordinary
+}
+
+/// A change made through the web UI (feature `ui`, #166): its forms create
+/// and delete arrays, volumes, exports and cluster members, so every one of
+/// them is held to the admin gate (#274), never only the node token. Its
+/// pages (GET) are ordinary reads.
+fn is_ui_change(method: &Method, path: &str) -> bool {
+    (path == "/ui" || path.starts_with("/ui/")) && *method != Method::GET && *method != Method::HEAD
 }
 
 /// `GET /api/v1/goldens/{name}/content`: open to the request, guarded by the
@@ -1691,6 +1699,27 @@ mod tests {
         assert!(!is_destructive(&Method::POST, "/mk/v1/volumes/abc/trim", Some("force=true")));
         assert!(!is_destructive(&Method::GET, "/mk/v1/status", None));
         assert!(!is_destructive(&Method::POST, "/mk/v1/volumes", None));
+    }
+
+    /// #166: the web UI's forms change arrays, volumes, exports and cluster
+    /// members: destructive. Its pages are reads.
+    #[test]
+    fn a_ui_change_is_destructive_and_its_pages_are_reads() {
+        let c = |m: Method, p: &str| classify(&m, p, None);
+        for (m, p) in [
+            (Method::POST, "/ui/volumes"),
+            (Method::DELETE, "/ui/volumes/1234"),
+            (Method::POST, "/ui/arrays"),
+            (Method::DELETE, "/ui/exports/x"),
+            (Method::POST, "/ui/nodes/leave"),
+            (Method::POST, "/ui/volumes/snapshot"),
+        ] {
+            assert!(matches!(c(m.clone(), p), Class::Destructive), "{m} {p}");
+        }
+        for p in ["/ui", "/ui/", "/ui/volumes", "/ui/volumes/table", "/ui/static/style.css"] {
+            assert!(matches!(c(Method::GET, p), Class::Ordinary), "GET {p}");
+        }
+        assert!(matches!(c(Method::POST, "/uix"), Class::Ordinary), "not the UI");
     }
 
     /// #122: staging, activating and rolling back a release rewrite what the

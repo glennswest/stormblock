@@ -688,7 +688,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement`, `prestage`, `fence`, `promote`, `dual-attach` |
 | `/serve/v1` (and `/mk/v1`) | the serving layer: `health`, `ready`, `status`, `volumes` (list, create, delete), exports, tar, raw, trim |
 | `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` |
-| `/ui`, `/` | the old web UI, only with `--features ui` (outside the token check, #166) |
+| `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
 
 ## Files
 
@@ -2023,7 +2023,6 @@ What earlier docs described and the code does not do, each with its issue:
   stormdrive's (stormdrive#44).
 - **io_uring zero-copy send, the StormFS shared-ring IPC server**: code with
   nothing starting it; `arm64`/`mikrotik` gate nothing (#169).
-- **The `ui` feature's pages are outside the token check** (#166).
 - **Scrub** of mirror legs and parity on a schedule (#160), **erasure coding
   beyond P+Q** (#159), metadata at 40 PB a node (#155–#158), drive affinity,
   overcommit and StorageClass policy for claims (#151–#154).

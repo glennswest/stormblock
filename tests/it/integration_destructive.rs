@@ -608,3 +608,30 @@ async fn a_sealed_volumes_digest_is_every_byte_and_kept_for_its_seal() {
     assert_eq!(resealed["sha256"], hex::encode(Sha256::digest(bytes(0x7E))));
     assert_eq!(resealed["cached"], false);
 }
+
+/// #166: the web UI (feature `ui`) is behind the same check as the API: no
+/// token, no page and no form; the node token reads its pages; its forms
+/// (creating and deleting arrays, volumes, exports) need the admin token.
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn the_web_ui_is_behind_the_token_and_its_forms_behind_the_admin_gate() {
+    let n = node(false, None).await;
+    let root = n.base.trim_end_matches("/api/v1").to_string();
+    let call_ui = |m: reqwest::Method, path: &str, tok: Option<&str>| {
+        let mut r = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap().request(m, format!("{root}{path}"));
+        if let Some(t) = tok {
+            r = r.bearer_auth(t);
+        }
+        r.form(&[("name", "ui-made"), ("size", "4M")]).send()
+    };
+    for p in ["/ui/", "/ui/volumes", "/"] {
+        assert_eq!(call_ui(reqwest::Method::GET, p, None).await.unwrap().status(), 401, "GET {p} with no token");
+    }
+    assert_eq!(call_ui(reqwest::Method::GET, "/ui/volumes", Some(NODE)).await.unwrap().status(), 200, "the node token reads a page");
+    for (m, p) in [(reqwest::Method::POST, "/ui/volumes"), (reqwest::Method::POST, "/ui/arrays"), (reqwest::Method::DELETE, "/ui/volumes/x")] {
+        assert_eq!(call_ui(m.clone(), p, None).await.unwrap().status(), 401, "{m} {p} with no token");
+        assert_eq!(call_ui(m.clone(), p, Some(NODE)).await.unwrap().status(), 403, "{m} {p} with the node token");
+    }
+    assert!(n.state.volume_manager.lock().await.list_volumes().await.iter().all(|v| v.1 != "ui-made"), "nothing was made");
+    assert_ne!(call_ui(reqwest::Method::POST, "/ui/volumes", Some(ADMIN)).await.unwrap().status(), 403, "the admin token gets through the gate");
+}
