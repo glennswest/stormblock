@@ -187,7 +187,12 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
       named distinctly, counted in space; the report lists them
 - [x] test `every_clone_a_golden_lists_is_made_with_its_own_identity`;
       docs/images.md, CHANGELOG
-- [ ] build VM; check.sh; golden; close
+- [x] found by the test: a `rest` slab/partition never fitted (sized from
+      the unaligned end of the table); `Gpt::largest_allocatable_bytes`, used
+      by the builder's `rest` and the pallet manager's fit checks
+- [x] image/pallet tests 101/101, clippy clean on the changed lines;
+      check.sh at 0d39fd5 ALL PASS (1148/1148)
+- [ ] golden; close
 
 ### Scrub: compare mirror legs and parity (2026-10-11, #160, P3) — WAITING ON THE OWNER
 
