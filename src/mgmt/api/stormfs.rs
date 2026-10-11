@@ -4,6 +4,7 @@
 //! POST   /api/v1/stormfs/allocate          take chunks on a named tier
 //! POST   /api/v1/stormfs/deallocate        free chunks and their addresses
 //! POST   /api/v1/stormfs/trim              free the space, keep the addresses
+//! POST   /api/v1/stormfs/copy              one chunk's bytes onto another (#64)
 //! GET    /api/v1/stormfs/extent-map/{vol}  what the block layer actually holds
 //! POST   /api/v1/stormfs/commit            versioned compare-and-swap (#50)
 //! GET    /api/v1/stormfs/pins              point-in-time holds
@@ -263,6 +264,8 @@ fn chunk_error(e: chunk::ChunkError) -> Response {
         )
             .into_response(),
         Drive(_) => ApiError::internal(e.to_string()),
+        // Not the caller's syntax but the state: allocate the range first.
+        NotOwned { .. } => ApiError::conflict(e.to_string()),
         _ => ApiError::bad_request(e.to_string()),
     }
 }
@@ -370,6 +373,64 @@ async fn free_extents(state: Arc<AppState>, req: ExtentsRequest, release_ownersh
         "slots_freed": slots_freed,
         "bytes_freed": bytes_freed,
         "failures": failures,
+    }))
+    .into_response()
+}
+
+// ---- copy ---------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct CopyRequest {
+    pub from: ExtentRef,
+    pub to: ExtentRef,
+}
+
+/// `POST /api/v1/stormfs/copy` — tier migration's copy step, done in the
+/// engine (#64): StormFS allocates the target, asks for the copy, swaps its
+/// chunk map with a commit, then deallocates the source. Both ranges must be
+/// its chunks; the target is never allocated here and the source is only
+/// read; repeating a copy is harmless. Answers once the target is durable.
+///
+/// The StormFS lock is held for the whole copy (lock order stormfs → volume
+/// manager, the manager only long enough to find the volumes), so a
+/// deallocate of either range waits for it rather than racing it.
+async fn copy(State(state): State<Arc<AppState>>, Json(req): Json<CopyRequest>) -> Response {
+    metrics::counter!("stormblock_api_requests_total", "endpoint" => "stormfs", "method" => "copy")
+        .increment(1);
+
+    let st = state.stormfs.lock().await;
+    let (src_dev, dst_dev) = {
+        let vm = state.volume_manager.lock().await;
+        let find = |v: Uuid| {
+            vm.get_volume_handle(&VolumeId(v))
+                .ok_or_else(|| ApiError::not_found(format!("volume {v} not found")))
+        };
+        match (find(req.from.volume), find(req.to.volume)) {
+            (Ok(s), Ok(d)) => (s, d),
+            (Err(r), _) | (_, Err(r)) => return r,
+        }
+    };
+    if dst_dev.is_sealed() {
+        return ApiError::conflict(format!(
+            "volume {} is sealed: a copy target must be writable",
+            req.to.volume
+        ));
+    }
+    let from = ChunkExtent { volume: VolumeId(req.from.volume), offset: req.from.offset, len: req.from.len };
+    let to = ChunkExtent { volume: VolumeId(req.to.volume), offset: req.to.offset, len: req.to.len };
+    let started = std::time::Instant::now();
+    let copied = match chunk::copy(&st.chunks, (from, src_dev.as_ref()), (to, dst_dev.as_ref())).await {
+        Ok(n) => n,
+        Err(e) => return chunk_error(e),
+    };
+    drop(st);
+    // A write into a chunk that shares a slot copies on write; the record of
+    // that is the volume metadata, written here like every other write path.
+    crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
+    metrics::counter!("stormblock_stormfs_copy_bytes_total").increment(copied);
+    Json(json!({
+        "bytes_copied": copied,
+        "ms": started.elapsed().as_millis() as u64,
     }))
     .into_response()
 }
@@ -672,6 +733,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/allocate", post(allocate))
         .route("/deallocate", post(deallocate))
         .route("/trim", post(trim))
+        .route("/copy", post(copy))
         // axum 0.8 spells path parameters `{vol}`; the spec's `:vol` is the
         // axum 0.6 form the routing table was written against.
         .route("/extent-map/{vol}", get(extent_map))

@@ -104,6 +104,42 @@ allocator never handed out, which is the discrepancy fsck is looking for;
 `unmapped_owned_bytes` is the other direction — space spoken for with nothing
 under it, either trimmed or allocated and not yet written.
 
+### Copy (#64)
+
+```http
+POST /api/v1/stormfs/copy
+{ "from": { "volume": "<uuid>", "offset": 0,       "len": 4194304 },
+  "to":   { "volume": "<uuid>", "offset": 8388608, "len": 4194304 } }
+
+200 { "bytes_copied": 4194304, "ms": 12 }
+```
+
+Tier migration's copy step, done inside the engine so a chunk's bytes never
+leave the node and no StormFS process is in the data path. StormFS migrates
+a chunk as allocate (the target, on the tier it wants) → copy → `commit` its
+chunk map → deallocate the source.
+
+- **Cross-volume and cross-tier**: `from` and `to` may be any two StormFS
+  chunks.
+- **Whole**: `from.len` must equal `to.len` and be non-zero (400); ranges in
+  one volume may not overlap (400; the same range onto itself is a 200 that
+  copies nothing).
+- **Never allocates, never strays**: both ranges must lie inside what
+  `allocate` handed out and was not deallocated, or 409 `not a StormFS
+  chunk`. A copy cannot read or write space StormFS was not given. A sealed
+  target is 409, an unknown volume 404.
+- **Repeatable**: copying the same bytes onto the same target again is the
+  same result, so a migration that crashed between the copy and its commit
+  copies again.
+- **The source is only read**. Freeing it is the deallocate after the
+  commit, so until then the way back is the source.
+- **Durable when answered**: the target is flushed before the 200.
+
+The copy runs in 1 MiB pieces with the StormFS lock held, so a deallocate of
+either range waits for the copy instead of racing it (allocate and commit
+wait too: a copy is a few I/Os per MiB). `stormblock_stormfs_copy_bytes_total`
+counts what was moved.
+
 ## Fence-free commits and pins (#50)
 
 Three further primitives (#50), which between them remove a journal and a

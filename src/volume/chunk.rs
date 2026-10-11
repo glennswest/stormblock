@@ -88,6 +88,9 @@ pub enum ChunkError {
         tier: StorageTier,
         slots_needed: u64,
     },
+    /// A copy names a range StormFS was never given (or gave back): it may
+    /// only move bytes between its own chunks.
+    NotOwned { what: &'static str, offset: u64, len: u64 },
     Drive(DriveError),
 }
 
@@ -113,6 +116,12 @@ impl std::fmt::Display for ChunkError {
                 f,
                 "tier {tier} has no room for {slots_needed} more slots — allocation is \
                  tier-scoped, so this is not silently satisfied from another tier"
+            ),
+            ChunkError::NotOwned { what, offset, len } => write!(
+                f,
+                "{what} {offset}..{} is not a StormFS chunk: allocate it first (a copy never \
+                 allocates, and never reads or writes space StormFS was not given)",
+                offset + len
             ),
             ChunkError::Drive(e) => write!(f, "drive error: {e}"),
         }
@@ -170,6 +179,16 @@ impl ChunkMap {
         m.range(..=offset)
             .next_back()
             .is_some_and(|(&start, &len)| start + len > offset)
+    }
+
+    /// Whether the whole of `offset..offset + len` has been handed out.
+    /// Ranges are coalesced, so a covered range lies inside one of them.
+    pub fn covers(&self, volume: VolumeId, offset: u64, len: u64) -> bool {
+        let Some(m) = self.owned.get(&volume) else { return false };
+        let Some(end) = offset.checked_add(len) else { return false };
+        m.range(..=offset)
+            .next_back()
+            .is_some_and(|(&start, &l)| start + l >= end)
     }
 
     /// Record a range as handed out, merging with anything adjacent.
@@ -490,6 +509,78 @@ pub struct FreeOutcome {
     /// already gone by then, so these are stranded and worth reporting rather
     /// than folding into `already_free`.
     pub failures: Vec<String>,
+}
+
+/// How much a [`copy`] moves per read and write: big enough that a chunk of
+/// a few MiB is a handful of I/Os, small enough not to hold a large buffer.
+pub const COPY_PIECE: u64 = 1 << 20;
+
+/// Copy one chunk's bytes onto another, inside the engine (#64): what
+/// StormFS's tier migration does between its allocate and its chunk-map CAS,
+/// without the bytes leaving the node or a StormFS process in the data path.
+///
+/// Both ranges must be StormFS's (handed out by [`allocate`] and not
+/// deallocated), the same length, and not overlapping. The target is never
+/// allocated here, and the source is only read. Copying the same bytes onto
+/// the same target again gives the same result, so a migration that crashed
+/// between the copy and its CAS can copy again. The target is flushed before
+/// this returns: a copy answered is a copy durable.
+///
+/// The caller holds the chunk map for the whole copy, so a deallocate of
+/// either range cannot land in the middle of it.
+pub async fn copy(
+    map: &ChunkMap,
+    from: (ChunkExtent, &dyn crate::drive::BlockDevice),
+    to: (ChunkExtent, &dyn crate::drive::BlockDevice),
+) -> Result<u64, ChunkError> {
+    let (src, src_dev) = from;
+    let (dst, dst_dev) = to;
+    if src.len != dst.len {
+        return Err(ChunkError::Invalid(format!(
+            "from.len {} and to.len {} differ: a copy moves a chunk whole, never a short copy",
+            src.len, dst.len
+        )));
+    }
+    if src.len == 0 {
+        return Err(ChunkError::Invalid("a zero-length copy".into()));
+    }
+    for (what, e, dev) in [("from", src, src_dev), ("to", dst, dst_dev)] {
+        let cap = dev.capacity_bytes();
+        if e.end() > cap {
+            return Err(ChunkError::OutOfRange { offset: e.offset, len: e.len, virtual_size: cap });
+        }
+        let bs = dev.block_size() as u64;
+        if e.offset % bs != 0 || e.len % bs != 0 {
+            return Err(ChunkError::Unaligned { what, value: if e.offset % bs != 0 { e.offset } else { e.len }, slot_size: bs });
+        }
+        if !map.covers(e.volume, e.offset, e.len) {
+            return Err(ChunkError::NotOwned { what, offset: e.offset, len: e.len });
+        }
+    }
+    if src.volume == dst.volume && src.offset < dst.end() && dst.offset < src.end() {
+        if src.offset == dst.offset {
+            // The same chunk onto itself: already a copy of itself.
+            return Ok(src.len);
+        }
+        return Err(ChunkError::Invalid(format!(
+            "from {}..{} and to {}..{} overlap in one volume",
+            src.offset,
+            src.end(),
+            dst.offset,
+            dst.end()
+        )));
+    }
+
+    let mut buf = vec![0u8; COPY_PIECE.min(src.len) as usize];
+    let mut done = 0u64;
+    while done < src.len {
+        let n = COPY_PIECE.min(src.len - done) as usize;
+        src_dev.read(src.offset + done, &mut buf[..n]).await?;
+        dst_dev.write(dst.offset + done, &buf[..n]).await?;
+        done += n as u64;
+    }
+    dst_dev.flush().await?;
+    Ok(done)
 }
 
 /// Free the physical slots under a set of chunks.

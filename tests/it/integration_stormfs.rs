@@ -732,3 +732,120 @@ async fn chunk_ownership_survives_a_restart() {
         SLOT * 2
     );
 }
+
+// ---- #64: a chunk copied inside the engine -------------------------------
+
+/// Read `len` bytes of a volume straight from the engine.
+async fn read_volume(state: &AppState, vol: &str, offset: u64, len: u64) -> Vec<u8> {
+    let id = stormblock::volume::VolumeId(vol.parse().unwrap());
+    let h = state.volume_manager.lock().await.get_volume_handle(&id).unwrap();
+    let mut buf = vec![0u8; len as usize];
+    h.read(offset, &mut buf).await.unwrap();
+    buf
+}
+
+async fn write_volume(state: &AppState, vol: &str, offset: u64, data: &[u8]) {
+    let id = stormblock::volume::VolumeId(vol.parse().unwrap());
+    let h = state.volume_manager.lock().await.get_volume_handle(&id).unwrap();
+    h.write(offset, data).await.unwrap();
+    h.flush().await.unwrap();
+}
+
+/// Tier migration's copy step (#64): one chunk's bytes onto another chunk in
+/// another volume, server-side, in pieces; the source untouched; repeating it
+/// harmless (a migration that crashed before its CAS copies again).
+#[tokio::test]
+async fn a_chunk_is_copied_onto_another_volumes_chunk_inside_the_engine() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state(&dir).await;
+    let (base, _srv) = start_server(state.clone()).await;
+    let c = reqwest::Client::new();
+    let cold = make_volume(&c, &base, "fs-cold", 8 * 1024 * 1024).await;
+    let hot = make_volume(&c, &base, "fs-hot", 8 * 1024 * 1024).await;
+
+    // Past one copy piece (1 MiB), so the copy is several reads and writes.
+    let len = 3 * 1024 * 1024 + 2 * SLOT;
+    let chunk = |v: &str| json!({ "tier": "hot", "len": len, "count": 1, "hint_volume": v, "zero": true });
+    let from = allocate(&c, &base, chunk(&cold)).await["extents"][0]["offset"].as_u64().unwrap();
+    let to = allocate(&c, &base, chunk(&hot)).await["extents"][0]["offset"].as_u64().unwrap();
+
+    let data: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
+    write_volume(&state, &cold, from, &data).await;
+
+    let body = json!({
+        "from": { "volume": cold, "offset": from, "len": len },
+        "to":   { "volume": hot,  "offset": to,   "len": len },
+    });
+    for _ in 0..2 {
+        let (s, v) = post(&c, format!("{base}/api/v1/stormfs/copy"), body.clone()).await;
+        assert_eq!(s, 200, "{v}");
+        assert_eq!(v["bytes_copied"], len);
+        assert!(read_volume(&state, &hot, to, len).await == data, "the target holds the source's bytes");
+        assert!(read_volume(&state, &cold, from, len).await == data, "the source is untouched");
+    }
+
+    // The way back is still the source: deallocate the target, and the
+    // source reads the same.
+    let (s, v) = post(
+        &c,
+        format!("{base}/api/v1/stormfs/deallocate"),
+        json!({ "extents": [ { "volume": hot, "offset": to, "len": len } ] }),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    assert!(read_volume(&state, &cold, from, len).await == data);
+
+    // And a copy onto the range StormFS just gave back is refused: a copy
+    // never allocates.
+    let (s, v) = post(&c, format!("{base}/api/v1/stormfs/copy"), body).await;
+    assert_eq!(s, 409, "{v}");
+    assert!(v.to_string().contains("not a StormFS chunk"), "{v}");
+}
+
+/// What a copy refuses, and with which status.
+#[tokio::test]
+async fn a_copy_that_cannot_be_whole_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state(&dir).await;
+    let (base, _srv) = start_server(state).await;
+    let c = reqwest::Client::new();
+    let a = make_volume(&c, &base, "fs-a", 8 * 1024 * 1024).await;
+    let b = make_volume(&c, &base, "fs-b", 8 * 1024 * 1024).await;
+    let other = make_volume(&c, &base, "not-stormfs", 8 * 1024 * 1024).await;
+    let chunk = |v: &str, n: u64| json!({ "tier": "hot", "len": SLOT * n, "count": 1, "hint_volume": v, "zero": false });
+    let fa = allocate(&c, &base, chunk(&a, 4)).await["extents"][0]["offset"].as_u64().unwrap();
+    let tb = allocate(&c, &base, chunk(&b, 4)).await["extents"][0]["offset"].as_u64().unwrap();
+    let copy = |from: Value, to: Value| json!({ "from": from, "to": to });
+    let ext = |v: &str, o: u64, l: u64| json!({ "volume": v, "offset": o, "len": l });
+    let url = format!("{base}/api/v1/stormfs/copy");
+
+    // Lengths differ: never a short copy.
+    let (s, v) = post(&c, url.clone(), copy(ext(&a, fa, SLOT * 4), ext(&b, tb, SLOT * 2))).await;
+    assert_eq!(s, 400, "{v}");
+    assert!(v.to_string().contains("differ"), "{v}");
+    // Zero length.
+    let (s, _) = post(&c, url.clone(), copy(ext(&a, fa, 0), ext(&b, tb, 0))).await;
+    assert_eq!(s, 400);
+    // A target StormFS was never given, in a volume it was never given.
+    let (s, v) = post(&c, url.clone(), copy(ext(&a, fa, SLOT * 4), ext(&other, 0, SLOT * 4))).await;
+    assert_eq!(s, 409, "{v}");
+    // Nor a source: a copy never reads space that is not StormFS's.
+    let (s, _) = post(&c, url.clone(), copy(ext(&other, 0, SLOT * 4), ext(&b, tb, SLOT * 4))).await;
+    assert_eq!(s, 409);
+    // Past the end of the chunk it names.
+    let (s, _) = post(&c, url.clone(), copy(ext(&a, fa, SLOT * 8), ext(&b, tb, SLOT * 8))).await;
+    assert_eq!(s, 409);
+    // Overlapping ranges in one volume.
+    let fa2 = allocate(&c, &base, chunk(&a, 4)).await["extents"][0]["offset"].as_u64().unwrap();
+    let (lo, hi) = (fa.min(fa2), fa.max(fa2));
+    assert_eq!(hi, lo + SLOT * 4, "two chunks side by side");
+    let (s, v) = post(&c, url.clone(), copy(ext(&a, lo, SLOT * 4), ext(&a, lo + SLOT * 2, SLOT * 4))).await;
+    assert_eq!(s, 400, "{v}");
+    // A chunk onto itself is already a copy of itself.
+    let (s, v) = post(&c, url.clone(), copy(ext(&a, lo, SLOT * 4), ext(&a, lo, SLOT * 4))).await;
+    assert_eq!(s, 200, "{v}");
+    // An unknown volume.
+    let gone = uuid::Uuid::new_v4().to_string();
+    let (s, _) = post(&c, url.clone(), copy(ext(&gone, 0, SLOT), ext(&b, tb, SLOT))).await;
+    assert_eq!(s, 404);
+}
