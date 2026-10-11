@@ -1103,7 +1103,7 @@ impl StormBlockConfig {
     pub fn network_report(&self) -> NetworkReport {
         NetworkReport {
             data_path: self.storage.interface_name().map(|name| {
-                let addr = self.storage.resolved.or_else(|| crate::netif::data_address());
+                let addr = self.storage.resolved.or_else(crate::netif::data_address);
                 crate::netif::state_of(&name, addr, self.storage.mtu)
             }),
             control: self.management.interface.as_deref().filter(|s| !s.is_empty()).map(|name| {
