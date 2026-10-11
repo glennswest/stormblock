@@ -181,6 +181,14 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Erasure coding k+m (2026-10-11, #159, P3) — WAITING ON THE OWNER
+
+Asked on #159 (needs-owner): (1) widths: any K+M with M 3–4 and K+M ≤ 24 /
+presets / any; (2) P+Q stays or becomes ec:K+2; (3) rollback: an older
+engine reading `Parity { parity: 3 }` would compute P+Q over it (silently
+wrong): a new scheme older engines refuse now, or #245's two steps.
+Recommended 1(a), 2(a), 3(b). Nothing built.
+
 ### StormFS registration names its target (2026-10-11, #170, P3) — WAITING ON THE OWNER
 
 The route is stormstorage's (#214, stormstorage#6, #77); the names say
