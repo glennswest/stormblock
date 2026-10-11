@@ -47,6 +47,9 @@ pub enum WantTransport {
     Ublk,
     /// Only NVMe-oF/TCP coordinates, even on the master.
     NvmeTcp,
+    /// A vhost-user-blk socket for a VMM on this node (#82). Only ever when
+    /// asked for: nothing but a VMM can use it. `/api/v1` attach only.
+    VhostUserBlk,
 }
 
 impl WantTransport {
@@ -59,7 +62,8 @@ impl WantTransport {
                 "" | "any" => Ok(WantTransport::Any),
                 "ublk" => Ok(WantTransport::Ublk),
                 "nvme_tcp" | "nvme-tcp" | "nvmeof" | "nvme" => Ok(WantTransport::NvmeTcp),
-                other => Err(format!("transport {other:?}: use nvme_tcp or ublk")),
+                "vhost_user_blk" | "vhost-user-blk" | "vhost-user" | "vhost" => Ok(WantTransport::VhostUserBlk),
+                other => Err(format!("transport {other:?}: use nvme_tcp, ublk or vhost_user_blk")),
             },
         }
     }

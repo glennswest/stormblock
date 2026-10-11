@@ -10,6 +10,8 @@ pub mod config;
 pub mod metrics;
 pub mod discovery;
 pub mod ublk_export;
+#[cfg(target_os = "linux")]
+pub mod vhost_export;
 pub mod debug;
 pub mod slab_report;
 pub mod tls;
@@ -290,6 +292,9 @@ pub struct AppState {
     pub fstemplates: Arc<tokio::sync::Mutex<crate::fs::TemplateStore>>,
     /// Live per-volume ublk exports for the local CSI fast path.
     pub ublk_exports: tokio::sync::Mutex<ublk_export::UblkExportManager>,
+    /// vhost-user-blk sockets for VMMs on this node (#82).
+    #[cfg(target_os = "linux")]
+    pub vhost_exports: tokio::sync::Mutex<vhost_export::VhostExports>,
     /// Volume moves, live and finished (#20). Kept so a move interrupted
     /// between its copy and its commit is still nameable after a restart —
     /// otherwise a crash there leaves two volumes and no record of which is
@@ -541,7 +546,12 @@ impl AppState {
                 // name: something would resolve it once and never again.
                 None => crate::volume::SynonymStore::in_memory(),
             }),
-            ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new().with_holds(holds)),
+            ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new().with_holds(holds.clone())),
+            #[cfg(target_os = "linux")]
+            vhost_exports: tokio::sync::Mutex::new(vhost_export::VhostExports::new(
+                config.management.data_dir.as_deref().map(std::path::Path::new),
+                holds,
+            )),
             moves: tokio::sync::RwLock::new(match config.management.data_dir.as_ref() {
                 Some(dir) => api::moves::load(std::path::Path::new(dir)),
                 None => HashMap::new(),

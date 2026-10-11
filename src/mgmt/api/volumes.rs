@@ -1677,6 +1677,33 @@ async fn attach_volume(
     };
     let key = uuid.to_string();
 
+    // A VMM on this node (#82): the guest's virtqueues handed to the engine
+    // over a socket. Asked for by name only; read-only at the device when
+    // the attach is.
+    if want == WantTransport::VhostUserBlk {
+        if node != local_node {
+            return ApiError::conflict(format!(
+                "vhost-user-blk is a socket on this node: this node is {local_node:?}, the attach is for {node:?}"
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let ro = mode != crate::volume::Access::ReadWrite;
+            return match state.vhost_exports.lock().await.attach(uuid, device.clone(), ro) {
+                Ok(info) => Json(serde_json::json!({
+                    "transport": "vhost_user_blk",
+                    "socket": info.socket,
+                    "read_only": info.read_only,
+                    "connected": info.connected,
+                }))
+                .into_response(),
+                Err(e) => ApiError::conflict(e),
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        return ApiError::conflict("vhost-user-blk is served on Linux only");
+    }
+
     // Local fast path, on the same terms as /v1: enabled, this node, and
     // backed here — which every engine volume is.
     if want != WantTransport::NvmeTcp
@@ -1724,6 +1751,14 @@ async fn get_attach(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
         return ApiError::not_found(format!("volume {uuid} not found"));
     }
     let key = uuid.to_string();
+    #[cfg(target_os = "linux")]
+    if let Some(v) = state.vhost_exports.lock().await.info(uuid) {
+        return Json(serde_json::json!({ "id": uuid, "attached": true, "info": {
+            "transport": "vhost_user_blk", "socket": v.socket, "read_only": v.read_only,
+            "connected": v.connected, "requests": v.requests,
+        } }))
+        .into_response();
+    }
     if let Some(path) = state.ublk_exports.lock().await.device_path(&key) {
         return Json(serde_json::json!({ "id": uuid, "attached": true, "info": super::v1::AttachInfo::Ublk { device_hint: path } })).into_response();
     }
@@ -1812,6 +1847,12 @@ async fn detach_volume(
         .into_response();
     }
     state.ublk_exports.lock().await.remove(&key);
+    // A vhost-user-blk socket goes with its VMM's connection (#82).
+    #[cfg(target_os = "linux")]
+    {
+        let gone = state.vhost_exports.lock().await.detach(uuid);
+        crate::mgmt::vhost_export::stop(gone.into_iter().collect()).await;
+    }
     {
         super::v1::release_nvme_namespace(&state, &key).await;
         crate::mgmt::nvme_hosts::detach(&state, uuid, None, crate::mgmt::nvme_hosts::Release::All).await;

@@ -1625,6 +1625,17 @@ pub async fn run() -> anyhow::Result<()> {
                 mgmt::ublk_export::ShutdownWait::none()
             }
         };
+        // vhost-user-blk sockets (#82): the VMMs disconnected, the sockets
+        // removed. Bounded like the rest: each waits at most 5 s.
+        #[cfg(target_os = "linux")]
+        if let Ok(mut v) = tokio::time::timeout(std::time::Duration::from_secs(3), state.vhost_exports.lock()).await {
+            let gone = v.detach_all();
+            drop(v);
+            if !gone.is_empty() {
+                tracing::info!("stopping {} vhost-user-blk socket(s)", gone.len());
+            }
+            mgmt::vhost_export::stop(gone).await;
+        }
 
         // Bounded, because a stop that waits on a lock is a stop that does not
         // happen.

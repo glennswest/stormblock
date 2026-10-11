@@ -1730,6 +1730,11 @@ async fn attach_volume(
 
 async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) -> V1Result<AttachInfo> {
     let want = WantTransport::parse(req.transport.as_deref()).map_err(V1Error::BadRequest)?;
+    if want == WantTransport::VhostUserBlk {
+        return Err(V1Error::BadRequest(
+            "vhost-user-blk is served by POST /api/v1/volumes/{id}/attach, not by /v1 (#82)".into(),
+        ));
+    }
     let mut v1 = state.v1.lock().await;
     expire_windows(&state, &mut v1).await;
     let rec = v1

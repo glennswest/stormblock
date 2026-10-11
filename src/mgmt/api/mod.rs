@@ -360,6 +360,10 @@ pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<Str
     if state.ublk_exports.lock().await.is_exported(&volume_id.to_string()) {
         busy.push("a ublk device".to_string());
     }
+    #[cfg(target_os = "linux")]
+    if state.vhost_exports.lock().await.is_exported(volume_id) {
+        busy.push("a vhost-user-blk socket".to_string());
+    }
     // A namespace on the shared NVMe subsystem — what the volume attach hot-
     // adds — was not checked here, so a volume attached that way could be
     // deleted from under its host (#138).

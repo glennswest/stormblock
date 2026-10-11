@@ -48,6 +48,7 @@ mod integration_serve_mounted;
 mod integration_stormfs;
 mod integration_synonyms;
 mod integration_v1_api;
+mod integration_vhost;
 mod integration_volume;
 mod integration_volume_kinds;
 mod small_volumes;
