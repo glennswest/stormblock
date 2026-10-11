@@ -19,6 +19,7 @@ pub mod logging;
 pub mod lockwatch;
 pub mod flowprogress;
 pub mod retry;
+pub mod netif;
 pub mod image;
 pub mod pallet;
 pub mod placement;

@@ -1125,7 +1125,7 @@ pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo
     };
     // A wildcard listen address tells a remote consumer nothing, so prefer the
     // configured advertised address (#26).
-    let traddr = state.config.management.resolve_advertised_host(&host);
+    let traddr = state.config.data_host(&host);
 
     // Volumes share the target's subsystem and are distinguished by NSID.
     // A per-volume NQN would force a Connect per container, which is the

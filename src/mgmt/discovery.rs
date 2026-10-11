@@ -52,6 +52,24 @@ pub struct Beacon {
     pub topology: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub topology_chain: String,
+    /// Where this node's data path is dialled when it has a storage network
+    /// of its own (#85). Absent: the same host as `mgmt_addr`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_addr: Option<String>,
+    /// That network's state as the node sees it: `up`, `down`, `no_address`,
+    /// `missing` (#85). A beacon arriving with anything but `up` is a node
+    /// whose control channel answers and whose volumes cannot be reached —
+    /// not a dead node. Absent (one network, or an older engine): up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_path: Option<String>,
+}
+
+impl Beacon {
+    /// Whether this peer can serve data: its storage network is up, or it
+    /// has none of its own.
+    pub fn data_path_up(&self) -> bool {
+        !matches!(self.data_path.as_deref(), Some(s) if s != "up")
+    }
 }
 
 /// A peer we have heard from.
@@ -90,12 +108,38 @@ pub struct Discovery {
     stale_after: Duration,
     /// This node's topology labels, announced in every beacon.
     topology: std::collections::BTreeMap<String, String>,
+    /// The control interface's address: beacons are sent and heard there
+    /// (#85). `None`: whatever the routing table picks.
+    control_if: Option<Ipv4Addr>,
+    /// The storage network, when the node has one (#85).
+    data: Option<DataNet>,
+}
+
+/// What a beacon says about the node's storage network.
+#[derive(Debug, Clone)]
+pub struct DataNet {
+    pub interface: String,
+    /// The address the data targets serve on.
+    pub address: Option<std::net::IpAddr>,
+    /// What initiators are told to dial.
+    pub advertised: String,
 }
 
 impl Discovery {
     /// Announce these labels (`[management].topology`) in every beacon.
     pub fn with_topology(mut self, topology: std::collections::BTreeMap<String, String>) -> Self {
         self.topology = topology;
+        self
+    }
+
+    /// Send and hear beacons on the control interface (#85), and say in
+    /// each where the data path is and whether it is up.
+    pub fn with_networks(mut self, control_if: Option<std::net::IpAddr>, data: Option<DataNet>) -> Self {
+        self.control_if = match control_if {
+            Some(std::net::IpAddr::V4(a)) => Some(a),
+            _ => None,
+        };
+        self.data = data;
         self
     }
 
@@ -135,6 +179,8 @@ impl Discovery {
             identity_path,
             stale_after,
             topology: std::collections::BTreeMap::new(),
+            control_if: None,
+            data: None,
         }
     }
 
@@ -228,7 +274,11 @@ impl Discovery {
             .read()
             .await
             .values()
-            .filter(|(b, seen)| b.cluster_id == Some(cid) && seen.elapsed() <= self.stale_after)
+            // A peer whose data path is down answers on the control channel
+            // and cannot hold a replica (#85): listed, never placed on.
+            .filter(|(b, seen)| {
+                b.cluster_id == Some(cid) && seen.elapsed() <= self.stale_after && b.data_path_up()
+            })
             .map(|(b, _)| b.clone())
             .collect()
     }
@@ -256,6 +306,11 @@ impl Discovery {
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
             topology: self.topology.clone(),
             topology_chain: self.topology_chain(),
+            data_addr: self.data.as_ref().map(|d| d.advertised.clone()),
+            data_path: self
+                .data
+                .as_ref()
+                .map(|d| crate::netif::state_of(&d.interface, d.address, None).state.to_string()),
         }
     }
 }
@@ -270,6 +325,9 @@ pub fn spawn(
     state: Arc<crate::mgmt::AppState>,
     announce_every: Duration,
 ) {
+    if let Some(a) = discovery.control_if {
+        tracing::info!("discovery beacons on the control interface ({a})");
+    }
     let listener = discovery.clone();
     tokio::spawn(async move {
         if let Err(e) = listen_loop(listener).await {
@@ -285,7 +343,7 @@ pub fn spawn(
 }
 
 async fn listen_loop(discovery: Arc<Discovery>) -> std::io::Result<()> {
-    let socket = bind_multicast()?;
+    let socket = bind_multicast(discovery.control_if)?;
     tracing::info!(
         "discovery listening on {}:{}",
         DISCOVERY_GROUP,
@@ -310,6 +368,10 @@ async fn announce_loop(
 ) -> std::io::Result<()> {
     let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))).await?;
     socket.set_multicast_loop_v4(false)?;
+    if let Some(a) = discovery.control_if {
+        // Out of the control interface, never whichever route wins (#85).
+        socket2::SockRef::from(&socket).set_multicast_if_v4(&a)?;
+    }
     let dest = SocketAddrV4::new(DISCOVERY_GROUP, DISCOVERY_PORT);
 
     let mut ticker = tokio::time::interval(every);
@@ -343,7 +405,7 @@ async fn local_capacity(state: &crate::mgmt::AppState) -> (u64, u64) {
 
 /// Bind the multicast group with SO_REUSEADDR, so several nodes on one host
 /// (and the test suite) can listen at once.
-fn bind_multicast() -> std::io::Result<UdpSocket> {
+fn bind_multicast(interface: Option<Ipv4Addr>) -> std::io::Result<UdpSocket> {
     use socket2::{Domain, Protocol, Socket, Type};
 
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
@@ -351,7 +413,9 @@ fn bind_multicast() -> std::io::Result<UdpSocket> {
     #[cfg(unix)]
     sock.set_reuse_port(true)?;
     sock.bind(&SocketAddr::from(([0, 0, 0, 0], DISCOVERY_PORT)).into())?;
-    sock.join_multicast_v4(&DISCOVERY_GROUP, &Ipv4Addr::UNSPECIFIED)?;
+    // On the control interface when one is named (#85); else the kernel's
+    // choice, as before.
+    sock.join_multicast_v4(&DISCOVERY_GROUP, &interface.unwrap_or(Ipv4Addr::UNSPECIFIED))?;
     sock.set_nonblocking(true)?;
 
     UdpSocket::from_std(std::net::UdpSocket::from(sock))
@@ -423,6 +487,8 @@ mod tests {
             engine_version: "test".into(),
             topology: Default::default(),
             topology_chain: String::new(),
+            data_addr: None,
+            data_path: None,
         };
 
         d.record(mk("same", ident.cluster_id, Some("prod"))).await;
@@ -463,6 +529,8 @@ mod tests {
             engine_version: "test".into(),
             topology: Default::default(),
             topology_chain: String::new(),
+            data_addr: None,
+            data_path: None,
         };
         d.record(mk).await;
         assert!(
@@ -492,6 +560,8 @@ mod tests {
             engine_version: "test".into(),
             topology: Default::default(),
             topology_chain: String::new(),
+            data_addr: None,
+            data_path: None,
         })
         .await;
 
@@ -527,5 +597,60 @@ mod tests {
         v.as_object_mut().unwrap().remove("topology_chain");
         let old: Beacon = serde_json::from_value(v).unwrap();
         assert!(old.topology.is_empty() && old.topology_chain.is_empty());
+    }
+
+    /// A peer whose storage network is down still beacons on the control
+    /// channel (#85): it stays listed, says why, and leaves placement — a
+    /// node whose volumes cannot be reached, not a dead one.
+    #[tokio::test]
+    async fn a_peer_whose_data_path_is_down_is_listed_and_not_placed_on() {
+        let d = disc("n1", None);
+        let ident = d.create_cluster("prod").await;
+        let mk = |name: &str, data_path: Option<&str>| Beacon {
+            version: BEACON_VERSION,
+            node_name: name.into(),
+            mgmt_addr: "192.0.2.1:9090".into(),
+            cluster_id: ident.cluster_id,
+            cluster_name: Some("prod".into()),
+            total_bytes: 100,
+            free_bytes: 50,
+            engine_version: "test".into(),
+            topology: Default::default(),
+            topology_chain: String::new(),
+            data_addr: data_path.map(|_| "10.99.0.2".into()),
+            data_path: data_path.map(String::from),
+        };
+        d.record(mk("up", Some("up"))).await;
+        d.record(mk("down", Some("down"))).await;
+        d.record(mk("one-network", None)).await;
+        let mut placed: Vec<String> = d.cluster_peers().await.into_iter().map(|b| b.node_name).collect();
+        placed.sort();
+        assert_eq!(placed, vec!["one-network", "up"]);
+        let nodes = d.nodes().await;
+        let down = nodes.iter().find(|n| n.beacon.node_name == "down").unwrap();
+        assert!(!down.stale, "its control channel answers");
+        let v = serde_json::to_value(down).unwrap();
+        assert_eq!(v["data_path"], "down");
+        assert_eq!(v["data_addr"], "10.99.0.2");
+    }
+
+    /// A node with a storage network says where its data path is and its
+    /// state in every beacon; one without says nothing (older peers parse it).
+    #[tokio::test]
+    async fn a_beacon_names_the_data_path_on_its_own_network() {
+        let d = disc("n1", None).with_networks(
+            None,
+            Some(DataNet {
+                interface: "lo".into(),
+                address: Some(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                advertised: "127.0.0.1".into(),
+            }),
+        );
+        let b = d.beacon_now(1, 1).await;
+        assert_eq!(b.data_addr.as_deref(), Some("127.0.0.1"));
+        assert_eq!(b.data_path.as_deref(), Some("up"));
+        let plain = disc("n2", None).beacon_now(1, 1).await;
+        let v = serde_json::to_value(&plain).unwrap();
+        assert!(v.get("data_path").is_none() && v.get("data_addr").is_none());
     }
 }

@@ -145,12 +145,14 @@ impl ServeContext {
     /// NVMe-oF portal, so one firewall rule covers the range. Falls back to
     /// the iSCSI bind (then the wildcard) only if that is unparseable.
     pub fn portal_bind_ip(&self) -> IpAddr {
-        self.cfg
+        let bind = self
+            .cfg
             .nvmeof_bind
             .parse::<SocketAddr>()
             .or_else(|_| self.cfg.iscsi_bind.parse::<SocketAddr>())
-            .map(|s| s.ip())
-            .unwrap_or(IpAddr::from([0, 0, 0, 0]))
+            .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+        // The storage network's address when there is one (#85).
+        crate::netif::data_bind(bind).ip()
     }
 
     /// Is this row's transport actually being served? An iSCSI row while the

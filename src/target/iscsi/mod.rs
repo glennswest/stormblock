@@ -73,7 +73,10 @@ pub struct IscsiTarget {
 }
 
 impl IscsiTarget {
-    pub fn new(config: IscsiConfig) -> Self {
+    pub fn new(mut config: IscsiConfig) -> Self {
+        // A wildcard bind is the storage network's address, when there is
+        // one (#85).
+        config.listen_addr = crate::netif::data_bind(config.listen_addr);
         IscsiTarget {
             config,
             sessions: Arc::new(SessionRegistry::new()),

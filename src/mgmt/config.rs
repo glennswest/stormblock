@@ -49,6 +49,54 @@ pub struct StormBlockConfig {
     /// Pool admission (#152).
     #[serde(default)]
     pub capacity: CapacitySection,
+    /// The storage network: the interface the data path is on (#85).
+    #[serde(default)]
+    pub storage: StorageSection,
+}
+
+/// `[storage]` (#85): the data path's own network. A storage VLAN is a
+/// different interface (a VLAN sub-interface or a second port) with its own
+/// subnet, MTU and usually no gateway. Naming it moves the NVMe/TCP and iSCSI
+/// targets onto it — a wildcard bind is narrowed to its address — and makes
+/// every attach reply, boot claim and discovery log page advertise that
+/// address, while the beacon, health and the management API stay on the LAN.
+/// Unset: one network, as before.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageSection {
+    /// `eth1.100`, `ens2f1`. `$STORMBLOCK_STORAGE_INTERFACE` overrides.
+    pub interface: Option<String>,
+    /// Which of the interface's addresses to serve on, when it has several;
+    /// else its first IPv4 address (then its first global IPv6 one).
+    pub address: Option<String>,
+    /// What initiators are told to dial, when it is not the address itself
+    /// (a NAT or a name). Host only; each protocol supplies its port.
+    pub advertised_addr: Option<String>,
+    /// The MTU this network has (9000 for jumbo frames). The interface's own
+    /// is compared with it at start and in health: a data path on the wrong
+    /// MTU fails as intermittent stalls on large transfers.
+    pub mtu: Option<u32>,
+    /// How long to wait at start for the interface to have its address
+    /// (a VLAN brought up beside the engine). Default 30.
+    pub wait_secs: Option<u64>,
+    /// The address resolved at start. Not configuration.
+    #[serde(skip)]
+    pub resolved: Option<std::net::IpAddr>,
+    /// Set when the interface had no address at start: the data targets are
+    /// then bound to loopback only (never the LAN) until a restart.
+    #[serde(skip)]
+    pub unresolved: bool,
+}
+
+impl StorageSection {
+    /// The configured interface, `$STORMBLOCK_STORAGE_INTERFACE` first.
+    pub fn interface_name(&self) -> Option<String> {
+        std::env::var("STORMBLOCK_STORAGE_INTERFACE")
+            .ok()
+            .or_else(|| self.interface.clone())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// `[capacity]` (#152): what a claim past what the data half can promise
@@ -120,9 +168,9 @@ pub struct ServeSection {
     /// over to a different volume. Refusing to serve is the safe answer, and
     /// the log says so.
     pub data_dir: Option<String>,
-    /// What consumers are told to attach to. Defaults to
-    /// `management.advertised_addr`, then the management listen host, then
-    /// loopback.
+    /// What consumers are told to attach to. Defaults to the storage
+    /// network's address (`[storage]`, #85), then `management.advertised_addr`,
+    /// then the management listen host, then the default route's address.
     pub advertise_addr: Option<String>,
     /// Serve the legacy shared iSCSI target. Off unless set, matching
     /// `ServeConfig`: NVMe-TCP is the transport.
@@ -243,7 +291,7 @@ impl StormBlockConfig {
             .serve
             .advertise_addr
             .clone()
-            .unwrap_or_else(|| self.management.resolve_advertised_host(listen_host));
+            .unwrap_or_else(|| self.data_host(listen_host));
 
         let d = ServeConfig::default();
         Ok(ServeConfig {
@@ -333,6 +381,7 @@ impl Default for StormBlockConfig {
             erase: EraseConfig::default(),
             metadata: MetadataSection::default(),
             capacity: CapacitySection::default(),
+            storage: StorageSection::default(),
         }
     }
 }
@@ -483,6 +532,15 @@ pub struct ManagementConfig {
     /// may serve the same volume need ranges that do not overlap. Unset:
     /// 1..=65519, as before.
     pub nvme_cntlid_range: Option<[u16; 2]>,
+    /// The control channel's interface (#85): the beacon is sent and heard
+    /// on it, and with no `advertised_addr` its address is what the beacon
+    /// and the forge trust URL name. Unset: the default route's, as before.
+    /// It does not narrow `listen_addr` (local callers use loopback); set
+    /// `listen_addr` to the LAN address to keep the API off other networks.
+    pub interface: Option<String>,
+    /// The control interface's address, resolved at start. Not configuration.
+    #[serde(skip)]
+    pub interface_addr: Option<std::net::IpAddr>,
 }
 
 /// serde needs a function for a default of `true`.
@@ -519,6 +577,8 @@ impl Default for ManagementConfig {
             advertised_addr: None,
             ublk_transport: true,
             nvme_cntlid_range: None,
+            interface: None,
+            interface_addr: None,
         }
     }
 }
@@ -603,6 +663,10 @@ impl ManagementConfig {
         if !is_wildcard_host(mgmt_host) {
             return mgmt_host.to_string();
         }
+        // The control interface the operator named (#85).
+        if let Some(ip) = self.interface_addr {
+            return ip.to_string();
+        }
         // Everything is a wildcard, so the node is listening on every
         // interface and the honest answer is the address it reaches other
         // machines from.
@@ -634,6 +698,36 @@ pub fn primary_local_host() -> Option<String> {
         .clone()
 }
 
+/// What health says about the node's networks (#85).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NetworkReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_path: Option<crate::netif::NetState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control: Option<crate::netif::NetState>,
+}
+
+/// `interface`'s address (`wanted` when given, and only once it is there),
+/// waiting up to `secs` for it.
+async fn wait_for_address(interface: &str, wanted: Option<std::net::IpAddr>, secs: u64) -> Option<std::net::IpAddr> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let mut said = false;
+    loop {
+        let found = match wanted {
+            Some(a) => crate::netif::addresses(interface).contains(&a).then_some(a),
+            None => crate::netif::primary_address(interface),
+        };
+        if found.is_some() || std::time::Instant::now() >= deadline {
+            return found;
+        }
+        if !said {
+            tracing::info!("waiting up to {secs} s for {interface} to have its address");
+            said = true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 /// Say, once at startup, what consumers will be told to dial and where that
 /// answer came from.
 ///
@@ -643,15 +737,32 @@ pub fn primary_local_host() -> Option<String> {
 /// second, and the default route picks the first. Both are defensible; only
 /// the operator knows which one the consumers are on. So the derivation stays
 /// — it beats loopback, which is never right — and it says so out loud.
-pub fn log_advertised_host(cfg: &ManagementConfig, listen_host: &str) {
+pub fn log_advertised_host(config: &StormBlockConfig, listen_host: &str) {
+    let cfg = &config.management;
+    // A storage network (#85) settles the data side; the control side is
+    // the management chain below.
+    if let Some(name) = config.storage.interface_name() {
+        tracing::info!(
+            "initiators are told to attach to {} (the storage network, {name}); \
+             the beacon and the control channel use {}",
+            config.data_host(listen_host),
+            cfg.resolve_advertised_host(cfg.listen_addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(""))
+        );
+        return;
+    }
     let host = cfg.resolve_advertised_host(listen_host);
     if cfg.advertised_host().is_some() {
         tracing::info!("consumers are told to attach to {host} (management.advertised_addr)");
         return;
     }
+    if cfg.interface_addr.is_some() {
+        tracing::info!("consumers are told to attach to {host} (management.interface)");
+        return;
+    }
     match primary_local_host() {
         Some(ip) if ip == host => tracing::warn!(
-            "consumers are told to attach to {host}, derived from this node's default route —              set management.advertised_addr if they reach this node on a different network"
+            "consumers are told to attach to {host}, derived from this node's default route — \
+             set management.advertised_addr or [storage] interface if they reach this node on a different network"
         ),
         _ => tracing::info!("consumers are told to attach to {host}"),
     }
@@ -893,6 +1004,112 @@ impl StormBlockConfig {
             tracing::info!("NVMe controller IDs {lo}..={hi}");
         }
         Ok(config)
+    }
+
+    /// Resolve the networks the configuration names (#85): the storage
+    /// interface's address (waiting up to `[storage] wait_secs` for it) and
+    /// the control interface's, and narrow every wildcard data-path bind to
+    /// the storage address from here on. Called once at start, after the
+    /// configuration is merged. Never fails: a storage interface with no
+    /// address leaves the data targets on loopback (the LAN never serves
+    /// them) and says so; the control channel is not affected.
+    pub async fn apply_networks(&mut self) {
+        if let Some(name) = self.management.interface.clone().filter(|s| !s.trim().is_empty()) {
+            self.management.interface_addr =
+                wait_for_address(&name, None, 10).await;
+            match self.management.interface_addr {
+                Some(a) => tracing::info!("control channel on {name} ({a})"),
+                None => tracing::warn!(
+                    "[management] interface {name} has no address: the beacon and the control address use the default route"
+                ),
+            }
+        }
+        let Some(name) = self.storage.interface_name() else {
+            crate::netif::set_data_address(None);
+            return;
+        };
+        let wanted = match self.storage.address.as_deref().map(str::parse::<std::net::IpAddr>) {
+            Some(Ok(a)) => Some(a),
+            Some(Err(e)) => {
+                tracing::error!("[storage] address {:?}: {e}; using {name}'s own", self.storage.address);
+                None
+            }
+            None => None,
+        };
+        let wait = self.storage.wait_secs.unwrap_or(30);
+        match wait_for_address(&name, wanted, wait).await {
+            Some(a) => {
+                self.storage.resolved = Some(a);
+                self.storage.unresolved = false;
+                crate::netif::set_data_address(Some(a));
+                tracing::info!("data path on {name} ({a}): NVMe/TCP and iSCSI listen there");
+            }
+            None => {
+                let lo = match wanted {
+                    Some(std::net::IpAddr::V6(_)) => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                    _ => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                };
+                self.storage.resolved = None;
+                self.storage.unresolved = true;
+                crate::netif::set_data_address(Some(lo));
+                tracing::error!(
+                    "[storage] interface {name} has {} after {wait} s: the data targets listen on {lo} only \
+                     until the engine restarts — volumes are unreachable from other machines; the control channel is up",
+                    match wanted {
+                        Some(a) => format!("no address {a}"),
+                        None => "no address".to_string(),
+                    }
+                );
+            }
+        }
+        let st = crate::netif::state_of(&name, self.storage.resolved, self.storage.mtu);
+        if st.mtu_mismatch {
+            tracing::warn!(
+                "[storage] interface {name} has MTU {} and the storage network is {}: large transfers will stall",
+                st.mtu.unwrap_or(0),
+                self.storage.mtu.unwrap_or(0)
+            );
+        }
+    }
+
+    /// The host a data-path initiator is told to dial (#85): `[storage]
+    /// advertised_addr`, else the storage interface's address, else (one
+    /// network) the management chain for a target listening on `listen_host`.
+    pub fn data_host(&self, listen_host: &str) -> String {
+        self.data_advertised_host()
+            .unwrap_or_else(|| self.management.resolve_advertised_host(listen_host))
+    }
+
+    /// The data host when one is known without guessing: the storage
+    /// network's, else `management.advertised_addr`.
+    pub fn data_advertised_host(&self) -> Option<String> {
+        if self.storage.interface_name().is_some() {
+            if let Some(h) = self.storage.advertised_addr.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+                return Some(h.to_string());
+            }
+            if let Some(a) = self.storage.resolved {
+                return Some(a.to_string());
+            }
+            if self.storage.unresolved {
+                // Bound to loopback; naming the LAN address would send an
+                // initiator to a port nothing listens on.
+                return crate::netif::data_address().map(|a| a.to_string());
+            }
+        }
+        self.management.advertised_host()
+    }
+
+    /// The data path and control channel as they are now, for health.
+    pub fn network_report(&self) -> NetworkReport {
+        NetworkReport {
+            data_path: self.storage.interface_name().map(|name| {
+                let addr = self.storage.resolved.or_else(|| crate::netif::data_address());
+                crate::netif::state_of(&name, addr, self.storage.mtu)
+            }),
+            control: self.management.interface.as_deref().filter(|s| !s.is_empty()).map(|name| {
+                crate::netif::state_of(name, self.management.interface_addr, None)
+            }),
+        }
     }
 
     /// Merge CLI arguments into this config (CLI takes precedence).

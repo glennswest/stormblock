@@ -654,7 +654,7 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
         let pol = crate::mgmt::nvme_hosts::policy(state);
         let target = state.nvmeof_target.read().await.as_ref().cloned();
         let tuple = |nqn: &str, port: u16, nsid: u32| {
-            let host = state.config.management.resolve_advertised_host("0.0.0.0");
+            let host = state.config.data_host("0.0.0.0");
             json!({
                 "protocol": "nvme-tcp",
                 "address": host,
@@ -732,7 +732,7 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
         let own = super::v1::ensure_volume_subsystem(state, volume.0, access).await;
         if let Some((nqn, port)) = own {
             if !nqn.is_empty() {
-                let host = state.config.management.resolve_advertised_host("0.0.0.0");
+                let host = state.config.data_host("0.0.0.0");
                 return json!({
                     "protocol": "nvme-tcp",
                     "address": host,

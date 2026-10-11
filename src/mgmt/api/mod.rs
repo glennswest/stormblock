@@ -124,6 +124,15 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// every drive answers.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         drives_unreachable: Vec<crate::drive::ridethrough::Stall>,
+        /// `data_path` and `control` (#85): the storage network's interface,
+        /// `state` (`up`, `down`, `no_address`, `missing`), the address the
+        /// data targets serve on, its MTU against `[storage] mtu`; and the
+        /// control interface's, when named. Read from sysfs and the
+        /// interface's addresses, never a lock. `status` stays `ok` with the
+        /// data path down: this answer is the control channel, and it is up —
+        /// the node's volumes are what cannot be reached.
+        #[serde(flatten)]
+        networks: crate::mgmt::config::NetworkReport,
     }
     #[derive(Serialize)]
     struct FlowOver {
@@ -167,6 +176,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         slabs: super::slab_report::for_health(&state),
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
         drives_unreachable: crate::drive::ridethrough::stalls(),
+        networks: state.config.network_report(),
     })
     .into_response()
 }

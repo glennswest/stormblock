@@ -1065,13 +1065,15 @@ pub async fn run() -> anyhow::Result<()> {
     };
     let slab_registry = volume_manager.registry().clone();
     let gem = volume_manager.gem().clone();
+    // Which network carries what (#85): before any target binds.
+    config.apply_networks().await;
     let mut state = Arc::new(AppState::new(config.clone(), volume_manager, slab_registry, gem));
     state.start_eraser().await;
 
     // What consumers will be told to dial, said once, before anything can be
     // attached — a derived address is a guess on a multi-homed node.
     mgmt::config::log_advertised_host(
-        &config.management,
+        &config,
         nvmeof_listen(&config).rsplit_once(':').map(|(h, _)| h).unwrap_or(""),
     );
 
@@ -1094,7 +1096,17 @@ pub async fn run() -> anyhow::Result<()> {
                 config.management.data_dir.as_ref().map(std::path::PathBuf::from),
                 std::time::Duration::from_secs(config.management.peer_stale_secs.max(1)),
             )
-            .with_topology(config.management.topology.clone()),
+            .with_topology(config.management.topology.clone())
+            .with_networks(
+                config.management.interface_addr,
+                config.storage.interface_name().map(|interface| mgmt::discovery::DataNet {
+                    interface,
+                    address: config.storage.resolved.or_else(crate::netif::data_address),
+                    advertised: config.data_host(
+                        nvmeof_listen(&config).rsplit_once(':').map(|(h, _)| h).unwrap_or(""),
+                    ),
+                }),
+            ),
         );
         if let Some(s) = Arc::get_mut(&mut state) {
             s.discovery = Some(disc.clone());
@@ -1479,8 +1491,8 @@ pub async fn run() -> anyhow::Result<()> {
                     .expect("invalid NVMe-oF listen address");
                 // Report a routable address in the discovery log page — a wildcard
                 // listen address is useless to a remote initiator (#26).
-                let advertised_addr = config.management
-                    .advertised_host()
+                let advertised_addr = config
+                    .data_advertised_host()
                     .and_then(|h| target::nvmeof::advertise_at(&h, listen_addr.port()));
                 let nvmeof_config = target::nvmeof::NvmeofConfig {
                     listen_addr,
@@ -6982,6 +6994,8 @@ async fn handle_adopt_ublk(
             }
         };
         config.management.listen_addr = addr.to_string();
+        // Which network carries what (#85): before any target binds.
+        config.apply_networks().await;
         // The metadata the manager was restored from is where anything the API
         // creates has to persist to, or a template minted now is gone at the
         // next boot.
@@ -7084,7 +7098,7 @@ async fn handle_adopt_ublk(
         // (`forge.json`), else on with the node's defaults: a single-node
         // cluster is its own forge. Before `/serve/v1`, as in the daemon.
         match config.nvmeof.as_ref() {
-            Some(section) => match mgmt::forge::target_from(section, &config.management) {
+            Some(section) => match mgmt::forge::target_from(section, &config) {
                 Ok(nvmeof) => match mgmt::forge::serve(&state, &reactor, Arc::new(nvmeof)).await {
                     Ok(()) => {
                         mgmt::forge::mark_configured(&state).await;
@@ -11158,7 +11172,7 @@ mod forge_mode_tests {
         let c = StormBlockConfig::default();
         assert!(c.nvmeof.is_none(), "a stormcos node's config names no [nvmeof]");
         assert!(
-            mgmt::forge::target_from(&section("not an address"), &c.management).is_err(),
+            mgmt::forge::target_from(&section("not an address"), &c).is_err(),
             "a bad listen_addr is said, not guessed"
         );
     }
@@ -11190,7 +11204,7 @@ mod forge_mode_tests {
         let state = Arc::new(AppState::new(config.clone(), vm, reg, gem));
 
         // What adopt-ublk does with the config.
-        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config.management).unwrap();
+        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config).unwrap();
         let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false }));
         mgmt::forge::serve(&state, &reactor, Arc::new(target)).await.unwrap();
         let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -11303,7 +11317,7 @@ mod forge_mode_tests {
         vm.seal_volume(release, None).await.unwrap();
         let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
         let forge = Arc::new(AppState::new(config.clone(), vm, reg, gem));
-        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config.management).unwrap();
+        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config).unwrap();
         let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 2, pin_cores: false }));
         mgmt::forge::serve(&forge, &reactor, Arc::new(target)).await.unwrap();
         let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -11489,7 +11503,7 @@ mod forge_mode_tests {
         vm.seal_volume(golden, None).await.unwrap();
         let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
         let forge = Arc::new(AppState::new(config.clone(), vm, reg, gem));
-        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config.management).unwrap();
+        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config).unwrap();
         let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false }));
         mgmt::forge::serve(&forge, &reactor, Arc::new(target)).await.unwrap();
         let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();

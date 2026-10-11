@@ -582,7 +582,10 @@ pub struct NvmeofTarget {
 impl NvmeofTarget {
     /// A target whose subsystem admits any host — a test harness, or an
     /// engine whose caller sets [`Subsystem::set_access`] before serving.
-    pub fn new(config: NvmeofConfig) -> Self {
+    pub fn new(mut config: NvmeofConfig) -> Self {
+        // On a node with a storage network, a wildcard bind is that
+        // network's address (#85): the data path never listens on the LAN.
+        config.listen_addr = crate::netif::data_bind(config.listen_addr);
         if config.advertised_addr.is_none() && config.listen_addr.ip().is_unspecified() {
             tracing::warn!(
                 "NVMe-oF {}: listening on {} with no advertised address: its discovery log page says {} \

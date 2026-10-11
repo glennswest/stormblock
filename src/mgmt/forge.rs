@@ -29,7 +29,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::mgmt::config::{ManagementConfig, NvmeofExportConfig};
+use crate::mgmt::config::NvmeofExportConfig;
 use crate::mgmt::AppState;
 use crate::target::nvmeof::{NvmeofConfig, NvmeofTarget};
 use crate::target::reactor::{ReactorConfig, ReactorPool};
@@ -98,7 +98,7 @@ impl std::fmt::Display for ForgeError {
 /// that owns a slab serves volumes, never the slab's drive.
 pub fn target_from(
     settings: &NvmeofExportConfig,
-    management: &ManagementConfig,
+    config: &crate::mgmt::config::StormBlockConfig,
 ) -> Result<NvmeofTarget, String> {
     let listen_addr: std::net::SocketAddr = settings
         .listen_addr
@@ -112,8 +112,9 @@ pub fn target_from(
             "NVMe-oF: export_drives is ignored here — this engine serves volumes, never its slab's drive"
         );
     }
-    let advertised_addr = management
-        .advertised_host()
+    // The storage network's address when there is one (#85).
+    let advertised_addr = config
+        .data_advertised_host()
         .and_then(|h| crate::target::nvmeof::advertise_at(&h, listen_addr.port()));
     Ok(NvmeofTarget::new(NvmeofConfig {
         listen_addr,
@@ -268,7 +269,7 @@ async fn start_as(
     {
         return Err(ForgeError::Configured);
     }
-    let target = target_from(&settings, &state.config.management).map_err(ForgeError::Invalid)?;
+    let target = target_from(&settings, &state.config).map_err(ForgeError::Invalid)?;
     let reactor = reactor(state, &mut forge).await;
     // Replacing one forge with another: the old one stops taking new
     // connections; the ones it has finish.
