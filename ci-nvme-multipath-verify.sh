@@ -117,6 +117,8 @@ EOT
         sleep 1
     done
     echo "A-COUNTERS eth0_rx=$(( $(ctr eth0 rx_bytes) - r0 )) eth1_rx=$(( $(ctr eth1 rx_bytes) - r1 ))"
+    echo "LOG A eth1 tx $(ctr eth1 tx_bytes) rx $(ctr eth1 rx_bytes); neigh: $(ip neigh | tr '\n' ';')"
+    echo "LOG A rp_filter all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter) eth0=$(cat /proc/sys/net/ipv4/conf/eth0/rp_filter) eth1=$(cat /proc/sys/net/ipv4/conf/eth1/rp_filter); routes: $(ip route | tr '\n' ';')"
     grep -E "data path on|also listening|listening on" /run/e.log | sed 's/^/LOG A: /' | head -6
     poweroff -f
 fi
@@ -142,6 +144,7 @@ t0=$(ctr eth0 tx_bytes); t1=$(ctr eth1 tx_bytes)
 sb clone --slab "$URI" --golden /tmp/one.img --name w1 && r import PASS || r import FAIL
 d0=$(( $(ctr eth0 tx_bytes) - t0 )); d1=$(( $(ctr eth1 tx_bytes) - t1 ))
 echo "B-COUNTERS eth0_tx=$d0 eth1_tx=$d1"
+echo "LOG B eth1 rx $(ctr eth1 rx_bytes); neigh: $(ip neigh | tr '\n' ';'); rp_filter all=$(cat /proc/sys/net/ipv4/conf/all/rp_filter) eth1=$(cat /proc/sys/net/ipv4/conf/eth1/rp_filter)"
 [ "$d0" -gt 8000000 ] && [ "$d1" -gt 8000000 ] && r both-nics PASS || r both-nics "FAIL (eth0 $d0, eth1 $d1)"
 grep -q "cannot bind" /tmp/out && r bound-to-device "FAIL (not bound)" || r bound-to-device PASS
 
