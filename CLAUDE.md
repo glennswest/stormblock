@@ -200,8 +200,12 @@ map) per move.
       volatile drive (7.6 GB, the power-cut test killed); fixed + test
 - [x] targeted 134/134; the new test; rate model (no SMR there: copy phase
       ~25 % longer idle, no worse with a foreground writer); docs, CHANGELOG
-- [ ] check.sh, golden, comment, shipped. Metal (an X9, the Dell): the
-      install records with health `flow_over`
+- [x] check.sh at b494a3a ALL PASS (1140/1140). Found first: the build
+      VMs' umask is now 077 and forge trust files came out 0600 (fixed:
+      mode set explicitly, #381's code)
+- [ ] golden, comment, shipped. Metal (an X9, the Dell): the install
+      records with health `flow_over`. golden-stormblock-5f8bc680a12b
+      (staged for #300) carries f991f31, unchecked: stormcos#467 told
 
 ### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — WAITS ON fio.ext4.rs#13 (1 PiB seal)
 
