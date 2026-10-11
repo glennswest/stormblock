@@ -157,6 +157,8 @@ pub async fn serve(
     crate::mgmt::api::exports::restore_exports(state).await;
     crate::mgmt::api::v1::restore_nvme_nsids(state).await;
     tracing::info!("NVMe-oF/TCP target listening on {addr}");
+    // Every other storage NIC's address (#90).
+    target.serve_other_listeners(reactor.clone()).await?;
     let reactor = reactor.clone();
     tokio::spawn(async move {
         if let Err(e) = target.run_with_listener(listener, &reactor).await {

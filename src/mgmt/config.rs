@@ -64,8 +64,14 @@ pub struct StormBlockConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageSection {
-    /// `eth1.100`, `ens2f1`. `$STORMBLOCK_STORAGE_INTERFACE` overrides.
+    /// `eth1.100`, `ens2f1`. `$STORMBLOCK_STORAGE_INTERFACE` overrides
+    /// (comma-separated for several).
     pub interface: Option<String>,
+    /// More storage interfaces (#90): two NICs, each its own path. The data
+    /// targets listen on, and advertise, every one's address, and the
+    /// engine's NVMe/TCP initiator leaves by each in turn. `interface`, if
+    /// set, is the first.
+    pub interfaces: Vec<String>,
     /// Which of the interface's addresses to serve on, when it has several;
     /// else its first IPv4 address (then its first global IPv6 one).
     pub address: Option<String>,
@@ -79,9 +85,13 @@ pub struct StorageSection {
     /// How long to wait at start for the interface to have its address
     /// (a VLAN brought up beside the engine). Default 30.
     pub wait_secs: Option<u64>,
-    /// The address resolved at start. Not configuration.
+    /// The address resolved at start (the first interface's). Not
+    /// configuration.
     #[serde(skip)]
     pub resolved: Option<std::net::IpAddr>,
+    /// Every interface's address resolved at start, in order (#90).
+    #[serde(skip)]
+    pub resolved_all: Vec<std::net::IpAddr>,
     /// Set when the interface had no address at start: the data targets are
     /// then bound to loopback only (never the LAN) until a restart.
     #[serde(skip)]
@@ -89,13 +99,23 @@ pub struct StorageSection {
 }
 
 impl StorageSection {
-    /// The configured interface, `$STORMBLOCK_STORAGE_INTERFACE` first.
+    /// The configured interface (the first), `$STORMBLOCK_STORAGE_INTERFACE`
+    /// first.
     pub fn interface_name(&self) -> Option<String> {
-        std::env::var("STORMBLOCK_STORAGE_INTERFACE")
-            .ok()
-            .or_else(|| self.interface.clone())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        self.interface_names().into_iter().next()
+    }
+
+    /// Every storage interface, in order: `$STORMBLOCK_STORAGE_INTERFACE`
+    /// (comma-separated) when set, else `interface` then `interfaces`.
+    pub fn interface_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = match std::env::var("STORMBLOCK_STORAGE_INTERFACE") {
+            Ok(v) if !v.trim().is_empty() => v.split(',').map(|s| s.trim().to_string()).collect(),
+            _ => self.interface.iter().chain(self.interfaces.iter()).map(|s| s.trim().to_string()).collect(),
+        };
+        names.retain(|s| !s.is_empty());
+        let mut seen = std::collections::HashSet::new();
+        names.retain(|s| seen.insert(s.clone()));
+        names
     }
 }
 
@@ -703,6 +723,9 @@ pub fn primary_local_host() -> Option<String> {
 pub struct NetworkReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_path: Option<crate::netif::NetState>,
+    /// Every storage interface, when there are several (#90).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub data_paths: Vec<crate::netif::NetState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub control: Option<crate::netif::NetState>,
 }
@@ -1024,8 +1047,10 @@ impl StormBlockConfig {
                 ),
             }
         }
-        let Some(name) = self.storage.interface_name() else {
+        let names = self.storage.interface_names();
+        let Some(name) = names.first().cloned() else {
             crate::netif::set_data_address(None);
+            crate::netif::set_path_sources(Vec::new());
             return;
         };
         let wanted = match self.storage.address.as_deref().map(str::parse::<std::net::IpAddr>) {
@@ -1037,39 +1062,77 @@ impl StormBlockConfig {
             None => None,
         };
         let wait = self.storage.wait_secs.unwrap_or(30);
-        match wait_for_address(&name, wanted, wait).await {
-            Some(a) => {
-                self.storage.resolved = Some(a);
-                self.storage.unresolved = false;
-                crate::netif::set_data_address(Some(a));
-                tracing::info!("data path on {name} ({a}): NVMe/TCP and iSCSI listen there");
+        // Each interface's address, the first one's waited for in full and
+        // the rest with what is left of the wait (#90).
+        let started = std::time::Instant::now();
+        let mut resolved = Vec::new();
+        let mut sources = Vec::new();
+        for (i, iface) in names.iter().enumerate() {
+            let left = wait.saturating_sub(started.elapsed().as_secs());
+            let want = if i == 0 { wanted } else { None };
+            match wait_for_address(iface, want, if i == 0 { wait } else { left }).await {
+                Some(a) => {
+                    let prefix = crate::netif::addresses_with_prefix(iface)
+                        .into_iter()
+                        .find(|(x, _)| *x == a)
+                        .map(|(_, p)| p)
+                        .unwrap_or(if a.is_ipv4() { 32 } else { 128 });
+                    tracing::info!("data path on {iface} ({a}/{prefix}): NVMe/TCP and iSCSI listen there");
+                    resolved.push(a);
+                    sources.push(crate::netif::PathSource { interface: iface.clone(), address: a, prefix });
+                }
+                None => tracing::error!(
+                    "[storage] interface {iface} has no address after {wait} s: it carries no path until the engine restarts"
+                ),
             }
-            None => {
-                let lo = match wanted {
-                    Some(std::net::IpAddr::V6(_)) => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-                    _ => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                };
-                self.storage.resolved = None;
-                self.storage.unresolved = true;
-                crate::netif::set_data_address(Some(lo));
-                tracing::error!(
-                    "[storage] interface {name} has {} after {wait} s: the data targets listen on {lo} only \
-                     until the engine restarts — volumes are unreachable from other machines; the control channel is up",
-                    match wanted {
-                        Some(a) => format!("no address {a}"),
-                        None => "no address".to_string(),
-                    }
+            let st = crate::netif::state_of(iface, resolved.last().copied(), self.storage.mtu);
+            if st.mtu_mismatch {
+                tracing::warn!(
+                    "[storage] interface {iface} has MTU {} and the storage network is {}: large transfers will stall",
+                    st.mtu.unwrap_or(0),
+                    self.storage.mtu.unwrap_or(0)
                 );
             }
         }
-        let st = crate::netif::state_of(&name, self.storage.resolved, self.storage.mtu);
-        if st.mtu_mismatch {
-            tracing::warn!(
-                "[storage] interface {name} has MTU {} and the storage network is {}: large transfers will stall",
-                st.mtu.unwrap_or(0),
-                self.storage.mtu.unwrap_or(0)
+        if resolved.is_empty() {
+            let lo = match wanted {
+                Some(std::net::IpAddr::V6(_)) => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                _ => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            };
+            self.storage.resolved = None;
+            self.storage.resolved_all = Vec::new();
+            self.storage.unresolved = true;
+            crate::netif::set_data_address(Some(lo));
+            crate::netif::set_path_sources(Vec::new());
+            tracing::error!(
+                "[storage] interface {} has {} after {wait} s: the data targets listen on {lo} only \
+                 until the engine restarts — volumes are unreachable from other machines; the control channel is up",
+                names.join(", "),
+                match wanted {
+                    Some(a) => format!("no address {a}"),
+                    None => "no address".to_string(),
+                }
             );
+            return;
         }
+        self.storage.resolved = resolved.first().copied();
+        self.storage.resolved_all = resolved.clone();
+        self.storage.unresolved = false;
+        crate::netif::set_data_addresses(resolved);
+        crate::netif::set_path_sources(sources);
+    }
+
+    /// Every host a data-path initiator may dial (#90): `[storage]
+    /// advertised_addr`, else every storage interface's address, else the
+    /// one [`data_host`](Self::data_host).
+    pub fn data_hosts(&self, listen_host: &str) -> Vec<String> {
+        if self.storage.interface_name().is_some()
+            && self.storage.advertised_addr.as_deref().map(str::trim).filter(|h| !h.is_empty()).is_none()
+            && self.storage.resolved_all.len() > 1
+        {
+            return self.storage.resolved_all.iter().map(|a| a.to_string()).collect();
+        }
+        vec![self.data_host(listen_host)]
     }
 
     /// The host a data-path initiator is told to dial (#85): `[storage]
@@ -1106,6 +1169,21 @@ impl StormBlockConfig {
                 let addr = self.storage.resolved.or_else(crate::netif::data_address);
                 crate::netif::state_of(&name, addr, self.storage.mtu)
             }),
+            data_paths: {
+                let names = self.storage.interface_names();
+                if names.len() < 2 {
+                    Vec::new()
+                } else {
+                    let sources = crate::netif::path_sources();
+                    names
+                        .iter()
+                        .map(|n| {
+                            let addr = sources.iter().find(|s| &s.interface == n).map(|s| s.address);
+                            crate::netif::state_of(n, addr, self.storage.mtu)
+                        })
+                        .collect()
+                }
+            },
             control: self.management.interface.as_deref().filter(|s| !s.is_empty()).map(|name| {
                 crate::netif::state_of(name, self.management.interface_addr, None)
             }),

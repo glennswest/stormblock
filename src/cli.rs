@@ -7602,9 +7602,11 @@ async fn claim_boot_uri(
                     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
                         anyhow::anyhow!("claim returned {status} but not JSON: {e}: {body}")
                     })?;
+                    // Every path when the appliance has several (#90): the
+                    // engine's initiator takes the multipath form.
                     let uri = v
                         .get("attach")
-                        .and_then(|a| a.get("uri"))
+                        .and_then(|a| a.get("uri_multipath").or_else(|| a.get("uri")))
                         .and_then(|u| u.as_str())
                         .ok_or_else(|| {
                             anyhow::anyhow!(
@@ -11490,7 +11492,7 @@ mod forge_mode_tests {
         let host = attach["host_nqns"][0].as_str().unwrap().to_string();
 
         // The machine connects as itself and reads its image.
-        let spec = NvmeTcpSpec { addr: addr.to_string(), nqn, nsid, host_nqn: Some(host), dhchap: None };
+        let spec = NvmeTcpSpec { addr: addr.to_string(), nqn, nsid, host_nqn: Some(host), dhchap: None, ..Default::default() };
         let dev = NvmeofDevice::connect(&spec).await.expect("the booting machine connects");
         let mut back = vec![0u8; MIB as usize];
         dev.read(0, &mut back).await.unwrap();
@@ -11599,6 +11601,7 @@ mod forge_mode_tests {
             nsid: a["nsid"].as_u64().unwrap() as u32,
             host_nqn: Some(a["host_nqns"][0].as_str().unwrap().to_string()),
             dhchap: None,
+            ..Default::default()
         }
         .uri();
         let built = t0.elapsed();
@@ -11791,6 +11794,7 @@ mod forge_mode_tests {
             nsid: attach["nsid"].as_u64().unwrap() as u32,
             host_nqn: Some(attach["host_nqns"][0].as_str().unwrap().to_string()),
             dhchap: None,
+            ..Default::default()
         }
         .uri();
 

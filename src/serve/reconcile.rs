@@ -656,6 +656,11 @@ pub(crate) async fn nvme_listener(ctx: &Arc<ServeContext>) -> anyhow::Result<(Ar
         ..Default::default()
     }));
     target.default_subsystem().set_access(crate::target::nvmeof::HostAccess::none());
+    // Every other storage NIC's address (#90).
+    target
+        .serve_other_listeners(ctx.reactor.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("binding the serve NVMe listener's other addresses: {e}"))?;
     let runner = target.clone();
     let reactor = ctx.reactor.clone();
     let task = tokio::spawn(async move {

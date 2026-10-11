@@ -654,15 +654,17 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
         let pol = crate::mgmt::nvme_hosts::policy(state);
         let target = state.nvmeof_target.read().await.as_ref().cloned();
         let tuple = |nqn: &str, port: u16, nsid: u32| {
-            let host = state.config.data_host("0.0.0.0");
-            json!({
+            let hosts = state.config.data_hosts("0.0.0.0");
+            let mut v = json!({
                 "protocol": "nvme-tcp",
-                "address": host,
+                "address": hosts[0],
                 "port": port,
                 "nqn": nqn,
                 "nsid": nsid,
-                "uri": format!("nvme-tcp://{host}:{port}/{nqn}?nsid={nsid}"),
-            })
+                "uri": format!("nvme-tcp://{}:{port}/{nqn}?nsid={nsid}", hosts[0]),
+            });
+            add_paths(&mut v, &hosts, port, &format!("{nqn}?nsid={nsid}"));
+            v
         };
         // The hosts this clone may be reached by, when the claim says.
         let named: Option<Vec<String>> = match &to {
@@ -732,18 +734,20 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
         let own = super::v1::ensure_volume_subsystem(state, volume.0, access).await;
         if let Some((nqn, port)) = own {
             if !nqn.is_empty() {
-                let host = state.config.data_host("0.0.0.0");
-                return json!({
+                let hosts = state.config.data_hosts("0.0.0.0");
+                let mut v = json!({
                     "protocol": "nvme-tcp",
-                    "address": host,
+                    "address": hosts[0],
                     "port": port,
                     "nqn": nqn,
                     // Always 1: the volume is the only namespace of its own
                     // subsystem, so the number carries no information and
                     // nothing can disagree about it.
                     "nsid": 1,
-                    "uri": format!("nvme-tcp://{host}:{port}/{nqn}"),
+                    "uri": format!("nvme-tcp://{}:{port}/{nqn}", hosts[0]),
                 });
+                add_paths(&mut v, &hosts, port, &nqn);
+                return v;
             }
         }
 
@@ -753,6 +757,20 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
         tracing::warn!(%volume, "claim: this node serves no per-volume subsystems; the clone is not served");
         serde_json::Value::Null
     }
+}
+
+/// With several storage addresses (#90): `addresses` (every one) and
+/// `uri_multipath` (`nvme-tcp://a:p,b:p/…`, what the engine's own initiator
+/// opens). `address` and `uri` stay the first path, for callers that read
+/// one (stormbootx).
+fn add_paths(v: &mut serde_json::Value, hosts: &[String], port: u16, rest: &str) {
+    if hosts.len() < 2 {
+        return;
+    }
+    let bracket = |h: &str| if h.contains(':') { format!("[{h}]") } else { h.to_string() };
+    v["addresses"] = json!(hosts.iter().map(|h| json!({"address": h, "port": port})).collect::<Vec<_>>());
+    let paths: Vec<String> = hosts.iter().map(|h| format!("{}:{port}", bracket(h))).collect();
+    v["uri_multipath"] = json!(format!("nvme-tcp://{}/{rest}", paths.join(",")));
 }
 
 async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequest) -> Response {

@@ -144,7 +144,7 @@ async fn discover(addr: SocketAddr, host: &str) -> Vec<String> {
 }
 
 fn spec(addr: SocketAddr, nqn: &str, nsid: u32, host: &str, key: Option<DhchapKey>) -> NvmeTcpSpec {
-    NvmeTcpSpec { addr: addr.to_string(), nqn: nqn.into(), nsid, host_nqn: Some(host.into()), dhchap: key }
+    NvmeTcpSpec { addr: addr.to_string(), nqn: nqn.into(), nsid, host_nqn: Some(host.into()), dhchap: key, ..Default::default() }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

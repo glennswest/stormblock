@@ -97,7 +97,7 @@ async fn call(method: reqwest::Method, url: String, body: serde_json::Value) -> 
 }
 
 fn spec(addr: SocketAddr, nqn: &str, nsid: u32, host: &str) -> NvmeTcpSpec {
-    NvmeTcpSpec { addr: addr.to_string(), nqn: nqn.into(), nsid, host_nqn: Some(host.into()), dhchap: None }
+    NvmeTcpSpec { addr: addr.to_string(), nqn: nqn.into(), nsid, host_nqn: Some(host.into()), dhchap: None, ..Default::default() }
 }
 
 async fn admin_as(addr: SocketAddr, subnqn: &str, host: &str) -> NvmeofInitiator {

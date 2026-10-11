@@ -116,7 +116,7 @@ async fn export(s: &Serve, body: serde_json::Value) -> (u16, serde_json::Value) 
 }
 
 fn spec(port: u16, nqn: &str, host: &str) -> NvmeTcpSpec {
-    NvmeTcpSpec { addr: format!("127.0.0.1:{port}"), nqn: nqn.into(), nsid: 1, host_nqn: Some(host.into()), dhchap: None }
+    NvmeTcpSpec { addr: format!("127.0.0.1:{port}"), nqn: nqn.into(), nsid: 1, host_nqn: Some(host.into()), dhchap: None, ..Default::default() }
 }
 
 /// What the discovery log page on `port` shows `host`.

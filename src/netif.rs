@@ -28,8 +28,13 @@ fn sysfs_net() -> PathBuf {
 
 /// Every address on `interface`, in the order the kernel lists them.
 /// Empty when it has none or does not exist.
-#[cfg(unix)]
 pub fn addresses(interface: &str) -> Vec<IpAddr> {
+    addresses_with_prefix(interface).into_iter().map(|(a, _)| a).collect()
+}
+
+/// Every address on `interface` with its prefix length (#90).
+#[cfg(unix)]
+pub fn addresses_with_prefix(interface: &str) -> Vec<(IpAddr, u8)> {
     let mut out = Vec::new();
     let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills `head` with a list we free below; every node
@@ -54,11 +59,25 @@ pub fn addresses(interface: &str) -> Vec<IpAddr> {
         match unsafe { (*ifa.ifa_addr).sa_family } as i32 {
             libc::AF_INET => {
                 let sa = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
-                out.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr))));
+                let prefix = if ifa.ifa_netmask.is_null() {
+                    32
+                } else {
+                    // SAFETY: an AF_INET address's netmask is a sockaddr_in.
+                    let m = unsafe { &*(ifa.ifa_netmask as *const libc::sockaddr_in) };
+                    u32::from_be(m.sin_addr.s_addr).count_ones() as u8
+                };
+                out.push((IpAddr::V4(Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr))), prefix));
             }
             libc::AF_INET6 => {
                 let sa = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
-                out.push(IpAddr::V6(Ipv6Addr::from(sa.sin6_addr.s6_addr)));
+                let prefix = if ifa.ifa_netmask.is_null() {
+                    128
+                } else {
+                    // SAFETY: an AF_INET6 address's netmask is a sockaddr_in6.
+                    let m = unsafe { &*(ifa.ifa_netmask as *const libc::sockaddr_in6) };
+                    m.sin6_addr.s6_addr.iter().map(|b| b.count_ones()).sum::<u32>() as u8
+                };
+                out.push((IpAddr::V6(Ipv6Addr::from(sa.sin6_addr.s6_addr)), prefix));
             }
             _ => {}
         }
@@ -69,8 +88,25 @@ pub fn addresses(interface: &str) -> Vec<IpAddr> {
 }
 
 #[cfg(not(unix))]
-pub fn addresses(_interface: &str) -> Vec<IpAddr> {
+pub fn addresses_with_prefix(_interface: &str) -> Vec<(IpAddr, u8)> {
     Vec::new()
+}
+
+/// Whether `addr` is in `net/prefix`.
+pub fn in_subnet(addr: IpAddr, net: IpAddr, prefix: u8) -> bool {
+    match (addr, net) {
+        (IpAddr::V4(a), IpAddr::V4(n)) => {
+            let p = prefix.min(32) as u32;
+            let mask = if p == 0 { 0 } else { u32::MAX << (32 - p) };
+            u32::from(a) & mask == u32::from(n) & mask
+        }
+        (IpAddr::V6(a), IpAddr::V6(n)) => {
+            let p = prefix.min(128) as u32;
+            let mask = if p == 0 { 0 } else { u128::MAX << (128 - p) };
+            u128::from(a) & mask == u128::from(n) & mask
+        }
+        _ => false,
+    }
 }
 
 /// The address a peer dials on `interface`: its first IPv4 address, else its
@@ -156,28 +192,80 @@ pub fn state_of(interface: &str, address: Option<IpAddr>, expected_mtu: Option<u
     }
 }
 
-/// The data path's address, process-wide (set once the configuration is
-/// resolved). `None`: no storage network, binds are left as configured.
-static DATA_ADDRESS: RwLock<Option<IpAddr>> = RwLock::new(None);
+/// The data path's addresses, process-wide (set once the configuration is
+/// resolved): one per storage interface (#85, #90). Empty: no storage
+/// network, binds are left as configured.
+static DATA_ADDRESSES: RwLock<Vec<IpAddr>> = RwLock::new(Vec::new());
 
-/// Set the address every wildcard data-path bind is narrowed to.
+/// Set the one address every wildcard data-path bind is narrowed to.
 pub fn set_data_address(addr: Option<IpAddr>) {
-    *DATA_ADDRESS.write().unwrap_or_else(|e| e.into_inner()) = addr;
+    set_data_addresses(addr.into_iter().collect());
 }
 
-/// The address set by [`set_data_address`].
+/// Set every address the data path listens on (#90).
+pub fn set_data_addresses(addrs: Vec<IpAddr>) {
+    *DATA_ADDRESSES.write().unwrap_or_else(|e| e.into_inner()) = addrs;
+}
+
+/// The first data address.
 pub fn data_address() -> Option<IpAddr> {
-    *DATA_ADDRESS.read().unwrap_or_else(|e| e.into_inner())
+    data_addresses().first().copied()
+}
+
+/// Every data address.
+pub fn data_addresses() -> Vec<IpAddr> {
+    DATA_ADDRESSES.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Where a data-path listener (NVMe/TCP, iSCSI) really binds: a wildcard
 /// address becomes the storage network's, port kept. A concrete address is
 /// the operator's choice and is kept. Without a storage network, `addr`.
 pub fn data_bind(addr: SocketAddr) -> SocketAddr {
-    match data_address() {
-        Some(ip) if addr.ip().is_unspecified() => SocketAddr::new(ip, addr.port()),
-        _ => addr,
+    data_binds(addr)[0]
+}
+
+/// Every address a data-path listener binds (#90): a wildcard — or any one
+/// of the storage addresses — becomes every storage address, port kept, so
+/// a target is reachable on each storage NIC. Anything else, itself.
+pub fn data_binds(addr: SocketAddr) -> Vec<SocketAddr> {
+    let all = data_addresses();
+    if all.is_empty() || !(addr.ip().is_unspecified() || all.contains(&addr.ip())) {
+        return vec![addr];
     }
+    all.into_iter().map(|ip| SocketAddr::new(ip, addr.port())).collect()
+}
+
+/// A local interface an initiator's connection can leave by (#90).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathSource {
+    pub interface: String,
+    pub address: IpAddr,
+    pub prefix: u8,
+}
+
+/// The storage interfaces an initiator binds its connections to, set with
+/// the data addresses. Empty: connections leave as the routing table says.
+static PATH_SOURCES: RwLock<Vec<PathSource>> = RwLock::new(Vec::new());
+
+pub fn set_path_sources(sources: Vec<PathSource>) {
+    *PATH_SOURCES.write().unwrap_or_else(|e| e.into_inner()) = sources;
+}
+
+pub fn path_sources() -> Vec<PathSource> {
+    PATH_SOURCES.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The local interface the `index`th path to `target` leaves by: among the
+/// storage interfaces on `target`'s subnet, the `index`th in turn — so two
+/// paths to two target addresses on one subnet leave by two NICs. None when
+/// no storage interface is on that subnet.
+pub fn source_for(target: IpAddr, index: usize) -> Option<PathSource> {
+    let on: Vec<PathSource> =
+        path_sources().into_iter().filter(|s| in_subnet(target, s.address, s.prefix)).collect();
+    if on.is_empty() {
+        return None;
+    }
+    Some(on[index % on.len()].clone())
 }
 
 #[cfg(test)]
@@ -223,5 +311,33 @@ mod tests {
         assert_eq!(data_bind(wild), "10.99.0.1:4420".parse().unwrap());
         assert_eq!(data_bind(fixed), fixed);
         set_data_address(None);
+    }
+
+    #[test]
+    fn every_storage_address_is_bound_and_paths_spread_over_the_nics() {
+        let a: IpAddr = "10.99.0.1".parse().unwrap();
+        let b: IpAddr = "10.99.0.11".parse().unwrap();
+        set_data_addresses(vec![a, b]);
+        let want: Vec<SocketAddr> = vec!["10.99.0.1:4420".parse().unwrap(), "10.99.0.11:4420".parse().unwrap()];
+        assert_eq!(data_binds("0.0.0.0:4420".parse().unwrap()), want);
+        assert_eq!(data_binds("10.99.0.11:4420".parse().unwrap()), want, "one of them means all");
+        assert_eq!(data_binds("192.0.2.1:4420".parse().unwrap()), vec!["192.0.2.1:4420".parse().unwrap()]);
+        set_data_addresses(Vec::new());
+
+        assert!(in_subnet("10.99.0.200".parse().unwrap(), a, 24));
+        assert!(!in_subnet("10.98.0.1".parse().unwrap(), a, 24));
+        assert!(in_subnet("fd00::5".parse().unwrap(), "fd00::1".parse().unwrap(), 64));
+        set_path_sources(vec![
+            PathSource { interface: "eth1".into(), address: a, prefix: 24 },
+            PathSource { interface: "eth2".into(), address: b, prefix: 24 },
+            PathSource { interface: "eth3".into(), address: "10.98.0.1".parse().unwrap(), prefix: 24 },
+        ]);
+        let t: IpAddr = "10.99.0.2".parse().unwrap();
+        assert_eq!(source_for(t, 0).unwrap().interface, "eth1");
+        assert_eq!(source_for(t, 1).unwrap().interface, "eth2");
+        assert_eq!(source_for(t, 2).unwrap().interface, "eth1");
+        assert_eq!(source_for("10.98.0.9".parse().unwrap(), 1).unwrap().interface, "eth3");
+        assert!(source_for("192.0.2.1".parse().unwrap(), 0).is_none());
+        set_path_sources(Vec::new());
     }
 }

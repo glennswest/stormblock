@@ -577,6 +577,10 @@ pub struct NvmeofTarget {
     /// Wakes the accept loop when `accepting` is cleared, so a drain does not
     /// wait for one last connection to arrive before noticing.
     stop_accept: tokio::sync::Notify,
+    /// Every address it listens on (#90): `config.listen_addr` first, then
+    /// the other storage addresses when it was told a wildcard (or one of
+    /// them) on a node with several storage interfaces.
+    listen_addrs: Vec<SocketAddr>,
 }
 
 impl NvmeofTarget {
@@ -584,8 +588,10 @@ impl NvmeofTarget {
     /// engine whose caller sets [`Subsystem::set_access`] before serving.
     pub fn new(mut config: NvmeofConfig) -> Self {
         // On a node with a storage network, a wildcard bind is that
-        // network's address (#85): the data path never listens on the LAN.
-        config.listen_addr = crate::netif::data_bind(config.listen_addr);
+        // network's addresses (#85, #90): the data path never listens on the
+        // LAN, and listens on every storage NIC.
+        let listen_addrs = crate::netif::data_binds(config.listen_addr);
+        config.listen_addr = listen_addrs[0];
         if config.advertised_addr.is_none() && config.listen_addr.ip().is_unspecified() {
             tracing::warn!(
                 "NVMe-oF {}: listening on {} with no advertised address: its discovery log page says {} \
@@ -605,7 +611,42 @@ impl NvmeofTarget {
             live: std::sync::atomic::AtomicUsize::new(0),
             accepting: std::sync::atomic::AtomicBool::new(true),
             stop_accept: tokio::sync::Notify::new(),
+            listen_addrs,
         }
+    }
+
+    /// Every address this target listens on (#90), the first being
+    /// [`listen_addr`](Self::listen_addr).
+    pub fn listen_addrs(&self) -> &[SocketAddr] {
+        &self.listen_addrs
+    }
+
+    /// The addresses a remote initiator is told (#90): every listen address
+    /// when there are several (each is a storage NIC's), else the one
+    /// [`advertised`](Self::advertised).
+    pub fn advertised_all(&self) -> Vec<SocketAddr> {
+        if self.listen_addrs.len() > 1 {
+            self.listen_addrs.clone()
+        } else {
+            vec![self.advertised()]
+        }
+    }
+
+    /// Bind the listeners after the first (#90) and serve them: the caller
+    /// binds and serves `listen_addr` itself, as before.
+    pub async fn serve_other_listeners(self: &Arc<Self>, reactor: Arc<ReactorPool>) -> std::io::Result<()> {
+        for addr in self.listen_addrs.iter().skip(1).copied() {
+            let listener = TcpListener::bind(addr).await?;
+            tracing::info!("NVMe-oF/TCP target also listening on {addr} ({})", self.config.nqn);
+            let me = self.clone();
+            let reactor = reactor.clone();
+            tokio::spawn(async move {
+                if let Err(e) = me.run_with_listener(listener, &reactor).await {
+                    tracing::error!("NVMe-oF listener {addr} stopped: {e}");
+                }
+            });
+        }
+        Ok(())
     }
 
     /// The subsystem the configuration names.
@@ -718,9 +759,15 @@ impl NvmeofTarget {
 
     /// Start accepting connections.
     pub async fn run(self: Arc<Self>, reactor: &ReactorPool) -> std::io::Result<()> {
-        let listener = TcpListener::bind(self.config.listen_addr).await?;
-        tracing::info!("NVMe-oF/TCP target listening on {} ({})", self.config.listen_addr, self.config.nqn);
-        self.run_with_listener(listener, reactor).await
+        let mut listeners = Vec::new();
+        for addr in &self.listen_addrs {
+            listeners.push(TcpListener::bind(addr).await?);
+            tracing::info!("NVMe-oF/TCP target listening on {addr} ({})", self.config.nqn);
+        }
+        // Every storage NIC's listener at once (#90); the first to fail ends it.
+        futures::future::try_join_all(listeners.into_iter().map(|l| self.clone().run_with_listener(l, reactor)))
+            .await
+            .map(|_| ())
     }
 
     /// Accept connections on a pre-bound listener. Useful for tests with ephemeral ports.
@@ -1402,16 +1449,21 @@ impl NvmeofTarget {
                 // asking host may connect to, so a host that has been given
                 // nothing is told of nothing (#210).
                 let data = if lid == 0x70 {
+                    // One record per address per subsystem (#90): a host's
+                    // `connect-all` then makes a path through each storage NIC.
+                    let addrs = self.advertised_all();
                     let entries: Vec<_> = self
                         .subsystems()
                         .into_iter()
                         .filter(|s| s.admits(&session.hostnqn))
-                        .map(|s| discovery::DiscoveryEntry {
-                            subnqn: s.nqn.clone(),
-                            traddr: self.advertised(),
-                            portid: 1,
-                            cntlid: 0xFFFF,
-                            subsys_type: discovery::SubsysType::NvmeSubsystem,
+                        .flat_map(|s| {
+                            addrs.iter().enumerate().map(move |(i, a)| discovery::DiscoveryEntry {
+                                subnqn: s.nqn.clone(),
+                                traddr: *a,
+                                portid: i as u16 + 1,
+                                cntlid: 0xFFFF,
+                                subsys_type: discovery::SubsysType::NvmeSubsystem,
+                            })
                         })
                         .collect();
                     let log = discovery::build_discovery_log_page(&entries);

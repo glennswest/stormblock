@@ -114,6 +114,7 @@ async fn a_node_becomes_a_forge_keeps_it_and_stops_being_one() {
         nsid: a["nsid"].as_u64().unwrap() as u32,
         host_nqn: Some(a["host_nqns"][0].as_str().unwrap().into()),
         dhchap: None,
+        ..Default::default()
     };
     let dev = NvmeofDevice::connect(&spec).await.expect("the machine connects");
     let mut back = vec![0u8; MIB as usize];
@@ -252,6 +253,7 @@ async fn a_node_is_a_forge_by_default_until_told_off_and_stays_off() {
         nsid: a["nsid"].as_u64().unwrap() as u32,
         host_nqn: Some(a["host_nqns"][0].as_str().unwrap().into()),
         dhchap: None,
+        ..Default::default()
     };
     let dev = NvmeofDevice::connect(&spec).await.expect("the booting machine connects");
     let mut back = vec![0u8; MIB as usize];
@@ -259,7 +261,7 @@ async fn a_node_is_a_forge_by_default_until_told_off_and_stays_off() {
     assert_eq!(back, image);
     drop(dev);
     // An anonymous host is not let in to the shared subsystem.
-    let anon = NvmeTcpSpec { addr: addr.to_string(), nqn: d.nqn.clone(), nsid: 1, host_nqn: None, dhchap: None };
+    let anon = NvmeTcpSpec { addr: addr.to_string(), nqn: d.nqn.clone(), nsid: 1, host_nqn: None, dhchap: None, ..Default::default() };
     assert!(NvmeofDevice::connect(&anon).await.is_err(), "the shared subsystem admits nobody");
 
     // Day 2: stormcluster turns a plain worker off.

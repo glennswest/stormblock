@@ -387,3 +387,139 @@ async fn the_discovery_record_names_a_dialable_address_for_a_host_name() {
     assert_eq!(trsvcid, "3319", "the advertised port, not the bound one");
     server.abort();
 }
+
+
+/// A TCP proxy to `to` on `on` that can be killed: its listener and every
+/// connection through it go at once, as a link that drops.
+async fn killable_proxy(on: &str, to: std::net::SocketAddr) -> (std::net::SocketAddr, impl FnOnce()) {
+    use std::sync::{Arc, Mutex};
+    let listener = tokio::net::TcpListener::bind(on).await.unwrap();
+    let at = listener.local_addr().unwrap();
+    let tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>> = Arc::default();
+    let t2 = tasks.clone();
+    let accept = tokio::spawn(async move {
+        loop {
+            let Ok((mut a, _)) = listener.accept().await else { return };
+            let t = tokio::spawn(async move {
+                let Ok(mut b) = tokio::net::TcpStream::connect(to).await else { return };
+                let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+            });
+            t2.lock().unwrap().push(t);
+        }
+    });
+    let kill = move || {
+        accept.abort();
+        for t in tasks.lock().unwrap().drain(..) {
+            t.abort();
+        }
+    };
+    (at, kill)
+}
+
+/// #90: a namespace by two addresses is two paths. I/O goes by both (each
+/// carries its share, round-robin), and when one path's link drops the
+/// I/O goes on by the other, every byte right.
+#[tokio::test]
+async fn two_paths_carry_the_io_and_one_dropping_leaves_the_other() {
+    use stormblock::drive::nvmeof_dev::{NvmeTcpSpec, NvmeofDevice};
+    std::env::set_var("STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS", "3");
+    let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;
+    let (target, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+    let (p1, _kill1) = killable_proxy("127.0.0.1:0", target).await;
+    let (p2, kill2) = killable_proxy("127.0.0.2:0", target).await;
+
+    for policy in ["", "&iopolicy=queue-depth"] {
+        let spec = NvmeTcpSpec::parse(&format!("nvme-tcp://{p1},{p2}/{SUBSYSTEM_NQN}?nsid=1{policy}")).unwrap();
+        let dev = std::sync::Arc::new(NvmeofDevice::connect(&spec).await.expect("two paths attach"));
+        let chunk = 128 * 1024usize;
+        let writes: Vec<_> = (0..64u64)
+            .map(|i| {
+                let dev = dev.clone();
+                tokio::spawn(async move {
+                    let buf = vec![(i as u8).wrapping_add(1); chunk];
+                    dev.write(i * chunk as u64, &buf).await.unwrap();
+                })
+            })
+            .collect();
+        for w in writes {
+            w.await.unwrap();
+        }
+        let st = dev.path_stats();
+        assert_eq!(st.len(), 2);
+        assert!(st.iter().all(|p| p.bytes >= 4 * chunk as u64), "both paths carry writes ({policy}): {st:?}");
+        let mut back = vec![0u8; chunk];
+        for i in 0..64u64 {
+            dev.read(i * chunk as u64, &mut back).await.unwrap();
+            assert!(back.iter().all(|b| *b == (i as u8).wrapping_add(1)), "block run {i}");
+        }
+    }
+
+    // The second path's link drops; I/O goes on by the first.
+    let spec = NvmeTcpSpec::parse(&format!("nvme-tcp://{p1},{p2}/{SUBSYSTEM_NQN}?nsid=1")).unwrap();
+    let dev = NvmeofDevice::connect(&spec).await.unwrap();
+    let buf = vec![0xAB; 4096];
+    for i in 0..8u64 {
+        dev.write(i * 4096, &buf).await.unwrap();
+    }
+    kill2();
+    let t0 = std::time::Instant::now();
+    for i in 0..32u64 {
+        dev.write(i * 4096, &[i as u8; 4096]).await.expect("a write after one path dropped");
+    }
+    let mut back = vec![0u8; 4096];
+    for i in 0..32u64 {
+        dev.read(i * 4096, &mut back).await.unwrap();
+        assert!(back.iter().all(|b| *b == i as u8));
+    }
+    let st = dev.path_stats();
+    assert!(st[1].down, "the dropped path is marked down: {st:?}");
+    assert!(t0.elapsed() < std::time::Duration::from_secs(20), "failover took {:?}", t0.elapsed());
+    server.abort();
+}
+
+/// #90: on a node with two storage addresses, a target told a wildcard
+/// listens on both, and its discovery log names the subsystem at each, so a
+/// host's `connect-all` makes a path through each NIC.
+#[tokio::test]
+async fn a_target_listens_on_and_lists_every_storage_address() {
+    use std::sync::Arc;
+    use stormblock::target::nvmeof::NvmeofTarget;
+    use stormblock::target::reactor::{ReactorConfig, ReactorPool};
+    let (_dir, vol, _vm) = common::setup_raid1_volume(64 * 1024 * 1024, 32 * 1024 * 1024).await;
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let a: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+    let b: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+    stormblock::netif::set_data_addresses(vec![a, b]);
+    let mut target = NvmeofTarget::new(NvmeofConfig {
+        listen_addr: format!("0.0.0.0:{port}").parse().unwrap(),
+        nqn: SUBSYSTEM_NQN.into(),
+        ..Default::default()
+    });
+    stormblock::netif::set_data_addresses(Vec::new());
+    target.add_namespace(1, vol);
+    let target = Arc::new(target);
+    assert_eq!(target.listen_addrs().len(), 2);
+    let reactor = ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false });
+    let t = target.clone();
+    let server = tokio::spawn(async move {
+        let _ = t.run(&reactor).await;
+    });
+    for ip in [a, b] {
+        common::wait_for_listener(std::net::SocketAddr::new(ip, port)).await;
+    }
+    assert!(
+        tokio::net::TcpStream::connect(std::net::SocketAddr::new("127.0.0.3".parse().unwrap(), port)).await.is_err(),
+        "not on the wildcard"
+    );
+    let mut init = NvmeofInitiator::connect(std::net::SocketAddr::new(b, port)).await.unwrap();
+    init.ic_handshake().await.unwrap();
+    init.fabric_connect("nqn.2014-08.org.nvmexpress.discovery", HOST_NQN, 0).await.unwrap();
+    let page = init.get_log_page(0x70, 4096).await.unwrap();
+    let numrec = u64::from_le_bytes(page[8..16].try_into().unwrap()) as usize;
+    assert_eq!(numrec, 2, "one record per address");
+    let field = |b: &[u8]| String::from_utf8_lossy(b).trim_end_matches(['\0', ' ']).to_string();
+    let mut traddrs: Vec<String> = (0..2).map(|i| field(&page[1024 * (i + 1) + 512..1024 * (i + 1) + 768])).collect();
+    traddrs.sort();
+    assert_eq!(traddrs, vec!["127.0.0.1", "127.0.0.2"]);
+    server.abort();
+}

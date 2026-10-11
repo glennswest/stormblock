@@ -12,9 +12,22 @@
 //! test initiator (`tests/common/nvmeof_initiator.rs`) proved against both
 //! this target and the Linux kernel target.
 //!
+//! Paths (#90): `nvme-tcp://a:p,b:p/<nqn>?nsid=N&iopolicy=round-robin` names
+//! the target by several addresses — one per storage NIC — and each is a
+//! path with connections of its own. Each connection leaves by the local
+//! storage interface on the path's subnet (`netif::source_for`): bound to
+//! that device (`SO_BINDTODEVICE`) and its address, so two paths on one
+//! subnet really are two NICs, not two source addresses on whichever NIC the
+//! route lookup picks (the owner's decision on #90). An operation takes a
+//! path by `iopolicy`: `round-robin` (default) or `queue-depth` (the path
+//! with the fewest commands in flight). A path whose connection fails is
+//! skipped for a while and the retry goes to another; with every path down,
+//! every path is tried.
+//!
 //! Queue model: one admin connection (QID 0) used at open for Identify,
-//! then dropped; several I/O connections (`STORMBLOCK_NVME_TCP_QUEUES`, 4),
-//! each behind its own Mutex, one command at a time on each. An operation
+//! then dropped; several I/O connections per path
+//! (`STORMBLOCK_NVME_TCP_QUEUES`, 4), each behind its own Mutex, one command
+//! at a time on each. An operation
 //! takes a free one (#331: with one, a flow-over's parallel 1 MiB copies and
 //! the node's own reads all queued on a single connection). The first is
 //! made at open, the rest when first needed. A connection that errors is
@@ -93,9 +106,37 @@ const MAX_CHUNK: usize = 128 * 1024;
 
 static HOSTID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
-/// A parsed `nvme-tcp://host:port/<nqn>?nsid=N` attach spec.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How an operation picks a path (#90): the names Linux's nvme-multipath
+/// `iopolicy` uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IoPolicy {
+    /// In turn.
+    #[default]
+    RoundRobin,
+    /// The path with the fewest commands in flight.
+    QueueDepth,
+}
+
+impl IoPolicy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "round-robin" => Some(IoPolicy::RoundRobin),
+            "queue-depth" => Some(IoPolicy::QueueDepth),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IoPolicy::RoundRobin => "round-robin",
+            IoPolicy::QueueDepth => "queue-depth",
+        }
+    }
+}
+
+/// A parsed `nvme-tcp://host:port[,host:port…]/<nqn>?nsid=N` attach spec.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NvmeTcpSpec {
+    /// `host:port`, or several comma-separated: one per path (#90).
     pub addr: String,
     pub nqn: String,
     pub nsid: u32,
@@ -107,15 +148,22 @@ pub struct NvmeTcpSpec {
     /// Never part of the URI — a URI is logged, listed and persisted. `None`
     /// falls back to `$STORMBLOCK_DHCHAP_SECRET`.
     pub dhchap: Option<crate::target::nvmeof::auth::DhchapKey>,
+    /// How operations pick a path when there are several (#90).
+    pub iopolicy: IoPolicy,
 }
 
 impl NvmeTcpSpec {
+    /// Each path's `host:port`.
+    pub fn addrs(&self) -> Vec<&str> {
+        self.addr.split(',').map(str::trim).filter(|a| !a.is_empty()).collect()
+    }
+
     /// Parse the URI form. `nsid` defaults to 1; port is required (the
     /// fleet convention is :4420 but nothing here assumes it).
     pub fn parse(uri: &str) -> Option<Self> {
         let rest = uri.strip_prefix("nvme-tcp://")?;
         let (addr, rest) = rest.split_once('/')?;
-        if addr.is_empty() || !addr.contains(':') {
+        if addr.is_empty() || addr.split(',').any(|a| a.trim().is_empty() || !a.contains(':')) {
             return None;
         }
         let (nqn, query) = match rest.split_once('?') {
@@ -127,10 +175,13 @@ impl NvmeTcpSpec {
         }
         let mut nsid = 1u32;
         let mut host_nqn = None;
+        let mut iopolicy = IoPolicy::default();
         if let Some(q) = query {
             for kv in q.split('&') {
                 if let Some(v) = kv.strip_prefix("nsid=") {
                     nsid = v.parse().ok()?;
+                } else if let Some(v) = kv.strip_prefix("iopolicy=") {
+                    iopolicy = IoPolicy::parse(v)?;
                 } else if let Some(v) = kv.strip_prefix("hostnqn=") {
                     // Spelled as nvme-cli spells it, so an operator moving
                     // between the two does not have to translate.
@@ -146,6 +197,7 @@ impl NvmeTcpSpec {
             nsid,
             host_nqn,
             dhchap: None,
+            iopolicy,
         })
     }
 
@@ -154,6 +206,10 @@ impl NvmeTcpSpec {
         if let Some(h) = &self.host_nqn {
             u.push_str("&hostnqn=");
             u.push_str(h);
+        }
+        if self.iopolicy != IoPolicy::default() {
+            u.push_str("&iopolicy=");
+            u.push_str(self.iopolicy.as_str());
         }
         u
     }
@@ -235,6 +291,36 @@ pub fn io_timeout() -> std::time::Duration {
     })
 }
 
+/// Connect to one path's address, leaving by the local storage interface on
+/// its subnet when there is one (#90): bound to the device, so egress is that
+/// NIC whatever the route lookup would pick, and to its address, so the
+/// source agrees with what the NIC answers ARP for.
+async fn connect_path(addr: &str, path: usize) -> io::Result<TcpStream> {
+    let target = tokio::net::lookup_host(addr)
+        .await?
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{addr} resolves to nothing")))?;
+    let Some(src) = crate::netif::source_for(target.ip(), path) else {
+        return TcpStream::connect(target).await;
+    };
+    let sock = if target.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(e) = socket2::SockRef::from(&sock).bind_device(Some(src.interface.as_bytes())) {
+        // CAP_NET_RAW is the engine's on a node. Without it the source
+        // address is still bound; egress is then the route's choice, said once.
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SAID.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "NVMe-TCP: cannot bind connections to {} ({e}): the source address is bound, and the route picks the NIC",
+                src.interface
+            );
+        }
+    }
+    sock.bind(std::net::SocketAddr::new(src.address, 0))?;
+    tracing::debug!("NVMe-TCP path {path} to {target} by {} ({})", src.interface, src.address);
+    sock.connect(target).await
+}
+
 /// A command (or a connect) bounded by [`io_timeout`].
 async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = io::Result<T>>) -> io::Result<T> {
     match tokio::time::timeout(io_timeout(), fut).await {
@@ -249,9 +335,9 @@ async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = io::Resul
 impl Conn {
     /// TCP connect + ICReq/ICResp + Fabric Connect for `qid`, and
     /// DH-HMAC-CHAP when the target asks for it.
-    async fn establish(spec: &NvmeTcpSpec, qid: u16) -> io::Result<Self> {
-        let (addr, nqn, host_nqn) = (spec.addr.as_str(), spec.nqn.as_str(), spec.effective_host_nqn());
-        let stream = bounded("connect", async { TcpStream::connect(addr).await }).await?;
+    async fn establish(spec: &NvmeTcpSpec, addr: &str, path: usize, qid: u16) -> io::Result<Self> {
+        let (nqn, host_nqn) = (spec.nqn.as_str(), spec.effective_host_nqn());
+        let stream = bounded("connect", connect_path(addr, path)).await?;
         stream.set_nodelay(true)?;
         // A dead peer is noticed while idle too, not only by a command's
         // timeout: probes after 10 s idle, every 5 s, 3 tries (#358).
@@ -574,12 +660,89 @@ impl Conn {
     }
 }
 
-/// A remote NVMe-TCP namespace attached as a local drive.
-pub struct NvmeofDevice {
+/// One path to the target (#90): an address, its connections, and how it
+/// has gone.
+struct Path {
+    addr: String,
     /// I/O queue connections; None until first used, and after an error
     /// until the next op re-establishes it.
     conns: Vec<Mutex<Option<Conn>>>,
-    /// Where the next operation starts looking for a free connection.
+    /// Commands in flight on this path (the queue-depth policy's measure).
+    inflight: std::sync::atomic::AtomicUsize,
+    /// Skipped until then after a failure.
+    down_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Commands and bytes carried.
+    ops: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+}
+
+impl Path {
+    fn new(addr: &str) -> Self {
+        Path {
+            addr: addr.to_string(),
+            conns: (0..io_queues()).map(|_| Mutex::new(None)).collect(),
+            inflight: std::sync::atomic::AtomicUsize::new(0),
+            down_until: std::sync::Mutex::new(None),
+            ops: std::sync::atomic::AtomicU64::new(0),
+            bytes: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn is_down(&self) -> bool {
+        matches!(*self.down_until.lock().unwrap_or_else(|e| e.into_inner()), Some(t) if t > std::time::Instant::now())
+    }
+}
+
+/// How long a path that failed is skipped (#90).
+const PATH_DOWN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What one path has carried, for a caller checking the spread (#90).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PathStats {
+    pub addr: String,
+    pub ops: u64,
+    pub bytes: u64,
+    pub down: bool,
+}
+
+/// A held connection on one path: counted in flight until dropped.
+struct ConnGuard<'a> {
+    guard: tokio::sync::MutexGuard<'a, Option<Conn>>,
+    path: &'a Path,
+}
+
+impl std::ops::Deref for ConnGuard<'_> {
+    type Target = Option<Conn>;
+    fn deref(&self) -> &Option<Conn> {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for ConnGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Option<Conn> {
+        &mut self.guard
+    }
+}
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        self.path.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl ConnGuard<'_> {
+    /// Count what this command carried.
+    fn carried(&self, bytes: usize) {
+        self.path.ops.fetch_add(1, Ordering::Relaxed);
+        self.path.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+}
+
+/// A remote NVMe-TCP namespace attached as a local drive.
+pub struct NvmeofDevice {
+    /// One per address in the spec (#90).
+    paths: Vec<Path>,
+    /// Where the next operation starts looking.
     next: AtomicU32,
     /// Writes hold it shared; a read-modify-write exclusively.
     rmw: tokio::sync::RwLock<()>,
@@ -591,17 +754,40 @@ pub struct NvmeofDevice {
 
 impl NvmeofDevice {
     /// Connect and identify. Admin connection (QID 0) is used for
-    /// Identify and dropped; the I/O connection (QID 1) is kept.
+    /// Identify and dropped; one I/O connection (QID 1) is kept. The first
+    /// path that answers is used; the rest connect when first needed.
     pub async fn connect(spec: &NvmeTcpSpec) -> DriveResult<Self> {
+        let addrs = spec.addrs();
+        if addrs.is_empty() {
+            return Err(DriveError::Other(anyhow::anyhow!("nvme-tcp: no address in {}", spec.uri())));
+        }
         tracing::info!(
-            "NVMe-TCP initiator: connecting to {} nqn={} nsid={}",
+            "NVMe-TCP initiator: connecting to {} nqn={} nsid={}{}",
             spec.addr,
             spec.nqn,
-            spec.nsid
+            spec.nsid,
+            if addrs.len() > 1 { format!(" ({} paths, {})", addrs.len(), spec.iopolicy.as_str()) } else { String::new() }
         );
-        let mut admin = Conn::establish(spec, 0)
-            .await
-            .map_err(DriveError::Io)?;
+        let paths: Vec<Path> = addrs.iter().map(|a| Path::new(a)).collect();
+        let mut admin = None;
+        let mut last = None;
+        for (i, a) in addrs.iter().enumerate() {
+            match Conn::establish(spec, a, i, 0).await {
+                Ok(c) => {
+                    admin = Some((i, c));
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("NVMe-TCP initiator: path {a} does not answer: {e}");
+                    *paths[i].down_until.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(std::time::Instant::now() + PATH_DOWN);
+                    last = Some(e);
+                }
+            }
+        }
+        let Some((first, mut admin)) = admin else {
+            return Err(DriveError::Io(last.expect("at least one path was tried")));
+        };
         let ctrl = bounded("identify", admin.identify(CNS_CONTROLLER, 0)).await.map_err(DriveError::Io)?;
         let (serial, model) = decode_identify_ctrl(&ctrl);
         let ns = bounded("identify", admin.identify(CNS_NAMESPACE, spec.nsid))
@@ -631,9 +817,10 @@ impl NvmeofDevice {
         );
         drop(admin);
 
-        let io_conn = Conn::establish(spec, 1)
+        let io_conn = Conn::establish(spec, addrs[first], first, 1)
             .await
             .map_err(DriveError::Io)?;
+        *paths[first].conns[0].lock().await = Some(io_conn);
 
         let uri = spec.uri();
         let id = DeviceId {
@@ -649,10 +836,8 @@ impl NvmeofDevice {
             model: if model.is_empty() { "NVMe-TCP".into() } else { model },
             path: uri,
         };
-        let mut conns = vec![Mutex::new(Some(io_conn))];
-        conns.extend((1..io_queues()).map(|_| Mutex::new(None)));
         Ok(NvmeofDevice {
-            conns,
+            paths,
             next: AtomicU32::new(0),
             rmw: tokio::sync::RwLock::new(()),
             spec: spec.clone(),
@@ -662,25 +847,67 @@ impl NvmeofDevice {
         })
     }
 
-    /// Lock the I/O connection, establishing it first if the last
-    /// operation dropped it. The caller runs one operation and, on error,
-    /// clears the slot so the next call reconnects.
-    async fn lock_conn(&self) -> DriveResult<tokio::sync::MutexGuard<'_, Option<Conn>>> {
-        // A free connection, else wait for one in turn.
-        let n = self.conns.len();
-        let start = self.next.fetch_add(1, Ordering::Relaxed) as usize;
-        let free = (0..n).find_map(|i| self.conns[(start + i) % n].try_lock().ok());
-        let mut guard = match free {
+    /// What each path has carried (#90).
+    pub fn path_stats(&self) -> Vec<PathStats> {
+        self.paths
+            .iter()
+            .map(|p| PathStats {
+                addr: p.addr.clone(),
+                ops: p.ops.load(Ordering::Relaxed),
+                bytes: p.bytes.load(Ordering::Relaxed),
+                down: p.is_down(),
+            })
+            .collect()
+    }
+
+    /// The path an operation goes by (#90): among those not marked down (all
+    /// of them when every one is), by the spec's policy.
+    fn pick_path(&self) -> usize {
+        let n = self.paths.len();
+        let up: Vec<usize> = (0..n).filter(|i| !self.paths[*i].is_down()).collect();
+        let pool: Vec<usize> = if up.is_empty() { (0..n).collect() } else { up };
+        match self.spec.iopolicy {
+            IoPolicy::RoundRobin => pool[self.next.fetch_add(1, Ordering::Relaxed) as usize % pool.len()],
+            IoPolicy::QueueDepth => {
+                let start = self.next.fetch_add(1, Ordering::Relaxed) as usize;
+                (0..pool.len())
+                    .map(|k| pool[(start + k) % pool.len()])
+                    .min_by_key(|i| self.paths[*i].inflight.load(Ordering::Relaxed))
+                    .expect("at least one path")
+            }
+        }
+    }
+
+    /// Lock an I/O connection on the path the policy picks, establishing it
+    /// first if the last operation dropped it. The caller runs one operation
+    /// and, on error, calls [`failed`](Self::failed) so the next call
+    /// reconnects (and goes by another path while this one is down).
+    async fn lock_conn(&self) -> DriveResult<ConnGuard<'_>> {
+        let pi = self.pick_path();
+        let path = &self.paths[pi];
+        path.inflight.fetch_add(1, Ordering::Relaxed);
+        // A free connection on the path, else wait for one in turn.
+        let n = path.conns.len();
+        let start = self.next.load(Ordering::Relaxed) as usize;
+        let free = (0..n).find_map(|i| path.conns[(start + i) % n].try_lock().ok());
+        let guard = match free {
             Some(g) => g,
-            None => self.conns[start % n].lock().await,
+            None => path.conns[start % n].lock().await,
         };
+        let mut guard = ConnGuard { guard, path };
         if guard.is_none() {
-            *guard = Some(
-                Conn::establish(&self.spec, 1)
-                    .await
-                    .map_err(DriveError::Io)?,
-            );
-            tracing::info!("NVMe-TCP initiator: reconnected to {}", self.spec.addr);
+            match Conn::establish(&self.spec, &path.addr, pi, 1).await {
+                Ok(c) => {
+                    *guard = Some(c);
+                    tracing::debug!("NVMe-TCP initiator: connected to {}", path.addr);
+                }
+                Err(e) => {
+                    *path.down_until.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(std::time::Instant::now() + PATH_DOWN);
+                    tracing::warn!("NVMe-TCP initiator: path {} is down: {e}", path.addr);
+                    return Err(DriveError::Io(e));
+                }
+            }
         }
         Ok(guard)
     }
@@ -700,9 +927,12 @@ impl NvmeofDevice {
         Ok((offset / bs * bs, end.div_ceil(bs) * bs))
     }
 
-    /// Drop the connection after an error, so the next call reconnects.
-    fn failed(guard: &mut tokio::sync::MutexGuard<'_, Option<Conn>>, e: io::Error) -> DriveError {
+    /// Drop the connection after an error, so the next call reconnects, and
+    /// skip its path for a while (#90): the retry goes by another.
+    fn failed(guard: &mut ConnGuard<'_>, e: io::Error) -> DriveError {
         **guard = None;
+        *guard.path.down_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now() + PATH_DOWN);
+        tracing::warn!("NVMe-TCP initiator: path {} failed: {e}", guard.path.addr);
         DriveError::Io(e)
     }
 
@@ -832,7 +1062,10 @@ impl NvmeofDevice {
             let mut guard = self.lock_conn().await?;
             let conn = guard.as_mut().expect("lock_conn established");
             return match self.read_blocks(conn, offset, buf).await {
-                Ok(n) => Ok(n),
+                Ok(n) => {
+                    guard.carried(n);
+                    Ok(n)
+                }
                 Err(e) => Err(Self::failed(&mut guard, e)),
             };
         }
@@ -846,6 +1079,7 @@ impl NvmeofDevice {
         if let Err(e) = self.read_blocks(conn, start, &mut span).await {
             return Err(Self::failed(&mut guard, e));
         }
+        guard.carried(span.len());
         let at = (offset - start) as usize;
         buf.copy_from_slice(&span[at..at + buf.len()]);
         Ok(buf.len())
@@ -858,7 +1092,10 @@ impl NvmeofDevice {
             let mut guard = self.lock_conn().await?;
             let conn = guard.as_mut().expect("lock_conn established");
             return match self.write_blocks(conn, offset, buf).await {
-                Ok(n) => Ok(n),
+                Ok(n) => {
+                    guard.carried(n);
+                    Ok(n)
+                }
                 Err(e) => Err(Self::failed(&mut guard, e)),
             };
         }
@@ -879,6 +1116,7 @@ impl NvmeofDevice {
         if let Err(e) = self.write_blocks(conn, start, &span).await {
             return Err(Self::failed(&mut guard, e));
         }
+        guard.carried(span.len() * 2);
         Ok(buf.len())
     }
 
@@ -887,9 +1125,9 @@ impl NvmeofDevice {
         let mut guard = self.lock_conn().await?;
         let conn = guard.as_mut().expect("lock_conn established");
         if let Err(e) = bounded("flush", conn.io_flush(nsid)).await {
-            *guard = None;
-            return Err(DriveError::Io(e));
+            return Err(Self::failed(&mut guard, e));
         }
+        guard.carried(0);
         Ok(())
     }
 
@@ -907,8 +1145,7 @@ impl NvmeofDevice {
             let mut guard = self.lock_conn().await?;
             let conn = guard.as_mut().expect("lock_conn established");
             if let Err(e) = bounded("deallocate", conn.io_deallocate(nsid, slba, nlb)).await {
-                *guard = None;
-                return Err(DriveError::Io(e));
+                return Err(Self::failed(&mut guard, e));
             }
             slba += nlb as u64;
             blocks -= nlb as u64;
@@ -937,6 +1174,21 @@ mod tests {
         assert!(NvmeTcpSpec::parse("nvme-tcp://hostnoport/nqn.x").is_none());
         assert!(NvmeTcpSpec::parse("nvme-tcp://host:4420/").is_none());
         assert!(NvmeTcpSpec::parse("nvme-tcp://host:4420/nqn?nsid=bogus").is_none());
+    }
+
+    /// Several paths and a policy (#90).
+    #[test]
+    fn a_uri_names_several_paths_and_a_policy() {
+        let s = NvmeTcpSpec::parse("nvme-tcp://10.0.0.5:4420,10.0.0.15:4420/nqn.x?nsid=2&iopolicy=queue-depth").unwrap();
+        assert_eq!(s.addrs(), vec!["10.0.0.5:4420", "10.0.0.15:4420"]);
+        assert_eq!(s.iopolicy, IoPolicy::QueueDepth);
+        assert_eq!(NvmeTcpSpec::parse(&s.uri()).unwrap(), s);
+        let rr = NvmeTcpSpec::parse("nvme-tcp://a:1,b:2/nqn.x").unwrap();
+        assert_eq!(rr.iopolicy, IoPolicy::RoundRobin);
+        assert!(!rr.uri().contains("iopolicy"), "the default is not spelled out");
+        assert!(NvmeTcpSpec::parse("nvme-tcp://a:1,,b:2/nqn.x").is_none());
+        assert!(NvmeTcpSpec::parse("nvme-tcp://a:1,b/nqn.x").is_none());
+        assert!(NvmeTcpSpec::parse("nvme-tcp://a:1/nqn.x?iopolicy=numa").is_none());
     }
 
     #[test]

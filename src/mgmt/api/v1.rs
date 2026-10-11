@@ -1125,7 +1125,9 @@ pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo
     };
     // A wildcard listen address tells a remote consumer nothing, so prefer the
     // configured advertised address (#26).
-    let traddr = state.config.data_host(&host);
+    // Every storage NIC's address when there are several (#90): a kernel
+    // initiator connects through each and multipaths over them.
+    let traddrs = state.config.data_hosts(&host);
 
     // Volumes share the target's subsystem and are distinguished by NSID.
     // A per-volume NQN would force a Connect per container, which is the
@@ -1141,7 +1143,7 @@ pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo
 
     AttachInfo::NvmeTcp {
         nqn,
-        addresses: vec![NvmeAddress { traddr, trsvcid: port }],
+        addresses: traddrs.into_iter().map(|traddr| NvmeAddress { traddr, trsvcid: port }).collect(),
         nsid,
         host_nqn: None,
         dhchap_secret: None,

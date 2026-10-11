@@ -1123,6 +1123,7 @@ impl GoldenSource {
                 .map(crate::target::nvmeof::auth::DhchapKey::parse)
                 .transpose()
                 .map_err(|e| spec_err(format!("export reply's secret: {e}")))?,
+            ..Default::default()
         };
         let dev = crate::drive::nvmeof_dev::NvmeofDevice::connect(&spec)
             .await
