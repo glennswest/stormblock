@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-11
+- **chore:** #196: `Dockerfile` and `Dockerfile.aarch64` removed. They built nothing that ships: rust 1.75 (the tree needs 1.95), no `--locked`, an aarch64 feature set that was neither the RouterOS profile nor measured, and nothing builds them. stormblock ships as goldens through stormcos's `build-goldens.sh`, and RouterOS is not shipping (owner, 2026-09-28). Nothing in glennswest's repositories refers to them.
 - **feat:** #154: `POST /api/v1/slabs/rebalance`, so a drive that was added is used, not only filled by new writes.
   - **Planned read-only:** pools are role + slot size; dedicated and quarantined slabs are left out. Extents move from slabs above the pool's mean fill to slabs below their share, keeping each volume's legs apart at its own rung (and never planning two legs of one extent onto one slab). Parity volumes' extents stay.
   - **Dry run unless `"dry_run": false`.** The moves then run in the background, each with only its slot's fence held (`migrate_leg_unlocked`), yielding to live I/O, capped by `max_bytes_per_sec`, persisted and released every 64. `GET` reports progress; `DELETE` stops it.

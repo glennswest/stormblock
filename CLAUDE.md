@@ -4379,7 +4379,7 @@ Master checklist lives in **stormblock-registry/CLAUDE.md**, "Layered goldens
 - [x] Volume lifecycle tests (create, snapshot COW, delete, multi-extent writes)
 - [x] Criterion micro-benchmarks (parity throughput, extent allocation, PDU parsing)
 - [x] fio macro-benchmark scripts (iSCSI + NVMe-oF, 4K random + sequential)
-- [x] Container images (Dockerfile x86_64 + aarch64, deployed via StormBase)
+- [x] Container images (Dockerfile x86_64 + aarch64, deployed via StormBase) — removed 2026-10-11 (#196): stale, built by nothing; the engine ships as goldens
 - [x] StormFS registration (announce volumes to StormFS metadata cluster)
 
 ### Container Extent Store — Organic Data Placement

@@ -748,8 +748,9 @@ the fedora golden, and every service golden is written by `stormblock golden`.
 For running it outside stormcos: `systemd/stormblock-target.service` (the
 daemon as a storage target) and `systemd/95-stormblock-iouring.conf`.
 `systemd/stormblock-ublk.service` runs `boot-iscsi --ublk` as an early-boot
-unit; since #162 a run opens the slab it made before and keeps its volumes. The container images (`Dockerfile`, `Dockerfile.aarch64`) are
-stale: rust 1.75, no `--locked`, and not the RouterOS profile (#196).
+unit; since #162 a run opens the slab it made before and keeps its volumes.
+There is no container image of the engine: it ships as goldens (stormcos's
+`build-goldens.sh`), and the stale `Dockerfile`s were removed (#196).
 `Containerfile.iscsi-test` is an old external-iSCSI test image.
 `deploy/terragrunt/` makes test VMs on Proxmox and `deploy/m0/` is the M0
 baseline setup; `scripts/build-stormblock-initramfs.sh` builds the initramfs
