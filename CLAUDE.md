@@ -181,6 +181,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Scrub: compare mirror legs and parity (2026-10-11, #160, P3) — WAITING ON THE OWNER
+
+No checksums, so a 2-way mismatch has no right answer. Asked on #160
+(needs-owner): (a) report + operator picks the leg, (b) per-slot/4K
+checksum (a format change on v2), (c) majority at mirror:3+ and report at
+mirror:2, (d) first leg wins (md; what RAID sets' scrub repair does today).
+Recommended (c)+(a), parity rewritten only when asked. Common part (a
+background per-volume scrub through the rebuild throttle, report only) is
+not built yet either.
+
 ### Discovery records advertise the bind address (2026-10-11, #116) — DONE (golden-stormblock-c8f8f2594866)
 
 The per-volume subsystems the issue's comment named are serve-listener
