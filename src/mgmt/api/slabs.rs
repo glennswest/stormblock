@@ -702,7 +702,7 @@ async fn rebalance_start(
             &r,
             &spread,
             req.pool.as_deref(),
-            req.max_moves.unwrap_or(10_000),
+            req.max_moves.unwrap_or(crate::rebalance::DEFAULT_MAX_MOVES),
         )
     };
     if req.dry_run || plan.list.is_empty() {

@@ -61,7 +61,7 @@ fn yes() -> bool {
     true
 }
 
-const DEFAULT_MAX_MOVES: usize = 10_000;
+pub const DEFAULT_MAX_MOVES: usize = 10_000;
 /// A slab within this share of its own slots of its target (the pool's mean
 /// fill) is not a source (at least one slot). One past it gives extents until
 /// it is at its target, to slabs below theirs.
