@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-11
+- **fix:** #121: `migrate_to_slab` (`stormblock migrate-boot`) frees the source slab's slots. A moved extent's source is owed until the record naming its copy is durable (b270bfd), and nothing paid it, so an evacuated slab kept every slot. That record is the destination's slot table (migrate-boot has no volume manager), so the destination is synced first, then the owed slots are freed and the source synced. A destination that does not sync frees nothing. Test: `boot_iscsi::migrate_boot_volumes_between_slabs`: every source slot free after the migration, and reopened from the files, the source is empty and the destination records the three copies.
 - **chore:** #196: `Dockerfile` and `Dockerfile.aarch64` removed. They built nothing that ships: rust 1.75 (the tree needs 1.95), no `--locked`, an aarch64 feature set that was neither the RouterOS profile nor measured, and nothing builds them. stormblock ships as goldens through stormcos's `build-goldens.sh`, and RouterOS is not shipping (owner, 2026-09-28). Nothing in glennswest's repositories refers to them.
 - **feat:** #154: `POST /api/v1/slabs/rebalance`, so a drive that was added is used, not only filled by new writes.
   - **Planned read-only:** pools are role + slot size; dedicated and quarantined slabs are left out. Extents move from slabs above the pool's mean fill to slabs below their share, keeping each volume's legs apart at its own rung (and never planning two legs of one extent onto one slab). Parity volumes' extents stay.

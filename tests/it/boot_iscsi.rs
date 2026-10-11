@@ -313,6 +313,20 @@ async fn migrate_boot_volumes_between_slabs() {
     // Source slab should be empty
     assert!(gem.slab_extents(src_id).is_empty());
 
+    // #121: and its slots freed, not left owed: the source has every slot
+    // back, and the slot tables on disk say the same when reopened.
+    let src = registry.get(&src_id).unwrap();
+    assert_eq!(src.free_slots(), src.total_slots(), "every source slot freed");
+    drop(registry);
+    let reopen = |p: std::path::PathBuf| async move {
+        let d: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(p.to_str().unwrap()).await.unwrap());
+        stormblock::drive::slab::Slab::open(d).await.unwrap()
+    };
+    let src = reopen(src_path.clone()).await;
+    assert_eq!(src.free_slots(), src.total_slots(), "freed on disk too");
+    let dst = reopen(dst_path.clone()).await;
+    assert_eq!(dst.total_slots() - dst.free_slots(), 3, "the three copies are recorded at the destination");
+
     // Cleanup
     let _ = std::fs::remove_file(&src_path);
     let _ = std::fs::remove_file(&dst_path);

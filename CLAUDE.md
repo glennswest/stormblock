@@ -181,6 +181,15 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### migrate-boot never paid owed frees (2026-10-11, #121) — IN PROGRESS
+
+- [x] `migrate_to_slab`: sync the destination (its slot table is the
+      record), then `release_owed`, then sync the source (the frees on
+      disk); a failed destination sync frees nothing
+- [x] `boot_iscsi::migrate_boot_volumes_between_slabs` checks the source's
+      slots freed, in memory and reopened; CHANGELOG
+- [ ] build VM; check.sh; golden; close
+
 ### A drive added grows the pool and is used (2026-10-11, #154, P3) — PARTLY BUILT; DECISION 3 WAITS ON THE OWNER
 
 Decision 3 (automatic, or on an operator's word) asked on #154 (A/B/C, C

@@ -195,6 +195,37 @@ pub async fn migrate_to_slab(
     let result = engine.evacuate_slab(gem, registry, source_slab, shutdown).await
         .map_err(|e| MigrateError::Evacuate(e.to_string()))?;
 
+    // Pay the owed frees (#121). A moved extent's source slot is owed until
+    // the record naming its copy is durable (b270bfd). Here that record is
+    // the destination's slot table (`migrate-boot` has no volume manager and
+    // persists no metadata: a node rebuilds the map from the slabs), so the
+    // destination is synced first, its entries after its data, and only then
+    // are the source slots freed. A sync that fails frees nothing: the source
+    // keeps the slots rather than lose a copy no record names.
+    let synced = match registry.get(&dest_slab_id) {
+        Some(dest) => dest.sync().await,
+        None => Err(crate::drive::DriveError::Other(anyhow::anyhow!("destination slab vanished"))),
+    };
+    match synced {
+        Ok(()) => {
+            let freed = engine.release_owed(registry).await;
+            // The frees made durable too: a free reaches the slot table at
+            // the source's next sync, and nothing else syncs it after a
+            // `migrate-boot`. Unsynced, a reboot reads the slots as held.
+            if let Some(src) = registry.get(&source_slab) {
+                if let Err(e) = src.sync().await {
+                    tracing::warn!("slab migration: the source's frees are not yet on disk: {e}");
+                }
+            }
+            tracing::info!("slab migration: destination synced, {freed} source slot(s) freed");
+        }
+        Err(e) => {
+            return Err(MigrateError::Other(format!(
+                "syncing the destination slab {dest_slab_id}: {e}; the source's slots are kept"
+            )));
+        }
+    }
+
     tracing::info!(
         "slab migration complete: {} migrated, {} failed",
         result.migrated, result.failed
