@@ -477,6 +477,27 @@ impl EmulatedDevice {
 
     /// Write `buf` (or zeros, when `buf` is `None`, over `len` bytes).
     fn mem_write(&self, shards: &[Mutex<HashMap<u64, Box<[u8]>>>], offset: u64, buf: Option<&[u8]>, len: u64) {
+        if buf.is_none() && len > 64 * PAGE {
+            // A large zero (a whole-drive discard, #401): the pages held in
+            // the range, not every page of it.
+            let (first, last) = (offset / PAGE, (offset + len).div_ceil(PAGE));
+            for shard in shards {
+                let mut m = shard.lock().unwrap_or_else(|e| e.into_inner());
+                let pages: Vec<u64> = m.keys().copied().filter(|p| (first..last).contains(p)).collect();
+                for page in pages {
+                    let from = (page * PAGE).max(offset);
+                    let to = ((page + 1) * PAGE).min(offset + len);
+                    let Some(p) = m.get_mut(&page) else { continue };
+                    let off = (from % PAGE) as usize;
+                    p[off..off + (to - from) as usize].fill(0);
+                    if p.iter().all(|&b| b == 0) {
+                        m.remove(&page);
+                        self.inner.stored.fetch_sub(PAGE, Ordering::Relaxed);
+                    }
+                }
+            }
+            return;
+        }
         let mut done = 0u64;
         while done < len {
             let at = offset + done;
@@ -592,6 +613,30 @@ impl EmulatedDevice {
     /// A write into the volatile cache: logged, and applied to the pages
     /// reads see. `None` writes zeros.
     fn cache_write(&self, shards: &[Mutex<HashMap<u64, Box<[u8]>>>], c: &mut Cache, offset: u64, buf: Option<&[u8]>, len: u64) {
+        if buf.is_none() {
+            // Zeros: only the pages held (in the view or the store) change;
+            // the rest already read as zeros. A discard of a whole drive costs
+            // what the drive holds, not its capacity (#401).
+            let (first, last) = (offset / PAGE, (offset + len).div_ceil(PAGE));
+            let mut held: std::collections::BTreeSet<u64> =
+                c.view.keys().copied().filter(|p| (first..last).contains(p)).collect();
+            for shard in shards {
+                held.extend(shard.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().filter(|p| (first..last).contains(p)));
+            }
+            for page in held {
+                let from = (page * PAGE).max(offset);
+                let to = ((page + 1) * PAGE).min(offset + len);
+                let off = (from % PAGE) as usize;
+                let p = c.view.entry(page).or_insert_with(|| {
+                    let mut b = vec![0u8; PAGE as usize];
+                    Self::mem_read(shards, page * PAGE, &mut b);
+                    b.into_boxed_slice()
+                });
+                p[off..off + (to - from) as usize].fill(0);
+            }
+            c.log.push((offset, None, len));
+            return;
+        }
         let mut done = 0u64;
         while done < len {
             let at = offset + done;
