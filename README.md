@@ -350,6 +350,7 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_METADATA_FORMAT` | `1` keeps new slabs (and the data directory) in metadata format 1 and migrates nothing (#158), where no `[metadata] format` is read | `2` |
 | `STORMBLOCK_NODE`, `HOSTNAME` | node name, after `[management] node_name` | kernel hostname, else `localhost` |
 | `STORMBLOCK_ADVERTISED_ADDR` | the address reported to consumers, after `[management] advertised_addr` | derived from the listen address or the default route |
+| `STORMBLOCK_STORAGE_INTERFACE` | the storage network's interface, before `[storage] interface` (#85) | one network |
 | `STORMBLOCK_CLAIM_GRACE_SECS` | how long a superseded boot clone is kept | `600` |
 | `STORMBLOCK_DHCHAP_SECRET` | the DH-HMAC-CHAP secret (`DHHC-1:…`) the engine's NVMe/TCP initiator answers with when a target asks and the drive was given none (`dhchap_secret`, #213) (#210) | no secret: a target that requires one refuses |
 | `STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS` | how long one NVMe/TCP command (or connect) of the engine's initiator may take before the connection is dropped and the command fails (#358) | `30`, like Linux's `nvme_core.io_timeout` |
@@ -398,6 +399,19 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 | `beacon_secs`, `peer_stale_secs` | `5`, `30` | discovery timing |
 | `ublk_transport` | `true` | offer ublk for a local attach; per request, `"transport": "nvme_tcp"` asks for the network instead |
 | `nvme_cntlid_range` | `[1, 65519]` | NVMe controller IDs every target of this node hands out; nodes that may serve one volume to a multipath host need ranges that do not overlap (#83, `docs/migration.md`) |
+| `interface` | — | the control channel's interface (#85): the discovery beacon is sent and heard there, and its address is the control address when `advertised_addr` is unset. `listen_addr` is not narrowed by it |
+
+**`[storage]`** (#85, [docs/storage-network.md](docs/storage-network.md)) — the
+data path's own network: a VLAN sub-interface or a second port, its own
+subnet and MTU. Unset: one network, as before.
+
+| key | default | |
+|---|---|---|
+| `interface` | — | `eth1.100`; `$STORMBLOCK_STORAGE_INTERFACE` first. The NVMe/TCP and iSCSI targets (shared, forge, `/serve/v1`) listening on a wildcard bind its address instead; attach replies, boot claims, discovery log pages and `/serve/v1` advertise it. The beacon, the forge trust URL and the API stay on the control side |
+| `address` | its first IPv4, else first global IPv6 | which of the interface's addresses |
+| `advertised_addr` | the address | what initiators dial, when it is not the address (host only) |
+| `mtu` | — | the network's MTU; the interface's is compared at start (WARN) and in health (`mtu_mismatch`) |
+| `wait_secs` | `30` | how long to wait at start for the address. None by then: the data targets bind loopback only (never the LAN) until a restart, an ERROR says so, health says `no_address`/`missing` |
 
 **`[[drives]]`** `path` — a device, partition, file or `nvme-tcp://`/`iscsi://` URI;
 or `kind = "emulated"`, `size = "1P"`, `backing = "<dir>"` (optional), `name`
@@ -537,7 +551,11 @@ file that still sets it loads, with a warning.
 | TCP 3260 | iSCSI shared target | daemon, unless `--no-iscsi` |
 | TCP 3261 | `/serve/v1`'s NVMe/TCP listener: every per-volume subsystem (`[serve] portal_base`, #188) | when `/serve/v1` serves an NVMe export |
 | TCP 3262–3388 | per-export iSCSI portals (`[serve] portal_span`) | when `/serve/v1` serves an iSCSI export |
-| UDP 7447, group 239.255.42.99 | node discovery beacon | daemon, unless `discovery_disabled` |
+| UDP 7447, group 239.255.42.99 | node discovery beacon | daemon, unless `discovery_disabled`; on `[management] interface` when set |
+
+With a storage network (`[storage] interface`, #85) the data ports (4420,
+3260, 3261, the per-export portals) listen on its address and 9090 and the
+beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
 
 ## Health, readiness and metrics
 
@@ -558,6 +576,13 @@ file that still sets it loads, with a warning.
   move (#172). A keep-data install is refused before anything is written
   when the data half has no room for the release's data volumes it does not
   already hold, plus 5 % and 64 slots (#172).
+  On a node with a storage network (#85), `"data_path"`: its `interface`,
+  `state` (`up`, `down`, `no_address`, `missing`), the `address` the data
+  targets serve on, `mtu`, `expected_mtu` and `mtu_mismatch`; and
+  `"control"` likewise for `[management] interface`. `status` stays `ok`
+  with the data path down: the node answers, its volumes cannot be reached.
+  Beacons carry `data_addr` and `data_path`; a peer whose data path is not
+  up stays listed and is not placed on.
   And `"slabs"` (#322): where the node runs from.
   - `diskless` is true when no volume has a leg on a local slab.
   - `system` and `data` are each `local`, `remote`, `mixed` (some of each,
@@ -2063,6 +2088,7 @@ What earlier docs described and the code does not do, each with its issue:
 |---|---|
 | `docs/auth.md` | who may call a node's API; the boot claim; host goldens |
 | `docs/nvme-access.md` | who may connect over NVMe/TCP: per-host subsystems, allowed hosts, DH-HMAC-CHAP, goldens write-protected (#210) |
+| `docs/storage-network.md` | the data path on its own network (a storage VLAN) and the control channel on the LAN: what binds and is advertised where, health and beacons when the data path is down (#85) |
 | `docs/migration.md` | moving a disk between nodes: NVMe ANA (states, notices, multipath across nodes) and the `/v1` epoch enforced at the target (#83, #6) |
 | `docs/data-classes.md` | the data classes system / partner / customer as designed (pallet kinds `system`, `vendor`, `user`), what an install, a demote/reset and a factory wipe do to each, where `system-data` fits, and how the code differs today: two halves, no class split (#356) |
 | `docs/erase.md` | secure delete: freed slots overwritten before reuse, levels, the audit record, what it does not do on flash, crypto-erase (design) (#286) |

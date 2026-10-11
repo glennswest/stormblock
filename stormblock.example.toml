@@ -53,6 +53,14 @@ target_name = "iqn.2024.io.stormblock:default"
 listen_addr = "0.0.0.0:4420"
 nqn = "nqn.2024.io.stormblock:default"
 
+# The data path on its own network (#85, docs/storage-network.md): a VLAN
+# sub-interface or a second port. Wildcard target binds above become its
+# address; attach replies advertise it; the API and the beacon stay put.
+# [storage]
+# interface = "eth1.100"
+# mtu = 9000
+# [management] interface = "eth0" puts the beacon on the control network.
+
 [reactor]
 cores = 0       # 0 = auto-detect
 pin_cores = true
