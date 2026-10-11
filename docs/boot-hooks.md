@@ -106,7 +106,7 @@ storage inventory:
   0000:00:1f.2 [8086:2922] class 0x0106: ahci, 1 drive(s)
   0000:00:05.0 [1000:0012] class 0x0100: no driver bound
 WARNING: storage controller 0000:00:05.0 [1000:0012] (class 0x0100) has no driver bound - its drives cannot be seen (#345)
-    sda: TestSATA serial SATA0001, 1 GB, sata on 0000:00:1f.2, front shelf
+    sda: TestSATA serial SATA0001, 1 GB, sata on 0000:00:1f.2, internal shelf -
 ```
 
 A controller with no driver is a WARNING naming its PCI id. A SAS, RAID,

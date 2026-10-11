@@ -1143,7 +1143,7 @@ before its data slab) has nothing to keep.
 - [x] on a build VM at 399356e: the new test, full nextest 1027/1027
 - Not on metal: the Dell's new SAS drives on a release with this golden
 
-### Boot inventory of storage controllers and drives (2026-10-08, #345, P1) — PAUSED for P0 #346 (back in line)
+### Boot inventory of storage controllers and drives (2026-10-08, #345, P1) — DONE (initramfs at 5205403, in every golden since)
 
 Owner: "a check during the boot, that we see if controller and drive is
 there". On top of #344's `local_disk` verdict.
@@ -1159,10 +1159,11 @@ there". On top of #344's `local_disk` verdict.
 - [x] tests/initramfs-storage-inventory.sh (9 checks) and every initramfs
       test under sh and busybox sh, /init parses, slab_report unit 4/4 on a
       build VM at 5205403
-- [ ] `ci-storage-inventory-verify.sh` (QEMU: AHCI, NVMe, virtio-blk, an
-      unbound LSI HBA): first run failed on its own QEMU arguments (serial
-      on -drive); fixed, never run since. Then README, boot-hooks.md,
-      CHANGELOG, full nextest, golden
+- [x] `ci-storage-inventory-verify.sh` (QEMU: AHCI, NVMe, virtio-blk, an
+      unbound LSI HBA) ALL PASS on a build VM (kernel 7.2.8, 9 checks), once
+      it carried the shelves block (`shelf_of`, #347); every initramfs test
+      under sh and busybox sh; boot-hooks.md section, CHANGELOG. No new
+      golden: only the script and docs changed
 
 ### The Dell runs diskless with its slabs on sda (2026-10-08, #344, P0) — DONE here, metal pending
 
