@@ -190,7 +190,9 @@ stop". A pallet's mirror legs are whole partitions (moot); for volumes:
       paged; `BlockDevice::drive_offset` (partition start)
 - [x] test `integration_placement::each_legs_place_on_its_drive_holds_the_
       extents_bytes`; README, pallets.md, CHANGELOG
-- [ ] on a build VM; check.sh; golden; close
+- [x] on a build VM: placement/partition/extable 22/22, clippy clean;
+      check.sh at a25b468 ALL PASS (1144/1144)
+- [ ] golden; close
 
 ### Boot clone read-only with a writable overlay (2026-10-10, #193, P3) — WAITING ON THE OWNER
 
