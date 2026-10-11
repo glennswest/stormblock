@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### A ublk device left by a test (2026-10-11, #135) — IN PROGRESS
+### A ublk device left by a test (2026-10-11, #135) — DONE
 
 Since stormcentral#107 a build is a fresh VM, destroyed after: an orphan can
 no longer outlive its job or wedge another's (the issue's shared dev is
@@ -192,8 +192,10 @@ recovery (`UblkServer` is non-recoverable by default).
       device down on every way out; fault hooks for the check
 - [x] `ci-ublk-cleanup-verify.sh` (QEMU, root in the guest): clean, panic,
       abort (an orphan left), the next run sweeps it
-- [ ] run it; check.sh; close (test-side and two read/remove helpers: a
-      golden for the helpers is not needed by anything)
+- [x] `ci-ublk-cleanup-verify.sh` ALL PASS at 55e8c27 (kernel 7.2.8, 8
+      checks; the kernel resets a dead server's pid to -1); check.sh ALL
+      PASS (1150/1150), 0 warnings. Closed; no golden (nothing the engine
+      runs changed)
 
 ### migrate-boot never paid owed frees (2026-10-11, #121) — DONE (golden-stormblock-3b051585c805)
 
