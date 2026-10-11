@@ -181,6 +181,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### ci-compose-disk-verify.sh runs where builds run (2026-10-10, #230) — IN PROGRESS
+
+It defaulted to /build/cargo/… (gone), worked under /build/work, and needed
+root (ublk attach, mount, shim/grub from /boot/efi, Fedora's initramfs).
+- [x] rewritten in ci-boot512-verify.sh's shape: unprivileged engine over
+      NVMe/TCP; the kernel in QEMU checks 4096 sectors, two partitions, the
+      ESP (stormuefi byte for byte) and the kernel's digest inside the
+      pallet; `pallet verify` on the host through the engine's initiator;
+      OVMF boots the disk as a 4Kn NVMe drive: stormuefi → the pallet's
+      kernel, command line and initramfs (the script's own)
+- [ ] run on a build VM; CHANGELOG; close
+
 ### Flow-over fast on SMR disks (2026-10-10, #401, P1) — DONE (golden-stormblock-8903710adfc5)
 
 X9 blades (ST2000DM008, drive-managed SMR): 16–21k extents left after Ready.

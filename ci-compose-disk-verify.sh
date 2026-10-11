@@ -1,259 +1,339 @@
 #!/usr/bin/env bash
 # ci-compose-disk-verify.sh — a composed disk, checked by things that are not
-# ours.
+# ours. Unprivileged: the kernel and the firmware are guests (#230).
 #
 # The unit and HTTP tests prove the engine agrees with itself about a composed
 # disk. This proves a *node* would agree: the built binary composes a disk out
-# of a real kernel, a real initramfs and a real ESP, serves it as a ublk block
-# device, and then
+# of a real kernel, an initramfs and a real ESP (stormuefi), serves it over
+# NVMe/TCP, and then
 #
-#   - fdisk reads the GPT at 4096-byte LBAs and finds two partitions,
-#   - blkid recognises the ESP as vfat and the kernel mounts it,
-#   - the kernel bytes inside the pallet digest to sha256sum of the file,
-#   - `stormblock pallet verify` passes against the block device, and
-#   - OVMF boots it: firmware finds the ESP on the 4Kn disk, shim loads grub,
-#     grub reads the config we put on the ESP and lists both partitions.
+#   - the engine: the disk is presented at 4096-byte LBAs, wrote no bytes of
+#     its own, and a second disk of the same layout mints no GPT and takes no
+#     slot from the slab;
+#   - Linux (the host's kernel in QEMU, nvme-cli over NVMe/TCP) sees 4096-byte
+#     sectors and the GPT's two partitions, mounts the ESP (vfat at 4096-byte
+#     sectors) and finds stormuefi in it byte for byte, and reads the kernel
+#     out of the pallet partition, digesting to sha256sum of the file;
+#   - `stormblock pallet verify` passes against the same namespace, read
+#     through the engine's own NVMe/TCP initiator;
+#   - OVMF boots the disk's bytes as a 4Kn NVMe drive: firmware finds the ESP,
+#     starts stormuefi, which starts the pallet's kernel with the pallet's
+#     command line and its initramfs.
 #
-# Runs on dev.g8.lo as root. Everything lives under /build/work — never /tmp,
-# which is a tmpfs that a sparse image quietly fills (CLAUDE.md).
+# Before #230 this ran as root on dev with shim and grub out of /boot/efi and
+# the binary at /build/cargo/…, all gone with the build VMs.
 #
-#   STORMBLOCK_BIN=/build/cargo/stormblock/debug/stormblock ./ci-compose-disk-verify.sh
-set -euo pipefail
+# Needs: cargo, git (stormuefi), qemu-system-x86_64, OVMF, mkfs.vfat + mtools,
+# /boot/vmlinuz-$(uname -r) and its modules, a static busybox, nvme-cli, curl.
+#   sc-build 'cargo build --locked && bash ci-compose-disk-verify.sh'
+set -uo pipefail
 
-# The engine requires a bearer token (#107). One for this run, presented by
-# every curl below through a curlrc, and named in the engine's config.
-CI_TOKEN=${STORMBLOCK_API_TOKEN:-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')}
-CURL_HOME=$(mktemp -d "${TMPDIR:-/tmp}/ci-curl.XXXXXX"); export CURL_HOME
-printf 'header = "Authorization: Bearer %s"\n' "$CI_TOKEN" > "$CURL_HOME/.curlrc"
-
-BIN=${STORMBLOCK_BIN:-/build/cargo/stormblock/debug/stormblock}
-WORK=${WORK:-/build/work/compose-verify}
-MGMT=${MGMT:-127.0.0.1:9199}
-NVMEOF=${NVMEOF:-127.0.0.1:4421}
-KERNEL=${KERNEL:-$(ls /boot/vmlinuz-* | head -1)}
-INITRD=${INITRD:-$(ls /boot/initramfs-*.img | head -1)}
-SHIM=${SHIM:-/boot/efi/EFI/BOOT/BOOTX64.EFI}
-GRUB=${GRUB:-/boot/efi/EFI/BOOT/grubx64.efi}
+KVER=${KVER:-$(uname -r)}
+KERNEL=${KERNEL:-/boot/vmlinuz-$KVER}
+BUSYBOX=${BUSYBOX:-$(command -v busybox.musl.static || command -v busybox)}
+NVME=$(command -v nvme || true)
 OVMF_CODE=${OVMF_CODE:-/usr/share/edk2/ovmf/OVMF_CODE.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/edk2/ovmf/OVMF_VARS.fd}
+STORMUEFI=${STORMUEFI:-}
+ROOT=$(pwd)
+BIN=${STORMBLOCK_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/stormblock}
+mkdir -p "$ROOT/tmp"
+export TMPDIR="$ROOT/tmp"
+W=$(mktemp -d "$TMPDIR/ci-compose.XXXXXX")
+PORT=$((20000 + RANDOM % 20000))
+MGMT=$((PORT + 1))
+TOKEN=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+H1="nqn.2014-08.org.nvmexpress:uuid:22222222-3333-4444-5555-666666666602"
+SB_PID=""
+FAILS=0
 
-api() { curl -sf -H 'Content-Type: application/json' "$@"; }
-say() { printf '\n== %s\n' "$*"; }
-fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
-j() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1"; }
-
-ENGINE=
-UBLK=
+say()  { echo "== $*"; }
+ok()   { echo "ok: $*"; }
+fail() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }
+die()  { echo "FAIL: $*"; exit 1; }
 cleanup() {
-    set +e
-    if [ -n "$UBLK" ]; then
-        umount "$WORK/mnt" 2>/dev/null
-        api -X DELETE "http://$MGMT/api/v1/volumes/$DISK_ID/attach" >/dev/null 2>&1
-    fi
-    if [ -n "$ENGINE" ]; then
-        kill "$ENGINE" 2>/dev/null
-        for _ in $(seq 1 50); do kill -0 "$ENGINE" 2>/dev/null || break; sleep 0.1; done
-        kill -9 "$ENGINE" 2>/dev/null
-        wait "$ENGINE" 2>/dev/null
-    fi
-    rm -f "$WORK/slab.img" "$WORK/esp.img" "$WORK/vars.fd"
-    rm -rf "$WORK/data" "$WORK/esp"
+    [ -n "$SB_PID" ] && kill "$SB_PID" 2>/dev/null && wait "$SB_PID" 2>/dev/null
+    rm -rf "$W"
 }
 trap cleanup EXIT
 
-[ -x "$BIN" ] || fail "no binary at $BIN"
-[ -r "$KERNEL" ] || fail "no kernel at $KERNEL"
-[ -r "$INITRD" ] || fail "no initramfs at $INITRD"
-# A previous run that died mid-way may have left its engine behind.
-pkill -9 -f "stormblock -c $WORK/stormblock.toml" 2>/dev/null || true
-rm -rf "$WORK"; mkdir -p "$WORK/data" "$WORK/mnt" "$WORK/esp/EFI/BOOT" "$WORK/esp/EFI/fedora"
-
-# ---------------------------------------------------------------- the engine
-say "slab and engine"
-truncate -s 2G "$WORK/slab.img"
-"$BIN" slab format "$WORK/slab.img" >/dev/null
-cat > "$WORK/stormblock.toml" <<EOF
-[[drives]]
-path = "$WORK/slab.img"
-
-[management]
-api_token = "$CI_TOKEN"
-listen_addr = "$MGMT"
-data_dir = "$WORK/data"
-node_name = "compose-verify"
-discovery_disabled = true
-advertised_addr = "127.0.0.1"
-EOF
-"$BIN" -c "$WORK/stormblock.toml" --no-iscsi --nvmeof-addr "$NVMEOF" \
-    --nvmeof-nqn nqn.2026-09.lo.test:compose >"$WORK/engine.log" 2>&1 &
-ENGINE=$!
-for _ in $(seq 1 100); do
-    api "http://$MGMT/api/v1/slabs" >/dev/null 2>&1 && break
-    sleep 0.1
+for need in "$KERNEL" "$BUSYBOX" "$NVME" "$OVMF_CODE"; do
+    [ -n "$need" ] && [ -r "$need" ] || { echo "SKIP: missing $need"; exit 2; }
 done
-api "http://$MGMT/api/v1/slabs" >/dev/null || fail "engine did not come up: $(tail -5 "$WORK/engine.log")"
+for cmd in qemu-system-x86_64 mkfs.vfat mcopy curl python3 cpio; do
+    command -v "$cmd" >/dev/null || { echo "SKIP: no $cmd"; exit 2; }
+done
+[ -x "$BIN" ] || die "no binary at $BIN (cargo build --locked first)"
+j() { python3 -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$1"; }
 
-# ------------------------------------------------------------------- the ESP
-# A real one: shim as the default loader, grub beside it, and a grub.cfg that
-# says something we can look for on the serial console. Fedora's grub looks
-# for its config in /EFI/fedora, shim's stub looks in /EFI/BOOT; give both.
-say "ESP with shim + grub"
-if [ -r "$SHIM" ] && [ -r "$GRUB" ]; then
-    cp "$SHIM" "$WORK/esp/EFI/BOOT/BOOTX64.EFI"
-    cp "$GRUB" "$WORK/esp/EFI/BOOT/grubx64.efi"
-    cat > "$WORK/esp/EFI/BOOT/grub.cfg" <<'EOF'
-serial --unit=0 --speed=115200
-terminal_output serial console
-echo "COMPOSED-DISK-GRUB-UP"
-ls
-echo "COMPOSED-DISK-LS-DONE"
-halt
-EOF
-    cp "$WORK/esp/EFI/BOOT/grub.cfg" "$WORK/esp/EFI/fedora/grub.cfg"
-    BOOTABLE=1
-else
-    echo "(no shim/grub on this host — the ESP gets a marker file only, no firmware boot)"
-    echo hello > "$WORK/esp/EFI/BOOT/MARKER.TXT"
-    BOOTABLE=0
+# ------------------------------------------------------------------ stormuefi
+if [ -z "$STORMUEFI" ]; then
+    say "stormuefi, built from its repo"
+    # Outside this checkout: inside it, cargo takes stormuefi for a stray
+    # member of stormblock's workspace.
+    U=$(mktemp -d "$(dirname "$ROOT")/stormuefi.XXXXXX")
+    git clone -q --depth 1 https://github.com/glennswest/stormuefi "$U/src" || die "clone stormuefi"
+    (cd "$U/src" && CARGO_TARGET_DIR="$U/target" cargo build -q --release --target x86_64-unknown-uefi) \
+        || die "build stormuefi"
+    cp "$U/target/x86_64-unknown-uefi/release/stormuefi.efi" "$W/stormuefi.efi"
+    rm -rf "$U"
+    STORMUEFI="$W/stormuefi.efi"
 fi
+echo "stormuefi $(stat -c %s "$STORMUEFI") bytes; kernel $KERNEL"
+
+# ---------------------------------------------------------------- the ESP
 # 4096-byte sectors: the disk this lands in is presented at 4096-byte LBAs,
 # and both the kernel's FAT driver and firmware's compare the BPB's
 # bytes-per-sector with the media's. A 512-sector ESP on a 4Kn disk reads as
 # "can't read superblock" — blkid still names it vfat, which is the trap.
 # 64 MiB: FAT16 needs 4085 clusters, which at one 4 KiB sector per cluster is
 # more than a 16 MiB image has.
-mkfs.vfat -F 16 -S 4096 -n EFI -C "$WORK/esp.img" 65536 >/dev/null
-mcopy -i "$WORK/esp.img" -s "$WORK/esp/EFI" ::/ >/dev/null
+say "ESP: FAT16, 4096-byte sectors, stormuefi as the default loader"
+mkdir -p "$W/esp/EFI/BOOT"
+cp "$STORMUEFI" "$W/esp/EFI/BOOT/BOOTX64.EFI"
+mkfs.vfat -F 16 -S 4096 -n EFI -C "$W/esp.img" 65536 >/dev/null || die "mkfs.vfat"
+mcopy -i "$W/esp.img" -s "$W/esp/EFI" ::/ || die "mcopy"
 
-# --------------------------------------------------------------- the goldens
+# ------------------------------------------------- the guest's initramfs
+# Two jobs: booted by QEMU with `-kernel`, it attaches the composed disk over
+# NVMe/TCP and checks it; booted by stormuefi out of the pallet (the command
+# line says `composed=ci`), it only says it is up — that is the pallet's
+# initramfs member reaching the kernel.
+say "guest initramfs: busybox, nvme-cli, nvme-tcp, vfat"
+I="$W/initrd"
+mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,mnt,etc/nvme,lib/mods}
+cp "$BUSYBOX" "$I/bin/busybox"
+for a in sh mount umount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed basename cut tr stat sha256sum; do
+    ln -sf busybox "$I/bin/$a"
+done
+cp "$NVME" "$I/bin/nvme"
+ldd "$NVME" | grep -o '/[^ ]*' | while read -r lib; do mkdir -p "$I$(dirname "$lib")"; cp -L "$lib" "$I$lib"; done
+cp "$STORMUEFI" "$I/stormuefi.efi"
+: > "$I/lib/mods/order"
+for m in virtio_net nvme-tcp vfat nls_cp437 nls_iso8859-1 nls_utf8; do
+    modprobe -S "$KVER" --show-depends "$m" 2>/dev/null | awk '$1=="insmod"{print $2}'
+done | awk '!seen[$0]++' | while read -r ko; do
+    base=$(basename "$ko" | sed 's/\.xz$//; s/\.zst$//')
+    case "$ko" in
+        *.xz) xz -dc "$ko" > "$I/lib/mods/$base" ;;
+        *.zst) zstd -dcq "$ko" > "$I/lib/mods/$base" ;;
+        *) cp "$ko" "$I/lib/mods/$base" ;;
+    esac
+    echo "$base" >> "$I/lib/mods/order"
+done
+cat > "$I/init" <<'EOF'
+#!/bin/sh
+export PATH=/bin
+mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
+if grep -q composed=ci /proc/cmdline; then
+    echo "COMPOSED-DISK-INITRAMFS-UP"
+    poweroff -f
+fi
+. /env
+for m in $(cat /lib/mods/order); do insmod /lib/mods/$m 2>/dev/null; done
+ip link set lo up; ip link set eth0 up
+ip addr add 10.0.2.15/24 dev eth0; ip route add default via 10.0.2.2
+r() { echo "RESULT $1 $2"; }
+echo "GUEST kernel $(cat /proc/sys/kernel/osrelease)"
+if nvme connect -t tcp -a 10.0.2.2 -s "$PORT" -n "$SUB" --hostnqn "$H1" >/tmp/o 2>&1; then
+    sleep 3
+    d=""
+    for b in /sys/block/nvme*n*; do [ "$(cat $b/nsid 2>/dev/null)" = "$NSID" ] && d=$(basename $b); done
+    echo "GUEST composed disk nsid $NSID = /dev/$d"
+    lbs=$(cat /sys/block/$d/queue/logical_block_size)
+    [ "$lbs" = 4096 ] && r sectors-4096 PASS || r sectors-4096 "FAIL ($lbs)"
+    parts=$(ls -d /sys/block/$d/${d}p* 2>/dev/null | wc -l)
+    [ "$parts" = 2 ] && r gpt-two-partitions PASS || r gpt-two-partitions "FAIL ($parts)"
+    if mount -t vfat -o ro /dev/${d}p1 /mnt 2>/tmp/m; then
+        r esp-mounts PASS
+        cmp -s /mnt/EFI/BOOT/BOOTX64.EFI /stormuefi.efi && r esp-holds-stormuefi PASS || r esp-holds-stormuefi FAIL
+        umount /mnt
+    else
+        r esp-mounts "FAIL ($(cat /tmp/m))"
+    fi
+    # The kernel member, read off the block device: whole 4 KiB blocks from
+    # the pallet's start plus the member's offset, cut to its length.
+    got=$(dd if=/dev/$d bs=4096 skip=$((KSTART / 4096)) count=$(((KLEN + 4095) / 4096)) 2>/dev/null \
+        | head -c "$KLEN" | sha256sum | cut -d' ' -f1)
+    [ "$got" = "$KDIGEST" ] && r kernel-in-pallet-is-the-kernel PASS || r kernel-in-pallet-is-the-kernel "FAIL ($got)"
+    nvme disconnect -n "$SUB" >/dev/null 2>&1
+else
+    r connect "FAIL ($(head -2 /tmp/o))"
+fi
+echo "GUEST dmesg:"
+dmesg | grep -iE 'nvme|fat|vfat' | tail -20
+echo "GUEST done"
+poweroff -f
+EOF
+chmod +x "$I/init"
+# The pallet's copy carries no /env: as a pallet member it only says it is up.
+(cd "$I" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$W/pallet-initrd.gz"
+
+# ---------------------------------------------------------------- the engine
+say "engine on 127.0.0.1:$PORT (NVMe/TCP) and :$MGMT (API)"
+mkdir -p "$W/data"
+truncate -s 2G "$W/d1.img"
+cat > "$W/stormblock.toml" <<EOF
+[management]
+api_token = "$TOKEN"
+listen_addr = "127.0.0.1:$MGMT"
+data_dir = "$W/data"
+node_name = "ci-compose"
+advertised_addr = "10.0.2.2"
+discovery_disabled = true
+
+[nvmeof]
+export_drives = false
+EOF
+RUST_LOG=stormblock=info "$BIN" --config "$W/stormblock.toml" \
+    --device "$W/d1.img" --data-dir "$W/data" --no-iscsi \
+    --nvmeof-addr "127.0.0.1:$PORT" --nvmeof-nqn "nqn.2026-09.lo.storm:ci-compose" \
+    > "$W/engine.log" 2>&1 &
+SB_PID=$!
+api() { curl -sf -m 300 -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' "$@"; }
+B="http://127.0.0.1:$MGMT/api/v1"
+for _ in $(seq 1 150); do api "$B/health" >/dev/null 2>&1 && break; sleep 0.2; done
+api "$B/health" >/dev/null || { tail -30 "$W/engine.log"; die "engine did not start"; }
+r=$(curl -s -m 180 -w ' HTTP%{http_code}' -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -X POST "$B/slabs" -d "{\"device_path\":\"$W/d1.img\",\"role\":\"system\"}")
+case "$r" in *HTTP2??) ;; *) die "slab: $r" ;; esac
+
 import() {
-    local name=$1 file=$2
-    local id
-    id=$(api -X POST "http://$MGMT/api/v1/volumes/import" \
-        -d "{\"name\":\"$name\",\"file\":\"$file\",\"format\":\"raw\"}" | j 'd["id"]')
-    for _ in $(seq 1 600); do
-        local st
-        st=$(api "http://$MGMT/api/v1/volumes/import/$id")
+    local id st
+    id=$(api -X POST "$B/volumes/import" -d "{\"name\":\"$1\",\"file\":\"$2\",\"format\":\"raw\"}" | j 'd["id"]') \
+        || die "import $1"
+    for _ in $(seq 1 900); do
+        st=$(api "$B/volumes/import/$id")
         case "$(echo "$st" | j 'd["state"]')" in
             Done|done) echo "$st" | j 'd["volume_id"]'; return 0 ;;
-            Failed|failed) fail "import $name: $(echo "$st" | j 'd.get("error")')" ;;
+            Failed|failed) die "import $1: $(echo "$st" | j 'd.get("error")')" ;;
         esac
         sleep 0.2
     done
-    fail "import $name did not finish"
+    die "import $1 did not finish"
 }
-say "goldens: kernel, initramfs, esp"
-KERNEL_ID=$(import kernel.golden "$KERNEL")
-INITRD_ID=$(import initrd.golden "$INITRD")
-ESP_ID=$(import esp.golden "$WORK/esp.img")
+say "goldens: kernel, initramfs, ESP"
+import kernel.golden "$KERNEL" >/dev/null
+import initrd.golden "$W/pallet-initrd.gz" >/dev/null
+import esp.golden "$W/esp.img" >/dev/null
 KERNEL_LEN=$(stat -c %s "$KERNEL")
-INITRD_LEN=$(stat -c %s "$INITRD")
-echo "kernel $KERNEL_ID ($KERNEL_LEN bytes), initramfs $INITRD_ID ($INITRD_LEN bytes), esp $ESP_ID"
+INITRD_LEN=$(stat -c %s "$W/pallet-initrd.gz")
 
-# ---------------------------------------------------------- the boot pallet
+# ------------------------------------------------------------ the boot pallet
 say "compose the boot pallet"
-PALLET=$(api -X POST "http://$MGMT/api/v1/volumes/compose/pallet" -d "{
-  \"name\": \"boot-v1\", \"pallet\": \"boot\", \"kind\": \"boot\", \"version_label\": \"$(basename "$KERNEL")\",
+P=$(api -X POST "$B/volumes/compose/pallet" -d "{
+  \"name\": \"boot-v1\", \"pallet\": \"kernel1\", \"kind\": \"boot\", \"version_label\": \"ci-compose\",
   \"members\": [
     {\"name\": \"kernel\", \"role\": \"kernel\", \"kind\": \"kernel\", \"volume\": \"kernel.golden\", \"len\": \"$KERNEL_LEN\"},
     {\"name\": \"initramfs\", \"role\": \"initramfs\", \"kind\": \"initramfs\", \"volume\": \"initrd.golden\", \"len\": \"$INITRD_LEN\"},
-    {\"name\": \"cmdline\", \"role\": \"cmdline\", \"kind\": \"bootconfig\", \"text\": \"root=/dev/nvme0n1p2 ro console=ttyS0\"}
-  ]}")
-echo "pallet $(echo "$PALLET" | j 'd["pallet"]["pallet"]') v$(echo "$PALLET" | j 'd["pallet"]["version"]'): shared $(echo "$PALLET" | j 'd["pallet"]["shared_bytes"]') written $(echo "$PALLET" | j 'd["pallet"]["written_bytes"]') size $(echo "$PALLET" | j 'd["virtual_size_human"]')"
-KERNEL_OFF=$(echo "$PALLET" | j 'd["pallet"]["members"][0]["offset"]')
-KERNEL_DIGEST=$(echo "$PALLET" | j 'd["pallet"]["members"][0]["digest"]')
-[ "$(echo "$PALLET" | j 'd["pallet"]["members"][0]["shared"]')" = True ] || fail "the kernel was not shared"
-[ "$KERNEL_DIGEST" = "$(sha256sum "$KERNEL" | cut -d' ' -f1)" ] || fail "the member digest is not the file's"
+    {\"name\": \"cmdline\", \"role\": \"cmdline\", \"kind\": \"bootconfig\", \"text\": \"console=ttyS0 panic=-1 composed=ci\"}
+  ]}") || die "compose/pallet"
+echo "pallet v$(echo "$P" | j 'd["pallet"]["version"]'): shared $(echo "$P" | j 'd["pallet"]["shared_bytes"]') written $(echo "$P" | j 'd["pallet"]["written_bytes"]')"
+KERNEL_OFF=$(echo "$P" | j 'd["pallet"]["members"][0]["offset"]')
+KERNEL_DIGEST=$(echo "$P" | j 'd["pallet"]["members"][0]["digest"]')
+[ "$(echo "$P" | j 'd["pallet"]["members"][0]["shared"]')" = True ] && ok "the kernel is shared in, not copied" \
+    || fail "the kernel was not shared"
+[ "$KERNEL_DIGEST" = "$(sha256sum "$KERNEL" | cut -d' ' -f1)" ] && ok "the member digest is the file's" \
+    || fail "the member digest is not the file's"
 
 # ------------------------------------------------------------------ the disk
 say "compose the disk"
-DISK=$(api -X POST "http://$MGMT/api/v1/volumes/compose/disk" -d '{
+DISK=$(api -X POST "$B/volumes/compose/disk" -d '{
   "name": "node1.disk",
   "partitions": [
     {"volume": "esp.golden", "name": "EFI", "type": "esp"},
-    {"volume": "boot-v1", "priority": 5}
-  ]}')
+    {"volume": "boot-v1", "priority": 15}
+  ]}') || die "compose/disk"
 DISK_ID=$(echo "$DISK" | j 'd["id"]')
-echo "disk $(echo "$DISK" | j 'd["name"]') $(echo "$DISK" | j 'd["virtual_size_human"]'): lba $(echo "$DISK" | j 'd["disk"]["lba"]'), gpt minted $(echo "$DISK" | j 'd["disk"]["gpt_minted"]'), written $(echo "$DISK" | j 'd["disk"]["written_bytes"]'), allocated $(echo "$DISK" | j 'd["allocated_human"]')"
-[ "$(echo "$DISK" | j 'd["disk"]["written_bytes"]')" = 0 ] || fail "a composed disk wrote bytes"
+echo "disk: lba $(echo "$DISK" | j 'd["disk"]["lba"]'), presented at $(echo "$DISK" | j 'd["lba"]'), gpt minted $(echo "$DISK" | j 'd["disk"]["gpt_minted"]'), written $(echo "$DISK" | j 'd["disk"]["written_bytes"]')"
+[ "$(echo "$DISK" | j 'd["lba"]')" = 4096 ] && ok "presented at 4096" || fail "presented at $(echo "$DISK" | j 'd["lba"]')"
+[ "$(echo "$DISK" | j 'd["disk"]["written_bytes"]')" = 0 ] && ok "the composed disk wrote nothing" \
+    || fail "a composed disk wrote bytes"
 PALLET_START=$(echo "$DISK" | j 'd["disk"]["partitions"][1]["start_bytes"]')
 
 # A second node: nothing minted, and the slab has not lost a slot. (A composed
 # disk's `allocated_bytes` counts what it maps, shared or not, so the slab's
 # free count is the number that says whether anything was written.)
-free_slots() { api "http://$MGMT/api/v1/slabs" | j 'sum(s["free_slots"] for s in (d["items"] if isinstance(d, dict) else d))'; }
+free_slots() { api "$B/slabs" | j 'sum(s["free_slots"] for s in (d["items"] if isinstance(d, dict) else d))'; }
 FREE_BEFORE=$(free_slots)
-DISK2=$(api -X POST "http://$MGMT/api/v1/volumes/compose/disk" -d '{
+DISK2=$(api -X POST "$B/volumes/compose/disk" -d '{
   "name": "node2.disk",
   "partitions": [
     {"volume": "esp.golden", "name": "EFI", "type": "esp"},
-    {"volume": "boot-v1", "priority": 5}
-  ]}')
-[ "$(echo "$DISK2" | j 'd["disk"]["gpt_minted"]')" = False ] || fail "the second disk minted a GPT"
-[ "$(free_slots)" = "$FREE_BEFORE" ] || fail "the second disk took slots from the slab"
-echo "node2.disk: gpt reused, slab free slots unchanged at $FREE_BEFORE"
+    {"volume": "boot-v1", "priority": 15}
+  ]}') || die "compose/disk node2"
+[ "$(echo "$DISK2" | j 'd["disk"]["gpt_minted"]')" = False ] && ok "the second disk reused the GPT" \
+    || fail "the second disk minted a GPT"
+[ "$(free_slots)" = "$FREE_BEFORE" ] && ok "the second disk took no slot (free $FREE_BEFORE)" \
+    || fail "the second disk took slots from the slab"
 
-# ---------------------------------------------------------- serve it: ublk
-say "attach as a ublk device"
-ATT=$(api -X POST "http://$MGMT/api/v1/volumes/$DISK_ID/attach" -d '{}')
-UBLK=$(echo "$ATT" | j 'd.get("device_hint","")')
-[ -n "$UBLK" ] || fail "attach did not yield a ublk device: $ATT"
-for _ in $(seq 1 50); do [ -b "$UBLK" ] && break; sleep 0.1; done
-[ -b "$UBLK" ] || fail "$UBLK never appeared"
-partprobe "$UBLK" 2>/dev/null || true
-udevadm settle 2>/dev/null || true
-for _ in $(seq 1 50); do [ -b "${UBLK}p2" ] && break; sleep 0.1; done
-[ -b "${UBLK}p2" ] || fail "the kernel did not find the partitions on $UBLK"
-echo "$UBLK, partitions: $(ls ${UBLK}p*)"
+# ---------------------------------------------------- Linux, over NVMe/TCP
+RA=$(api -X POST "$B/volumes/$DISK_ID/attach" -d "{\"transport\":\"nvme-tcp\",\"host_nqn\":\"$H1\"}") || die "attach"
+SUB=$(echo "$RA" | j 'd["nqn"]'); NSID=$(echo "$RA" | j 'd["nsid"]')
+echo "subsystem $SUB nsid $NSID"
+cat > "$I/env" <<EOF
+PORT=$PORT
+SUB=$SUB
+NSID=$NSID
+H1=$H1
+KSTART=$((PALLET_START + KERNEL_OFF))
+KLEN=$KERNEL_LEN
+KDIGEST=$KERNEL_DIGEST
+EOF
+(cd "$I" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$W/initrd.gz"
 
-# ------------------------------------------------------ external readers
-say "fdisk"
-fdisk -l "$UBLK" | tee "$WORK/fdisk.txt"
-grep -q "Sector size (logical/physical): 4096 bytes / 4096 bytes" "$WORK/fdisk.txt" || fail "fdisk does not see 4096-byte sectors"
-grep -q "Disklabel type: gpt" "$WORK/fdisk.txt" || fail "fdisk does not see a GPT"
-grep -q "EFI System" "$WORK/fdisk.txt" || fail "fdisk does not see the ESP"
-[ "$(grep -c "^${UBLK}p" "$WORK/fdisk.txt")" = 2 ] || fail "fdisk does not see two partitions"
+say "boot $KERNEL in QEMU, attach the composed disk over NVMe/TCP"
+ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
+timeout 300 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 1024 -smp 2 \
+    -nographic -no-reboot -kernel "$KERNEL" -initrd "$W/initrd.gz" \
+    -append "console=ttyS0 panic=-1 loglevel=4" \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 > "$W/guest.log" 2>&1
+tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST)|nvme|FAT' | tail -40
+results=$(tr -d '\r' < "$W/guest.log" | grep -c '^RESULT ')
+bad=$(tr -d '\r' < "$W/guest.log" | grep '^RESULT ' | grep -vc ' PASS')
+[ "$results" -ge 5 ] || fail "the guest reported $results results, expected 5"
+[ "$bad" = 0 ] || fail "$bad guest check(s) failed"
 
-say "blkid + mount the ESP"
-blkid "${UBLK}p1" | tee "$WORK/blkid.txt"
-grep -q 'TYPE="vfat"' "$WORK/blkid.txt" || fail "the ESP is not vfat to blkid"
-mount -o ro "${UBLK}p1" "$WORK/mnt"
-ls -R "$WORK/mnt" | head -20
-[ -f "$WORK/mnt/EFI/BOOT/BOOTX64.EFI" ] || [ -f "$WORK/mnt/EFI/BOOT/MARKER.TXT" ] || fail "the ESP does not hold what we put in it"
-umount "$WORK/mnt"
-
-say "the kernel inside the pallet is the kernel"
-GOT=$(dd if="$UBLK" bs=4096 iflag=skip_bytes,count_bytes skip=$((PALLET_START + KERNEL_OFF)) count="$KERNEL_LEN" status=none | sha256sum | cut -d' ' -f1)
-[ "$GOT" = "$KERNEL_DIGEST" ] || fail "kernel bytes read off the block device do not digest to the file"
-echo "sha256 $GOT == $(basename "$KERNEL")"
-
-say "stormblock pallet, against the block device"
-"$BIN" pallet --drive "$UBLK" list
-"$BIN" pallet --drive "$UBLK" verify all | tee "$WORK/verify.txt"
-grep -qi "fail\|error" "$WORK/verify.txt" && fail "pallet verify reported a problem"
-
-# --------------------------------------------------------------- firmware
-if [ "$BOOTABLE" = 1 ] && command -v qemu-system-x86_64 >/dev/null && [ -r "$OVMF_CODE" ]; then
-    say "OVMF boots it (NVMe, 4096-byte LBAs)"
-    if [ -r "$OVMF_VARS" ]; then
-        cp "$OVMF_VARS" "$WORK/vars.fd"
-        FW=(-drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" -drive if=pflash,format=raw,file="$WORK/vars.fd")
-    else
-        FW=(-bios "$OVMF_CODE")
-    fi
-    ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
-    timeout 120 qemu-system-x86_64 -machine q35,accel=$ACCEL -m 512 -nographic -no-reboot \
-        "${FW[@]}" \
-        -drive file="$UBLK",format=raw,if=none,id=d0,cache=none \
-        -device nvme,id=nvme0,serial=composed \
-        -device nvme-ns,drive=d0,bus=nvme0,logical_block_size=4096,physical_block_size=4096 \
-        -serial file:"$WORK/serial.txt" -monitor none -display none >/dev/null 2>&1 || true
-    sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$WORK/serial.txt" | tr -d '\r' | grep -a "COMPOSED-DISK\|(hd0" | tee "$WORK/boot.txt"
-    grep -q "COMPOSED-DISK-GRUB-UP" "$WORK/boot.txt" || fail "grub did not come up from the composed disk (see $WORK/serial.txt)"
-    grep -q "(hd0,gpt2)" "$WORK/boot.txt" || fail "grub did not list the pallet partition"
-    echo "firmware found the ESP, shim loaded grub, grub read our config and saw both partitions"
+# ------------------------------------- stormblock pallet, against the namespace
+say "stormblock pallet verify, through the engine's NVMe/TCP initiator"
+URI="nvme-tcp://127.0.0.1:$PORT/$SUB?nsid=$NSID"
+STORMBLOCK_HOST_NQN="$H1" "$BIN" pallet --drive "$URI" list 2>&1 | tail -5
+if STORMBLOCK_HOST_NQN="$H1" "$BIN" pallet --drive "$URI" verify all > "$W/verify.txt" 2>&1; then
+    cat "$W/verify.txt"
+    grep -qi "fail\|error" "$W/verify.txt" && fail "pallet verify reported a problem" || ok "pallet verify passed"
 else
-    echo "(firmware boot skipped)"
+    cat "$W/verify.txt"; fail "pallet verify exited non-zero"
 fi
 
-say "PASS"
+# --------------------------------------------------------------- firmware
+say "OVMF boots it (NVMe, 4096-byte LBAs)"
+api -X POST "$B/volumes/$DISK_ID/seal" -d '{"force":true}' >/dev/null || fail "seal"
+api -X POST "$B/releases" -d "{\"version\":\"ci-compose\",\"volume\":\"$DISK_ID\"}" >/dev/null || fail "publish"
+curl -sf -m 600 -H "Authorization: Bearer $TOKEN" -o "$W/disk.img" "$B/releases/ci-compose/image.img" \
+    || die "download the disk"
+echo "disk image: $(stat -c %s "$W/disk.img") bytes"
+if [ -r "$OVMF_VARS" ]; then
+    cp "$OVMF_VARS" "$W/vars.fd"
+    FW=(-drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" -drive if=pflash,format=raw,file="$W/vars.fd")
+else
+    FW=(-bios "$OVMF_CODE")
+fi
+timeout 240 qemu-system-x86_64 -machine q35,accel=$ACCEL -m 1024 -nographic -no-reboot \
+    "${FW[@]}" \
+    -drive file="$W/disk.img",format=raw,if=none,id=d0,snapshot=on \
+    -device nvme,id=nvme0,serial=composed \
+    -device nvme-ns,drive=d0,bus=nvme0,logical_block_size=4096,physical_block_size=4096,bootindex=1 \
+    -serial file:"$W/serial.txt" -monitor none -display none >/dev/null 2>&1 || true
+sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$W/serial.txt" | tr -d '\r' > "$W/serial.clean"
+grep -a "stormuefi\|SELECTION\|kernel1\|Command line\|Linux version\|No bootable\|COMPOSED-DISK" "$W/serial.clean" | head -20
+grep -qa "stormuefi" "$W/serial.clean" && ok "firmware started stormuefi from the 4096-sector ESP" \
+    || fail "firmware did not start stormuefi"
+grep -qa "Linux version" "$W/serial.clean" && ok "stormuefi started the kernel from the boot pallet" \
+    || fail "stormuefi did not start the kernel"
+grep -qa "Command line:.*composed=ci" "$W/serial.clean" && ok "with the pallet's command line" \
+    || fail "the kernel did not get the pallet's command line"
+grep -qa "COMPOSED-DISK-INITRAMFS-UP" "$W/serial.clean" && ok "and the pallet's initramfs ran" \
+    || fail "the pallet's initramfs did not run"
+
+if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi
+echo "FAILURES: $FAILS"; tail -20 "$W/engine.log"; exit 1
