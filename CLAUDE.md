@@ -188,7 +188,8 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
       disk); a failed destination sync frees nothing
 - [x] `boot_iscsi::migrate_boot_volumes_between_slabs` checks the source's
       slots freed, in memory and reopened; CHANGELOG
-- [ ] build VM; check.sh; golden; close
+- [x] migrate/boot_iscsi 24/24, clippy clean; check.sh at c71b637 ALL PASS (1150/1150)
+- [ ] golden; close
 
 ### A drive added grows the pool and is used (2026-10-11, #154, P3) — PARTLY BUILT; DECISION 3 WAITS ON THE OWNER
 
