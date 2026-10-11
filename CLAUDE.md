@@ -180,6 +180,26 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### NVMe/TCP multipath: every storage address, paths in the initiator (2026-10-11, #90, P3) — IN PROGRESS
+
+Owner (on #90): bind each connection to its device and source address
+(SO_BINDTODEVICE + source), not policy routing; verify by per-interface
+tx_bytes. Multiple I/O queues landed with #331 (4/namespace, now per path).
+ARP sysctls are the node network's (stormpump#17).
+- [ ] `[storage] interfaces = [..]` (with `interface`): every address
+      resolved; `netif::data_binds` (all), path sources (iface, ip, prefix)
+- [ ] targets: shared/forge/serve NVMe listeners on every storage address;
+      discovery log one record per address; attach `addresses` all of them;
+      claim replies `addresses` + multipath `uri`
+- [ ] initiator: `nvme-tcp://a:p,b:p/nqn?nsid=N&iopolicy=round-robin|queue-depth`;
+      queues per path; each connection bound to the local interface on the
+      path's subnet (device + source); a failed path skipped (backoff),
+      I/O on the others; per-path counters
+- [ ] tests: URI, in-process two listeners (spread, failover);
+      `ci-nvme-multipath-verify.sh`: two QEMU guests joined by two links on
+      one subnet, the engine's initiator over both, tx_bytes on both NICs
+- [ ] docs (storage-network.md, nvme-access.md, README), CHANGELOG
+
 ### SWIM gossip for membership (2026-10-11, #42, P3) — AFTER #44 AND stormkv#2
 
 Would replace `src/cluster/` membership/heartbeat (opt-in, unused). Blocked
