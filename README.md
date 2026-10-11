@@ -292,7 +292,9 @@ Every other command logs to stderr as before.
 | `image build\|convert\|inspect\|formats\|lay-node\|local-boot` | build disk images and ISOs out of pallets from a TOML spec (`docs/images.md`); `lay-node` lays a node's disk layout (destroys the drive); `local-boot` copies an ESP and boot pallets onto an installed disk |
 | `pallet …` (22 actions) | the pallet lifecycle on drives given with `--drive`: `init-gpt`, `list`, `info`, `status`, `chain`, `verify`, `publish`, `activate`, `successful`, `rollback`, `copy`, `move`, `add-member`/`remove-member`/`copy-member`/`move-member`, `read-only`, `sealed`, `delete`, `prune`, `convert`, `adopt` (`docs/pallets.md`) |
 | `golden` | build an ext4 image from tar archives, with no mount or privilege (`--out --size --tar … [--label] [--read-only]`; `--whiteouts` and `--fsck` are on by default and take a value, e.g. `--fsck false`) — how stormcentral builds service goldens. A check that fails names its findings (the first 20, each with the paths of the inodes it names, logged at WARN, which this command prints on stderr) and the error counts them per code (#86). Known false findings: an entry whose xattrs need a block of their own (SELinux label + ACL) reads `i-blocks-wrong` (mkfs.ext4.rs#25); ACLs from a tar are stored in a form the kernel cannot read (fio.ext4.rs#14) |
-| `attach` | attach a slab offline and export (and optionally mount) volumes in it; with no `--volume`, list them |
+| `golden --from-volume` | write a volume of a slab out as a golden image, with no engine (`--slab … --from-volume <v> --out <file> [--seal] [--fsck false]`, #87): sparse, an ext4 volume checked first, `--seal` seals it in the slab too. `--size` is only for the tar path |
+| `clone` | import a golden into a slab and CoW-clone it, with no engine (`--slab … --golden <image or sealed volume> --name <clone> [--size]`, #87): see *A golden into a slab, offline* |
+| `attach` | attach a slab offline and export (and optionally mount) volumes in it; with no `--volume`, list them. A writable attach writes the volume records back to the slab when it is released |
 | `boot-claim` | ask an appliance which image this machine boots (`--boothost URL --tag <host name or alias>`; the SMBIOS serial by default), print the attach URI |
 | `boot-local` | attach local slabs non-destructively, export the boot volume as `/dev/ublkb0` (plus `--image-store`, `--writable`), optionally flow over to `--local-disk`; `--check` validates and exits |
 | `adopt-ublk` | take over the ublk devices an earlier engine (the initramfs one) created; `--api` serves the management API too — what stormcos runs. With an `[nvmeof]` section in `--config` (`listen_addr`, `nqn`, the #210 host policy) it also serves the shared NVMe/TCP target, so boot claims get an attach (forge mode, #206); without one, what the node was told (`forge.json`: the settings of a `PUT /api/v1/forge`, #272, or off after a `DELETE`); with nothing kept, forge mode **on with the node's defaults** (`0.0.0.0:4420`, `nqn.2026-08.lo.storm:<node name>`, the #210 closed policy, #287). Never the slab's drive raw |
@@ -1599,6 +1601,40 @@ Two answers, in both directions:
 The state is derived on every read from whether the volume resolves, never
 stored — a stored flag would be a second copy of a fact the volume manager
 already holds, wrong exactly when it mattered.
+
+### A golden into a slab, offline (#87)
+
+What the boot path does — a sealed golden in a slab, a copy-on-write clone
+of it as a device — for a build tool with a slab image and no engine
+(tinyanvil, instead of overlayfs on a loop-mounted golden):
+
+```sh
+truncate -s 8G work.slab && stormblock slab format work.slab --role data
+stormblock clone  --slab work.slab --golden fedora.img --name work1
+stormblock attach --slab work.slab --volume work1 --mount /mnt     # Ctrl+C releases
+stormblock golden --slab work.slab --from-volume work1 --out new.img --seal
+```
+
+- `clone` imports the image (raw, qcow2, vmdk) once, as the sealed volume
+  `golden-<stem>-<sha16>`: the first 16 hex digits of the sha256 of its
+  content (the virtual disk, whatever the file's format). The next `clone`
+  of an image with that content finds it and writes nothing. Only non-zero
+  chunks are written; an image whose filesystem does not read is refused,
+  and nothing is kept.
+- The clone is `fs::clone_volume`'s: a fresh filesystem UUID, checked. It is
+  refused when a volume of that name exists. `--golden` may instead name a
+  sealed volume already in the slab (a `--seal`ed result, cloned again).
+- A slab just formatted (records region, nothing allocated) is opened as
+  empty. Any other slab with no records is refused, as by `attach`.
+- `golden --from-volume` writes the volume's whole capacity, sparse, after
+  checking an ext4 volume. `--seal` seals it in the slab as well.
+- Checked by `ci-clone-verify.sh` (the built binary as root in a QEMU guest):
+  golden, format, clone, dedup, mount and write, release, out, the result
+  cloned into a second slab, the golden's other clone untouched with its
+  own UUID.
+
+On a running engine the same is `POST /api/v1/volumes/import` and
+`POST /api/v1/volumes/{id}/clone`.
 
 ### Reading a slab without attaching it
 

@@ -180,22 +180,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Offline clone verb and golden --from-volume (2026-10-11, #87, P3) — IN PROGRESS
+### Offline clone verb and golden --from-volume (2026-10-11, #87, P3) — DONE
 
 tinyanvil wants slab CoW instead of overlayfs on a loop-mounted golden, with
-no running engine.
-- [ ] `image::offline`: import a golden file (raw/qcow2/vmdk) into an opened
-      slab once — sealed volume `golden-<stem>-<sha16>` (sha256 of the
-      image's content), found again by that digest — and CoW-clone it
-      (`fs::clone_volume`: fresh fs UUID, checked); persisted to the slab
-- [ ] CLI `stormblock clone --slab … --golden <file> --name <clone>`
-      (`--golden` may also name a sealed volume in the slab)
-- [ ] `stormblock golden --from-volume <v> --slab … --out <file>` (sparse
-      copy, ext4 checked, `--seal` seals it in the slab too); `--size`
-      only for the tar path
-- [ ] `attach` persists the records when it releases a writable volume
-- [ ] tests (in-process: import, dedup, clone, write, export round trip;
-      the CLI); docs (README), CHANGELOG
+no running engine. README "A golden into a slab, offline".
+- [x] `image::offline`: import a golden file (raw/qcow2/vmdk) once — sealed
+      `golden-<stem>-<sha16>` (sha256 of its content), found again by it —
+      and `fs::clone_volume` (fresh fs UUID, checked); persisted to the slab
+- [x] CLI `clone --slab … --golden <file|sealed volume> --name [--size]`;
+      a freshly formatted slab (no records, 0 slots) opens empty with an
+      array of its own (`open_slabs_or_fresh`)
+- [x] `golden --from-volume <v> --slab … --out [--seal]`; `--size` only for
+      tars
+- [x] `attach` persists the records when it releases a writable volume
+- [x] `cli::offline_clone_tests` (round trip, dedup, re-clone, refusals);
+      `ci-clone-verify.sh` ALL PASS (13 checks, kernel 7.2.8, real ublk
+      mount); check.sh ALL PASS (1170/1170)
 
 ### Storage VLAN: data path on its own network (2026-10-11, #85, P3) — DONE
 
