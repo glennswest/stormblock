@@ -10059,6 +10059,111 @@ file = "{state}"
         assert!(seen.windows(2).all(|w| w[1] < w[0]), "one fewer per extent moved: {seen:?}");
     }
 
+    /// #401: what a slow (SMR) disk is asked to do by a flow-over. The
+    /// copies land as a few large writes in ascending order, not one write
+    /// per extent in whatever order they finished; an extent that is all
+    /// zeros is unmapped from every map naming it (a golden and its clone)
+    /// rather than copied, and reads back as zeros; every other byte reads
+    /// back as it was, and nothing is left on the source.
+    #[tokio::test]
+    async fn a_flow_over_writes_large_runs_in_disk_order_and_does_not_copy_zeros() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::drive::DriveResult;
+        use crate::placement::topology::StorageTier;
+
+        struct Recorded {
+            inner: Arc<dyn BlockDevice>,
+            writes: Arc<std::sync::Mutex<Vec<(u64, u64)>>>,
+        }
+        #[async_trait::async_trait]
+        impl BlockDevice for Recorded {
+            fn id(&self) -> &crate::drive::DeviceId { self.inner.id() }
+            fn capacity_bytes(&self) -> u64 { self.inner.capacity_bytes() }
+            fn block_size(&self) -> u32 { self.inner.block_size() }
+            fn optimal_io_size(&self) -> u32 { self.inner.optimal_io_size() }
+            fn device_type(&self) -> crate::drive::DriveType { self.inner.device_type() }
+            async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> { self.inner.read(offset, buf).await }
+            async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+                self.writes.lock().unwrap().push((offset, buf.len() as u64));
+                self.inner.write(offset, buf).await
+            }
+            async fn flush(&self) -> DriveResult<()> { self.inner.flush().await }
+            async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> { self.inner.discard(offset, len).await }
+            async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> { self.inner.write_zeroes(offset, len).await }
+        }
+
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 48;
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str| dir.path().join(name).display().to_string();
+        let format = |dev: Arc<dyn BlockDevice>| async move {
+            Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System)).await.unwrap()
+        };
+        let mut mgr = VolumeManager::new(SLOT);
+        let src_dev: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&file("appliance.slab"), 4 * EXTENTS * SLOT).await.unwrap());
+        let source = format(src_dev).await;
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+
+        // Every third extent is all zeros (written, so mapped); the rest
+        // carry their own index.
+        let golden = mgr.create_volume_any("golden", EXTENTS * SLOT).await.unwrap();
+        let g = mgr.get_volume(&golden).unwrap();
+        let byte = |e: u64| if e % 3 == 0 { 0u8 } else { (e as u8).wrapping_add(1) };
+        for e in 0..EXTENTS {
+            g.write(e * SLOT, &vec![byte(e); SLOT as usize]).await.unwrap();
+        }
+        g.flush().await.unwrap();
+        let clone = mgr.create_snapshot(golden, "clone").await.unwrap();
+        let mapped = |m: &VolumeManager, v| {
+            let gem = m.gem().clone();
+            async move { gem.read().await.get_volume_map(&v).map(|m| m.extents.len()).unwrap_or(0) }
+        };
+        assert_eq!(mapped(&mgr, golden).await, EXTENTS as usize);
+
+        let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dst_dev: Arc<dyn BlockDevice> = Arc::new(Recorded {
+            inner: Arc::new(FileDevice::open_with_capacity(&file("local.slab"), 4 * EXTENTS * SLOT).await.unwrap()),
+            writes: writes.clone(),
+        });
+        let local = format(dst_dev).await;
+        let (local_id, data_at) = (local.slab_id(), local.data_offset());
+        mgr.add_slab(local).await;
+        writes.lock().unwrap().clear();
+
+        let (moved, failed) = super::flow_system_half(mgr.gem(), mgr.registry(), &[source_id], local_id, || mgr.persist(), None)
+            .await
+            .expect("the flow-over finished");
+        let zeros = (0..EXTENTS).filter(|e| e % 3 == 0).count() as u64;
+        assert_eq!((moved, failed), (EXTENTS, 0), "every extent moved or unmapped, none failed");
+
+        // The copies: slot-sized or larger writes in the data region.
+        let data: Vec<(u64, u64)> =
+            writes.lock().unwrap().iter().copied().filter(|(at, len)| *at >= data_at && *len >= SLOT).collect();
+        let copied: u64 = data.iter().map(|(_, len)| len / SLOT).sum();
+        assert_eq!(copied, EXTENTS - zeros, "only the extents with data are written: {data:?}");
+        assert!(data.len() <= 2, "the window's copies merged into a run or two, not {}: {data:?}", data.len());
+        assert!(data.windows(2).all(|w| w[0].0 < w[1].0), "ascending: {data:?}");
+
+        // Zeros: unmapped in the golden and in its clone, read back as zeros.
+        assert_eq!(mapped(&mgr, golden).await, (EXTENTS - zeros) as usize);
+        assert_eq!(mapped(&mgr, clone).await, (EXTENTS - zeros) as usize);
+        for v in [golden, clone] {
+            let h = mgr.get_volume(&v).unwrap();
+            for e in 0..EXTENTS {
+                let mut back = vec![0xEEu8; SLOT as usize];
+                h.read(e * SLOT, &mut back).await.unwrap();
+                assert!(back.iter().all(|b| *b == byte(e)), "volume {v:?} extent {e}");
+            }
+        }
+        assert_eq!(super::extents_on(mgr.gem(), &[source_id]).await, 0, "nothing left on the source");
+        let snap = crate::flowprogress::FLOW.snapshot().unwrap();
+        assert_eq!(snap.zeroed, zeros);
+        assert_eq!(snap.bytes, (EXTENTS - zeros) * SLOT);
+    }
+
     /// #282: the pacing rule. Over the bound: half the window, a pause of
     /// one flush (at most 10 s). Under it: the window doubles back. No bound,
     /// or no flushes seen: full speed.
