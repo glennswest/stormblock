@@ -4,7 +4,6 @@
 //! Each `ThinVolume` implements `BlockDevice`, so target protocols
 //! (NVMe-oF, iSCSI) see volumes as plain block devices.
 
-#[cfg(feature = "stormfs-data")]
 pub mod catalog;
 pub mod chunk;
 pub mod extent;
