@@ -611,7 +611,9 @@ async fn a_sealed_volumes_digest_is_every_byte_and_kept_for_its_seal() {
 
 /// #166: the web UI (feature `ui`) is behind the same check as the API: no
 /// token, no page and no form; the node token reads its pages; its forms
-/// (creating and deleting arrays, volumes, exports) need the admin token.
+/// (creating and deleting arrays, volumes, exports) need the admin token:
+/// the node token is refused by the admin gate (401, as for any destructive
+/// verb).
 #[cfg(feature = "ui")]
 #[tokio::test]
 async fn the_web_ui_is_behind_the_token_and_its_forms_behind_the_admin_gate() {
@@ -630,8 +632,11 @@ async fn the_web_ui_is_behind_the_token_and_its_forms_behind_the_admin_gate() {
     assert_eq!(call_ui(reqwest::Method::GET, "/ui/volumes", Some(NODE)).await.unwrap().status(), 200, "the node token reads a page");
     for (m, p) in [(reqwest::Method::POST, "/ui/volumes"), (reqwest::Method::POST, "/ui/arrays"), (reqwest::Method::DELETE, "/ui/volumes/x")] {
         assert_eq!(call_ui(m.clone(), p, None).await.unwrap().status(), 401, "{m} {p} with no token");
-        assert_eq!(call_ui(m.clone(), p, Some(NODE)).await.unwrap().status(), 403, "{m} {p} with the node token");
+        // As every destructive verb answers the node token (#274).
+        let r = call_ui(m.clone(), p, Some(NODE)).await.unwrap();
+        assert_eq!(r.status(), 401, "{m} {p} with the node token");
+        assert!(r.text().await.unwrap().contains("admin token required"), "{m} {p}: the admin gate says why");
     }
     assert!(n.state.volume_manager.lock().await.list_volumes().await.iter().all(|v| v.1 != "ui-made"), "nothing was made");
-    assert_ne!(call_ui(reqwest::Method::POST, "/ui/volumes", Some(ADMIN)).await.unwrap().status(), 403, "the admin token gets through the gate");
+    assert_ne!(call_ui(reqwest::Method::POST, "/ui/volumes", Some(ADMIN)).await.unwrap().status(), 401, "the admin token gets through the gate");
 }
