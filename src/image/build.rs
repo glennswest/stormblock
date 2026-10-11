@@ -1534,9 +1534,9 @@ members = [ {{ name = "cmdline", role = "cmdline", kind = "bootconfig", text = "
         let spec = |clones: &str| {
             crate::image::ImageSpec::from_toml(&format!(
                 r#"
-size = "256M"
+size = "512M"
 [slab]
-size = "rest"
+size = "256M"
 [[slab.golden]]
 name = "blank"
 file = "{blank}"
