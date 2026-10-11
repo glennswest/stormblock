@@ -491,6 +491,12 @@ impl VolumeManager {
         let mut laid: Vec<Laid> = Vec::with_capacity(spec.partitions.len());
         let mut cursor = slot;
         for p in &spec.partitions {
+            // Four bits each in the GPT attributes: refused, never masked (#102).
+            if let Err(e) = crate::pallet::manager::check_attributes(p.priority, p.tries.unwrap_or(0)) {
+                return Err(invalid(format!("partition {}: {e}", p.volume)));
+            }
+        }
+        for p in &spec.partitions {
             let handle = self.get_volume_handle(&p.volume).ok_or(VolumeError::VolumeNotFound(p.volume))?;
             if role.is_none() {
                 role = self.volume_role(&p.volume);
@@ -1326,6 +1332,24 @@ mod tests {
         let dev = vm.get_volume(&VolumeId(report.id)).unwrap();
         let view = PartitionView::whole(dev);
         Pallet::read(&view).await.unwrap().verify_all(&view).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// #102: a pallet partition's priority or tries past four bits is
+    /// refused, before anything is laid, rather than masked into the GPT.
+    #[tokio::test]
+    async fn a_partition_priority_past_four_bits_is_refused() {
+        let (mut vm, path) = manager().await;
+        let kernel = golden(&mut vm, "kernel.golden", SLOT, 0x4B).await;
+        let initrd = golden(&mut vm, "initrd.golden", SLOT, 0x49).await;
+        let pallet = vm.compose_pallet(boot_pallet(kernel, initrd)).await.unwrap();
+        for (priority, tries, field) in [(Some(20), None, "priority = 20"), (Some(5), Some(16), "tries = 16")] {
+            let mut spec = DiskSpec::new("node1.disk");
+            spec.partitions.push(DiskPartition { priority, tries, ..DiskPartition::new(VolumeId(pallet.id)) });
+            let e = vm.compose_disk(spec).await.unwrap_err().to_string();
+            assert!(e.contains(field) && e.contains("0..=15"), "{e}");
+        }
+        assert!(vm.find_volume("node1.disk").await.is_none(), "nothing made");
         let _ = std::fs::remove_file(&path);
     }
 

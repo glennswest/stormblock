@@ -98,6 +98,10 @@ pub enum PalletError {
     OutOfRange { offset: u64, len: u64 },
     /// A fixed-width field in the on-disk format cannot hold this value.
     TooLong { field: &'static str, max: usize, got: usize },
+    /// A value past what its GPT attribute field holds: priority and tries
+    /// are four bits each (§2.2), and a wider value would be masked into a
+    /// different one (#102), so it is refused.
+    AttributeRange { field: &'static str, max: u8, got: u8 },
     /// No free run on the drive large enough, or no free GPT entry.
     NoSpace { need: u64, largest_free: u64 },
     /// The requested range overlaps a partition that already exists. Firmware
@@ -144,6 +148,10 @@ impl fmt::Display for PalletError {
             PalletError::TooLong { field, max, got } => {
                 write!(f, "{field} is {got} bytes, and the format allows {max}")
             }
+            PalletError::AttributeRange { field, max, got } => write!(
+                f,
+                "{field} = {got} does not fit: the GPT attribute is four bits, 0..={max}"
+            ),
             PalletError::NoSpace { need, largest_free } => write!(
                 f,
                 "no free run large enough: need {need} bytes, largest free run is {largest_free}"

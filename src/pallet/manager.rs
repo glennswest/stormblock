@@ -47,7 +47,24 @@ enum Proven {
 }
 
 /// The highest priority the 4-bit GPT field can hold — what activation sets.
-const TOP_PRIORITY: u8 = 15;
+pub const TOP_PRIORITY: u8 = 15;
+/// The most boot attempts the 4-bit GPT field can hold.
+pub const MAX_TRIES: u8 = 15;
+
+/// Refuse a priority or tries the GPT attribute cannot hold (#102): the
+/// encoder masks to four bits, so 20 would land as 4, below a sibling at 10,
+/// and only the boot would show it.
+pub fn check_attributes(priority: Option<u8>, tries: u8) -> Result<()> {
+    if let Some(p) = priority {
+        if p > TOP_PRIORITY {
+            return Err(PalletError::AttributeRange { field: "priority", max: TOP_PRIORITY, got: p });
+        }
+    }
+    if tries > MAX_TRIES {
+        return Err(PalletError::AttributeRange { field: "tries", max: MAX_TRIES, got: tries });
+    }
+    Ok(())
+}
 
 // ------------------------------------------------------------------ content
 
@@ -527,6 +544,7 @@ impl PalletManager {
     /// Compose and publish: lay new sealed content down beside whatever is
     /// running, and never touch what is in use.
     pub async fn publish(&self, spec: PublishSpec) -> Result<PalletLocation> {
+        check_attributes(spec.priority, spec.tries)?;
         let existing = self.store.scan().await;
         let version = match spec.version {
             Some(v) => v,

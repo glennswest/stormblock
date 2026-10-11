@@ -49,8 +49,8 @@ from_dir = "build/esp"          # or from_image = "esp.img"
 name          = "stormcos-boot"
 kind          = "boot"
 version_label = "6.12.0-200.fc41"
-priority      = 15              # selection order; higher wins
-# tries      = 3                # boot attempts (default 3); 0 needs successful
+priority      = 15              # selection order; higher wins; 0..=15 (four bits, more is refused)
+# tries      = 3                # boot attempts (default 3, at most 15); 0 needs successful
 # successful = true             # the proven fallback (#57); default: earned on its first good boot
 members = [
   { name = "kernel",    role = "kernel",    kind = "kernel",     file = "build/vmlinuz" },

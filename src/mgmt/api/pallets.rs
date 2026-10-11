@@ -91,7 +91,9 @@ fn err(e: PalletError) -> Response {
         PalletError::NotFound(_) => ApiError::not_found(e.to_string()),
         PalletError::Refused(_) | PalletError::Overlaps { .. } => ApiError::conflict(e.to_string()),
         PalletError::NoSpace { .. } => ApiError::conflict(e.to_string()),
-        PalletError::TooLong { .. } | PalletError::BadGeometry(_) => {
+        PalletError::TooLong { .. }
+        | PalletError::BadGeometry(_)
+        | PalletError::AttributeRange { .. } => {
             ApiError::bad_request(e.to_string())
         }
         other => ApiError::internal(other.to_string()),

@@ -221,6 +221,8 @@ impl ImageBuilder {
 
     /// Build the raw image at `out`.
     pub async fn build(&self, out: &Path) -> Result<BuildReport> {
+        // Again here: a spec can be made in code as well as parsed.
+        self.spec.check()?;
         let declared = size_of(&self.spec.size)?;
         let rest_count = self.count_rest();
         if rest_count > 1 {
@@ -1516,6 +1518,48 @@ members = [ {{ name = "cmdline", role = "cmdline", kind = "bootconfig", text = "
         store.add_drive(out.display().to_string(), dev);
         let loc = crate::pallet::PalletManager::new(store).get(id).await.unwrap();
         assert!(!loc.attributes.successful && loc.attributes.tries_left > 0, "earned, not given: {:?}", loc.attributes);
+    }
+
+    /// #102: a priority or tries past the GPT attribute's four bits is
+    /// refused when the spec is read, naming the range, not masked (20 was
+    /// laid as 4, below a sibling at 10). 15 is the top and lands as 15.
+    #[tokio::test]
+    async fn a_priority_or_tries_past_four_bits_is_refused_not_masked() {
+        let text = |attrs: &str| {
+            format!(
+                r#"
+size = "64M"
+[[pallet]]
+name = "boot-v2"
+kind = "boot"
+{attrs}
+members = [ {{ name = "cmdline", role = "cmdline", kind = "bootconfig", text = "root=ublk0 ro" }} ]
+"#
+            )
+        };
+        let e = crate::image::ImageSpec::from_toml(&text("priority = 20")).unwrap_err().to_string();
+        assert!(e.contains("boot-v2") && e.contains("priority = 20") && e.contains("0..=15"), "{e}");
+        let e = crate::image::ImageSpec::from_toml(&text("priority = 10\ntries = 16")).unwrap_err().to_string();
+        assert!(e.contains("tries = 16") && e.contains("0..=15"), "{e}");
+
+        // A spec made in code is checked by the build, before anything is written.
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut spec = crate::image::ImageSpec::from_toml(&text("priority = 10")).unwrap();
+        spec.pallets[0].priority = Some(20);
+        let out = dir.path().join("masked.img");
+        let e = crate::image::ImageBuilder::new(spec).build(&out).await.unwrap_err().to_string();
+        assert!(e.contains("priority = 20"), "{e}");
+        assert!(!out.exists(), "nothing laid down");
+
+        let out = dir.path().join("top.img");
+        let spec = crate::image::ImageSpec::from_toml(&text("priority = 15\ntries = 15")).unwrap();
+        let report = crate::image::ImageBuilder::new(spec).build(&out).await.unwrap();
+        let id = report.partitions.iter().find_map(|p| p.pallet_id).unwrap();
+        let dev = crate::drive::open_path(out.to_str().unwrap(), true).await.unwrap();
+        let mut store = crate::pallet::PalletStore::new(Vec::new());
+        store.add_drive(out.display().to_string(), dev);
+        let loc = crate::pallet::PalletManager::new(store).get(id).await.unwrap();
+        assert_eq!((loc.attributes.priority, loc.attributes.tries_left), (15, 15));
     }
 
     /// #124: `clones = [...]` makes every clone it names, beside the first:

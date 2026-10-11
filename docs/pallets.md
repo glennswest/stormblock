@@ -84,7 +84,10 @@ way code does.
 
 Priority is four bits, so activation **renumbers** rather than climbs: the
 target takes 15 and its competitors are pushed down below it in their existing
-order.
+order. A `priority` or `tries` past 15 is **refused**, by `image build`'s spec,
+`POST /api/v1/pallets`, `pallet publish` and `compose/disk`, and never
+masked: masked, 20 was laid as 4, below a sibling at 10, and only the boot
+showed it (#102).
 
 ### 2.3 Partition contents
 

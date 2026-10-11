@@ -294,7 +294,24 @@ pub struct GoldenSpec {
 
 impl ImageSpec {
     pub fn from_toml(text: &str) -> Result<ImageSpec> {
-        toml::from_str(text).map_err(|e| ImageError::Spec(e.to_string()))
+        let spec: ImageSpec = toml::from_str(text).map_err(|e| ImageError::Spec(e.to_string()))?;
+        spec.check()?;
+        Ok(spec)
+    }
+
+    /// What a spec says that cannot be built as written, refused before
+    /// anything is laid down: a pallet's priority or tries past the four
+    /// bits its GPT attribute holds (#102).
+    pub fn check(&self) -> Result<()> {
+        for p in &self.pallets {
+            crate::pallet::manager::check_attributes(p.priority, p.tries.unwrap_or(0)).map_err(|e| {
+                ImageError::Spec(format!(
+                    "pallet '{}': {e}",
+                    p.name.as_deref().unwrap_or("(from_image)")
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     pub async fn load(path: impl AsRef<std::path::Path>) -> Result<ImageSpec> {

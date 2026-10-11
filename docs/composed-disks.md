@@ -138,7 +138,7 @@ any sealed volume. Its span is the volume's size rounded up to a slot; they
 are laid out in order after the head slot. `type` defaults to what the volume
 *is* — `pallet` for a pallet volume, `linux` otherwise; say `esp` for an ESP.
 For a pallet partition `priority` and `tries` become the GPT attribute bits
-the boot ladder reads, `sealed`/`read-only`/`required` are set, and the
+the boot ladder reads (four bits each: past 15 is refused, #102), `sealed`/`read-only`/`required` are set, and the
 superblock's own flags already agree.
 
 ```json
