@@ -4458,10 +4458,28 @@ pub async fn run() -> anyhow::Result<()> {
         if fsck {
             let check = crate::fs::ext4::check(&dev).await?;
             if !check.is_clean() {
+                // Name what failed (#86): each problem with the paths of the
+                // inodes it names, the first GOLDEN_FINDINGS of them, and a
+                // count per code in the error.
+                let ex = crate::fs::ext4::explain(&dev, &check).await;
+                for f in ex.findings.iter().take(GOLDEN_FINDINGS) {
+                    tracing::warn!("{name}: {f}");
+                    eprintln!("  {name}: {f}");
+                }
+                if ex.findings.len() > GOLDEN_FINDINGS {
+                    eprintln!(
+                        "  {name}: … and {} more",
+                        ex.findings.len() - GOLDEN_FINDINGS
+                    );
+                }
+                if let Some(e) = &ex.walk_error {
+                    eprintln!("  {name}: paths incomplete: {e}");
+                }
                 anyhow::bail!(
-                    "{name} does not check out after {files} entries — {} problem(s); \
+                    "{name} does not check out after {files} entries — {} problem(s): {}; \
                      not shipping a golden every clone would inherit",
-                    check.problems.len()
+                    ex.findings.len(),
+                    ex.summary()
                 );
             }
             println!("  {name}: checks out");
@@ -7550,6 +7568,10 @@ pub(crate) async fn report_first_local_boot(dir: &std::path::Path) -> Option<Rep
 pub(crate) const SYSTEM_DATA_VOLUME: &str = "system-data";
 /// Its size: thin, so it costs what is written.
 const SYSTEM_DATA_BYTES: u64 = 4 << 30;
+
+/// How many of a failed golden check's findings `golden` prints one by one
+/// (#86); the rest are counted, and the error carries a count per code.
+const GOLDEN_FINDINGS: usize = 20;
 /// Where `boot-local` says which ublk device it is, for `/init` to mount.
 pub(crate) const SYSTEM_DATA_DEV_FILE: &str = "/run/stormblock/system-data.dev";
 

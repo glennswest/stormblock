@@ -180,6 +180,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### golden names the entries a check rejects (2026-10-11, #86, P3) — IN PROGRESS
+
+- [ ] `fs::ext4::explain`: each non-note problem with the paths of the
+      inodes its message names (one walk), a count per code
+- [ ] `stormblock golden`: the first 20 findings (WARN + stderr), the error
+      carries the per-code counts
+- [ ] tests: the paths named (links, root, orphan); a tar with SELinux
+      labels and POSIX ACLs unpacked and checked (the tinyanvil case)
+- [ ] docs, CHANGELOG; sc-build; what SELinux/ACL attrs do (filed where
+      the fault is, if any)
+
 ### CSI integration test on the 4-node cluster (2026-10-11, #15, P3) — WAITING ON THE OWNER
 
 Nothing here runs a CSI driver. The engine's half (`/v1`, `contract/`) is

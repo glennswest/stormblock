@@ -552,6 +552,159 @@ pub async fn repair(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<fsck::FsckRepo
         .map_err(|e| anyhow::anyhow!("repairing the filesystem: {e}"))
 }
 
+/// One problem a check found, with the paths of the inodes it names.
+#[derive(Debug, Clone)]
+pub struct Finding {
+    /// The pass that found it.
+    pub pass: u8,
+    /// The check's stable short identifier (`inode-csum`, `dir-entry-type`, …).
+    pub code: &'static str,
+    /// What is wrong, as the check said it.
+    pub message: String,
+    /// Each inode the message names, with the paths that reach it (empty
+    /// when no directory entry does: an orphan, or a tree too broken to walk).
+    pub inodes: Vec<(u32, Vec<String>)>,
+}
+
+impl std::fmt::Display for Finding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pass {} {}: {}", self.pass, self.code, self.message)?;
+        for (ino, paths) in &self.inodes {
+            match paths.as_slice() {
+                [] => write!(f, " [inode {ino}: no path reaches it]")?,
+                [one] => write!(f, " [inode {ino} = {one}]")?,
+                [first, rest @ ..] => {
+                    write!(f, " [inode {ino} = {first} and {} more link(s)]", rest.len())?
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What a failed check found, in a form a person can act on (#86): every
+/// problem with the paths of the inodes it names, and a count per code.
+#[derive(Debug, Clone, Default)]
+pub struct Explained {
+    pub findings: Vec<Finding>,
+    /// `(code, count)`, most frequent first.
+    pub by_code: Vec<(&'static str, usize)>,
+    /// Why the paths could not be looked up, when they could not.
+    pub walk_error: Option<String>,
+}
+
+impl Explained {
+    /// `code ×n, code ×n`, for a one-line summary.
+    pub fn summary(&self) -> String {
+        self.by_code
+            .iter()
+            .map(|(c, n)| format!("{c} \u{d7}{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// The inode numbers a check's message names: `inode N`, `directory N`.
+/// Messages are sentences, so this reads the number after either word.
+pub fn inodes_named(message: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let words: Vec<&str> = message.split_whitespace().collect();
+    for w in words.windows(2) {
+        if w[0] == "inode" || w[0] == "directory" {
+            let digits: String = w[1].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u32>() {
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Explain a check: the problems that make it unclean (notes are not),
+/// with the paths of the inodes each names. The tree is walked once, and
+/// only when some problem names an inode; a walk that fails leaves the
+/// findings without paths and says why.
+pub async fn explain(dev: &Arc<dyn BlockDevice>, report: &fsck::FsckReport) -> Explained {
+    let problems: Vec<&fsck::Problem> = report.problems.iter().filter(|p| !p.is_note()).collect();
+    let mut wanted: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
+    for p in &problems {
+        for ino in inodes_named(&p.message) {
+            wanted.entry(ino).or_default();
+        }
+    }
+    let walk_error = if wanted.is_empty() { None } else { paths_of(dev, &mut wanted).await.err() };
+
+    let mut counts: Vec<(&'static str, usize)> = Vec::new();
+    let findings = problems
+        .iter()
+        .map(|p| {
+            match counts.iter_mut().find(|(c, _)| *c == p.code) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((p.code, 1)),
+            }
+            Finding {
+                pass: p.pass,
+                code: p.code,
+                message: p.message.clone(),
+                inodes: inodes_named(&p.message)
+                    .into_iter()
+                    .map(|i| (i, wanted.get(&i).cloned().unwrap_or_default()))
+                    .collect(),
+            }
+        })
+        .collect();
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    Explained { findings, by_code: counts, walk_error }
+}
+
+/// Fill `wanted` with every path that reaches each of its inodes. The root
+/// is inode 2 and has no entry of its own, so it is named `/`.
+async fn paths_of(
+    dev: &Arc<dyn BlockDevice>,
+    wanted: &mut std::collections::HashMap<u32, Vec<String>>,
+) -> Result<(), String> {
+    if let Some(p) = wanted.get_mut(&2) {
+        p.push("/".into());
+    }
+    let vol = fio_ext4::Volume::open(VolumeDevice::opaque(dev.clone()))
+        .await
+        .map_err(|e| format!("opening the filesystem to name the inodes: {e}"))?;
+    let mut dirs = vec!["/".to_string()];
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(2u32);
+    let mut unread = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        let entries = match vol.read_dir(&dir).await {
+            Ok(e) => e,
+            // A directory that cannot be read is often what the check is
+            // about; keep walking the rest and say which.
+            Err(e) => {
+                unread.push(format!("{dir}: {e}"));
+                continue;
+            }
+        };
+        for e in entries {
+            if e.name == "." || e.name == ".." {
+                continue;
+            }
+            let path = if dir == "/" { format!("/{}", e.name) } else { format!("{dir}/{}", e.name) };
+            if let Some(p) = wanted.get_mut(&e.inode) {
+                p.push(path.clone());
+            }
+            if e.is_dir && seen.insert(e.inode) {
+                dirs.push(path);
+            }
+        }
+    }
+    if unread.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("could not read {} directory(ies): {}", unread.len(), unread.join("; ")))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
@@ -699,6 +852,145 @@ mod tests {
         let p = path.to_str().unwrap().to_string();
         let dev = FileDevice::open_with_capacity(&p, size).await.unwrap();
         (Arc::new(dev), p)
+    }
+
+    #[test]
+    fn the_inodes_a_message_names_are_read_out_of_it() {
+        assert_eq!(inodes_named("inode 12 checksum does not match its contents"), vec![12]);
+        assert_eq!(
+            inodes_named("directory 2 entry 'etc' has file type 1 but inode 13 is type 2"),
+            vec![2, 13]
+        );
+        assert_eq!(inodes_named("inode 7, inode 7 again"), vec![7]);
+        assert!(inodes_named("block bitmap differences: +1234").is_empty());
+    }
+
+    /// #86: a failed check names its entries — the path of each inode a
+    /// problem names, every link to it, and a count per code.
+    #[tokio::test]
+    async fn a_failed_check_names_the_paths_of_the_inodes_it_found_wrong() {
+        let (dev, path) = scratch("explain", 64 * 1024 * 1024).await;
+        format(&dev, &Ext4Params::default()).await.unwrap();
+        let (a, b) = {
+            let mut vol = fio_ext4::Volume::open(VolumeDevice::opaque(dev.clone())).await.unwrap();
+            vol.mkdir_all("/etc/selinux").await.unwrap();
+            let a = vol.write("/etc/selinux/config", b"SELINUX=enforcing\n").await.unwrap();
+            vol.link("/etc/selinux/config", "/etc/selinux.conf").await.unwrap();
+            let b = vol.write("/etc/hostname", b"anvil\n").await.unwrap();
+            vol.flush().await.unwrap();
+            (a, b)
+        };
+        let problem = |code: &'static str, message: String| fsck::Problem {
+            pass: 1,
+            code,
+            severity: Severity::Serious,
+            message,
+            fixed: false,
+        };
+        let report = fsck::FsckReport {
+            problems: vec![
+                problem("inode-csum", format!("inode {a} checksum does not match its contents")),
+                problem("inode-csum", format!("inode {b} checksum does not match its contents")),
+                problem("dir-entry-type", format!("directory 2 entry 'x' points at inode {b}")),
+                problem("inode-csum", "inode 4000 checksum does not match its contents".into()),
+            ],
+            ..Default::default()
+        };
+        let ex = explain(&dev, &report).await;
+        assert!(ex.walk_error.is_none(), "{:?}", ex.walk_error);
+        assert_eq!(ex.findings.len(), 4);
+        let mut links = ex.findings[0].inodes[0].1.clone();
+        links.sort();
+        assert_eq!(links, vec!["/etc/selinux.conf", "/etc/selinux/config"]);
+        assert_eq!(ex.findings[1].inodes, vec![(b, vec!["/etc/hostname".to_string()])]);
+        assert_eq!(ex.findings[2].inodes[0], (2, vec!["/".to_string()]));
+        assert_eq!(ex.findings[3].inodes, vec![(4000, vec![])]);
+        assert_eq!(ex.by_code, vec![("inode-csum", 3), ("dir-entry-type", 1)]);
+        let line = ex.findings[1].to_string();
+        assert!(line.contains("pass 1 inode-csum") && line.contains("= /etc/hostname"), "{line}");
+        assert!(ex.findings[3].to_string().contains("no path reaches it"));
+        assert_eq!(ex.summary(), "inode-csum \u{d7}3, dir-entry-type \u{d7}1");
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A POSIX ACL as `setfacl` hands it to the kernel (and tar records it):
+    /// version 2, then (tag u16, perm u16, id u32) entries.
+    fn posix_acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
+        let mut v = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in entries {
+            v.extend_from_slice(&tag.to_le_bytes());
+            v.extend_from_slice(&perm.to_le_bytes());
+            v.extend_from_slice(&id.to_le_bytes());
+        }
+        v
+    }
+
+    /// #86's case: a root tar carrying SELinux labels and POSIX ACLs (what
+    /// `tar --xattrs` of a Fedora root records), built the way `stormblock
+    /// golden` builds one: unpacked, then checked.
+    #[tokio::test]
+    async fn a_tar_with_selinux_labels_and_acls_unpacks_and_checks_clean() {
+        use fio_ext4::tar::{EntryKind, Header, Writer};
+        let (dev, path) = scratch("xattrs", 128 * 1024 * 1024).await;
+        let params = Ext4Params {
+            journal: Some(false),
+            reserved_percent: 0.0,
+            ..Default::default()
+        };
+        format(&dev, &params).await.unwrap();
+
+        let label = |t: &str| ("security.selinux".to_string(), format!("system_u:object_r:{t}:s0\0").into_bytes());
+        // user::rwx, user:1000:r-x, group::r-x, mask::r-x, other::r-x
+        let acl = posix_acl(&[(0x01, 7, u32::MAX), (0x02, 5, 1000), (0x04, 5, u32::MAX), (0x10, 5, u32::MAX), (0x20, 5, u32::MAX)]);
+        let mut w = Writer::new(Vec::new());
+        let dir = |p: &str, x: Vec<(String, Vec<u8>)>| Header { xattrs: x, ..Header::directory(p) };
+        let dirs = [
+            dir("etc", vec![label("etc_t")]),
+            dir("var", vec![label("var_t")]),
+            dir("var/log", vec![label("var_log_t")]),
+            dir(
+                "var/log/journal",
+                vec![
+                    label("var_log_t"),
+                    ("system.posix_acl_access".into(), acl.clone()),
+                    ("system.posix_acl_default".into(), acl.clone()),
+                ],
+            ),
+        ];
+        for d in &dirs {
+            w.append(d, b"").await.unwrap();
+        }
+        for i in 0..40 {
+            let body = format!("file {i}\n");
+            let mut h = Header::file(format!("etc/f{i}.conf"), body.len() as u64);
+            h.xattrs = vec![label("etc_t")];
+            if i % 4 == 0 {
+                h.xattrs.push(("system.posix_acl_access".into(), acl.clone()));
+            }
+            if i % 5 == 0 {
+                h.xattrs.push(("security.capability".into(), vec![1, 0, 0, 2, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+            }
+            w.append(&h, body.as_bytes()).await.unwrap();
+        }
+        let link = Header { kind: EntryKind::Symlink, link: "../etc".into(), xattrs: vec![label("etc_t")], ..Header::file("var/etc", 0) };
+        w.append(&link, b"").await.unwrap();
+        w.finish().await.unwrap();
+        let archive = w.into_inner();
+
+        crate::serve::tarfs::unpack(
+            &dev,
+            std::io::Cursor::new(archive),
+            "/",
+            crate::serve::tarfs::parse_compression(None).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+        let report = check(&dev).await.unwrap();
+        let ex = explain(&dev, &report).await;
+        let lines: Vec<String> = ex.findings.iter().map(|f| f.to_string()).collect();
+        assert!(report.is_clean(), "{}: {lines:#?}", ex.summary());
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
