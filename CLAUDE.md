@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Discovery records advertise the bind address (2026-10-11, #116) — IN PROGRESS
+### Discovery records advertise the bind address (2026-10-11, #116) — DONE (golden-stormblock-c8f8f2594866)
 
 The per-volume subsystems the issue's comment named are serve-listener
 subsystems since #188; every target sets `advertised_addr`. Left: a host
@@ -193,7 +193,7 @@ bind address (`0.0.0.0`).
 - [x] tests (unit; discovery page read off the wire); README, CHANGELOG
 - [x] nvmeof/forge/serve/discovery 156/156, clippy clean; check.sh at
       753900d ALL PASS (1147/1147)
-- [ ] golden; close
+- [x] golden golden-stormblock-c8f8f2594866 (a54eac1); closed
 
 ### The web UI behind the token (2026-10-11, #166) — DONE
 
