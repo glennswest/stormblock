@@ -6414,7 +6414,9 @@ async fn startup_arrays_and_volumes(
     assembled_sets: bool,
 ) -> anyhow::Result<Option<Arc<dyn BlockDevice>>> {
     use crate::raid::RaidArrayId;
-    let same = |a: &Arc<dyn BlockDevice>, b: &Arc<dyn BlockDevice>| std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b));
+    let same = |a: &Arc<dyn BlockDevice>, b: &Arc<dyn BlockDevice>| {
+        Arc::as_ptr(a) as *const () == Arc::as_ptr(b) as *const ()
+    };
     let opened: Vec<(String, Arc<dyn BlockDevice>)> =
         state.drives.read().await.iter().map(|d| (d.path.clone(), d.device.clone())).collect();
     let set_named = |name: &str| {
