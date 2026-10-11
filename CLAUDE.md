@@ -180,6 +180,30 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Storage VLAN: data path on its own network (2026-10-11, #85, P3) — IN PROGRESS
+
+Owner: a storage VLAN is a different NIC and network (own subnet, MTU,
+usually no gateway); the knob is which interface. Today every advertised
+address is `management.advertised_addr` or the default route's.
+- [ ] `src/netif.rs`: an interface's address (getifaddrs: IPv4, else global
+      IPv6), operstate and MTU (sysfs); a process-wide data address
+      (`data_bind`: a wildcard target bind → the storage address)
+- [ ] `[storage] interface | address | advertised_addr | mtu | wait_secs`
+      (`$STORMBLOCK_STORAGE_INTERFACE`), resolved at start (waits for the
+      address); unresolved = the data targets bound to loopback, ERROR, health
+- [ ] binds: shared NVMe-oF, iSCSI, forge, serve listeners through `data_bind`
+- [ ] advertised per role: `Config::data_host` (attach replies, claims,
+      discovery log pages, /serve/v1) vs the control host (beacon, forge
+      trust URL); `[management] interface` for the control side
+- [ ] beacon on `[management] interface` (IP_MULTICAST_IF + join on it);
+      beacon carries `data_addr`, `data_path`; a peer whose data path is
+      down stays listed and leaves placement
+- [ ] health `data_path {interface, state, address, mtu, expected_mtu}`,
+      `control`; MTU mismatch WARN
+- [ ] tests (unit, `lo`, fake sysfs); a QEMU check with a real second
+      interface (bound only there, down → health says so, API answers);
+      docs (docs/storage-network.md, README), CHANGELOG
+
 ### vhost-user-blk backend (2026-10-11, #82, P3) — DONE
 
 - [x] `drive::vhost_user_blk`: control thread on the socket (SCM_RIGHTS),
