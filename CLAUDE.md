@@ -285,15 +285,17 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### Benches in their own crate (2026-10-10, #211) — PAUSED for P0 #391 (back in line; #391 done)
+### Benches in their own crate (2026-10-10, #211) — IN PROGRESS
 
 - [x] `benches/Cargo.toml` (`stormblock-benches`, criterion, `publish =
       false`), workspace member; criterion and `[[bench]]` out of the root;
       Cargo.lock by hand; README, CHANGELOG
 - [x] `cargo tree -e dev -p stormblock | grep -c criterion` = 0 (at cf81c60)
 - [x] found: pdu_parsing needs tokio (never built before); added (019ef67)
-- [ ] the benches compile at 019ef67 (a build was queued when paused:
-      `cargo bench -p stormblock-benches --no-run`), check.sh; close
+- [x] `autobenches = false` in the root: `--all-targets` found benches/*.rs
+      as the root's own (found on #300)
+- [ ] on a build VM: `cargo check --all-targets` (root), `cargo bench -p
+      stormblock-benches --no-run`, the criterion count, check.sh; close
 
 ### API stalls on a RAID1 head during a rebuild (2026-10-10, #266) — DONE (test)
 

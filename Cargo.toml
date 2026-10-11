@@ -15,6 +15,10 @@ license = "TBD"
 rust-version = "1.75"
 # One in-process integration-test binary (tests/it), not one per file (#209).
 autotests = false
+# The benches are their own package (benches/Cargo.toml, #211); without this
+# the root still finds benches/*.rs as its own and `--all-targets` asks it
+# for criterion.
+autobenches = false
 
 [lib]
 name = "stormblock"
