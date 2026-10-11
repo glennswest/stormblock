@@ -180,6 +180,15 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### NVMe-oF always built (2026-10-11, #161) — DONE
+
+No build without `nvmeof` compiled (far past the issue's four sites: the
+boot claim, forge trust, the initiator) or had a use since RouterOS
+stopped. The feature, its 90 gates and the six without-it branches removed
+(the validation's proposal). Default, `--no-default-features`, `+iscsi`,
+`cluster`, `ui`: 0 errors, 0 warnings; check.sh at c368973 ALL PASS
+(1150/1150). No golden (the default build is unchanged).
+
 ### VFIO NVMe driver: build or delete the stub (2026-10-11, #167, P3) — WAITING ON THE OWNER
 
 `src/drive/nvme.rs` (298 lines) builds nothing outside itself; NVMe goes
