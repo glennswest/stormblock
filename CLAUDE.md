@@ -191,7 +191,9 @@ bind address (`0.0.0.0`).
       first) at the shared target, forge, the serve listener; a warning when
       a wildcard is left advertised
 - [x] tests (unit; discovery page read off the wire); README, CHANGELOG
-- [ ] build VM; check.sh; golden; close
+- [x] nvmeof/forge/serve/discovery 156/156, clippy clean; check.sh at
+      753900d ALL PASS (1147/1147)
+- [ ] golden; close
 
 ### The web UI behind the token (2026-10-11, #166) — DONE
 
