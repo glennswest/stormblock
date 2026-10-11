@@ -285,7 +285,7 @@ area; the superblock CRC covers it.
       check.sh at 15a0a30 ALL PASS (1121/1121); golden
       golden-stormblock-7b232505a559; told stormuefi#59, stormcentral#634
 
-### Benches in their own crate (2026-10-10, #211) — IN PROGRESS
+### Benches in their own crate (2026-10-10, #211) — DONE
 
 - [x] `benches/Cargo.toml` (`stormblock-benches`, criterion, `publish =
       false`), workspace member; criterion and `[[bench]]` out of the root;
@@ -294,8 +294,10 @@ area; the superblock CRC covers it.
 - [x] found: pdu_parsing needs tokio (never built before); added (019ef67)
 - [x] `autobenches = false` in the root: `--all-targets` found benches/*.rs
       as the root's own (found on #300)
-- [ ] on a build VM: `cargo check --all-targets` (root), `cargo bench -p
-      stormblock-benches --no-run`, the criterion count, check.sh; close
+- [x] on a build VM at 26408ab: criterion in the root's dev tree 0;
+      `cargo check -p stormblock --all-targets` builds; the 3 benches build
+      and run (`pdu_parsing` measured); check.sh ALL PASS (1140/1140). No
+      golden (the engine binary is unchanged)
 
 ### API stalls on a RAID1 head during a rebuild (2026-10-10, #266) — DONE (test)
 
