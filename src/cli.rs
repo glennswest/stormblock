@@ -4463,17 +4463,17 @@ pub async fn run() -> anyhow::Result<()> {
                 // count per code in the error.
                 let ex = crate::fs::ext4::explain(&dev, &check).await;
                 for f in ex.findings.iter().take(GOLDEN_FINDINGS) {
+                    // WARN reaches stderr in this command: once is enough.
                     tracing::warn!("{name}: {f}");
-                    eprintln!("  {name}: {f}");
                 }
                 if ex.findings.len() > GOLDEN_FINDINGS {
-                    eprintln!(
-                        "  {name}: … and {} more",
+                    tracing::warn!(
+                        "{name}: … and {} more",
                         ex.findings.len() - GOLDEN_FINDINGS
                     );
                 }
                 if let Some(e) = &ex.walk_error {
-                    eprintln!("  {name}: paths incomplete: {e}");
+                    tracing::warn!("{name}: paths incomplete: {e}");
                 }
                 anyhow::bail!(
                     "{name} does not check out after {files} entries — {} problem(s): {}; \
