@@ -180,6 +180,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### StormKV for cluster metadata and the GEM (2026-10-11, #44, P3) — WAITING ON THE OWNER
+
+The GEM half shipped locally (#155, #157, #158: ~25 B/extent, paged index,
+cold maps evicted; 1 PiB emulated). StormKV has a TCP transport now
+(stormkv-net), and its gossip is still in-process only (stormkv#2). What is left is
+`src/cluster/` (one openraft group, opt-in since #209), which no component
+builds and no node runs; cross-node redundancy is stormstorage's (#179 b).
+Asked on #44 (needs-owner): A close (recommended), B build it on StormKV,
+C park until cluster mode has a user. Nothing built.
+
 ### Offline clone verb and golden --from-volume (2026-10-11, #87, P3) — DONE
 
 tinyanvil wants slab CoW instead of overlayfs on a loop-mounted golden, with
