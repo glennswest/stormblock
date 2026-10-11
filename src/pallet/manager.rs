@@ -472,7 +472,7 @@ impl PalletManager {
                 continue;
             }
             let Ok(gpt) = Gpt::read(&d.device).await else { continue };
-            let free = gpt.largest_free_bytes();
+            let free = gpt.largest_allocatable_bytes();
             if free < need {
                 continue;
             }
@@ -1204,7 +1204,7 @@ impl PalletManager {
         // and would otherwise never fit anywhere. Headroom is preserved when
         // the source was a partition and the room is there.
         let used = align_up(src.used_bytes.max(ALIGN_BYTES), ALIGN_BYTES);
-        let want = if !src.is_whole_drive() && src.size_bytes <= gpt.largest_free_bytes() {
+        let want = if !src.is_whole_drive() && align_up(src.size_bytes, ALIGN_BYTES) <= gpt.largest_allocatable_bytes() {
             align_up(src.size_bytes, ALIGN_BYTES).max(used)
         } else {
             used

@@ -430,7 +430,7 @@ impl ImageBuilder {
         for raw in &self.spec.partitions {
             let size = match size_of(&raw.size)? {
                 Some(s) => s,
-                None if is_rest(&raw.size) => gpt.largest_free_bytes(),
+                None if is_rest(&raw.size) => gpt.largest_allocatable_bytes(),
                 None => match &raw.from_file {
                     Some(f) => file_len(f).await?,
                     None => {
@@ -522,7 +522,7 @@ impl ImageBuilder {
         };
         let size = match size_of(&slab.size)? {
             Some(s) => align_up(s, ALIGN),
-            None => gpt.largest_free_bytes() / ALIGN * ALIGN,
+            None => gpt.largest_allocatable_bytes(),
         };
         if size == 0 {
             return Err(ImageError::Spec(format!(
@@ -1572,5 +1572,25 @@ template = true
             .unwrap_err()
             .to_string();
         assert!(e.contains("'blank'"), "the first clone's name too: {e}");
+
+        // A slab that takes the `rest` of the image fits it: it was sized to
+        // the largest free run counted from the table's end, not from the
+        // 1 MiB boundary the partition starts at, and never fitted.
+        let rest = crate::image::ImageSpec::from_toml(&format!(
+            r#"
+size = "256M"
+[slab]
+size = "rest"
+[[slab.golden]]
+name = "blank"
+file = "{blank}"
+clones = ["pvc-a"]
+"#
+        ))
+        .unwrap();
+        let report = crate::image::ImageBuilder::new(rest).build(&dir.path().join("rest.img")).await.unwrap();
+        let slab = report.partitions.iter().find(|p| !p.volumes.is_empty()).expect("the slab");
+        assert!(slab.size_bytes >= 250 << 20, "the rest of a 256M image: {}", slab.size_bytes);
+        assert_eq!(slab.volumes.len(), 3);
     }
 }

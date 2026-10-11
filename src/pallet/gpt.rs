@@ -403,6 +403,24 @@ impl Gpt {
             .unwrap_or(0)
     }
 
+    /// The largest partition [`allocate`](Self::allocate) can place: a free
+    /// run measured from its first 1 MiB boundary, in whole MiB. What a
+    /// `rest` sizes itself to and a "does it fit" asks. `largest_free_bytes`
+    /// counts a run from the end of the table, which is not aligned, so a
+    /// partition sized to it never fit (found by #124's test).
+    pub fn largest_allocatable_bytes(&self) -> u64 {
+        let bs = self.block_size as u64;
+        let align = (ALIGN_BYTES / bs).max(1);
+        self.free_runs()
+            .into_iter()
+            .filter_map(|(start, end)| {
+                let aligned = start.div_ceil(align) * align;
+                (aligned <= end).then(|| (end - aligned + 1) * bs / ALIGN_BYTES * ALIGN_BYTES)
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     fn first_free_slot(&self) -> Option<usize> {
         self.entries.iter().position(|e| e.is_empty())
     }
