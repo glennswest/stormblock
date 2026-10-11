@@ -161,9 +161,17 @@ tests run on.
    the extent still names the source and carrying the source slot's share
    count as the slab has it then. Holding both for the copy queued every
    volume's I/O and every API call behind each move.
-   **Moves run in windows** (#331): up to 64 extents (`STORMBLOCK_FLOW_BATCH`),
-   up to 8 at once (`STORMBLOCK_FLOW_PARALLEL`), each slot once, then one
-   persist and then the release of their source slots. A source slot stays
+   **Moves run in windows** (#331): up to 64 extents (`STORMBLOCK_FLOW_BATCH`,
+   and at most 64 MiB of them), each slot once, then one persist and then the
+   release of their source slots. Since #401 a window's slots whose fences are
+   free are moved together: sources read 8 at once (`STORMBLOCK_FLOW_PARALLEL`),
+   destination slots allocated together and written in slot order as merged
+   runs, each run read back before any map names it, then one publish under
+   the map and the registry with the same checks per extent. A fence is never
+   waited for while others are held: a slot whose fence is taken moves on its
+   own afterwards, as before. A source that reads all zeros is unmapped from
+   every map naming it instead of copied, only where every reference is that
+   slot alone; its slot is owed like a moved one. A source slot stays
    owed, never freed, until the map naming its copy is durable, so a cut
    anywhere in a window leaves each extent on its source or on a copy that is
    whole. The flow-over gives the disk back to foreground I/O for a quarter

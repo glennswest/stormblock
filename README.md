@@ -358,7 +358,9 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_SLOT_CACHE_MB` | bound of each slab's cache of slot table pages; nothing else of the table is kept in memory (#155) | `16` |
 | `STORMBLOCK_FLOW_BOOT_GRACE_SECS` | the most a successor's flow-over waits for the node's boot: until volume I/O is still for 10 s (#278) | `90`; `0` starts at once |
 | `STORMBLOCK_FLOW_BATCH` | extents a flow-over moves per window, one persist per window (#331) | `64` |
-| `STORMBLOCK_FLOW_PARALLEL` | moves a flow-over makes at once (#331) | `8` |
+| `STORMBLOCK_FLOW_PARALLEL` | sources a flow-over reads at once, and moves at once for slots it cannot take in a window (#331) | `8` |
+| `STORMBLOCK_FLOW_RUN_MB` | the largest write a flow-over makes on its destination: neighbouring slots merged into one (#401) | `32` |
+| `STORMBLOCK_FLOW_COALESCE` | `0`: one write and read-back per extent, as before #401, for measuring | on |
 | `STORMBLOCK_FLOW_FLUSH_BOUND_MS` | the destination disk's flush time (p90, 30 s) above which a flow-over halves its window and pauses for one flush after each (#282) | `1000`; `0` off |
 | `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per attached NVMe/TCP namespace (#331) | `4` |
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
@@ -526,7 +528,11 @@ bad value still stops startup — use `--raid`/`--volume`, or the API),
   plus `"raid"` (the worst RAID set's state) on a node that has sets, and
   `"flow_over_remaining"` (#260) on an engine running a flow-over: the extents
   of this node's volumes still on a remote slab (the appliance's), 0 once the
-  flow-over has finished, left out when there is none. Kept by the flow-over
+  flow-over has finished, left out when there is none. Beside it,
+  `"flow_over"` (#401): `moved`, `zeroed` (extents that read all zeros and
+  were unmapped, not copied), `bytes`, `seconds`, `mb_per_s`,
+  `extents_per_s` and `eta_seconds` (for what is left, at the rate so far).
+  Kept by the flow-over
   as it goes, so it is never missing for being busy; an abandoned flow-over
   leaves it above 0 (the node still runs from the appliance), and
   `"flow_over_stalled"` says why: the local slab full (after a power cycle
@@ -1690,6 +1696,20 @@ and from the moment a boot knows a flow-over is coming (`boot-local` once the
 disk is laid or the move resumed, `adopt-ublk` before it serves) nothing is
 written in place on them either: a write to an extent still on the appliance
 is a copy-on-write onto the local disk (rule 11).
+
+**It writes the way a slow disk wants** (#401). A window's sources are read
+from the appliance in parallel, their copies written to the local disk in
+slot order with neighbours merged into one write (up to 32 MiB,
+`STORMBLOCK_FLOW_RUN_MB`) and read back once per write, and published in one
+sweep of the maps. Before, each extent was its own 1 MiB write and read-back,
+8 at once in whatever order they finished, and each one swept every map. An
+extent that reads as all zeros is not copied at all: it is unmapped from every
+map that names it (a golden and its clones), since an unmapped extent reads
+as zeros; one with another leg, or in a volume with parity, is copied as any
+other. A fresh lay discards the whole drive first, and a re-lay its system
+partition, so a drive-managed SMR disk knows its zones are empty. A disk takes
+a discard only when the kernel advertises one (`queue/discard_max_bytes`): an
+SSD, or an SMR HDD that takes TRIM; a conventional HDD gets none.
 
 **The node stays usable while it moves** (#269). A move holds only its slot's
 fence while it copies; the extent map and the registry are taken just to
