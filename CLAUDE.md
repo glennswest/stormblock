@@ -181,6 +181,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Boot clone read-only with a writable overlay (2026-10-10, #193, P3) — WAITING ON THE OWNER
+
+#107's point 3 ("consider"). Today: a fresh CoW clone per boot, the sealed
+golden never written; a node with a disk relocates writes off the clone
+(#239); what still writes the clone is stormuefi's `tries_left` (GPT
+attributes) and a diskless node's data and metadata. Asked on #193
+(needs-owner): **A** read-only + a per-boot overlay volume (stormblock,
+initramfs, stormuefi), **B** read-only + the node's data half (no
+diskless), **C** no change, close as covered (recommended). Nothing built.
+
 ### Config sections parsed and never acted on (2026-10-10, #165) — DONE (golden-stormblock-68b92b6062a4)
 
 Per section, act or remove: `[[arrays]]`/`[[volumes]]` act (startup reads
