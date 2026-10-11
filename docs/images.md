@@ -298,6 +298,7 @@ Each `[[slab.golden]]` does two things:
 | `name` | — | base name |
 | `from` / `file` | — | content: a path, or `pallet:<pallet>/<member>` |
 | `clone` | `name` | the clone's volume name — what `stormblock.volume=` resolves to |
+| `clones` | `[]` | more clones of the same golden, each a CoW clone with its own filesystem identity (#124); every name in the slab must be distinct |
 | `golden_name` | `<name>.golden` | the golden's volume name |
 | `size` | content, rounded up to a slot | the volume's virtual size |
 

@@ -601,7 +601,8 @@ impl ImageBuilder {
 
         let mut pallets: Option<PalletStore> = None;
         let mut taken: HashSet<String> = HashSet::new();
-        let mut pairs: Vec<(VolumeId, VolumeId)> = Vec::new();
+        // Each golden and its clones, in the order the spec gives them.
+        let mut pairs: Vec<(VolumeId, Vec<VolumeId>)> = Vec::new();
         let mut need = 0u64;
 
         for g in goldens {
@@ -609,8 +610,11 @@ impl ImageBuilder {
                 .golden_name
                 .clone()
                 .unwrap_or_else(|| format!("{}.golden", g.name));
-            let clone_name = g.clone.clone().unwrap_or_else(|| g.name.clone());
-            for n in [&golden_name, &clone_name] {
+            // The first clone, then every name `clones` lists (#124): each a
+            // CoW clone of its own, stamped with its own identity.
+            let clone_names: Vec<String> =
+                std::iter::once(g.clone.clone().unwrap_or_else(|| g.name.clone())).chain(g.clones.iter().cloned()).collect();
+            for n in std::iter::once(&golden_name).chain(clone_names.iter()) {
                 if !taken.insert(n.clone()) {
                     return Err(ImageError::Spec(format!(
                         "two volumes in the slab would both be called '{n}'; a boot resolves a \
@@ -692,36 +696,49 @@ impl ImageBuilder {
                 mgr.mark_template(golden_id);
             }
 
-            let clone_id = mgr
-                .create_snapshot(golden_id, &clone_name)
-                .await
-                .map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
-            // A clone is a filesystem — or a disk — of its own: two live ones
-            // must never claim one identity, and the golden's is the one
-            // every clone would otherwise carry (#76).
+            // A stamped clone copies on write what its stamp touches: the
+            // superblock's slot for ext4, both GPT copies' for a disk.
             if let Some(f) = &fs {
-                let dev = mgr
-                    .get_volume(&clone_id)
-                    .ok_or_else(|| ImageError::Other("clone vanished after create".into()))?;
-                let fresh = if f.kind == "ext4" {
-                    let u = Uuid::new_v4();
-                    crate::fs::ext4::stamp_uuid(&dev, u, false)
-                        .await
-                        .map_err(|e| ImageError::Other(format!("stamp clone '{clone_name}': {e}")))?;
-                    Some(u)
-                } else {
-                    crate::fs::disk::stamp(&dev, f)
-                        .await
-                        .map_err(|e| ImageError::Other(format!("stamp clone '{clone_name}': {e}")))?
-                };
-                drop(dev);
-                if let Some(u) = fresh {
-                    mgr.set_fs_uuid(clone_id, u)
-                        .await
-                        .map_err(|e| ImageError::Other(format!("record clone '{clone_name}': {e}")))?;
+                let per = if f.kind == "ext4" { 1 } else { 2 };
+                need += per * slot_size * clone_names.len() as u64;
+                if need > free_bytes {
+                    return Err(ImageError::TooSmall { need, have: free_bytes });
                 }
             }
-            pairs.push((golden_id, clone_id));
+            let mut clones = Vec::with_capacity(clone_names.len());
+            for clone_name in &clone_names {
+                let clone_id = mgr
+                    .create_snapshot(golden_id, clone_name)
+                    .await
+                    .map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
+                // A clone is a filesystem — or a disk — of its own: two live ones
+                // must never claim one identity, and the golden's is the one
+                // every clone would otherwise carry (#76).
+                if let Some(f) = &fs {
+                    let dev = mgr
+                        .get_volume(&clone_id)
+                        .ok_or_else(|| ImageError::Other("clone vanished after create".into()))?;
+                    let fresh = if f.kind == "ext4" {
+                        let u = Uuid::new_v4();
+                        crate::fs::ext4::stamp_uuid(&dev, u, false)
+                            .await
+                            .map_err(|e| ImageError::Other(format!("stamp clone '{clone_name}': {e}")))?;
+                        Some(u)
+                    } else {
+                        crate::fs::disk::stamp(&dev, f)
+                            .await
+                            .map_err(|e| ImageError::Other(format!("stamp clone '{clone_name}': {e}")))?
+                    };
+                    drop(dev);
+                    if let Some(u) = fresh {
+                        mgr.set_fs_uuid(clone_id, u)
+                            .await
+                            .map_err(|e| ImageError::Other(format!("record clone '{clone_name}': {e}")))?;
+                    }
+                }
+                clones.push(clone_id);
+            }
+            pairs.push((golden_id, clones));
         }
 
         // Everything an image build lays is the release's (#349): an install
@@ -735,8 +752,9 @@ impl ImageBuilder {
             .map_err(|e| ImageError::Other(format!("slab metadata: {e}")))?;
 
         let clone_of: std::collections::HashMap<VolumeId, VolumeId> =
-            pairs.iter().map(|(g, c)| (*c, *g)).collect();
-        let order: Vec<VolumeId> = pairs.iter().flat_map(|(g, c)| [*g, *c]).collect();
+            pairs.iter().flat_map(|(g, cs)| cs.iter().map(move |c| (*c, *g))).collect();
+        let order: Vec<VolumeId> =
+            pairs.iter().flat_map(|(g, cs)| std::iter::once(*g).chain(cs.iter().copied())).collect();
         let listed = mgr.list_volumes().await;
         let mut out = Vec::with_capacity(listed.len());
         for id in order {
@@ -1498,5 +1516,61 @@ members = [ {{ name = "cmdline", role = "cmdline", kind = "bootconfig", text = "
         store.add_drive(out.display().to_string(), dev);
         let loc = crate::pallet::PalletManager::new(store).get(id).await.unwrap();
         assert!(!loc.attributes.successful && loc.attributes.tries_left > 0, "earned, not given: {:?}", loc.attributes);
+    }
+
+    /// #124: `clones = [...]` makes every clone it names, beside the first:
+    /// each a CoW clone of the golden with an identity of its own, all
+    /// reported, and a name used twice refused.
+    #[tokio::test]
+    async fn every_clone_a_golden_lists_is_made_with_its_own_identity() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let blank = dir.path().join("blank.img").display().to_string();
+        {
+            let dev: std::sync::Arc<dyn crate::drive::BlockDevice> = std::sync::Arc::new(
+                crate::drive::filedev::FileDevice::open_with_capacity(&blank, 32 << 20).await.unwrap(),
+            );
+            crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default()).await.unwrap();
+        }
+        let spec = |clones: &str| {
+            crate::image::ImageSpec::from_toml(&format!(
+                r#"
+size = "256M"
+[slab]
+size = "rest"
+[[slab.golden]]
+name = "blank"
+file = "{blank}"
+clones = [{clones}]
+template = true
+"#
+            ))
+            .unwrap()
+        };
+        let out = dir.path().join("image.img");
+        let report = crate::image::ImageBuilder::new(spec(r#""pvc-a", "pvc-b""#)).build(&out).await.unwrap();
+        let vols: Vec<&super::VolumeReport> = report.partitions.iter().flat_map(|p| p.volumes.iter()).collect();
+        let names: Vec<&str> = vols.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["blank.golden", "blank", "pvc-a", "pvc-b"], "the golden, then every clone");
+        let golden = vols[0];
+        assert!(golden.sealed && golden.clone_of.is_none());
+        let mut uuids = std::collections::HashSet::new();
+        uuids.insert(golden.fs_uuid.expect("the golden's filesystem"));
+        for c in &vols[1..] {
+            assert_eq!(c.clone_of, Some(golden.id), "{} is a clone of the golden", c.name);
+            assert!(uuids.insert(c.fs_uuid.expect("a stamped identity")), "{}'s identity is its own", c.name);
+        }
+
+        let e = crate::image::ImageBuilder::new(spec(r#""pvc-a", "pvc-a""#))
+            .build(&dir.path().join("twice.img"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'pvc-a'"), "a name used twice is refused: {e}");
+        let e = crate::image::ImageBuilder::new(spec(r#""blank""#))
+            .build(&dir.path().join("first.img"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("'blank'"), "the first clone's name too: {e}");
     }
 }

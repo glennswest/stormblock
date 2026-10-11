@@ -181,6 +181,14 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### image build: `clones = [...]` made (2026-10-11, #124) — IN PROGRESS
+
+- [x] `fill_slab`: the first clone and every `clones` name, each stamped,
+      named distinctly, counted in space; the report lists them
+- [x] test `every_clone_a_golden_lists_is_made_with_its_own_identity`;
+      docs/images.md, CHANGELOG
+- [ ] build VM; check.sh; golden; close
+
 ### Scrub: compare mirror legs and parity (2026-10-11, #160, P3) — WAITING ON THE OWNER
 
 No checksums, so a 2-way mismatch has no right answer. Asked on #160
