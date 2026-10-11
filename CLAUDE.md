@@ -181,6 +181,15 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### server3 VM/container probes slower on 11.65 than 11.64 (2026-10-10, #263) — CLOSED: not stormblock's
+
+bc89136..953cba6 (the only member change): #259's resume of a cut-short
+flow-over (machine name, the stranded-extents refusal) and the initramfs
+exporting the boot tag / resume source. No clone, attach or flow-over
+scheduling change. stormcentral's samples for server3 since: vm_start 428 s
+(11.69), 767 s (11.72), 7.7 s (11.88), 0.4 s (11.91); container_start 0.5 s
+on 11.91. No code change.
+
 ### ci-compose-disk-verify.sh runs where builds run (2026-10-10, #230) — DONE
 
 It defaulted to /build/cargo/… (gone), worked under /build/work, and needed
