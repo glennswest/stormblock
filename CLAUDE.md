@@ -180,6 +180,13 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### SWIM gossip for membership (2026-10-11, #42, P3) — AFTER #44 AND stormkv#2
+
+Would replace `src/cluster/` membership/heartbeat (opt-in, unused). Blocked
+on stormkv#2 (stormkv-gossip depends on stormkv-core; its transport is in
+stormkv-net beside Raft) and on #44's answer: A makes this moot, B makes it
+part of that work. Proposed after #44. Nothing built.
+
 ### StormKV for cluster metadata and the GEM (2026-10-11, #44, P3) — WAITING ON THE OWNER
 
 The GEM half shipped locally (#155, #157, #158: ~25 B/extent, paged index,
