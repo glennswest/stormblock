@@ -1560,7 +1560,7 @@ impl PlacementEngine {
         Ok(MigrateExtentResult { volume_id, vext_idx: stripe, source_slab: old.slab_id, dest_slab: new.slab_id, dest_slot: new.slot_idx })
     }
 
-    fn best_slab_apart_at(
+    pub(crate) fn best_slab_apart_at(
         &self,
         registry: &SlabRegistry,
         tier: StorageTier,

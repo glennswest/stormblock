@@ -232,8 +232,16 @@ makes `mirror:3@shelf` placeable.
 `PlacementEngine::rebalance` (even distribution, tier affinity, and by failure
 domain) exists and is tested, but **nothing calls it**: no API, no timer. After
 a drive is added, the pool stays lopsided until writes happen to land on the
-new drive. Wanted: `POST /api/v1/slabs/rebalance` (dry-run first), and a gentle
-automatic pass after a drive is added.
+new drive. **Built (#154):** `POST /api/v1/slabs/rebalance` (a dry run unless
+`"dry_run": false`). It plans read-only: per pool (role and slot size), from
+slabs above the mean fill to slabs below their share, never onto a dedicated
+or quarantined slab, keeping each volume's legs apart at its rung (and two legs
+of one extent never planned onto one slab). Parity volumes' extents stay. The
+moves then run in the background, each holding only its slot's fence, yielding
+to live I/O, with `max_bytes_per_sec`; `GET` reports and `DELETE` stops. The
+drain's copies hold only the fence too (they held the map and the registry for
+each, #269's shape), and it yields to live I/O. Whether a pass runs by itself
+after a drive is added is decision 3, asked on #154.
 
 ## 5. Capacity and overcommit
 

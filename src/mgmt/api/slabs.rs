@@ -662,6 +662,84 @@ async fn upgrade_slab(State(state): State<Arc<AppState>>, Path(id): Path<String>
     }
 }
 
+/// `POST /api/v1/slabs/rebalance` (#154): plan moving extents from fuller
+/// slabs onto emptier ones of the same pool; with `"dry_run": false`, run the
+/// plan in the background. A dry run is the default. 409 while one runs.
+async fn rebalance_start(
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<crate::rebalance::Request>>,
+) -> Response {
+    let req = body.map(|Json(r)| r).unwrap_or(crate::rebalance::Request {
+        dry_run: true,
+        pool: None,
+        max_moves: None,
+        max_bytes_per_sec: None,
+    });
+    if let Some(p) = &req.pool {
+        if !p.eq_ignore_ascii_case("system") && !p.eq_ignore_ascii_case("data") {
+            return ApiError::bad_request(format!("pool {p:?}: system or data"));
+        }
+    }
+    if state.rebalance.lock().await.running().await {
+        return ApiError::conflict("a rebalance is running: GET /api/v1/slabs/rebalance, or DELETE it".to_string());
+    }
+    // Each volume's rung, read before the map and the registry (the volume
+    // manager is never taken after them).
+    let spread: std::collections::HashMap<crate::volume::VolumeId, String> = {
+        let vm = state.volume_manager.lock().await;
+        let ids: Vec<_> = vm.list_volumes().await.into_iter().map(|(id, ..)| id).collect();
+        ids.into_iter().filter_map(|id| vm.redundancy(&id).map(|p| (id, p.spread.clone()))).collect()
+    };
+    let plan = {
+        let _pin = match crate::volume::gem::pin_resident(&state.gem).await {
+            Ok(p) => p,
+            Err(e) => return ApiError::internal(format!("loading extent maps: {e}")),
+        };
+        let g = state.gem.read().await;
+        let r = state.slab_registry.read().await;
+        crate::rebalance::plan(
+            &g,
+            &r,
+            &spread,
+            req.pool.as_deref(),
+            req.max_moves.unwrap_or(10_000),
+        )
+    };
+    if req.dry_run || plan.list.is_empty() {
+        return Json(serde_json::json!({ "dry_run": req.dry_run, "plan": plan })).into_response();
+    }
+    let summary = serde_json::to_value(&plan).unwrap_or_default();
+    let status = state.rebalance.lock().await.start(
+        plan.list,
+        req.max_bytes_per_sec,
+        state.gem.clone(),
+        state.slab_registry.clone(),
+        state.volume_manager.clone(),
+    );
+    let snapshot = status.read().await.clone();
+    (axum::http::StatusCode::ACCEPTED, Json(serde_json::json!({ "dry_run": false, "plan": summary, "status": snapshot })))
+        .into_response()
+}
+
+/// `GET /api/v1/slabs/rebalance`: the last rebalance's progress.
+async fn rebalance_status(State(state): State<Arc<AppState>>) -> Response {
+    match state.rebalance.lock().await.status().await {
+        Some(s) => Json(s).into_response(),
+        None => ApiError::not_found("no rebalance has run".to_string()),
+    }
+}
+
+/// `DELETE /api/v1/slabs/rebalance`: stop it after the move under way; what
+/// moved stays moved, and is made durable.
+async fn rebalance_cancel(State(state): State<Arc<AppState>>) -> Response {
+    let r = state.rebalance.lock().await;
+    if r.running().await && r.cancel() {
+        Json(serde_json::json!({ "cancelled": true })).into_response()
+    } else {
+        ApiError::not_found("no rebalance is running".to_string())
+    }
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_slabs).post(format_slab))
@@ -669,6 +747,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/gc", get(gc_status).post(run_gc))
         // Likewise "pool": the aggregate over every slab, not one of them.
         .route("/pool", get(pool_status))
+        .route("/rebalance", get(rebalance_status).post(rebalance_start).delete(rebalance_cancel))
         // Likewise "durability": whether the record is actually being written.
         .route("/durability", get(durability))
         .route("/{id}", get(get_slab).delete(delete_slab))

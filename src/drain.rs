@@ -4,8 +4,11 @@
 //!
 //! The placement engine's `evacuate_slab` holds the GEM and the registry for
 //! its whole run, which is fine for a CLI and not for a node serving volumes.
-//! A drain takes the two locks per extent, releases them, yields, and goes
-//! again — so I/O flows between moves and a cancel lands within one extent.
+//! A drain moves one extent at a time: a data leg's destination is chosen
+//! under the read locks and its copy made with only the slot's fence held
+//! (#154; it held both write locks across each copy, #269's shape); a parity
+//! leg still moves under the locks. Between moves it gives the disks back to
+//! live I/O, and a cancel lands within one extent.
 //! The slabs being drained are quarantined first, so nothing new arrives
 //! while the old leaves.
 
@@ -128,6 +131,9 @@ impl Drains {
     }
 }
 
+/// The longest a drain waits for live I/O between two moves (#154).
+const DRAIN_YIELD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Make the map durable, then free the source slots it no longer names.
 ///
 /// A migration's source slot is *owed*, not freed (b270bfd): freeing it before
@@ -184,6 +190,8 @@ async fn run(
     }
 
     let mut since_persist = 0u32;
+    let mut foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
+    let mut last_move = std::time::Duration::ZERO;
     loop {
         if *cancel.borrow() {
             // What has moved is paid for before stopping: the map is made
@@ -239,30 +247,57 @@ async fn run(
             }
             pick
         };
-        let fence = match pick {
-            Some((.., false, leg)) => Some(crate::volume::fence::exclusive(leg).await),
-            _ => None,
-        };
-        let step = {
-            let mut g = gem.write().await;
-            let mut r = registry.write().await;
-            match pick {
-                None => None,
-                Some((vol, idx, slab, is_parity, _)) => {
-                    let rung = spread.get(&vol).map(String::as_str).unwrap_or("drive");
-                    let res = if is_parity {
-                        engine.migrate_parity_leg_at(&mut g, &mut r, vol, idx, slab, rung).await
-                    } else {
-                        engine
-                            .migrate_leg_at_held(&mut g, &mut r, vol, idx, slab, rung, fence.as_ref())
-                            .await
-                    };
-                    let remaining = remaining_on(&g, &slabs);
-                    Some((res, remaining, vol, idx, slab, is_parity))
-                }
+        // Live I/O first (#154): when a volume was read or written since the
+        // last move, give the disks back for a quarter of that move's time
+        // (at most 2 s), as the flow-over does. An idle node drains at full
+        // speed.
+        if crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed) != foreground {
+            tokio::time::sleep((last_move / 4).min(DRAIN_YIELD_MAX)).await;
+        }
+        foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
+        let started = std::time::Instant::now();
+        let step = match pick {
+            None => None,
+            // A data leg: the destination chosen under the read locks, the
+            // copy made with only the slot's fence held (#154; #269's shape:
+            // the map and the registry held across each copy queued every
+            // volume's I/O and every API call behind it).
+            Some((vol, idx, slab, false, leg)) => {
+                let rung = spread.get(&vol).map(String::as_str).unwrap_or("drive");
+                let dest = {
+                    let g = gem.read().await;
+                    let r = registry.read().await;
+                    match (g.lookup(vol, idx), r.get(&slab).map(|s| s.tier())) {
+                        (Some(loc), Some(tier)) => {
+                            let others: Vec<crate::placement::domain::FailureDomain> =
+                                loc.legs().filter(|l| *l != leg).map(|l| r.domain_of(&l.slab_id)).collect();
+                            engine.best_slab_apart_at(&r, tier, slab, &others, rung)
+                        }
+                        (None, _) => Err(crate::placement::PlacementError::ExtentNotFound { volume_id: vol, vext_idx: idx }),
+                        (_, None) => Err(crate::placement::PlacementError::SlabNotFound(slab)),
+                    }
+                };
+                let fence = crate::volume::fence::exclusive(leg).await;
+                let res = match dest {
+                    Ok(d) => engine.migrate_leg_unlocked(&gem, &registry, vol, idx, leg, d, &fence).await,
+                    Err(e) => Err(e),
+                };
+                drop(fence);
+                let remaining = remaining_on(&*gem.read().await, &slabs);
+                Some((res, remaining, vol, idx, slab, false))
+            }
+            // A parity leg: under the locks, as before (rare, and its stripe
+            // is moved as one).
+            Some((vol, idx, slab, true, _)) => {
+                let mut g = gem.write().await;
+                let mut r = registry.write().await;
+                let rung = spread.get(&vol).map(String::as_str).unwrap_or("drive");
+                let res = engine.migrate_parity_leg_at(&mut g, &mut r, vol, idx, slab, rung).await;
+                let remaining = remaining_on(&g, &slabs);
+                Some((res, remaining, vol, idx, slab, true))
             }
         };
-        drop(fence);
+        last_move = started.elapsed();
 
         match step {
             None => {

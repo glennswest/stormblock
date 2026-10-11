@@ -36,6 +36,7 @@ mod integration_nvme_hosts;
 mod integration_nvmeof;
 mod integration_pallet;
 mod integration_placement;
+mod integration_rebalance;
 mod integration_power_cut;
 mod integration_raid_degraded;
 mod integration_raid_sets;

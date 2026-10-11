@@ -340,6 +340,8 @@ pub struct AppState {
     pub stage_job: tokio::sync::Mutex<Option<crate::mgmt::api::releases::StageJob>>,
     /// Drives being emptied so they can be pulled (#70 item 3).
     pub drains: tokio::sync::RwLock<crate::drain::Drains>,
+    /// The pool's rebalance, the last one run (#154).
+    pub rebalance: tokio::sync::Mutex<crate::rebalance::Rebalance>,
     /// Per-volume rebuilds after a drive fails (#146).
     pub rebuilds: Arc<crate::rebuild::Rebuilds>,
     /// Disk images being imported into goldens.
@@ -569,6 +571,7 @@ impl AppState {
                 None => HashMap::new(),
             }),
             drains: tokio::sync::RwLock::new(crate::drain::Drains::default()),
+            rebalance: tokio::sync::Mutex::new(crate::rebalance::Rebalance::default()),
             rebuilds,
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
             serve: std::sync::OnceLock::new(),
