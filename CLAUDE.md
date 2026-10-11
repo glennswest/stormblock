@@ -180,6 +180,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Secrets volume class (2026-10-11, #74, P3) — WAITING ON THE OWNER
+
+Found: stormcos's `stormcert-data` (the node CA key) is an ordinary volume,
+cloneable and attachable with the node token since #274. Asked on #74
+(needs-owner): A the engine-enforced `secret` class now (no clone/snapshot/
+template/compose/copy/move/export, local ublk only, one consumer, erase on
+delete, seal + synonym repoint keeping the previous; stormcos marks
+stormcert-data) — recommended; B A + attach bound to the workload's
+ServiceAccount (needs rustkube-node/stormcos); C nothing until stormcert
+asks. Workload auth and encryption as separate design issues. Nothing built.
+
 ### Writable cmdline and a kdump target (2026-10-11, #59, P3) — WAITING ON THE OWNER
 
 The PVC half is settled (CoW clones on the data slab; pallets.md §2.5 says
