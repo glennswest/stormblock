@@ -864,7 +864,9 @@ enum PalletAction {
 struct VolumeSpec {
     name: String,
     size: u64,
-    redundancy: crate::volume::RedundancyPolicy,
+    /// As given (checked to parse), for the config it is merged into
+    /// (`[[volumes]] redundancy`).
+    redundancy_text: Option<String>,
 }
 
 /// The iSCSI settings the target runs with (#164).
@@ -885,11 +887,11 @@ fn parse_volume_spec(s: &str) -> Result<VolumeSpec, String> {
     }
     let name = parts[0].to_string();
     let size = parse_size(parts[1])?;
-    let redundancy = match parts.get(2) {
-        Some(r) => crate::volume::RedundancyPolicy::parse(r)?,
-        None => Default::default(),
-    };
-    Ok(VolumeSpec { name, size, redundancy })
+    if let Some(r) = parts.get(2) {
+        crate::volume::RedundancyPolicy::parse(r)?;
+    }
+    let redundancy_text = parts.get(2).map(|r| r.to_string());
+    Ok(VolumeSpec { name, size, redundancy_text })
 }
 
 fn parse_raid_level(s: &str) -> Result<RaidLevel, String> {
@@ -940,8 +942,8 @@ pub async fn run() -> anyhow::Result<()> {
 
     // Load and merge configuration
     let mut config = StormBlockConfig::load(&cli.config)?;
-    let cli_volumes: Vec<(String, u64)> = cli.volumes.iter()
-        .map(|v| (v.name.clone(), v.size))
+    let cli_volumes: Vec<(String, u64, Option<String>)> = cli.volumes.iter()
+        .map(|v| (v.name.clone(), v.size, v.redundancy_text.clone()))
         .collect();
     config.merge_cli(
         &cli.device,
@@ -6528,10 +6530,17 @@ async fn startup_arrays_and_volumes(
                     continue;
                 }
             };
-            let created = if spec.redundancy.is_none() {
+            let policy = match spec.redundancy.as_deref().map(crate::volume::RedundancyPolicy::parse).transpose() {
+                Ok(p) => p.unwrap_or_default(),
+                Err(e) => {
+                    tracing::error!("volume '{}' not created: redundancy: {e}", spec.name);
+                    continue;
+                }
+            };
+            let created = if policy.is_none() {
                 vm.create_volume(&spec.name, size, *array_id).await
             } else {
-                vm.create_volume_with(&spec.name, size, crate::volume::CreateOptions::redundant(spec.redundancy.clone())).await
+                vm.create_volume_with(&spec.name, size, crate::volume::CreateOptions::redundant(policy)).await
             };
             match created {
                 Ok(id) => {

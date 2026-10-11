@@ -908,7 +908,7 @@ impl StormBlockConfig {
         devices: &[String],
         raid_level: Option<RaidLevel>,
         stripe_kb: u64,
-        volumes: &[(String, u64)],
+        volumes: &[(String, u64, Option<String>)],
         #[cfg(feature = "iscsi")] iscsi_addr: Option<&str>,
         #[cfg(feature = "iscsi")] iscsi_target_name: Option<&str>,
         #[cfg(feature = "iscsi")] chap_user: Option<&str>,
@@ -949,11 +949,11 @@ impl StormBlockConfig {
         // CLI volumes override config volumes
         if !volumes.is_empty() {
             self.volumes = volumes.iter()
-                .map(|(name, size)| VolumeConfig {
+                .map(|(name, size, redundancy)| VolumeConfig {
                     name: name.clone(),
                     size: size.to_string(),
                     array: "cli-array".to_string(),
-                    redundancy: None,
+                    redundancy: redundancy.clone(),
                 })
                 .collect();
         }
@@ -1103,10 +1103,14 @@ impl StormBlockConfig {
             }
         }
 
-        // Validate volume sizes
+        // Validate volume sizes and policies
         for vol in &self.volumes {
             parse_size(&vol.size)
                 .map_err(|e| anyhow::anyhow!("invalid volume size '{}': {e}", vol.size))?;
+            if let Some(r) = &vol.redundancy {
+                crate::volume::RedundancyPolicy::parse(r)
+                    .map_err(|e| anyhow::anyhow!("volume '{}': redundancy '{r}': {e}", vol.name))?;
+            }
         }
 
         // Validate cluster TLS config
