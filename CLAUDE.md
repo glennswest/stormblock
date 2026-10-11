@@ -180,14 +180,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### StormFS server-side chunk copy (2026-10-11, #64, P3) — IN PROGRESS
+### StormFS server-side chunk copy (2026-10-11, #64, P3) — DONE
 
 - [x] `POST /api/v1/stormfs/copy` (`chunk::copy`, `ChunkMap::covers`):
       equal lengths, both ranges StormFS-owned, no overlap, never allocates,
       source only read, target flushed; under the StormFS lock
 - [x] tests `integration_stormfs` (copy across volumes in pieces, repeated,
       way back; the refusals); docs/stormfs-api.md, CHANGELOG
-- [ ] sc-build: the tests, check.sh; golden; close; tell stormfs#56
+- [x] integration_stormfs 20/20; check.sh at e03f152 ALL PASS (a first run
+      lost integration_forge to #333's port race); golden; closed;
+      stormfs#56 told
 
 ### Pallet priority/tries past four bits refused (2026-10-11, #102, P3) — DONE
 
