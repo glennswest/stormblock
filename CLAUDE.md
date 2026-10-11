@@ -181,6 +181,13 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### VFIO NVMe driver: build or delete the stub (2026-10-11, #167, P3) — WAITING ON THE OWNER
+
+`src/drive/nvme.rs` (298 lines) builds nothing outside itself; NVMe goes
+through the kernel, O_DIRECT + io_uring. Asked on #167 (needs-owner): A
+build VFIO, B delete the stub (and dma.rs's VFIO/hugepage parts; `DmaBuf`
+stays, direct.rs uses it), C keep it documented. Recommended B.
+
 ### Non-redundant volumes: drive affinity (2026-10-11, #153, P3) — WAITING ON THE OWNER
 
 Decision 1 of multi-drive §2. Asked on #153 (needs-owner): A affinity for
