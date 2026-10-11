@@ -198,7 +198,7 @@ Built meanwhile, the operator's tools either way:
       locks per copy, #269's shape), yielding to live I/O
 - [x] tests `integration_rebalance` (2); rebalance/drain/placement/
       multidrive 38/38; check.sh at 6688e90 ALL PASS (1150/1150), 0 warnings
-- [ ] golden (for the drain fix and the endpoint)
+- [x] golden golden-stormblock-d9d2dc698e70 (cd6c46e)
 - [ ] the automatic part per the owner's answer
 
 ### image build: `clones = [...]` made (2026-10-11, #124) — DONE (golden-stormblock-17aefc2dba61)
