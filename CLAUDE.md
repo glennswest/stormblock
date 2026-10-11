@@ -180,6 +180,16 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Writable cmdline and a kdump target (2026-10-11, #59, P3) — WAITING ON THE OWNER
+
+The PVC half is settled (CoW clones on the data slab; pallets.md §2.5 says
+writable data is not a pallet, #356). Asked on #59 (needs-owner): (1)
+writable cmdline: A an unsigned operator delta with an allowlist (format +
+stormuefi), B none, per-node settings stay in boothost/install-config/
+system-data (recommended), C a denylist; (2) kdump: A a data-half volume like
+system-data, sized from RAM, B a writable `dump` pallet kind, C not until
+stormcos runs kdump (recommended, then A). Nothing built.
+
 ### StormFS server-side chunk copy (2026-10-11, #64, P3) — DONE
 
 - [x] `POST /api/v1/stormfs/copy` (`chunk::copy`, `ChunkMap::covers`):
