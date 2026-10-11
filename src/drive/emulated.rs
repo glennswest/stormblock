@@ -902,6 +902,32 @@ mod tests {
         assert_eq!(crash("no-such-drive", 0, 0.5), None);
     }
 
+    /// #401: a discard of a whole 1 PiB drive, volatile or not, zeroes what
+    /// was written and costs what the drive holds, not its capacity (it
+    /// built a 64 KiB page per 64 KiB of the range).
+    #[tokio::test]
+    async fn a_whole_drive_discard_costs_what_is_held_not_the_capacity() {
+        for volatile in [true, false] {
+            let name = format!("disc-{}", uuid::Uuid::new_v4().simple());
+            let flag = if volatile { "&volatile=1" } else { "" };
+            let d = open(&spec(&format!("emulated://{name}?size=1P{flag}"))).unwrap();
+            d.write(PAGE / 2, &[5u8; 8192]).await.unwrap();
+            d.write(PIB - PAGE, &[6u8; 4096]).await.unwrap();
+            d.flush().await.unwrap();
+            d.write(TIB, &[7u8; 4096]).await.unwrap();
+            let t = std::time::Instant::now();
+            d.discard(0, PIB).await.unwrap();
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "volatile {volatile}: {:?}", t.elapsed());
+            for at in [PAGE / 2, PIB - PAGE, TIB] {
+                let mut b = vec![9u8; 4096];
+                d.read(at, &mut b).await.unwrap();
+                assert!(b.iter().all(|&x| x == 0), "volatile {volatile}: {at} reads zeros");
+            }
+            d.flush().await.unwrap();
+            assert_eq!(d.stored_bytes(), 0, "volatile {volatile}: nothing held once flushed");
+        }
+    }
+
     #[tokio::test]
     async fn one_name_is_one_drive_and_it_fails_on_command() {
         let name = format!("same-{}", uuid::Uuid::new_v4().simple());
