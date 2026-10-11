@@ -593,7 +593,7 @@ async fn start_portal(
     }
 
     let addr = SocketAddr::new(ctx.portal_bind_ip(), row.portal_port);
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = crate::netif::bind_data_listener(addr)
         .await
         .map_err(|e| anyhow::anyhow!("binding {addr}: {e}"))?;
 
@@ -646,7 +646,7 @@ pub(crate) async fn nvme_listener(ctx: &Arc<ServeContext>) -> anyhow::Result<(Ar
     }
     let port = ctx.cfg.portal_base;
     let addr = SocketAddr::new(ctx.portal_bind_ip(), port);
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = crate::netif::bind_data_listener(addr)
         .await
         .map_err(|e| anyhow::anyhow!("binding the serve NVMe listener {addr}: {e}"))?;
     let target = Arc::new(NvmeofTarget::new(NvmeofConfig {

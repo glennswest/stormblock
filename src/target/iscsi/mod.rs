@@ -147,7 +147,7 @@ impl IscsiTarget {
 
     /// Start accepting connections. Runs until the listener is dropped.
     pub async fn run(self: Arc<Self>, reactor: &ReactorPool) -> std::io::Result<()> {
-        let listener = TcpListener::bind(self.config.listen_addr).await?;
+        let listener = crate::netif::bind_data_listener(self.config.listen_addr).await?;
         tracing::info!("iSCSI target listening on {} ({})", self.config.listen_addr, self.config.target_name);
         self.run_with_listener(listener, reactor).await
     }

@@ -142,7 +142,7 @@ pub async fn serve(
     // a moment, not a failure.
     let mut tries = 0;
     let listener = loop {
-        match tokio::net::TcpListener::bind(addr).await {
+        match crate::netif::bind_data_listener(addr).await {
             Ok(l) => break l,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 40 => {
                 tries += 1;

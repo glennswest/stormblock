@@ -636,7 +636,7 @@ impl NvmeofTarget {
     /// binds and serves `listen_addr` itself, as before.
     pub async fn serve_other_listeners(self: &Arc<Self>, reactor: Arc<ReactorPool>) -> std::io::Result<()> {
         for addr in self.listen_addrs.iter().skip(1).copied() {
-            let listener = TcpListener::bind(addr).await?;
+            let listener = crate::netif::bind_data_listener(addr).await?;
             tracing::info!("NVMe-oF/TCP target also listening on {addr} ({})", self.config.nqn);
             let me = self.clone();
             let reactor = reactor.clone();
@@ -761,7 +761,7 @@ impl NvmeofTarget {
     pub async fn run(self: Arc<Self>, reactor: &ReactorPool) -> std::io::Result<()> {
         let mut listeners = Vec::new();
         for addr in &self.listen_addrs {
-            listeners.push(TcpListener::bind(addr).await?);
+            listeners.push(crate::netif::bind_data_listener(*addr).await?);
             tracing::info!("NVMe-oF/TCP target listening on {addr} ({})", self.config.nqn);
         }
         // Every storage NIC's listener at once (#90); the first to fail ends it.

@@ -235,6 +235,29 @@ pub fn data_binds(addr: SocketAddr) -> Vec<SocketAddr> {
     all.into_iter().map(|ip| SocketAddr::new(ip, addr.port())).collect()
 }
 
+/// Bind a data-path listener (#90). An address on a storage interface is
+/// bound to that interface's device too, so every connection it accepts
+/// answers by the NIC it arrived on: with two NICs on one subnet the
+/// routing table would send every reply out of the first one, whose
+/// neighbours (rightly, `arp_ignore=1`) do not answer for the second's
+/// peers. Anything else is an ordinary bind.
+pub async fn bind_data_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    let Some(src) = path_sources().into_iter().find(|s| s.address == addr.ip()) else {
+        return tokio::net::TcpListener::bind(addr).await;
+    };
+    let sock = if addr.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+    sock.set_reuseaddr(true)?;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(e) = socket2::SockRef::from(&sock).bind_device(Some(src.interface.as_bytes())) {
+        tracing::warn!(
+            "listener {addr}: cannot bind to {} ({e}): its replies leave by the routing table's choice of NIC",
+            src.interface
+        );
+    }
+    sock.bind(addr)?;
+    sock.listen(1024)
+}
+
 /// A local interface an initiator's connection can leave by (#90).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathSource {
