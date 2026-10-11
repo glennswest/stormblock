@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-10
+- **docs:** #345: `docs/boot-hooks.md` documents the boot's storage inventory: what it prints, the WARNING for a controller with no driver, and the bounded wait for drives (`STORM_STORAGE_WAIT`, 30 s). `ci-storage-inventory-verify.sh` (the inventory on a real kernel in QEMU) now carries the shelves block the inventory calls since #347.
 - **feat:** #176 (#51 item 3): `GET /api/v1/volumes/{id}/legs[?start=&limit=]` says where every leg of a volume's extents is on its drive, for a reader that must not reconstruct RAID and takes one good leg instead.
   - **What it reports:** each mapped extent's legs (primary, then mirrors) with the drive (path, serial, WWN, model: the disk, not the partition), the slot's absolute byte offset on it, and `ok`, `failed` or `missing`. A parity volume's stripes carry their P and Q legs apart. Pages of up to 65536 extents, with `next`.
   - **How the offset is found:** `BlockDevice::drive_offset` (a partition adds its start).

@@ -95,6 +95,26 @@ Whatever the policy, three rules decide which drives are candidates at all
    machine's own. #344's first fix ("a shelf is only behind an expander") was
    the wrong model and is replaced by this.
 
+**What storage the machine has (#345)** is said before anything decides
+about a disk (`# --- BEGIN storage inventory`). Every PCI mass-storage
+controller (class 01xx: AHCI, SAS HBA or RAID, NVMe, virtio) is listed with
+its PCI id, class and driver, and every drive under it with model, serial,
+size, transport and SES bay:
+
+```
+storage inventory:
+  0000:00:1f.2 [8086:2922] class 0x0106: ahci, 1 drive(s)
+  0000:00:05.0 [1000:0012] class 0x0100: no driver bound
+WARNING: storage controller 0000:00:05.0 [1000:0012] (class 0x0100) has no driver bound - its drives cannot be seen (#345)
+    sda: TestSATA serial SATA0001, 1 GB, sata on 0000:00:1f.2, front shelf
+```
+
+A controller with no driver is a WARNING naming its PCI id. A SAS, RAID,
+NVMe or SCSI controller whose driver bound but which shows no drive yet is
+waited for, bounded by `STORM_STORAGE_WAIT` (30 s): SAS and expander
+discovery runs on after the driver loads. The inventory goes into
+`local-disk.json` as `controllers` and `drives`, kept by the verdict below.
+
 **What the boot did with the machine's own disk (#344)** is written to
 `/run/stormblock/local-disk.json` (which survives `switch_root`) and reported
 in the engine's health as `slabs.local_disk`, with the drive's `shelf` (`id`,

@@ -55,7 +55,9 @@ done | awk '!seen[$0]++' | while read -r ko; do
     echo "$base" >> "$I/lib/mods/order"
 done
 echo "  modules: $(tr '\n' ' ' < "$I/lib/mods/order")"
-INV=$(sed -n '/# --- BEGIN storage inventory/,/# --- END storage inventory/p' "$GEN")
+# The shelves block first: the inventory names each drive's shelf with its
+# functions (#347), as the unit test does.
+INV=$(sed -n '/# --- BEGIN shelves/,/# --- END shelves/p' "$GEN"; sed -n '/# --- BEGIN storage inventory/,/# --- END storage inventory/p' "$GEN")
 [ -n "$INV" ] || { echo "FAIL: could not extract the inventory block"; exit 1; }
 {
     cat <<'EOF'
