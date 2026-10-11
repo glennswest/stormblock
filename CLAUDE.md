@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### ci-compose-disk-verify.sh runs where builds run (2026-10-10, #230) — IN PROGRESS
+### ci-compose-disk-verify.sh runs where builds run (2026-10-10, #230) — DONE
 
 It defaulted to /build/cargo/… (gone), worked under /build/work, and needed
 root (ublk attach, mount, shim/grub from /boot/efi, Fedora's initramfs).
@@ -191,7 +191,11 @@ root (ublk attach, mount, shim/grub from /boot/efi, Fedora's initramfs).
       pallet; `pallet verify` on the host through the engine's initiator;
       OVMF boots the disk as a 4Kn NVMe drive: stormuefi → the pallet's
       kernel, command line and initramfs (the script's own)
-- [ ] run on a build VM; CHANGELOG; close
+- [x] found: it and ci-boot512-verify.sh lacked the admin token (slab
+      create is destructive since #274) and took the multipath path node;
+      both fixed
+- [x] on a build VM: both ALL PASS (compose 16 checks; boot512 10);
+      CHANGELOG; closed. Scripts only: no golden
 
 ### Flow-over fast on SMR disks (2026-10-10, #401, P1) — DONE (golden-stormblock-8903710adfc5)
 
