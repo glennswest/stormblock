@@ -22,7 +22,6 @@ pub struct StormBlockConfig {
     pub luns: Vec<LunConfig>,
     #[cfg(feature = "iscsi")]
     pub iscsi: Option<IscsiExportConfig>,
-    #[cfg(feature = "nvmeof")]
     pub nvmeof: Option<NvmeofExportConfig>,
     pub reactor: ReactorCfg,
     #[cfg(feature = "cluster")]
@@ -322,7 +321,6 @@ impl Default for StormBlockConfig {
             luns: Vec::new(),
             #[cfg(feature = "iscsi")]
             iscsi: None,
-            #[cfg(feature = "nvmeof")]
             nvmeof: None,
             reactor: ReactorCfg::default(),
             #[cfg(feature = "cluster")]
@@ -810,7 +808,6 @@ fn default_iscsi_target_name() -> String {
     "iqn.2024.io.stormblock:default".to_string()
 }
 
-#[cfg(feature = "nvmeof")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NvmeofExportConfig {
     #[serde(default = "default_nvmeof_addr")]
@@ -845,12 +842,10 @@ pub struct NvmeofExportConfig {
     pub boothost_host_nqn: Option<String>,
 }
 
-#[cfg(feature = "nvmeof")]
 fn default_nvmeof_addr() -> String {
     "0.0.0.0:4420".to_string()
 }
 
-#[cfg(feature = "nvmeof")]
 pub fn default_nvmeof_nqn() -> String {
     "nqn.2024.io.stormblock:default".to_string()
 }
@@ -889,7 +884,6 @@ impl StormBlockConfig {
             crate::drive::slab::set_default_format(f);
             tracing::info!("new slabs are written in metadata format {f}");
         }
-        #[cfg(feature = "nvmeof")]
         if let Some([lo, hi]) = config.management.nvme_cntlid_range {
             anyhow::ensure!(
                 (1..=0xFFEF).contains(&lo) && (lo..=0xFFEF).contains(&hi),
@@ -913,8 +907,8 @@ impl StormBlockConfig {
         #[cfg(feature = "iscsi")] iscsi_target_name: Option<&str>,
         #[cfg(feature = "iscsi")] chap_user: Option<&str>,
         #[cfg(feature = "iscsi")] chap_secret: Option<&str>,
-        #[cfg(feature = "nvmeof")] nvmeof_addr: Option<&str>,
-        #[cfg(feature = "nvmeof")] nvmeof_nqn: Option<&str>,
+        nvmeof_addr: Option<&str>,
+        nvmeof_nqn: Option<&str>,
         reactor_cores: usize,
         data_dir: Option<&str>,
     ) {
@@ -980,7 +974,6 @@ impl StormBlockConfig {
         }
 
         // NVMe-oF likewise (#164).
-        #[cfg(feature = "nvmeof")]
         {
             let existing = self.nvmeof.take().unwrap_or(NvmeofExportConfig {
                 listen_addr: default_nvmeof_addr(),
@@ -1021,7 +1014,6 @@ impl StormBlockConfig {
 
     /// Where the shared NVMe-oF target listens: the section, else the
     /// default (#164).
-    #[cfg(feature = "nvmeof")]
     pub fn nvmeof_listen(&self) -> String {
         self.nvmeof.as_ref().map(|n| n.listen_addr.clone()).unwrap_or_else(default_nvmeof_addr)
     }
@@ -1093,7 +1085,6 @@ impl StormBlockConfig {
             }
         }
 
-        #[cfg(feature = "nvmeof")]
         if let Some(ref nvmeof) = self.nvmeof {
             let port = nvmeof.listen_addr.parse::<SocketAddr>()
                 .map_err(|e| anyhow::anyhow!("invalid NVMe-oF listen_addr: {e}"))?

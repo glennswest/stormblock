@@ -1702,7 +1702,6 @@ async fn attach_volume(
         ));
     }
 
-    #[cfg(feature = "nvmeof")]
     {
         let ro = mode != crate::volume::Access::ReadWrite;
         match super::v1::nvme_attach(&state, &key, uuid, req.host_nqn.as_deref(), req.dhchap, ro, req.holder.as_deref()).await {
@@ -1711,8 +1710,6 @@ async fn attach_volume(
             Err(super::v1::NvmeAttachError::Conflict(m)) => ApiError::conflict(m),
         }
     }
-    #[cfg(not(feature = "nvmeof"))]
-    Json(super::v1::attach_info_for(&state, None)).into_response()
 }
 
 /// `GET /api/v1/volumes/{id}/attach` — how the volume is being served
@@ -1732,7 +1729,6 @@ async fn get_attach(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
     }
     let nsid = state.v1.lock().await.nvme_nsids.get(&key).copied();
     // And every host it is served to from a host's own subsystem (#210).
-    #[cfg(feature = "nvmeof")]
     let hosts: Vec<serde_json::Value> = {
         let h = state.nvme_hosts.lock().await;
         h.subsystems
@@ -1753,8 +1749,6 @@ async fn get_attach(State(state): State<Arc<AppState>>, Path(id): Path<String>) 
             })
             .collect()
     };
-    #[cfg(not(feature = "nvmeof"))]
-    let hosts: Vec<serde_json::Value> = Vec::new();
     match nsid {
         Some(n) => Json(serde_json::json!({ "id": uuid, "attached": true, "info": super::v1::attach_info_for(&state, Some(n)), "hosts": hosts })).into_response(),
         None if !hosts.is_empty() => Json(serde_json::json!({ "id": uuid, "attached": true, "hosts": hosts })).into_response(),
@@ -1797,7 +1791,6 @@ async fn detach_volume(
             ));
         }
     }
-    #[cfg(feature = "nvmeof")]
     if let Some(host) = q.host_nqn.as_deref() {
         // One host's view goes; the volume stays served to anyone else.
         let gone = crate::mgmt::nvme_hosts::detach(
@@ -1818,10 +1811,7 @@ async fn detach_volume(
         }))
         .into_response();
     }
-    #[cfg(not(feature = "nvmeof"))]
-    let _ = q;
     state.ublk_exports.lock().await.remove(&key);
-    #[cfg(feature = "nvmeof")]
     {
         super::v1::release_nvme_namespace(&state, &key).await;
         crate::mgmt::nvme_hosts::detach(&state, uuid, None, crate::mgmt::nvme_hosts::Release::All).await;
@@ -1914,7 +1904,6 @@ struct AnaRequest {
 }
 
 /// The NVMe ANA state of a volume on this node, and where it is served.
-#[cfg(feature = "nvmeof")]
 async fn ana_view(state: &Arc<AppState>, id: Uuid) -> serde_json::Value {
     use crate::target::nvmeof::ana;
     let mut served = Vec::new();
@@ -1940,18 +1929,12 @@ async fn ana_view(state: &Arc<AppState>, id: Uuid) -> serde_json::Value {
 
 /// `GET /api/v1/volumes/{id}/ana` — the volume's ANA state here (#83).
 async fn get_ana(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    #[cfg(feature = "nvmeof")]
     {
         let vid = match resolve_volume(&state, &id).await {
             Ok(v) => v,
             Err(r) => return r,
         };
         Json(ana_view(&state, vid.0).await).into_response()
-    }
-    #[cfg(not(feature = "nvmeof"))]
-    {
-        let _ = (state, id);
-        ApiError::bad_request("this engine was built without NVMe-oF".to_string())
     }
 }
 
@@ -1967,7 +1950,6 @@ async fn set_ana(
     Path(id): Path<String>,
     Json(req): Json<AnaRequest>,
 ) -> Response {
-    #[cfg(feature = "nvmeof")]
     {
         use crate::target::nvmeof::ana::AnaState;
         let Some(st) = AnaState::parse(req.state.trim()) else {
@@ -1984,11 +1966,6 @@ async fn set_ana(
             return ApiError::internal(format!("ANA state for {} not kept, so not applied: {e}", vid.0));
         }
         Json(ana_view(&state, vid.0).await).into_response()
-    }
-    #[cfg(not(feature = "nvmeof"))]
-    {
-        let _ = (state, id, req);
-        ApiError::bad_request("this engine was built without NVMe-oF".to_string())
     }
 }
 
@@ -2265,7 +2242,6 @@ pub(crate) async fn stop_volume_subsystem(state: &Arc<AppState>, volume: Uuid) {
     let gone = state.volume_subsystems.lock().await.remove(&volume);
     state.nvme_portals.write().await.remove(&volume);
     if let Some(s) = gone {
-        #[cfg(feature = "nvmeof")]
         {
             s.sub.remove_namespace(1).await;
             s.target.remove_subsystem(&s.nqn);

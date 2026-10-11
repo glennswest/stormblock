@@ -185,7 +185,6 @@ pub async fn restore_exports(state: &Arc<AppState>) -> usize {
             continue;
         }
         match entry.protocol {
-            #[cfg(feature = "nvmeof")]
             ExportProtocol::Nvmeof if entry.subsystem.is_some() => {
                 // Served from a host subsystem, which `nvme_hosts::restore`
                 // puts back with its access list.
@@ -201,7 +200,6 @@ pub async fn restore_exports(state: &Arc<AppState>) -> usize {
                     restored += 1;
                 }
             }
-            #[cfg(feature = "nvmeof")]
             ExportProtocol::Nvmeof => {
                 let Some(nsid) = entry.nsid else {
                     tracing::warn!(
@@ -257,8 +255,6 @@ pub async fn restore_exports(state: &Arc<AppState>) -> usize {
                     }
                 }
             }
-            #[cfg(not(feature = "nvmeof"))]
-            ExportProtocol::Nvmeof => {}
 
             // iSCSI exports ride on the LUN table, which restores itself.
             ExportProtocol::Iscsi => {
@@ -334,7 +330,6 @@ async fn create_export(
         #[cfg(not(feature = "iscsi"))]
         ExportProtocol::Iscsi => return ApiError::internal("iSCSI support not compiled in"),
 
-        #[cfg(feature = "nvmeof")]
         ExportProtocol::Nvmeof => {
             let device = {
                 let vm = state.volume_manager.lock().await;
@@ -390,8 +385,6 @@ async fn create_export(
                 }
             }
         }
-        #[cfg(not(feature = "nvmeof"))]
-        ExportProtocol::Nvmeof => return ApiError::internal("NVMe-oF support not compiled in"),
     }
 
     let entry = ExportEntry {
@@ -469,7 +462,6 @@ pub(crate) async fn drop_export(state: &Arc<AppState>, id: Uuid) -> bool {
     if let Some(lun) = entry.lun_id {
         super::luns::detach_lun(state, lun).await;
     }
-    #[cfg(feature = "nvmeof")]
     if entry.subsystem.is_some() {
         let holder = format!("export:{}", entry.id);
         crate::mgmt::nvme_hosts::detach(

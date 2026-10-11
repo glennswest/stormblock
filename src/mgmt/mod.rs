@@ -14,13 +14,9 @@ pub mod debug;
 pub mod slab_report;
 pub mod tls;
 pub mod raid_sets;
-#[cfg(feature = "nvmeof")]
 pub mod nvme_hosts;
-#[cfg(feature = "nvmeof")]
 pub mod ana;
-#[cfg(feature = "nvmeof")]
 pub mod forge;
-#[cfg(feature = "nvmeof")]
 pub mod forge_trust;
 #[cfg(feature = "ui")]
 pub mod ui;
@@ -215,11 +211,9 @@ pub struct VolumeSubsystem {
     pub nqn: String,
     pub port: u16,
     /// The listener's target, to withdraw the subsystem from.
-    #[cfg(feature = "nvmeof")]
     pub target: Arc<crate::target::nvmeof::NvmeofTarget>,
     /// The subsystem, so who may connect can be changed after it started
     /// (#210).
-    #[cfg(feature = "nvmeof")]
     pub sub: Arc<crate::target::nvmeof::Subsystem>,
 }
 
@@ -366,10 +360,8 @@ pub struct AppState {
     #[cfg(feature = "iscsi")]
     pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
     /// Live NVMe-oF target, so exports can add namespaces at runtime (#26).
-    #[cfg(feature = "nvmeof")]
     pub nvmeof_target: tokio::sync::RwLock<Option<Arc<crate::target::nvmeof::NvmeofTarget>>>,
     /// Per-host NVMe subsystems and who may reach them (#210).
-    #[cfg(feature = "nvmeof")]
     pub nvme_hosts: tokio::sync::Mutex<nvme_hosts::NvmeHosts>,
     /// The volume listing's state generation (#218): (the last fingerprint
     /// of what the listing reports that a persist does not move, how many
@@ -379,10 +371,8 @@ pub struct AppState {
     /// The `[nvmeof]` settings in force: `--config`'s, or the forge settings
     /// this node keeps (#272). Read through [`AppState::nvmeof_settings`],
     /// never `config.nvmeof`, which is only what the file said at start.
-    #[cfg(feature = "nvmeof")]
     pub nvmeof_settings: std::sync::RwLock<Option<config::NvmeofExportConfig>>,
     /// Who set up the shared target, for `/api/v1/forge` (#272).
-    #[cfg(feature = "nvmeof")]
     pub forge: tokio::sync::Mutex<forge::Forge>,
     /// Live LUN table, keyed by LUN ID for O(1) lookup at thousands of
     /// LUNs (#24).
@@ -422,7 +412,6 @@ impl AppState {
     }
 
     /// The `[nvmeof]` settings in force (#272).
-    #[cfg(feature = "nvmeof")]
     pub fn nvmeof_settings(&self) -> Option<config::NvmeofExportConfig> {
         self.nvmeof_settings.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -479,7 +468,6 @@ impl AppState {
     ) -> Self {
         // NSIDs are never handed out twice, across restarts too (#96): the
         // high-water marks live in the data directory.
-        #[cfg(feature = "nvmeof")]
         if let Some(dir) = config.management.data_dir.as_ref() {
             crate::target::nvmeof::nsid::load(std::path::Path::new(dir).join("nsid_high.json"));
         }
@@ -503,9 +491,7 @@ impl AppState {
         let volume_catalog = volume_manager.catalog_cell();
         // Before any target serves: a volume this node was told is not to be
         // used through it must not answer optimized after a restart (#83).
-        #[cfg(feature = "nvmeof")]
         ana::load(&config);
-        #[cfg(feature = "nvmeof")]
         let nvmeof_settings = config.nvmeof.clone();
         let volume_manager = Arc::new(crate::lockwatch::TrackedMutex::new(volume_manager));
         let rebuilds = crate::rebuild::Rebuilds::new(volume_manager.clone(), &config.rebuild);
@@ -592,14 +578,10 @@ impl AppState {
             last_gc: None,
             #[cfg(feature = "iscsi")]
             iscsi_target: tokio::sync::RwLock::new(None),
-            #[cfg(feature = "nvmeof")]
             nvmeof_target: tokio::sync::RwLock::new(None),
-            #[cfg(feature = "nvmeof")]
             nvme_hosts: tokio::sync::Mutex::new(nvme_hosts::NvmeHosts::default()),
             listing_state: std::sync::Mutex::new((0, 0)),
-            #[cfg(feature = "nvmeof")]
             nvmeof_settings: std::sync::RwLock::new(nvmeof_settings),
-            #[cfg(feature = "nvmeof")]
             forge: tokio::sync::Mutex::new(forge::Forge::default()),
             #[cfg(feature = "iscsi")]
             lun_entries: tokio::sync::RwLock::new(HashMap::new()),

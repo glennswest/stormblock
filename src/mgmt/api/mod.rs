@@ -25,7 +25,6 @@ pub mod boothost;
 pub mod release_stage;
 pub mod releases;
 pub mod goldens;
-#[cfg(feature = "nvmeof")]
 pub mod forge;
 #[cfg(feature = "iscsi")]
 pub mod luns;
@@ -200,7 +199,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(kube::router(state.clone()));
 
     // This node as its site's forge (#272).
-    #[cfg(feature = "nvmeof")]
     let r = r.nest("/api/v1/forge", forge::router(state.clone()));
 
     // The StormFS data path (#49, #50). Out of the `mikrotik` profile: a
@@ -369,7 +367,6 @@ pub async fn what_is_serving(state: &AppState, volume_id: uuid::Uuid) -> Vec<Str
         busy.push(format!("NVMe namespace {nsid}"));
     }
     // Served to a host from its own subsystem (#210).
-    #[cfg(feature = "nvmeof")]
     for (nqn, nsid) in state.nvme_hosts.lock().await.serving(volume_id) {
         busy.push(format!("NVMe namespace {nsid} of {nqn}"));
     }

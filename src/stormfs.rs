@@ -145,7 +145,6 @@ impl StormFsRegistration {
                 let mut p = Vec::new();
                 #[cfg(feature = "iscsi")]
                 p.push("iscsi".to_string());
-                #[cfg(feature = "nvmeof")]
                 p.push("nvmeof".to_string());
                 p
             };

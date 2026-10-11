@@ -74,18 +74,15 @@ struct Cli {
 
     /// NVMe-oF/TCP listen address; else `[nvmeof] listen_addr`, else
     /// 0.0.0.0:4420
-    #[cfg(feature = "nvmeof")]
     #[arg(long)]
     nvmeof_addr: Option<String>,
 
     /// NVMe-oF subsystem NQN; else `[nvmeof] nqn`, else
     /// nqn.2024.io.stormblock:default
-    #[cfg(feature = "nvmeof")]
     #[arg(long)]
     nvmeof_nqn: Option<String>,
 
     /// Disable NVMe-oF/TCP target
-    #[cfg(feature = "nvmeof")]
     #[arg(long)]
     no_nvmeof: bool,
 
@@ -958,9 +955,7 @@ pub async fn run() -> anyhow::Result<()> {
         cli.chap_user.as_deref(),
         #[cfg(feature = "iscsi")]
         cli.chap_secret.as_deref(),
-        #[cfg(feature = "nvmeof")]
         cli.nvmeof_addr.as_deref(),
-        #[cfg(feature = "nvmeof")]
         cli.nvmeof_nqn.as_deref(),
         cli.reactor_cores,
         cli.data_dir.as_deref(),
@@ -1478,7 +1473,6 @@ pub async fn run() -> anyhow::Result<()> {
         }
 
         // Start NVMe-oF/TCP target (only if we have a device to export)
-        #[cfg(feature = "nvmeof")]
         if !cli.no_nvmeof {
             if let Some(ref device) = export_device {
                 let listen_addr: std::net::SocketAddr = nvmeof_listen(&config).parse()
@@ -1551,13 +1545,7 @@ pub async fn run() -> anyhow::Result<()> {
         // per-export portals on exists by now, and so does the shared iSCSI target
         // it reports LUN counts from. The management API is started after it, so
         // the router sees the context rather than racing it.
-        // A build without NVMe-oF still has to answer "which interface do the
-        // per-export portals bind?", and the answer is the same one it would have
-        // been — the range is allocated the same way whichever transport wires it.
-        #[cfg(feature = "nvmeof")]
         let nvmeof_bind = nvmeof_listen(&config);
-        #[cfg(not(feature = "nvmeof"))]
-        let nvmeof_bind = "0.0.0.0:4420".to_string();
         #[cfg(feature = "iscsi")]
         let iscsi_bind = iscsi_section(&config).listen_addr;
         #[cfg(not(feature = "iscsi"))]
@@ -7066,7 +7054,6 @@ async fn handle_adopt_ublk(
         // `--config` has an `[nvmeof]` section, else what this node was told
         // (`forge.json`), else on with the node's defaults: a single-node
         // cluster is its own forge. Before `/serve/v1`, as in the daemon.
-        #[cfg(feature = "nvmeof")]
         match config.nvmeof.as_ref() {
             Some(section) => match mgmt::forge::target_from(section, &config.management) {
                 Ok(nvmeof) => match mgmt::forge::serve(&state, &reactor, Arc::new(nvmeof)).await {
@@ -11109,7 +11096,7 @@ file = "{state}"
 
 /// Forge mode on an adopting engine (#206): what a bastion's `adopt-ublk`
 /// does with an `[nvmeof]` section, and what it does without one.
-#[cfg(all(test, feature = "nvmeof"))]
+#[cfg(test)]
 mod forge_mode_tests {
     use super::*;
     use crate::drive::filedev::FileDevice;

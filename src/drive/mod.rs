@@ -1,6 +1,6 @@
 //! Drive layer — unified BlockDevice trait over NVMe (VFIO), SAS (io_uring), and file (tokio).
 
-#[cfg(all(target_os = "linux", feature = "nvmeof"))]
+#[cfg(target_os = "linux")]
 pub mod nvme;
 #[cfg(target_os = "linux")]
 pub mod sas;
@@ -25,7 +25,6 @@ pub mod discover;
 // where its target does.
 #[cfg(feature = "iscsi")]
 pub mod iscsi_dev;
-#[cfg(feature = "nvmeof")]
 pub mod nvmeof_dev;
 pub mod slab;
 pub mod slab_registry;
@@ -388,7 +387,6 @@ pub async fn open_one_drive_with_secret(
     // Fabric URIs first — a remote namespace attached as a drive
     // (stormblock#73). The same string works everywhere a device path
     // does: config `[[drives]]`, POST /api/v1/drives, RAID members.
-    #[cfg(feature = "nvmeof")]
     if let Some(mut spec) = nvmeof_dev::NvmeTcpSpec::parse(path) {
         if dhchap.is_some() {
             spec.dhchap = dhchap;
@@ -478,14 +476,10 @@ pub async fn open_path(path: &str, read_only: bool) -> DriveResult<std::sync::Ar
 }
 
 fn supported_uri_schemes() -> &'static str {
-    #[cfg(all(feature = "nvmeof", feature = "iscsi"))]
+    #[cfg(feature = "iscsi")]
     return "nvme-tcp://host:port/nqn?nsid=N, iscsi://host:port/iqn, emulated://name?size=1P";
-    #[cfg(all(feature = "nvmeof", not(feature = "iscsi")))]
-    return "nvme-tcp://host:port/nqn?nsid=N";
-    #[cfg(all(not(feature = "nvmeof"), feature = "iscsi"))]
-    return "iscsi://host:port/iqn";
-    #[cfg(all(not(feature = "nvmeof"), not(feature = "iscsi")))]
-    return "none (built without fabric features)";
+    #[cfg(not(feature = "iscsi"))]
+    return "nvme-tcp://host:port/nqn?nsid=N, emulated://name?size=1P";
 }
 
 /// Parse `iscsi://host:port/iqn` into (host, port, iqn).

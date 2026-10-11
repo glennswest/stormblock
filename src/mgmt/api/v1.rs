@@ -903,7 +903,6 @@ fn account_static_nodes(v1: &mut V1State, replicas: &[Replica], size: u64, charg
 /// Reuses the namespace if this volume is already attached, so an attach
 /// replay is idempotent and does not leak namespaces. Connected hosts are
 /// notified by the target, so no reconnect is needed.
-#[cfg(feature = "nvmeof")]
 /// Serve a volume as a subsystem of its own, and remember where.
 ///
 /// The NQN carries the volume GUID, so the address names what it serves:
@@ -965,7 +964,6 @@ pub async fn ensure_volume_subsystem(
     Some((nqn, port))
 }
 
-#[cfg(feature = "nvmeof")]
 pub(crate) async fn ensure_nvme_namespace_ro(
     state: &AppState,
     volume_id: &str,
@@ -1006,7 +1004,6 @@ pub(crate) async fn ensure_nvme_namespace_ro(
 /// NGUID, which the kernel reports as "duplicate IDs in subsystem" (#210). A
 /// record whose volume is gone, whose NSID is taken, or whose volume is a
 /// sealed golden (never on the shared subsystem) is dropped, loudly.
-#[cfg(feature = "nvmeof")]
 pub async fn restore_nvme_nsids(state: &AppState) -> usize {
     let Some(target) = state.nvmeof_target.read().await.as_ref().cloned() else { return 0 };
     let shared = target.default_subsystem();
@@ -1070,7 +1067,6 @@ pub async fn restore_nvme_nsids(state: &AppState) -> usize {
 
 /// Withdraw a volume's namespace on detach, so it stops being served and the
 /// NSID can be reused.
-#[cfg(feature = "nvmeof")]
 pub(crate) async fn release_nvme_namespace(state: &AppState, volume_id: &str) {
     let nsid = {
         let mut v1 = state.v1.lock().await;
@@ -1086,7 +1082,6 @@ pub(crate) async fn release_nvme_namespace(state: &AppState, volume_id: &str) {
 
 /// Take a volume's namespace off the shared subsystem, its record already
 /// gone — unless an export serves it there too.
-#[cfg(feature = "nvmeof")]
 async fn withdraw_shared_namespace(state: &AppState, volume_id: &str, nsid: u32) {
     // An export may serve the same volume at the same NSID (a subsystem
     // never holds one volume twice): it keeps the namespace.
@@ -1117,17 +1112,11 @@ pub(crate) fn nvme_addresses(state: &AppState, port: Option<u16>) -> Vec<NvmeAdd
 
 pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo {
     let listen = {
-        #[cfg(feature = "nvmeof")]
         {
             state
                 .nvmeof_settings()
                 .map(|n| n.listen_addr)
                 .unwrap_or_else(|| "0.0.0.0:4420".to_string())
-        }
-        #[cfg(not(feature = "nvmeof"))]
-        {
-            let _ = state;
-            "0.0.0.0:4420".to_string()
         }
     };
     let (host, port) = match listen.rsplit_once(':') {
@@ -1142,16 +1131,11 @@ pub(crate) fn attach_info_for(state: &AppState, nsid: Option<u32>) -> AttachInfo
     // A per-volume NQN would force a Connect per container, which is the
     // overhead the hot-add path exists to avoid.
     let nqn = {
-        #[cfg(feature = "nvmeof")]
         {
             state
                 .nvmeof_settings()
                 .map(|n| n.nqn)
                 .unwrap_or_else(|| crate::target::nvmeof::NvmeofConfig::default().nqn)
-        }
-        #[cfg(not(feature = "nvmeof"))]
-        {
-            "nqn.2024.io.stormblock:default".to_string()
         }
     };
 
@@ -1475,7 +1459,6 @@ async fn delete_volume(
         // Stop serving it before the backing storage goes away — otherwise a
         // deleted COW image leaves a namespace pointing at freed slots, which
         // the container-restart cycle would hit constantly.
-        #[cfg(feature = "nvmeof")]
         release_nvme_namespace(&state, &id).await;
 
         if let Some(local) = rec.local_id {
@@ -1674,14 +1657,12 @@ async fn revoke_attachment(
         ("ublk", _) => {
             state.ublk_exports.lock().await.remove(id);
         }
-        #[cfg(feature = "nvmeof")]
         ("nvme_tcp", Some(host)) => {
             if let Some(local) = local {
                 crate::mgmt::nvme_hosts::detach(state, local, Some(host), crate::mgmt::nvme_hosts::Release::All)
                     .await;
             }
         }
-        #[cfg(feature = "nvmeof")]
         ("nvme_tcp", None) => {
             if let Some(nsid) = shared_nsid {
                 withdraw_shared_namespace(state, id, nsid).await;
@@ -1839,7 +1820,6 @@ async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) 
     // NVMe-oF path: hot-add the volume as a namespace on the shared
     // subsystem. A node that is already connected picks it up from the async
     // event with no Connect at all.
-    #[cfg(feature = "nvmeof")]
     {
         let Some(local) = local_id else {
             if want == WantTransport::NvmeTcp {
@@ -1859,15 +1839,6 @@ async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) 
                 Err(V1Error::Conflict(m))
             }
         }
-    }
-    #[cfg(not(feature = "nvmeof"))]
-    {
-        let _ = local_id;
-        if want == WantTransport::NvmeTcp {
-            forget_attachment(&state, &id, &req.node).await;
-            return Err(V1Error::Conflict(format!("volume {id} could not be added as an NVMe-oF namespace")));
-        }
-        Ok(Json(attach_info_for(&state, None)))
     }
 }
 
@@ -1889,7 +1860,6 @@ pub(crate) enum NvmeAttachError {
 /// shown to every host the shared subsystem admits, and refused when the
 /// shared subsystem admits no host at all, since the coordinates would lead
 /// nowhere. A sealed volume is always served write-protected.
-#[cfg(feature = "nvmeof")]
 pub(crate) async fn nvme_attach(
     state: &AppState,
     key: &str,
@@ -1940,12 +1910,6 @@ pub(crate) async fn nvme_attach(
 /// the coordinates an `nvme_tcp` attach returns must be ones an initiator
 /// can connect to and find the volume behind (#149).
 async fn nvme_unavailable(state: &AppState, id: &str, local_id: Option<Uuid>, local_node: &str) -> Option<String> {
-    #[cfg(not(feature = "nvmeof"))]
-    {
-        let _ = (state, id, local_id, local_node);
-        return Some("this engine was built without NVMe-oF".into());
-    }
-    #[cfg(feature = "nvmeof")]
     {
         if state.nvmeof_target.read().await.is_none() {
             return Some(format!(
@@ -2009,7 +1973,6 @@ async fn detach_volume(
         .attachments
         .get(&id)
         .is_some_and(|nodes| !nodes.is_empty());
-    #[cfg(feature = "nvmeof")]
     if !still_attached {
         release_nvme_namespace(&state, &id).await;
         let local = state.v1.lock().await.volumes.get(&id).and_then(|r| r.local_id);
@@ -2017,8 +1980,6 @@ async fn detach_volume(
             crate::mgmt::nvme_hosts::detach(&state, local, None, crate::mgmt::nvme_hosts::Release::All).await;
         }
     }
-    #[cfg(not(feature = "nvmeof"))]
-    let _ = still_attached;
     // Idempotent: detach replays are no-ops.
     Ok(Json(serde_json::json!({})))
 }
@@ -2894,7 +2855,7 @@ mod persistence_tests {
 /// here: dev has no ublk_drv) the engine answers `ublk` unless the request
 /// names `nvme_tcp` — and with it, the coordinates are real: the engine's own
 /// `nvme-tcp://` initiator connects to them and finds the volume.
-#[cfg(all(test, feature = "nvmeof"))]
+#[cfg(test)]
 mod transport_tests {
     use super::*;
     use crate::drive::filedev::FileDevice;

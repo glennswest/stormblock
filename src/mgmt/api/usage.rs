@@ -174,7 +174,6 @@ impl Context {
         }
         // A host's own subsystem (#210): an attach that named `host_nqn`, or a
         // boot claim's clone. Not on the shared subsystem, so not below.
-        #[cfg(feature = "nvmeof")]
         {
             let hosts = state.nvme_hosts.lock().await;
             for sub in hosts.subsystems.values() {

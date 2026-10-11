@@ -19,7 +19,6 @@ use uuid::Uuid;
 use crate::mgmt::{AppState, ExportEntry};
 #[cfg(feature = "iscsi")]
 use crate::target::iscsi::IscsiTarget;
-#[cfg(feature = "nvmeof")]
 use crate::target::nvmeof::NvmeofTarget;
 use crate::target::reactor::ReactorPool;
 
@@ -42,7 +41,6 @@ pub struct Portal {
 /// discovering every namespace on a shared subsystem. Since #188 every one is
 /// a subsystem of the one serve listener (`[serve] portal_base`), not a
 /// target on a port of its own: a node is no longer capped at the port span.
-#[cfg(feature = "nvmeof")]
 pub struct Subsystem {
     pub sub: Arc<crate::target::nvmeof::Subsystem>,
     pub port: u16,
@@ -50,7 +48,6 @@ pub struct Subsystem {
 }
 
 /// The one NVMe/TCP listener every serve export is a subsystem of (#188).
-#[cfg(feature = "nvmeof")]
 pub struct NvmeListener {
     pub target: Arc<NvmeofTarget>,
     pub task: JoinHandle<()>,
@@ -69,10 +66,8 @@ pub struct ServeContext {
     pub wiring: Mutex<WiringTable>,
     #[cfg(feature = "iscsi")]
     pub portals: Mutex<HashMap<Uuid, Portal>>,
-    #[cfg(feature = "nvmeof")]
     pub subsystems: Mutex<HashMap<Uuid, Subsystem>>,
     /// The serve NVMe listener, bound at the first NVMe export (#188).
-    #[cfg(feature = "nvmeof")]
     pub nvme_listener: Mutex<Option<NvmeListener>>,
     /// The shared reactor pool (sized from cores, issue #8). Per-export
     /// targets run on it too — building a fresh single-core pool per portal
@@ -135,9 +130,7 @@ impl ServeContext {
             wiring: Mutex::new(wiring),
             #[cfg(feature = "iscsi")]
             portals: Mutex::new(HashMap::new()),
-            #[cfg(feature = "nvmeof")]
             subsystems: Mutex::new(HashMap::new()),
-            #[cfg(feature = "nvmeof")]
             nvme_listener: Mutex::new(None),
             reactor,
             drain_deadlines: Mutex::new(HashMap::new()),
@@ -172,7 +165,7 @@ impl ServeContext {
     pub fn is_blocked(&self, w: &Wiring) -> bool {
         match w.protocol {
             WireProto::Iscsi => !self.cfg.iscsi_enabled,
-            WireProto::Nvmeof => !cfg!(feature = "nvmeof"),
+            WireProto::Nvmeof => false,
         }
     }
 

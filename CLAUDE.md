@@ -79,11 +79,10 @@ Dependencies: one TLS backend (ring), and `cluster` (openraft) is opt-in. Every
 sc-build job starts from an empty drive, so every dependency is compiled on
 every build: adding one costs every build.
 
-Features: `default = ["nvmeof", "iscsi", "stormfs-data"]` (`cluster` opt-in
-since #209); `ui` is
-the old web UI (off since v12.2.0, stormview is the UI). `arm64` and
-`mikrotik` gated no code and were removed (#169). Without `nvmeof` the tree
-does not compile (#161).
+Features: `default = ["iscsi", "stormfs-data"]` (`cluster` opt-in since
+#209); `ui` is the old web UI (off since v12.2.0, stormview is the UI).
+NVMe-oF is always built, not a feature (#161). `arm64` and `mikrotik` gated
+no code and were removed (#169).
 
 **RouterOS: not shipping** (owner, 2026-09-28) — the profile is neither built
 nor checked. Kept as history of what it was and why:

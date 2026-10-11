@@ -8,7 +8,6 @@ pub mod reactor;
 #[cfg(feature = "iscsi")]
 pub mod iscsi;
 
-#[cfg(feature = "nvmeof")]
 pub mod nvmeof;
 
 use std::collections::HashMap;
@@ -22,7 +21,6 @@ pub struct TargetConfig {
     pub reactor: reactor::ReactorConfig,
     #[cfg(feature = "iscsi")]
     pub iscsi: Option<iscsi::IscsiConfig>,
-    #[cfg(feature = "nvmeof")]
     pub nvmeof: Option<nvmeof::NvmeofConfig>,
 }
 

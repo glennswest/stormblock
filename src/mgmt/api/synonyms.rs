@@ -613,7 +613,6 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents:
 
     // Its export goes first: an export outliving its volume is a namespace
     // that answers for nothing.
-    #[cfg(feature = "nvmeof")]
     {
         // Out of its host's subsystem too (#210): the host keeps the
         // subsystem, and finds its new clone there.
@@ -650,7 +649,6 @@ async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents:
 /// that asked for somewhere to attach should be told plainly that there is
 /// nowhere, not left to infer it from a missing field.
 async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>) -> serde_json::Value {
-    #[cfg(feature = "nvmeof")]
     {
         use crate::target::nvmeof::HostAccess;
         let pol = crate::mgmt::nvme_hosts::policy(state);
@@ -754,11 +752,6 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
         // claim is never served from it (#98).
         tracing::warn!(%volume, "claim: this node serves no per-volume subsystems; the clone is not served");
         return serde_json::Value::Null;
-    }
-    #[cfg(not(feature = "nvmeof"))]
-    {
-        let _ = (state, volume, to);
-        serde_json::Value::Null
     }
 }
 

@@ -37,14 +37,12 @@ use crate::mgmt::{ExportEntry, ExportProtocol, ExportStatus};
 use crate::mgmt::LunBacking;
 #[cfg(feature = "iscsi")]
 use crate::target::iscsi::{IscsiConfig, IscsiTarget};
-#[cfg(feature = "nvmeof")]
 use crate::target::nvmeof::{NvmeofConfig, NvmeofTarget};
 use crate::volume::VolumeId;
 
 use super::ctx::ServeContext;
 #[cfg(feature = "iscsi")]
 use super::ctx::Portal;
-#[cfg(feature = "nvmeof")]
 use super::ctx::Subsystem;
 use super::netstat;
 use super::wiring::{WireProto, WireState, Wiring};
@@ -275,7 +273,6 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         // NVMe rows get a dedicated subsystem and nothing else: there is no
         // shared-target LUN to pin, and the volume is namespace 1 of its own
         // subsystem.
-        #[cfg(feature = "nvmeof")]
         if row.protocol == WireProto::Nvmeof {
             match start_subsystem(ctx, &row, dev).await {
                 Ok(()) => {
@@ -413,7 +410,6 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         // no second look, no window to lose. The grace remains as the bound on
         // an initiator that never lets go.
         let live = match row.protocol {
-            #[cfg(feature = "nvmeof")]
             WireProto::Nvmeof => {
                 let subs = ctx.subsystems.lock().await;
                 match subs.get(&row.export_id) {
@@ -454,7 +450,6 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
         }
 
         if row.protocol == WireProto::Nvmeof {
-            #[cfg(feature = "nvmeof")]
             stop_subsystem(ctx, &row.export_id).await;
         } else {
             #[cfg(feature = "iscsi")]
@@ -644,7 +639,6 @@ async fn stop_portal(ctx: &Arc<ServeContext>, export_id: &Uuid) {
 /// The one serve NVMe/TCP listener every export is a subsystem of (#188),
 /// bound at `[serve] portal_base` the first time an export needs it. Its own
 /// (default) subsystem admits nobody: only an export's NQN is reachable on it.
-#[cfg(feature = "nvmeof")]
 pub(crate) async fn nvme_listener(ctx: &Arc<ServeContext>) -> anyhow::Result<(Arc<NvmeofTarget>, u16)> {
     let mut l = ctx.nvme_listener.lock().await;
     if let Some(x) = l.as_ref() {
@@ -676,7 +670,6 @@ pub(crate) async fn nvme_listener(ctx: &Arc<ServeContext>) -> anyhow::Result<(Ar
 
 /// Serve one export as a subsystem of the serve listener (#188): one NQN per
 /// volume, the volume as namespace 1, the export's host access (#212).
-#[cfg(feature = "nvmeof")]
 async fn start_subsystem(
     ctx: &Arc<ServeContext>,
     row: &Wiring,
@@ -712,7 +705,6 @@ async fn start_subsystem(
 
 /// Withdraw an export's subsystem: its namespace first (a removal waits for
 /// what is in flight, #83), then the subsystem.
-#[cfg(feature = "nvmeof")]
 async fn stop_subsystem(ctx: &Arc<ServeContext>, export_id: &Uuid) {
     if let Some(s) = ctx.subsystems.lock().await.remove(export_id) {
         s.sub.remove_namespace(1).await;
@@ -775,7 +767,6 @@ pub async fn refresh_counters(ctx: &Arc<ServeContext>) {
     drop(w);
     #[cfg(feature = "iscsi")]
     s.store(&s.portals, ctx.portals.lock().await.len() as u64);
-    #[cfg(feature = "nvmeof")]
     s.store(&s.subsystems, ctx.subsystems.lock().await.len() as u64);
     s.publish_metrics();
 }

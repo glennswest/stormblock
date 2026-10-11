@@ -208,12 +208,12 @@ A change to any of these needs a stormblock-test issue.
 `STORMBLOCK_TEST_DIR=<a stormblock-test checkout>`, it also runs that repo's
 own check (`test/check.sh`, the `short` suite) against this checkout.
 
-**Features** (`Cargo.toml`): `default = ["nvmeof", "iscsi", "stormfs-data"]`;
-`cluster` is opt-in since #209.
+**Features** (`Cargo.toml`): `default = ["iscsi", "stormfs-data"]`;
+`cluster` is opt-in since #209. NVMe-oF/TCP is not a feature: it is always
+built (#161), since every node, forge and `/serve/v1` serve over it.
 
 | feature | adds |
 |---|---|
-| `nvmeof` | the NVMe-oF/TCP target, `--nvmeof-*` flags, `[nvmeof]` |
 | `iscsi` | the iSCSI target, `--iscsi-*`/`--chap-*` flags, `boot-iscsi`, `migrate-boot`, `[iscsi]`, `/api/v1/luns`, `/api/v1/sessions` |
 | `cluster` (opt-in) | openraft membership, heartbeats, replication, `[cluster]`, `/api/v1/cluster`, `/raft/*` |
 | `stormfs-data` | the StormFS data path, `/api/v1/stormfs` (`docs/stormfs-api.md`) |
@@ -224,7 +224,7 @@ Profiles:
 ```bash
 cargo build --release --locked --target x86_64-unknown-linux-musl                 # a full node
 cargo build --release --locked --target aarch64-unknown-linux-musl \
-    --no-default-features --features nvmeof                                       # RouterOS (NVMe-TCP only)
+    --no-default-features                                                         # RouterOS (NVMe-TCP only)
 ```
 
 **Nothing ships for RouterOS** (owner, 2026-09-28): the RouterOS profile is
@@ -232,8 +232,7 @@ no longer built or checked, and the command above is kept for reference only.
 The `arm64` and `mikrotik` feature names it used to carry gated no code and
 are gone (#169).
 When it did ship it served containers, PVCs and sbregistry over NVMe-TCP; iSCSI
-sharing and PXE boot on RouterOS are mkube's. `--no-default-features` without
-`nvmeof` does not currently compile (#161).
+sharing and PXE boot on RouterOS are mkube's.
 
 ## Running
 
@@ -320,9 +319,9 @@ Every other command logs to stderr as before.
 | `--iscsi-target-name` | `[iscsi] target_name`, else `iqn.2024.io.stormblock:default` | iSCSI target IQN (`iscsi`) |
 | `--chap-user`, `--chap-secret` | `[iscsi] chap_user`/`chap_secret` | CHAP for the iSCSI target; both or neither (`iscsi`) |
 | `--no-iscsi` | off | do not start the iSCSI target (`iscsi`) |
-| `--nvmeof-addr` | `[nvmeof] listen_addr`, else `0.0.0.0:4420` | NVMe-oF/TCP listen address (`nvmeof`) |
-| `--nvmeof-nqn` | `[nvmeof] nqn`, else `nqn.2024.io.stormblock:default` | NVMe-oF subsystem NQN (`nvmeof`) |
-| `--no-nvmeof` | off | do not start the NVMe-oF target (`nvmeof`) |
+| `--nvmeof-addr` | `[nvmeof] listen_addr`, else `0.0.0.0:4420` | NVMe-oF/TCP listen address |
+| `--nvmeof-nqn` | `[nvmeof] nqn`, else `nqn.2024.io.stormblock:default` | NVMe-oF subsystem NQN |
+| `--no-nvmeof` | off | do not start the NVMe-oF target |
 | `--reactor-cores` | `0` | per-core reactor threads for the targets; 0 = one per core |
 
 **A flag wins over the file, the file over the default** (#164). Until #164
@@ -426,7 +425,7 @@ it, because a path is logged, listed and persisted. Over HTTP it is
 `chap_secret` (both or neither; a flag wins, see above), and
 `max_connections` (`4`, MC/S per session).
 
-**`[nvmeof]`** (`nvmeof`) — `listen_addr` and `nqn` (a flag wins, see above),
+**`[nvmeof]`** — `listen_addr` and `nqn` (a flag wins, see above),
 `export_drives` (`true`: publish each drive as a raw namespace; set `false`
 where the drives are the engine's pool). Who may connect
 ([docs/nvme-access.md](docs/nvme-access.md), #210): `allow_any_host`

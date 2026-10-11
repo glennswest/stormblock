@@ -163,8 +163,10 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 # first (CLAUDE.md), no stormcos node enables Raft, and the feature pulled
 # openraft, chrono, rust_decimal, borsh and thiserror 1.x into every build.
 # Build with `--features cluster` for it.
-default = ["nvmeof", "iscsi", "stormfs-data"]
-nvmeof = []
+# NVMe-oF/TCP is not a feature (#161): every node, forge and `/serve/v1`
+# serve over it, boot claims and remote slabs attach through it, and nothing
+# ships without it since RouterOS stopped (owner, 2026-09-28).
+default = ["iscsi", "stormfs-data"]
 iscsi = []
 # The StormFS data-path surface: chunk lifecycle, versioned-map commits and
 # version pins (#49, #50). Off with --no-default-features (what the RouterOS
@@ -180,7 +182,7 @@ cluster = ["dep:openraft"]
 ui = ["dep:askama", "dep:rust-embed", "dep:mime_guess"]
 # `arm64` and `mikrotik` are gone (#169): they gated no code, so
 # `--features mikrotik` stripped nothing. A small build is
-# `--no-default-features --features nvmeof`.
+# `--no-default-features` (NVMe-oF only).
 
 [dev-dependencies]
 # Integration tests read engine-written pallets through the firmware path.

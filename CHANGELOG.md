@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-11
+- **BREAKING (build):** #161: `nvmeof` is no longer a feature. NVMe-oF/TCP is always built: every node, forge, `/serve/v1`, the boot claim and remote slabs use it, and nothing ships without it since RouterOS stopped (owner, 2026-09-28). A build without it did not compile, and by now failed in far more places than the four the issue found (the boot claim, forge trust, the initiator in the CLI). The 90 gates and the six branches that existed only for a build without it are gone. `--features nvmeof` is now refused by cargo; nothing in glennswest's repositories passed it except this README. `--no-default-features` is the small build (NVMe-oF only), and `--no-default-features --features iscsi` builds too.
 - **chore:** #169: dead code and empty features removed.
   - `target/nvmeof/zerocopy.rs` (an io_uring zero-copy C2H send nothing called; the targets send through tokio) is gone, as are `drive::IoOp` and `drive::IoCompletion` (unused).
   - The `arm64` and `mikrotik` features gated no code, so `--features mikrotik` stripped nothing; they are gone. A small build is `--no-default-features --features nvmeof`.

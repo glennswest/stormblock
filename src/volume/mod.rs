@@ -5020,7 +5020,6 @@ mod redundancy_tests {
             assert_eq!(mgr.get_volume(&plain).unwrap().block_size(), 4096);
             // What an NVMe/TCP host is told: LBADS 9, and the capacity in
             // 512-byte blocks.
-            #[cfg(feature = "nvmeof")]
             {
                 let id = crate::target::nvmeof::admin::identify_namespace(&dev);
                 assert_eq!(id[130], 9);
