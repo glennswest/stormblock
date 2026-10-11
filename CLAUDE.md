@@ -194,8 +194,11 @@ stormstorage's, #179; `ReplicatedVolume` has no callers, #169).
 - [x] `[reactor]` from the config; `retired_keys` warnings
 - [x] tests `cli::config_arrays_tests`; README, raid-sets.md, example,
       CHANGELOG
-- [ ] on a build VM: the tests, config/raid/cluster tests, `--features
-      cluster`, check.sh; golden; close
+- [x] found by the build: `merge_cli` dropped `--volume`'s policy; carried
+      now, and a config volume's redundancy checked at validate
+- [x] on a build VM: config/raid/cluster/auth 115/115, `--features cluster`
+      checks, the 3 new tests; check.sh at 6861972 ALL PASS (1143/1143)
+- [ ] golden; close
 
 ### server3 VM/container probes slower on 11.65 than 11.64 (2026-10-10, #263) — CLOSED: not stormblock's
 

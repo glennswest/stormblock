@@ -10,6 +10,7 @@
     - a volume is made when none of its name exists, never resized.
   - **`[reactor]`'s `cores` and `pin_cores` are used**; `--reactor-cores` wins over `cores`.
   - **`[boot]` and `[cluster] replication_mode`/`replication_factor` are removed.** Nothing serves iPXE templates, and cross-node copies are stormstorage's (#179). A file that still sets them loads, with a warning naming each.
+  - **Fixed along the way:** `merge_cli` dropped `--volume name:size:policy`'s policy. It reaches `[[volumes]] redundancy` now, and a config volume's redundancy is checked at validate.
   - **Tests:** `cli::config_arrays_tests` (made once, found again after a restart with the data kept; not made over a drive holding a slab; retired keys warned).
 - **fix:** #230: `ci-compose-disk-verify.sh` runs unprivileged on a build VM (`sc-build 'cargo build --locked && bash ci-compose-disk-verify.sh'`). It took its binary from `/build/cargo/…`, which no longer exists, worked under `/build/work`, and needed root for a ublk attach, a mount, and shim and grub out of `/boot/efi`.
   - **Now:** the composed disk is served over NVMe/TCP. The host's kernel in QEMU checks 4096-byte sectors, the two partitions, the ESP and the kernel's digest inside the pallet. `stormblock pallet verify` reads the namespace through the engine's own initiator. OVMF boots the disk as a 4Kn NVMe drive, with stormuefi (built from its repo) starting the pallet's kernel, command line and initramfs.
