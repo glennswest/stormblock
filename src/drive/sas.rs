@@ -365,7 +365,7 @@ fn queue_value(path: &str, what: &str) -> Option<u64> {
     let name = real.file_name()?.to_str()?.to_string();
     let base = std::path::Path::new("/sys/class/block").join(&name);
     let at = |dir: &std::path::Path| std::fs::read_to_string(dir.join("queue").join(what)).ok();
-    let text = at(&base).or_else(|| at(&std::fs::canonicalize(&base).ok()?.parent()?.to_path_buf()))?;
+    let text = at(&base).or_else(|| at(std::fs::canonicalize(&base).ok()?.parent()?))?;
     text.trim().parse().ok()
 }
 

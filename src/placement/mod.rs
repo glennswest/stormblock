@@ -116,6 +116,9 @@ pub struct MigrateExtentResult {
     pub dest_slot: u64,
 }
 
+/// A slot to read: its device, where it starts, how long it is.
+type SourceAt = (Arc<dyn BlockDevice>, u64, u64);
+
 /// What became of one item of [`PlacementEngine::migrate_window_unlocked`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowMove {
@@ -981,7 +984,7 @@ impl PlacementEngine {
 
         // The sources, in parallel (each is a round trip to the appliance),
         // with no lock held.
-        let sources: Vec<Option<(Arc<dyn BlockDevice>, u64, u64)>> = {
+        let sources: Vec<Option<SourceAt>> = {
             let r = registry.read().await;
             items
                 .iter()
