@@ -180,6 +180,23 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Offline clone verb and golden --from-volume (2026-10-11, #87, P3) — IN PROGRESS
+
+tinyanvil wants slab CoW instead of overlayfs on a loop-mounted golden, with
+no running engine.
+- [ ] `image::offline`: import a golden file (raw/qcow2/vmdk) into an opened
+      slab once — sealed volume `golden-<stem>-<sha16>` (sha256 of the
+      image's content), found again by that digest — and CoW-clone it
+      (`fs::clone_volume`: fresh fs UUID, checked); persisted to the slab
+- [ ] CLI `stormblock clone --slab … --golden <file> --name <clone>`
+      (`--golden` may also name a sealed volume in the slab)
+- [ ] `stormblock golden --from-volume <v> --slab … --out <file>` (sparse
+      copy, ext4 checked, `--seal` seals it in the slab too); `--size`
+      only for the tar path
+- [ ] `attach` persists the records when it releases a writable volume
+- [ ] tests (in-process: import, dedup, clone, write, export round trip;
+      the CLI); docs (README), CHANGELOG
+
 ### Storage VLAN: data path on its own network (2026-10-11, #85, P3) — DONE
 
 Owner: a storage VLAN is a different NIC and network (own subnet, MTU,
