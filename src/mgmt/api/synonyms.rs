@@ -751,7 +751,7 @@ async fn attach_info(state: &Arc<AppState>, volume: VolumeId, to: AttachFor<'_>)
         // address. The shared subsystem's NSIDs were the other scheme, and a
         // claim is never served from it (#98).
         tracing::warn!(%volume, "claim: this node serves no per-volume subsystems; the clone is not served");
-        return serde_json::Value::Null;
+        serde_json::Value::Null
     }
 }
 
