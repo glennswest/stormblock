@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Config sections parsed and never acted on (2026-10-10, #165) — IN PROGRESS
+### Config sections parsed and never acted on (2026-10-10, #165) — DONE (golden-stormblock-68b92b6062a4)
 
 Per section, act or remove: `[[arrays]]`/`[[volumes]]` act (startup reads
 the merged config; `merge_cli` already turned `--raid`/`--volume` into
@@ -198,7 +198,7 @@ stormstorage's, #179; `ReplicatedVolume` has no callers, #169).
       now, and a config volume's redundancy checked at validate
 - [x] on a build VM: config/raid/cluster/auth 115/115, `--features cluster`
       checks, the 3 new tests; check.sh at 6861972 ALL PASS (1143/1143)
-- [ ] golden; close
+- [x] golden golden-stormblock-68b92b6062a4 (18accce); closed
 
 ### server3 VM/container probes slower on 11.65 than 11.64 (2026-10-10, #263) — CLOSED: not stormblock's
 
