@@ -14,7 +14,7 @@ use crate::drive::slab::{Slab, SlabRole, DEFAULT_SLOT_SIZE as SLAB_SLOT_SIZE};
 #[cfg(feature = "iscsi")]
 use crate::boot_iscsi::{BootDiskLayout, IscsiBootManager};
 use crate::placement::topology::StorageTier;
-use crate::raid::{RaidArray, RaidArrayId, RaidLevel};
+use crate::raid::{RaidArrayId, RaidLevel};
 use crate::volume::VolumeManager;
 use crate::target::{self, reactor::{ReactorConfig, ReactorPool}};
 use crate::mgmt::{self, AppState, DriveInfo};

@@ -83,6 +83,20 @@ pub fn ui_router(state: Arc<AppState>) -> Router {
 #[cfg(not(feature = "cluster"))]
 async fn cluster_disabled() -> impl IntoResponse {
     use askama::Template;
+    // The nodes table's row, as `cluster::NodeRow` has it: askama checks the
+    // template's fields at compile time, and `()` has none (#166: `--features
+    // ui` without `cluster` did not build). The list is always empty here.
+    #[allow(dead_code)]
+    struct NoNode {
+        node_id: u64,
+        hostname: String,
+        mgmt_addr: String,
+        status: String,
+        capacity_human: String,
+        drives_count: usize,
+        arrays_count: usize,
+        volumes_count: usize,
+    }
     #[derive(Template)]
     #[template(path = "cluster.html")]
     struct ClusterDisabled {
@@ -93,7 +107,7 @@ async fn cluster_disabled() -> impl IntoResponse {
         node_count: usize,
         online_count: usize,
         leader_display: String,
-        nodes: Vec<()>,
+        nodes: Vec<NoNode>,
     }
     let tmpl = ClusterDisabled {
         active: "cluster",
