@@ -182,7 +182,7 @@ async fn a_configured_target_is_not_the_apis_to_change() {
         require_dhchap: false,
         boothost_host_nqn: None,
     };
-    let target = stormblock::mgmt::forge::target_from(&settings, &state.config.management).unwrap();
+    let target = stormblock::mgmt::forge::target_from(&settings, &state.config).unwrap();
     let reactor = Arc::new(stormblock::target::reactor::ReactorPool::new(
         &stormblock::target::reactor::ReactorConfig { core_count: 1, pin_cores: false },
     ));

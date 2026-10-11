@@ -1689,6 +1689,73 @@ pin_cores = false
         assert_ne!(s.advertise_addr, "0.0.0.0");
     }
 
+    /// A storage network (#85): the data path is advertised and bound on it,
+    /// the control channel keeps the management address.
+    #[tokio::test]
+    async fn the_data_path_is_advertised_on_the_storage_network_and_control_on_the_lan() {
+        let mut cfg: StormBlockConfig = toml::from_str(
+            "[management]\nadvertised_addr = \"192.0.2.5\"\ndata_dir = \"/nonexistent/sb\"\n[storage]\ninterface = \"lo\"\nwait_secs = 1\n",
+        )
+        .unwrap();
+        // Before: one network, the management address for both.
+        assert_eq!(cfg.data_host("0.0.0.0"), "192.0.2.5");
+        cfg.apply_networks().await;
+        assert_eq!(cfg.storage.resolved, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(cfg.data_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(cfg.management.resolve_advertised_host("0.0.0.0"), "192.0.2.5");
+        assert_eq!(
+            crate::netif::data_bind("0.0.0.0:4420".parse().unwrap()),
+            "127.0.0.1:4420".parse().unwrap()
+        );
+        let s = cfg.serve_config("0.0.0.0:3260", "0.0.0.0:4420");
+        if let Ok(s) = s {
+            assert_eq!(s.advertise_addr, "127.0.0.1");
+        }
+        let report = cfg.network_report();
+        assert_eq!(report.data_path.as_ref().unwrap().state, "up");
+        assert!(report.control.is_none());
+
+        // An explicit advertised address for the storage network wins.
+        cfg.storage.advertised_addr = Some("storage.example".into());
+        assert_eq!(cfg.data_host("0.0.0.0"), "storage.example");
+        crate::netif::set_data_address(None);
+    }
+
+    /// A storage interface with no address: the data targets go to loopback
+    /// and say so; never the LAN, never the management address.
+    #[tokio::test]
+    async fn a_storage_interface_without_an_address_keeps_the_data_path_off_the_lan() {
+        let mut cfg: StormBlockConfig = toml::from_str(
+            "[management]\nadvertised_addr = \"192.0.2.5\"\ninterface = \"lo\"\n[storage]\ninterface = \"nosuch0\"\nwait_secs = 0\n",
+        )
+        .unwrap();
+        cfg.apply_networks().await;
+        assert!(cfg.storage.unresolved);
+        assert_eq!(
+            crate::netif::data_bind("0.0.0.0:4420".parse().unwrap()),
+            "127.0.0.1:4420".parse().unwrap()
+        );
+        assert_eq!(cfg.data_host("0.0.0.0"), "127.0.0.1");
+        let report = cfg.network_report();
+        assert_eq!(report.data_path.as_ref().unwrap().state, "missing");
+        assert_eq!(report.control.as_ref().unwrap().interface, "lo");
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["data_path"]["interface"], "nosuch0");
+        crate::netif::set_data_address(None);
+    }
+
+    /// The control interface's address is the control fallback (#85).
+    #[tokio::test]
+    async fn the_control_interface_names_the_control_address() {
+        let mut cfg: StormBlockConfig = toml::from_str("[management]\ninterface = \"lo\"\n").unwrap();
+        cfg.apply_networks().await;
+        assert_eq!(cfg.management.interface_addr, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(cfg.management.resolve_advertised_host("0.0.0.0"), "127.0.0.1");
+        // No storage network: data follows control.
+        assert_eq!(cfg.data_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(crate::netif::data_address(), None);
+    }
+
     /// `serve.advertise_addr` overrides even an explicit management one: a
     /// node can be reached at a different address for data than for control.
     #[test]
