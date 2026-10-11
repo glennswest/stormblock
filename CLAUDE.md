@@ -181,7 +181,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Per-leg physical offsets for a read-only reader (2026-10-10, #176, P3) — IN PROGRESS
+### Per-leg physical offsets for a read-only reader (2026-10-10, #176, P3) — DONE (golden-stormblock-dfc1c805a509)
 
 #51 item 3: "expose offsets per leg so a reader can take one good leg and
 stop". A pallet's mirror legs are whole partitions (moot); for volumes:
@@ -192,7 +192,7 @@ stop". A pallet's mirror legs are whole partitions (moot); for volumes:
       extents_bytes`; README, pallets.md, CHANGELOG
 - [x] on a build VM: placement/partition/extable 22/22, clippy clean;
       check.sh at a25b468 ALL PASS (1144/1144)
-- [ ] golden; close
+- [x] golden golden-stormblock-dfc1c805a509; closed
 
 ### Boot clone read-only with a writable overlay (2026-10-10, #193, P3) — WAITING ON THE OWNER
 
