@@ -180,29 +180,29 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Storage VLAN: data path on its own network (2026-10-11, #85, P3) — IN PROGRESS
+### Storage VLAN: data path on its own network (2026-10-11, #85, P3) — DONE
 
 Owner: a storage VLAN is a different NIC and network (own subnet, MTU,
-usually no gateway); the knob is which interface. Today every advertised
-address is `management.advertised_addr` or the default route's.
-- [ ] `src/netif.rs`: an interface's address (getifaddrs: IPv4, else global
-      IPv6), operstate and MTU (sysfs); a process-wide data address
-      (`data_bind`: a wildcard target bind → the storage address)
-- [ ] `[storage] interface | address | advertised_addr | mtu | wait_secs`
-      (`$STORMBLOCK_STORAGE_INTERFACE`), resolved at start (waits for the
-      address); unresolved = the data targets bound to loopback, ERROR, health
-- [ ] binds: shared NVMe-oF, iSCSI, forge, serve listeners through `data_bind`
-- [ ] advertised per role: `Config::data_host` (attach replies, claims,
-      discovery log pages, /serve/v1) vs the control host (beacon, forge
-      trust URL); `[management] interface` for the control side
-- [ ] beacon on `[management] interface` (IP_MULTICAST_IF + join on it);
-      beacon carries `data_addr`, `data_path`; a peer whose data path is
-      down stays listed and leaves placement
-- [ ] health `data_path {interface, state, address, mtu, expected_mtu}`,
-      `control`; MTU mismatch WARN
-- [ ] tests (unit, `lo`, fake sysfs); a QEMU check with a real second
-      interface (bound only there, down → health says so, API answers);
-      docs (docs/storage-network.md, README), CHANGELOG
+usually no gateway); the knob is which interface. docs/storage-network.md.
+- [x] `src/netif.rs`: an interface's address (getifaddrs), operstate, MTU
+      (sysfs, `STORMBLOCK_SYSFS_NET` for tests); `data_bind` (process-wide)
+- [x] `[storage] interface | address | advertised_addr | mtu | wait_secs`
+      (`$STORMBLOCK_STORAGE_INTERFACE`), `apply_networks` at start (daemon,
+      adopt-ublk); no address = data targets on loopback, ERROR
+- [x] binds: `NvmeofTarget::new`, `IscsiTarget::new`, serve's
+      `portal_bind_ip` narrow a wildcard to the storage address
+- [x] advertised per role: `StormBlockConfig::data_host` /
+      `data_advertised_host` (attach, claims, discovery log pages, serve);
+      control = `management.resolve_advertised_host` (+ `[management]
+      interface`); `forge::target_from` takes the whole config
+- [x] beacon on `[management] interface`; `data_addr`, `data_path` in it;
+      `cluster_peers` leaves out a peer whose data path is down
+- [x] health `data_path`, `control` (`NetworkReport`); MTU mismatch WARN
+- [x] unit 17/17; `ci-storage-net-verify.sh` ALL PASS (kernel 7.2.8, an
+      802.1Q VLAN on a dummy link at MTU 9000: 4420/3260 on 10.99.0.1 only,
+      attach names it, link down → health `down` with status ok; MTU
+      mismatch; a missing interface → loopback only); check.sh at 28e77cf
+      ALL PASS (1168/1168). Not on metal: a node with a real storage VLAN
 
 ### vhost-user-blk backend (2026-10-11, #82, P3) — DONE
 
