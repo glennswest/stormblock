@@ -180,19 +180,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### vhost-user-blk backend (2026-10-11, #82, P3) — IN PROGRESS
+### vhost-user-blk backend (2026-10-11, #82, P3) — DONE
 
 - [x] `drive::vhost_user_blk`: control thread on the socket (SCM_RIGHTS),
       memfd guest memory, split rings served on the engine's runtime;
       IN/OUT/FLUSH/GET_ID/DISCARD/WRITE_ZEROES; RO at the device; MQ, CONFIG,
       REPLY_ACK; one VMM at a time, reconnect; no dirty log / inflight /
-      indirect (said in the module doc)
-- [ ] tests: an in-process frontend (`vhost_user_blk::tests`)
-- [ ] `mgmt::vhost_export` + `transport: vhost-user-blk` on
-      `/api/v1/volumes/{id}/attach` (local node only, never the default;
-      `/v1` unchanged), holds, detach, what_is_serving
-- [ ] `ci-vhost-user-blk-verify.sh`: QEMU guest over vhost-user-blk
-- [ ] docs, CHANGELOG; follow-ups (dirty log, #169's ring IPC)
+      indirect (docs/vhost-user-blk.md)
+- [x] `mgmt::vhost_export` + `transport: vhost-user-blk` on
+      `/api/v1/volumes/{id}/attach` (this node only, never the default;
+      `/v1` refuses it), held against delete, detach, daemon stop
+- [x] tests: in-process frontend (2), `integration_vhost` (2);
+      `ci-vhost-user-blk-verify.sh` ALL PASS (kernel 7.2.8 in QEMU,
+      vhost-user-blk-pci, 2 queues: rw write/read-back, then ro: data kept,
+      writes refused); check.sh at 81327a4 ALL PASS; golden; closed
+- [x] follow-ups: #404 (dirty log + inflight: live migration); stormvm told.
+      The ring IPC (`uring_server.rs`) was not needed
 
 ### Secrets volume class (2026-10-11, #74, P3) — WAITING ON THE OWNER
 
