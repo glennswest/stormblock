@@ -247,12 +247,38 @@ pub struct PathSource {
 /// the data addresses. Empty: connections leave as the routing table says.
 static PATH_SOURCES: RwLock<Vec<PathSource>> = RwLock::new(Vec::new());
 
+/// Whether the sources were set (by the configuration, or from the
+/// environment at first use).
+static PATH_SOURCES_SET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn set_path_sources(sources: Vec<PathSource>) {
+    PATH_SOURCES_SET.store(true, std::sync::atomic::Ordering::SeqCst);
     *PATH_SOURCES.write().unwrap_or_else(|e| e.into_inner()) = sources;
 }
 
+/// The storage interfaces connections leave by. A process that resolved no
+/// configuration (a CLI command, `boot-local` in the initramfs) takes them
+/// from `$STORMBLOCK_STORAGE_INTERFACE` (comma-separated) at first use.
 pub fn path_sources() -> Vec<PathSource> {
+    if !PATH_SOURCES_SET.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        if let Ok(v) = std::env::var("STORMBLOCK_STORAGE_INTERFACE") {
+            let found = sources_of(v.split(',').map(str::trim).filter(|s| !s.is_empty()));
+            *PATH_SOURCES.write().unwrap_or_else(|e| e.into_inner()) = found;
+        }
+    }
     PATH_SOURCES.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Each interface's first address (IPv4 first) with its prefix, for those
+/// that have one now.
+pub fn sources_of<'a>(interfaces: impl Iterator<Item = &'a str>) -> Vec<PathSource> {
+    interfaces
+        .filter_map(|i| {
+            let a = primary_address(i)?;
+            let prefix = addresses_with_prefix(i).into_iter().find(|(x, _)| *x == a).map(|(_, p)| p)?;
+            Some(PathSource { interface: i.to_string(), address: a, prefix })
+        })
+        .collect()
 }
 
 /// The local interface the `index`th path to `target` leaves by: among the
