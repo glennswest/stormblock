@@ -405,8 +405,49 @@ cat > "$INITRD_DIR/usr/share/udhcpc/default.script" << 'DHCPSCRIPT'
 #!/bin/sh
 # Apply what the DHCP server offered. Called by udhcpc with $1 as the reason
 # and the lease in the environment.
+
+# --- BEGIN dhcp mtu
+# The link MTU (#425): DHCP option 26 (udhcpc is started with `-O mtu`, or it
+# never asks for it), or the node's declared `[network] mtu`, which wins
+# (/run/declared-mtu, written by the boot nic block). Set from the bottom up,
+# a bond's slaves, then the bridge's ports, then the interface itself
+# (stormbr0): a bridge takes no MTU above its ports', and the NVMe/TCP root
+# connects over it right after this, so this is when the path MTU is decided.
+# The g16 network is 9000 end to end; at 1500 the root ran on small frames.
+dhcp_mtu() { # interface lease-mtu
+    _sys=${STORM_SYSFS:-/sys}
+    _if=$1
+    _m=$(cat /run/declared-mtu 2>/dev/null)
+    _from="declared [network] mtu"
+    if [ -z "$_m" ]; then
+        _m=$2
+        _from="from DHCP"
+    fi
+    case "$_m" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$_m" -lt 576 ] || [ "$_m" -gt 65535 ]; then
+        echo "  mtu $_m ($_from) is not a usable MTU: left as it is"
+        return 0
+    fi
+    _set() {
+        ip link set "$1" mtu "$_m" 2>/dev/null || echo "  WARNING: $1 does not take mtu $_m"
+    }
+    for _p in $(ls "$_sys/class/net/$_if/brif" 2>/dev/null); do
+        for _s in $(cat "$_sys/class/net/$_p/bonding/slaves" 2>/dev/null); do _set "$_s"; done
+        _set "$_p"
+    done
+    for _s in $(cat "$_sys/class/net/$_if/bonding/slaves" 2>/dev/null); do _set "$_s"; done
+    if ip link set "$_if" mtu "$_m" 2>/dev/null; then
+        echo "  mtu $_m on $_if ($_from)"
+        echo "$_m" > /run/stormblock-mtu 2>/dev/null
+    else
+        echo "  WARNING: $_if does not take mtu $_m ($_from): left as it is"
+    fi
+}
+# --- END dhcp mtu
+
 case "$1" in
     bound|renew)
+        dhcp_mtu "$interface" "$mtu"
         ip addr flush dev "$interface" 2>/dev/null
         ip addr add "$ip/${mask:-24}" dev "$interface"
         ip link set "$interface" up
@@ -1977,6 +2018,9 @@ elif [ -n "$DECL_FILE" ]; then
                 CANDIDATES="${CANDIDATES% }"
                 IFACE="$_dn"
                 netsay "  boot NIC: $_dn first, as [network] in $DECL_FROM declares (dhcp)"
+                # Its MTU too, which the lease's does not override (#425).
+                _dmtu=$(toml_network "$DECL_FILE" mtu)
+                case "$_dmtu" in ''|*[!0-9]*) ;; *) echo "$_dmtu" > /run/declared-mtu ;; esac
             else
                 netsay "WARNING: [network] in $DECL_FROM names $_dn, which has no carrier - DHCP on the others"
             fi
@@ -2129,7 +2173,7 @@ else
         fi
         if [ -n "$BONDED" ]; then
             net_bring_up "$BONDED"
-            if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
+            if udhcpc -i "$IFACE" -O mtu -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
                 LEASED="$BONDED"
             else
                 echo "  no lease on $BONDED - falling back to single ports"
@@ -2142,7 +2186,7 @@ else
     [ -n "$LEASED" ] || for UPLINK in $CANDIDATES; do
         netsay "  trying $UPLINK (speed $(net_speed "$UPLINK"), carrier $(net_carrier "$UPLINK"))"
         net_bring_up "$UPLINK"
-        if udhcpc -i "$IFACE" -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
+        if udhcpc -i "$IFACE" -O mtu -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
             LEASED="$UPLINK"
             break
         fi
@@ -4305,7 +4349,7 @@ if [ -z "$(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ')" ] \
     for dev in /sys/class/net/*; do
         n=$(basename "$dev"); [ "$n" = "lo" ] && continue
         ip link set "$n" up 2>/dev/null
-        udhcpc -i "$n" -s /usr/share/udhcpc/default.script -q -n -t 5 ${DHCP_HOST_ARGS:-} >/dev/null 2>&1 && break
+        udhcpc -i "$n" -O mtu -s /usr/share/udhcpc/default.script -q -n -t 5 ${DHCP_HOST_ARGS:-} >/dev/null 2>&1 && break
     done
     stamp "network retried: $(ip -4 addr show scope global 2>/dev/null | grep -m1 'inet ' | awk '{print $2}')"
 fi
