@@ -143,6 +143,32 @@ pub async fn format_from_tree(
     dirs: &[String],
     label: &str,
 ) -> Result<()> {
+    format_from_tree_labelled(device, files, dirs, label, LabelCase::Upper).await
+}
+
+/// How a volume label is written.
+///
+/// FAT labels are upper case by DOS convention, and every label this writer
+/// made was. But a reader that looks a label up by name, case-sensitively —
+/// combustion and ignition look for `/dev/disk/by-label/combustion` or
+/// `ignition` — needs the bytes it asks for (#326). Linux keeps the case of
+/// both the boot sector's and the root directory's label as written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelCase {
+    /// Upper-cased, as DOS writes it (the default everywhere).
+    Upper,
+    /// Exactly as given.
+    Keep,
+}
+
+/// [`format_from_tree`] with the label's case chosen.
+pub async fn format_from_tree_labelled(
+    device: Arc<dyn BlockDevice>,
+    files: &[(String, Vec<u8>)],
+    dirs: &[String],
+    label: &str,
+    case: LabelCase,
+) -> Result<()> {
     let mut root = MemDir::default();
     for d in dirs {
         root.dir_at(d)?;
@@ -158,6 +184,7 @@ pub async fn format_from_tree(
         root.dir_at(parent)?.files.insert(name.to_string(), data.clone());
     }
     let mut fs = Fat32::new(device, label)?;
+    fs.label_case = case;
     let entries = fs.write_mem_children(&root, 0).await?;
     fs.write_root(entries).await?;
     fs.finish().await
@@ -454,6 +481,7 @@ struct Fat32 {
     kind: FatKind,
     view: PartitionView,
     label: String,
+    label_case: LabelCase,
     reserved_sectors: u32,
     sectors_per_cluster: u32,
     fat_sectors: u32,
@@ -612,6 +640,7 @@ impl Fat32 {
             kind,
             view,
             label: label.to_string(),
+            label_case: LabelCase::Upper,
             reserved_sectors: reserved,
             sectors_per_cluster: spc,
             fat_sectors,
@@ -745,7 +774,7 @@ impl Fat32 {
         // The volume label lives in the root directory as well as in the BPB;
         // some tools only look at one of them — and for a cloud-init seed the
         // label *is* the contract, so both are written.
-        bytes.extend_from_slice(&label_entry(&self.label));
+        bytes.extend_from_slice(&label_entry(&self.label, self.label_case));
         bytes.extend_from_slice(&entries);
 
         match self.kind {
@@ -935,7 +964,7 @@ impl Fat32 {
                 b[64] = 0x80;
                 b[66] = 0x29;
                 b[67..71].copy_from_slice(&self.volume_id.to_le_bytes());
-                b[71..82].copy_from_slice(&pad_label(&self.label));
+                b[71..82].copy_from_slice(&pad_label(&self.label, self.label_case));
                 b[82..90].copy_from_slice(b"FAT32   ");
             }
             FatKind::Fat16 => {
@@ -951,7 +980,7 @@ impl Fat32 {
                 b[36] = 0x80;
                 b[38] = 0x29;
                 b[39..43].copy_from_slice(&self.volume_id.to_le_bytes());
-                b[43..54].copy_from_slice(&pad_label(&self.label));
+                b[43..54].copy_from_slice(&pad_label(&self.label, self.label_case));
                 b[54..62].copy_from_slice(b"FAT16   ");
             }
         }
@@ -961,17 +990,20 @@ impl Fat32 {
     }
 }
 
-fn pad_label(label: &str) -> [u8; 11] {
+fn pad_label(label: &str, case: LabelCase) -> [u8; 11] {
     let mut out = [b' '; 11];
     for (i, c) in label.bytes().take(11).enumerate() {
-        out[i] = c.to_ascii_uppercase();
+        out[i] = match case {
+            LabelCase::Upper => c.to_ascii_uppercase(),
+            LabelCase::Keep => c,
+        };
     }
     out
 }
 
-fn label_entry(label: &str) -> [u8; 32] {
+fn label_entry(label: &str, case: LabelCase) -> [u8; 32] {
     let mut e = [0u8; 32];
-    e[0..11].copy_from_slice(&pad_label(label));
+    e[0..11].copy_from_slice(&pad_label(label, case));
     e[11] = ATTR_VOLUME_ID;
     e[22..24].copy_from_slice(&FIXED_TIME.to_le_bytes());
     e[24..26].copy_from_slice(&FIXED_DATE.to_le_bytes());

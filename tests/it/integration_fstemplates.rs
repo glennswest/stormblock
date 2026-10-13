@@ -1935,3 +1935,99 @@ async fn an_import_with_role_data_lands_in_the_data_half() {
     assert_eq!(import("media-default", None).await, vec!["system"], "no role: the system half, as before");
     server.abort();
 }
+
+/// #326 (stormvm#63): a config drive for openSUSE's combustion is
+/// `combustion/script` — a subdirectory — on a filesystem labelled
+/// `combustion`, looked up by that exact name. The seed door keeps the
+/// directory and, asked to, the label's case; a cloud-init seed with no
+/// directories and no `keep_case` is written as it always was.
+#[tokio::test]
+async fn a_seed_keeps_its_directories_and_asked_to_its_labels_case() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let c = reqwest::Client::new();
+    let vol = |name: &'static str| {
+        let c = c.clone();
+        let url = url.clone();
+        async move {
+            let v: serde_json::Value = c
+                .post(format!("{url}/api/v1/volumes"))
+                .json(&serde_json::json!({"name": name, "size": "64M"}))
+                .send().await.unwrap().json().await.unwrap();
+            Uuid::parse_str(v["id"].as_str().unwrap()).unwrap()
+        }
+    };
+    let read = |id: Uuid| {
+        let state = state.clone();
+        async move {
+            let dev: Arc<dyn BlockDevice> = {
+                let vm = state.volume_manager.lock().await;
+                vm.get_volume(&VolumeId(id)).unwrap()
+            };
+            stormblock::image::fat::read_tree(dev).await.unwrap()
+        }
+    };
+
+    // Combustion: the script in its directory, the label lower case.
+    let id = vol("vm1-combustion").await;
+    let r = c
+        .post(format!("{url}/api/v1/volumes/{id}/cidata"))
+        .json(&serde_json::json!({
+            "label": "combustion",
+            "keep_case": true,
+            "files": [{"path": "/combustion/script", "contents": "#!/bin/sh\n# combustion: network\necho ok\n"}],
+        }))
+        .send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["label"], "combustion", "{body}");
+    assert_eq!(body["written"], serde_json::json!(["combustion/script"]), "{body}");
+    let tree = read(id).await;
+    assert_eq!(tree.label, "combustion");
+    assert!(tree.dirs.iter().any(|d| d == "combustion"), "{:?}", tree.dirs);
+    let script = tree.files.iter().find(|(p, _)| p == "combustion/script").expect("combustion/script");
+    assert_eq!(script.1, b"#!/bin/sh\n# combustion: network\necho ok\n");
+    assert!(!tree.files.iter().any(|(p, _)| p == "script"), "nothing at the root: {:?}", tree.files);
+    // The root directory's label entry carries the same bytes as the boot
+    // sector's: libblkid reads that one first.
+    let dev: Arc<dyn BlockDevice> = {
+        let vm = state.volume_manager.lock().await;
+        vm.get_volume(&VolumeId(id)).unwrap()
+    };
+    let mut raw = vec![0u8; 4 << 20];
+    dev.read(0, &mut raw).await.unwrap();
+    let entry = raw.windows(12).any(|w| &w[..11] == b"combustion " && w[11] == 0x08);
+    assert!(entry, "a lower-case volume label entry in the root directory");
+
+    // Cloud-init, as before: upper case, flat.
+    let id = vol("vm1-cidata").await;
+    let r = c
+        .post(format!("{url}/api/v1/volumes/{id}/cidata"))
+        .json(&serde_json::json!({
+            "files": [
+                {"path": "/meta-data", "contents": "instance-id: vm1\n"},
+                {"path": "user-data", "contents": "#cloud-config\n"},
+            ],
+        }))
+        .send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    let tree = read(id).await;
+    assert_eq!(tree.label, "CIDATA");
+    let mut names: Vec<&str> = tree.files.iter().map(|(p, _)| p.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["meta-data", "user-data"]);
+
+    // Refused, with nothing written: a label FAT cannot hold, a path that
+    // climbs out.
+    for body in [
+        serde_json::json!({"label": "a-label-too-long", "keep_case": true, "files": [{"path": "/x", "contents": ""}]}),
+        serde_json::json!({"files": [{"path": "/../x", "contents": ""}]}),
+        serde_json::json!({"files": [{"path": "/", "contents": ""}]}),
+    ] {
+        let r = c.post(format!("{url}/api/v1/volumes/{id}/cidata")).json(&body).send().await.unwrap();
+        assert_eq!(r.status(), 400, "{body}");
+    }
+    assert_eq!(read(id).await.label, "CIDATA");
+    server.abort();
+}

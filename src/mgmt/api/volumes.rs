@@ -1879,6 +1879,12 @@ async fn detach_volume(
 /// vfat rather than ISO 9660 because this engine already writes FAT with real
 /// long-name entries — `meta-data` does not fit 8.3 — and because a seed is
 /// per VM and writable, which an ISO is not.
+///
+/// The same door writes other config drives (#326, stormvm#63): openSUSE's
+/// combustion reads `combustion/script` on a filesystem labelled
+/// `combustion` or `ignition`. Paths keep their directories (a flat seed is
+/// laid exactly as before), and `"keep_case": true` writes the label as
+/// given instead of upper case.
 async fn write_cidata(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1891,7 +1897,7 @@ async fn write_cidata(
     let files: Vec<(String, Vec<u8>)> = match req
         .files
         .into_iter()
-        .map(|f| f.resolve().map(|s| (leaf(&s.path), s.contents)))
+        .map(|f| f.resolve().and_then(|s| seed_path(&s.path).map(|p| (p, s.contents))))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(f) => f,
@@ -1900,15 +1906,37 @@ async fn write_cidata(
     if files.is_empty() {
         return ApiError::bad_request("a seed with no files is not a seed");
     }
+    // Upper case by default: both spellings are accepted by cloud-init, and
+    // FAT stores a label upper case by convention — writing it that way means
+    // what `blkid` reports is what was asked for. `keep_case` writes it as
+    // given, for a reader that looks it up by exact name (combustion's and
+    // ignition's `/dev/disk/by-label/combustion`, #326).
+    let label = req.label.unwrap_or_else(|| "CIDATA".to_string());
+    let label = if req.keep_case { label } else { label.to_uppercase() };
+    if label.is_empty() || label.len() > 11 || !label.bytes().all(|b| b.is_ascii_graphic() || b == b' ') {
+        return ApiError::bad_request(format!(
+            "label {label:?}: a FAT label is 1 to 11 printable ASCII characters"
+        ));
+    }
     let dev = match writable_volume(&state, vol.0).await {
         Ok(d) => d,
         Err(r) => return r,
     };
-    // Upper case: both spellings are accepted by cloud-init, and FAT stores a
-    // label upper case anyway — writing it that way means what `blkid` reports
-    // is what was asked for.
-    let label = req.label.unwrap_or_else(|| "CIDATA".to_string()).to_uppercase();
-    match crate::image::fat::format_from_files(dev, &files, &label).await {
+    // A flat seed (cloud-init's three files) is laid as it always was; a
+    // seed whose paths name directories (combustion's `combustion/script`)
+    // is laid as a tree, its directories created (#326).
+    let tree = files.iter().any(|(p, _)| p.contains('/'));
+    let case = if req.keep_case {
+        crate::image::fat::LabelCase::Keep
+    } else {
+        crate::image::fat::LabelCase::Upper
+    };
+    let wrote = if tree || req.keep_case {
+        crate::image::fat::format_from_tree_labelled(dev, &files, &[], &label, case).await
+    } else {
+        crate::image::fat::format_from_files(dev, &files, &label).await
+    };
+    match wrote {
         Ok(()) => {
             let mut vm = state.volume_manager.lock().await;
             let fs = crate::volume::FsInfo::vfat(&label);
@@ -1925,10 +1953,19 @@ async fn write_cidata(
     }
 }
 
-/// The last component of a path — a seed is flat, and a caller that wrote
-/// `/user-data` means the file at the root.
-fn leaf(path: &str) -> String {
-    path.rsplit('/').next().unwrap_or(path).to_string()
+/// A seed file's path from the filesystem's root, without the leading `/`:
+/// `/user-data` is `user-data`, `/combustion/script` is `combustion/script`.
+/// Until #326 every path was cut to its last component, which put
+/// combustion's script at the root where combustion never looks.
+fn seed_path(path: &str) -> Result<String, String> {
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Err(format!("'{path}' names no file"));
+    }
+    if parts.iter().any(|p| *p == "." || *p == "..") {
+        return Err(format!("'{path}': '.' and '..' are not seed paths"));
+    }
+    Ok(parts.join("/"))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1937,6 +1974,9 @@ pub struct CidataRequest {
     /// `CIDATA` unless told otherwise.
     #[serde(default)]
     pub label: Option<String>,
+    /// Write the label exactly as given rather than upper case (#326).
+    #[serde(default)]
+    pub keep_case: bool,
 }
 
 #[derive(Debug, Deserialize)]
