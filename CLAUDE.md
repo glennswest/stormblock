@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### forge stops answering for ~1 min under build load (2026-10-13, #418, P0) — IN PROGRESS
+### forge stops answering for ~1 min under build load (2026-10-13, #418, P0) — DONE (golden-stormblock-f86a80fdceac)
 
 forge runs 13.7.0 (#235: recreated, not upgraded), whose log names no lock
 holder (#365 came later); the syslog query timed out. By reading today's
@@ -193,8 +193,13 @@ manager whenever the catalog was stale.
 - [x] compose_pallet_unlocked / compose_slab_unlocked (5419291)
 - [x] golden slot check unlocked; listing and GET answer from the catalog
       while the manager is held (f522c75)
-- [ ] build VM: clippy, the test (before: d7c3d89, after), check.sh
-- [ ] golden; tell stormcentral#… the new forge needs it
+- [x] build VM: the test at d7c3d89 (before) FAILED, a listing 9.0 s
+      (health 1.5 ms); at 6d25533 PASS, listing ≤ 158 ms, health ≤ 2.7 ms;
+      62 compose/disk/golden/seal/lock tests pass; check.sh ALL PASS
+- [x] golden golden-stormblock-f86a80fdceac. Reaches forge only when forge
+      runs this engine (13.7 today; recreated per stormcentral#210)
+- Found: the build VMs' clippy (1.95) fails the crate with ~100 old lints
+  (none in the lines changed here): #398
 
 ### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — PAUSED for P0 #418; WIP on branch wip/408-namespaces
 
