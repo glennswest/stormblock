@@ -89,7 +89,7 @@ enum Allowed {
     Any,
 }
 
-async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize, mid: bool) -> Result<(usize, bool), String> {
+async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize, mid: bool, fua: bool) -> Result<(usize, bool), String> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024).with_atomic_unit(atomic));
     let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
@@ -152,7 +152,15 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize, mid: bool) ->
         } else {
             "persist"
         };
-        if r < 0.70 {
+        if r < 0.70 && fua && rng.gen_bool(0.3) {
+            // A FUA write (#409): durable when it returns, with no flush. From
+            // here the block may read only this value (until written again).
+            let i = rng.gen_range(0..BLOCKS);
+            seq += 1;
+            cv.write_fua(i * BLOCK, &block(i, seq)).await.map_err(|e| e.to_string())?;
+            current.insert(i, Some(seq));
+            allowed.insert(i, Allowed::Values([seq].into_iter().collect()));
+        } else if r < 0.70 {
             let i = rng.gen_range(0..BLOCKS);
             seq += 1;
             cv.write(i * BLOCK, &block(i, seq)).await.map_err(|e| e.to_string())?;
@@ -305,10 +313,28 @@ async fn v1_survives_a_power_cut_inside_a_persist() {
 }
 
 async fn power_cuts_cut(version: u32, tear: Tear, atomic: usize, mid: bool) {
+    power_cuts_fua(version, tear, atomic, mid, false).await
+}
+
+/// #409: the same 300 cuts with a third of the writes FUA. A FUA write is
+/// acknowledged durable on its own, so after the cut its block reads that
+/// value — whether it landed in a slot already on the device (a FUA write
+/// at the drive) or took one (the volume's flush).
+#[tokio::test]
+async fn fua_writes_survive_a_power_cut_with_no_flush() {
+    power_cuts_fua(2, Tear::None, 4096, true, true).await;
+}
+
+#[tokio::test]
+async fn fua_writes_survive_a_power_cut_that_tears_writes() {
+    power_cuts_fua(2, Tear::Scatter(0.5), 512, true, true).await;
+}
+
+async fn power_cuts_fua(version: u32, tear: Tear, atomic: usize, mid: bool, fua: bool) {
     let mut failures = Vec::new();
     let (mut torn, mut mid_op) = (0usize, 0usize);
     for seed in 0..300u64 {
-        match trial(seed, version, tear, atomic, mid).await {
+        match trial(seed, version, tear, atomic, mid, fua).await {
             Ok((t, m)) => {
                 torn += t;
                 mid_op += m as usize;

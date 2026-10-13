@@ -240,6 +240,32 @@ impl BlockDevice for CrashDevice {
         Ok(buf.len())
     }
 
+    /// A FUA write (#409): on the media when it returns, as a drive's FUA
+    /// write is. An older write of the same bytes still in the cache is
+    /// superseded there, so a cut that keeps it does not bring the old bytes
+    /// back over the new ones.
+    async fn write_fua(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        let mut st = self.state.lock().unwrap();
+        let (start, end) = (offset as usize, offset as usize + buf.len());
+        if end > st.view.len() {
+            return Err(DriveError::OutOfRange { offset, len: buf.len() as u64, capacity: st.view.len() as u64 });
+        }
+        if st.cut.is_none() && st.cut_at == Some(st.writes) {
+            st.cut = Some((st.durable.clone(), st.cached.clone()));
+        }
+        st.writes += 1;
+        for (off, data) in st.cached.iter_mut() {
+            let (a, b) = (*off as usize, *off as usize + data.len());
+            let (lo, hi) = (a.max(start), b.min(end));
+            if lo < hi {
+                data[lo - a..hi - a].copy_from_slice(&buf[lo - start..hi - start]);
+            }
+        }
+        st.view[start..end].copy_from_slice(buf);
+        st.durable[start..end].copy_from_slice(buf);
+        Ok(buf.len())
+    }
+
     async fn flush(&self) -> DriveResult<()> {
         let mut st = self.state.lock().unwrap();
         let cached = std::mem::take(&mut st.cached);
@@ -259,6 +285,24 @@ impl BlockDevice for CrashDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #409: a FUA write survives a cut that keeps nothing of the cache, and
+    /// an older cached write of the same bytes cannot bring them back.
+    #[tokio::test]
+    async fn a_fua_write_survives_on_its_own() {
+        let d = CrashDevice::new(1 << 20);
+        d.write(0, &[1u8; 8192]).await.unwrap();
+        d.write_fua(4096, &[2u8; 4096]).await.unwrap();
+        let mut b = vec![0u8; 8192];
+        let after = d.crash(1, 0.0);
+        after.read(0, &mut b).await.unwrap();
+        assert!(b[..4096].iter().all(|&x| x == 0), "the plain write was not flushed");
+        assert!(b[4096..].iter().all(|&x| x == 2), "the FUA write is on the media");
+        let after = d.crash(1, 1.0);
+        after.read(0, &mut b).await.unwrap();
+        assert!(b[..4096].iter().all(|&x| x == 1));
+        assert!(b[4096..].iter().all(|&x| x == 2), "the older cached write does not undo it");
+    }
 
     #[tokio::test]
     async fn only_flushed_writes_are_certain_to_survive() {
