@@ -180,10 +180,18 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — IN PROGRESS
+### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — PAUSED for P0 #418; WIP on branch wip/408-namespaces
 
 Forge holds more than stormcos (nana builds goldens there): a namespace per
-family, a Kubernetes namespace on forge's apiserver.
+family, a Kubernetes namespace on forge's apiserver. Branch
+wip/408-namespaces (unbuilt): the record field + v2 header extension and its
+test, the manager's map (create, clone inherits, restore, delete), the
+catalog, `namespace` on every volume response, `?namespace=` on the list.
+Next there: `src/mgmt/namespaces.rs` (quota store, usage = Σ exclusive +
+sealed volumes' shared, settle_new_volume: set ns, unique name, quota, undo),
+goldens keyed by (namespace, name), SAR with namespace (KubeAuth::review
+gains it; JSON body's namespace read for bearers), list filtered per
+namespace for a bearer.
 - [ ] model: `namespace` on the volume (v2 header extension after the
       tier; none = `stormcos`), kept by the manager like origins, inherited
       by snapshots/clones unless the clone names one; catalog; immutable once
