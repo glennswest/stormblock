@@ -180,6 +180,19 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — IN PROGRESS
+
+Found: a cut-short sda (`slab holds` 3) booted with the clone as resume
+source; the mount list was read from sda alone and failed ("none"); the
+survey skipped sda as the boot's own disk and said "no local drive to take".
+- [x] `slab cat` resumes with STORMBLOCK_RESUME_SOURCE; mounts_from says
+      why; `root mount guard` FATAL before switch_root (3cbabac)
+- [x] survey: per-drive reasons (ld_skip), "booting from <disk>", verdict
+      taken; `diskless refused` block (FATAL; assimilate=off,
+      rd.stormblock.diskless=1) (296a9a3)
+- [x] every initramfs test under sh and busybox sh
+- [ ] ci-no-appliance-verify.sh; check.sh; golden + initramfs with #425; tell
+
 ### The initramfs ignores the DHCP MTU (2026-10-13, #425, P0) — IN PROGRESS
 
 Dell 12.21: g16 offers MTU 9000, stormbr0 came up 1500 (path MTU 1500).
