@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — DONE
+### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — DONE (golden-stormblock-0f2728dcf2ef)
 
 The target advertised MDTS 5 (128 KiB) and maxh2cdata 131072, so a 1 MiB
 extent moved as 8 commands; the initiator's `MAX_CHUNK` was 128 KiB.
