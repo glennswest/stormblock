@@ -50,7 +50,11 @@ while [ $# -gt 0 ]; do
     *) path="$1"; shift ;;
     esac
 done
-[ -n "${STUB_FILE:-}" ] && [ -r "$STUB_FILE" ] || exit 1
+if [ -n "${STUB_FAIL:-}" ]; then
+    echo "cannot read the slabs: $STUB_FAIL"
+    exit 2
+fi
+[ -n "${STUB_FILE:-}" ] && [ -r "$STUB_FILE" ] || { echo "stormpump: no such file"; exit 1; }
 cp "$STUB_FILE" "$out"
 STUBEOF
 chmod +x "$STUB"
@@ -151,6 +155,46 @@ LIST
 check "a ? line in /etc/stormblock/mounts reads as an optional entry" \
     "stormblock:/p/stormblock,?cilium:/p/cilium,?flowsdn:/p/flowsdn|/etc/stormblock/mounts in stormpump|1" \
     "$(run "" "$WORK/optlist" "" /dev/sda)"
+
+# #427: a list that was not read is not "no list". On the Dell a cut-short
+# disk failed the read, the boot said "none" and went on with nothing mounted.
+err() { # file-or-empty fail slab -> MOUNTS_ERR
+    STUB_LOG="$WORK/log" STUB_FILE="$1" STUB_FAIL="$2" STORM_STORMBLOCK="$STUB" STORM_RUN="$WORK/run" \
+        MOUNTS="" VOLUME="" SLAB_ARG="$3" sh -c '
+        . "$0"
+        mounts_from "$SLAB_ARG"
+        printf "%s|%s" "$MOUNTS" "$MOUNTS_ERR"
+    ' "$WORK/mounts.sh"
+}
+check "no file in the root: said so" \
+    "|no /etc/stormblock/mounts in stormpump" "$(err "" "" /dev/sda)"
+check "a read that failed: said, with the reason, never 'none'" \
+    "|could not be read from /dev/sda: cannot read the slabs: extents on a slab not here" \
+    "$(err "$WORK/list" "extents on a slab not here" /dev/sda)"
+check "no slab: said" "|no slab to read it from" "$(err "$WORK/list" "" "")"
+
+# The guard before switch_root (#427): a root that names volumes and a boot
+# that mounted none stops, saying why; anything else goes on.
+sed -n '/# --- BEGIN root mount guard/,/# --- END root mount guard/p' "$GEN" > "$WORK/guard.sh"
+[ -s "$WORK/guard.sh" ] || { echo "FAIL: could not extract the root mount guard block"; exit 1; }
+guard() { # mounts root-list-file-or-empty err -> console, "RESCUE" when it stopped
+    rm -rf "$WORK/root"; mkdir -p "$WORK/root/etc/stormblock"
+    [ -n "$2" ] && cp "$2" "$WORK/root/etc/stormblock/mounts"
+    STORM_SYSROOT="$WORK/root" MOUNTS="$1" MOUNTS_ERR="$3" sh -c '
+        rescue_shell() { echo RESCUE; exit 0; }
+        . "$0"
+        echo ON
+    ' "$WORK/guard.sh"
+}
+out=$(guard "" "$WORK/list" "could not be read from /dev/sda: cannot read the slabs: x")
+case "$out" in
+*"FATAL: this release's root names 3 volume(s)"*"could not be read from /dev/sda"*RESCUE) echo "  ok    nothing mounted, a list in the root: FATAL, not switch_root" ;;
+*) echo "  FAIL  guard: $out"; fail=1 ;;
+esac
+check "a list mounted: on" "ON" "$(guard "stormblock:/p/stormblock" "$WORK/list" "")"
+check "no list in the root: on" "ON" "$(guard "" "" "")"
+printf '# nothing\n\n' > "$WORK/comments"
+check "a root list of comments only: on" "ON" "$(guard "" "$WORK/comments" "")"
 
 # The block parses under the shell /init runs in.
 if command -v busybox >/dev/null 2>&1; then

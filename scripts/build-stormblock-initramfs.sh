@@ -925,15 +925,29 @@ mounts_from() { # slab -> MOUNTS (comma-separated) and MOUNTS_FROM
         return 0
     fi
     MOUNTS_FROM=""
-    [ -n "${1:-}" ] || return 0
+    MOUNTS_ERR=""
+    if [ -z "${1:-}" ]; then
+        MOUNTS_ERR="no slab to read it from"
+        return 0
+    fi
     _ml_out="${STORM_RUN:-/run/stormblock}/mounts.list"
     mkdir -p "${_ml_out%/*}" 2>/dev/null
     rm -f "$_ml_out"
-    if "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$1" \
-            --volume "${VOLUME:-stormpump}" --out "$_ml_out" /etc/stormblock/mounts \
-            >/dev/null 2>&1 && [ -r "$_ml_out" ]; then
+    # A disk whose flow-over was cut short holds part of the root volume;
+    # the rest is on the clone this boot resumes from (#427): `slab cat`
+    # opens both when STORMBLOCK_RESUME_SOURCE names it, as boot-local does.
+    _ml_said=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$1" \
+            --volume "${VOLUME:-stormpump}" --out "$_ml_out" /etc/stormblock/mounts 2>&1)
+    _ml_rc=$?
+    if [ "$_ml_rc" = 0 ] && [ -r "$_ml_out" ]; then
         MOUNTS=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$_ml_out" | grep -v '^$' | tr '\n' ',' | sed 's/,$//')
         MOUNTS_FROM="/etc/stormblock/mounts in ${VOLUME:-stormpump}"
+    elif [ "$_ml_rc" = 1 ]; then
+        MOUNTS_ERR="no /etc/stormblock/mounts in ${VOLUME:-stormpump}"
+    else
+        # Not "none": the list was not read (#427). On the Dell a cut-short
+        # disk answered this, and the boot went on with nothing mounted.
+        MOUNTS_ERR="could not be read from $1: $(printf '%s\n' "$_ml_said" | grep -v '^$' | tail -1)"
     fi
     return 0
 }
@@ -3210,7 +3224,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     if [ -n "$MOUNTS" ]; then
         echo "Mount list: $(printf '%s' "$MOUNTS" | tr ',' '\n' | grep -c .) volume(s), from $MOUNTS_FROM"
     else
-        echo "Mount list: none (no rd.stormblock.mount=, and no /etc/stormblock/mounts in ${VOLUME:-stormpump})"
+        echo "Mount list: none (no rd.stormblock.mount=; ${MOUNTS_ERR:-no /etc/stormblock/mounts in ${VOLUME:-stormpump}})"
     fi
     MOUNT_MAP=""
     if [ -n "$MOUNTS" ]; then
@@ -4073,6 +4087,25 @@ fi
 # empty volume on first boot, x-systemd.growfs grows the fs after auto-expand,
 # and the mounts land over the read-only erofs root. Writing /sysroot/etc/fstab
 # copies-up into the overlay upper (regenerated every boot, which is fine).
+# --- BEGIN root mount guard (covered by tests/initramfs-mounts.sh)
+# A root that names volumes to mount, and a boot that mounts none (#427):
+# PID 1 starts with nothing to run, and the node hangs before any service,
+# console or port (12.21 on the Dell, a cut-short disk whose list read
+# failed and was taken for "none"). Never switch root into that: say what
+# the list is and why it was not read, and stop.
+_mlc_root="${STORM_SYSROOT:-/sysroot}"
+_mlc_file="$_mlc_root/etc/stormblock/mounts"
+if [ -z "${MOUNTS:-}" ] && [ -f "$_mlc_file" ]; then
+    _mlc_n=$(sed -e 's/#.*//' -e 's/[[:space:]]//g' "$_mlc_file" | grep -vc '^$')
+    if [ "${_mlc_n:-0}" -gt 0 ]; then
+        echo "FATAL: this release's root names $_mlc_n volume(s) to mount (/etc/stormblock/mounts),"
+        echo "  and this boot mounted none: the list ${MOUNTS_ERR:-was not read before the engine started}."
+        echo "  PID 1 would start with nothing to run (#427): not switching root."
+        rescue_shell
+    fi
+fi
+# --- END root mount guard
+
 # Mount what this init was told to mount, into the real root, before PID 1
 # starts. A stormpump node's boot manifest registers directories, so a
 # container's volume has to be a mounted directory by the time PID 1 reads the
