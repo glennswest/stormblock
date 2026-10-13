@@ -34,6 +34,12 @@ I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods,usr/share/udhcpc,var/lib/misc}
 cp "$BUSYBOX" "$I/bin/busybox"
 for a in $("$BUSYBOX" --list); do ln -sf busybox "$I/bin/$a"; done
+# iproute2 for the test's own plumbing (busybox `ip` makes no veth pair); the
+# DHCP script runs busybox `ip`, as on a node.
+IPR=$(command -v ip)
+[ -n "$IPR" ] && cp "$IPR" "$I/bin/ipr" && ldd "$IPR" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+    mkdir -p "$I$(dirname "$lib")"; cp -L "$lib" "$I$lib"
+done
 # The DHCP script exactly as the generator writes it.
 sed -n "/<< 'DHCPSCRIPT'/,/^DHCPSCRIPT$/p" scripts/build-stormblock-initramfs.sh | sed '1d;$d' \
     > "$I/usr/share/udhcpc/default.script"
@@ -62,12 +68,12 @@ mount -t tmpfs run /run; mount -t tmpfs tmp /tmp
 for m in $(cat /lib/mods/order); do insmod /lib/mods/$m 2>&1 | sed "s/^/LOG insmod $m: /"; done
 r() { echo "RESULT $1 $2"; }
 ip link set lo up
-ip link add srv type veth peer name port0
-ip link set srv mtu 9000; ip link set srv up
-ip addr add 192.168.30.252/20 dev srv
-ip link add stormbr0 type bridge
-ip link set port0 master stormbr0
-ip link set port0 up; ip link set stormbr0 up
+ipr link add srv type veth peer name port0 || echo "LOG veth: $?"
+ipr link set srv mtu 9000; ipr link set srv up
+ipr addr add 192.168.30.252/20 dev srv
+ipr link add stormbr0 type bridge
+ipr link set port0 master stormbr0
+ipr link set port0 up; ipr link set stormbr0 up
 cat > /etc/udhcpd.conf <<EOT
 start 192.168.30.2
 end 192.168.30.20

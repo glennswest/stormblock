@@ -3075,9 +3075,17 @@ pub async fn run() -> anyhow::Result<()> {
     /// A file out of a volume's filesystem on `slabs`, read-only (#262). The
     /// error carries `slab cat`'s exit code: 1 for the file, 2 for the volume.
     async fn volume_file_on_slabs(slabs: &[String], volume: &str, path: &str) -> Result<Vec<u8>, (i32, String)> {
-        let mgr = open_slabs_and_restore(slabs, None)
-            .await
-            .map_err(|e| (2, format!("cannot read the slabs: {e}")))?;
+        // A disk whose flow-over was cut short holds only part of its volumes
+        // (#427): the rest is on the clone the boot resumes from, which /init
+        // names in STORMBLOCK_RESUME_SOURCE. Opened the way boot-local opens
+        // it, the clone attached for its data; never a claim of its own.
+        let resume = std::env::var("STORMBLOCK_RESUME_SOURCE").is_ok_and(|v| !v.trim().is_empty());
+        let mgr = if resume {
+            open_slabs_resuming(slabs, None, true).await.map(|(m, _)| m)
+        } else {
+            open_slabs_and_restore(slabs, None).await
+        }
+        .map_err(|e| (2, format!("cannot read the slabs: {e}")))?;
         let id = mgr
             .find_volume(volume)
             .await
