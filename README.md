@@ -128,9 +128,10 @@ image, the one write that needs no token (the health and readiness probes are
 the only other open requests; `docs/auth.md`).
 
 **Serving.** ublk devices for the local node, each request served as it
-arrives, not one at a time (#264), over one hardware queue per CPU up to four
-(`STORMBLOCK_UBLK_QUEUES`, 1–16; 128 in flight shared out, at least 32 a
-queue; an adopted device keeps the count it was created with), and FUA
+arrives, not one at a time (#264), over one hardware queue per CPU up to four when
+the volume's slabs are on SSDs and one when they are on a spinning disk
+(`STORMBLOCK_UBLK_QUEUES`, 1–16, overrides; 128 in flight shared out, at
+least 32 a queue; an adopted device keeps the count it was created with), and FUA
 writes taken as FUA: durable on their own, with no device-wide flush when
 their slot is already on the drive (#409, `docs/durability.md` rule 15); a shared NVMe-oF/TCP subsystem
 with namespace hot-add, and per-volume subsystems; a shared iSCSI target
