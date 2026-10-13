@@ -71,6 +71,12 @@ pub struct FlowOver {
     /// not seed it before exporting; absent (an older record) means it did.
     #[serde(default)]
     pub data_flow: bool,
+    /// The data half's own drive, when the system half has one of its own
+    /// (#402: an SSD for the system half, the HDD keeping the data). The
+    /// successor opens it beside `disk`; `disk` is the system drive, where
+    /// local boot lays the ESP and the boot pallets. Absent: one drive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_disk: Option<String>,
 }
 
 /// Where `boot-claim` leaves the install it was asked for (#148): written
@@ -629,7 +635,7 @@ mod tests {
         mixed.slabs.push("iscsi://10.0.0.1:3260/iqn.x".into());
         assert!(!local_only_boot(&mixed), "any remote slab");
         let mut flowing = a_record();
-        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false });
+        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false, data_disk: None });
         assert!(!local_only_boot(&flowing), "the install boot itself");
         let mut installing = a_record();
         installing.install = Some(InstallTicket { boothost: "http://f".into(), host: "h".into(), volume: "v".into() });
@@ -691,6 +697,7 @@ mod tests {
             system_slab: "8aa6b985-3f4d-4130-99cb-154b56dcb68b".into(),
             data_slab: "f86ee673-57da-4aa5-961c-168c263de265".into(),
             data_flow: false,
+            data_disk: None,
         });
         let bytes = serde_json::to_vec(&rec).expect("encodes");
         assert_eq!(serde_json::from_slice::<Record>(&bytes).expect("decodes"), rec);

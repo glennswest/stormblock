@@ -465,6 +465,13 @@ enum SubCommand {
         /// decide this, only somebody who knows the drive is spent.
         #[arg(long)]
         local_disk_force: bool,
+        /// The drive for the system half when it is not --local-disk (#402):
+        /// the drive stormdrive designates `system`. The system half is laid
+        /// there, sized to the drive with room for an update, and the data
+        /// half stays on (or is laid on) --local-disk; a system half that
+        /// was on --local-disk is retired.
+        #[arg(long)]
+        system_disk: Option<String>,
         /// Validate the artifact and resolve the boot volume, then exit
         /// without exporting (no ublk needed)
         #[arg(long)]
@@ -1071,7 +1078,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier,
-                local_disk_force, check,
+                local_disk_force, system_disk, check,
             } => {
                 return handle_boot_local(
                     slab,
@@ -1083,6 +1090,7 @@ pub async fn run() -> anyhow::Result<()> {
                     local_disk.as_deref(),
                     local_tier,
                     *local_disk_force,
+                    system_disk.as_deref(),
                     *check,
                 ).await;
             }
@@ -5306,6 +5314,7 @@ pub async fn run() -> anyhow::Result<()> {
                 system_slab: system_id.0.to_string(),
                 data_slab: data_id.0.to_string(),
                 data_flow: true,
+                data_disk: None,
             };
             println!(
                 "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
@@ -5410,6 +5419,7 @@ pub async fn run() -> anyhow::Result<()> {
             system_slab: system_id.0.to_string(),
             data_slab: data_id.0.to_string(),
             data_flow: false,
+            data_disk: None,
         };
         {
             let mut reg = mgr.registry().write().await;
@@ -5492,6 +5502,242 @@ pub async fn run() -> anyhow::Result<()> {
     /// node's identity, and copying over it would destroy a CA key that cannot be
     /// minted again. Empty is the whole test, and it is asked of the drive rather
     /// than assumed from which code path got here.
+    /// Take the node's drives for this boot (#402): [`take_local_disk_for`]
+    /// when one drive carries both halves; with `system_disk` another drive,
+    /// the system half goes there and the data half stays on (or is laid on)
+    /// `disk`, see [`take_split`].
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn take_local_disks(
+        mgr: &mut crate::volume::VolumeManager,
+        disk: &str,
+        system_disk: Option<&str>,
+        local_tier: &str,
+        local_disk_force: bool,
+        root: Option<&str>,
+    ) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
+        match system_disk.filter(|s| *s != disk) {
+            None => take_local_disk_for(mgr, disk, local_tier, local_disk_force, root).await,
+            Some(sys) => take_split(mgr, disk, sys, local_tier, local_disk_force, root).await,
+        }
+    }
+
+    /// The bytes of the release's system half this manager holds: every
+    /// system volume's mapped extents (#402), what a stage copies again.
+    async fn release_system_bytes(mgr: &crate::volume::VolumeManager) -> u64 {
+        let mut total = 0u64;
+        for (id, ..) in mgr.list_volumes().await {
+            if mgr.volume_role(&id) != Some(crate::drive::slab::SlabRole::System) {
+                continue;
+            }
+            if let Some(h) = mgr.get_volume_handle(&id) {
+                total += h.mapped().await;
+            }
+        }
+        total
+    }
+
+    /// The system half on a drive of its own, the data half on `data_disk`
+    /// (#402, owner's A: the drive stormdrive designates `system` outranks
+    /// the one the system half was on). Three shapes:
+    ///
+    /// - **the move**: `data_disk` carries both halves (the node so far): its
+    ///   data half is kept where it is, every data volume adopted, the
+    ///   node's own volumes in its system half carried into the data half,
+    ///   and then its system half and boot area are retired;
+    /// - **an update of a split node**: `system_disk` carries the system half
+    ///   alone: its slab is formatted again, its boot area kept;
+    /// - **a fresh pair**: neither carries a half: both laid.
+    ///
+    /// Everything that can refuse — the data half's records, the room the
+    /// release's data needs, the room an update needs on the system drive —
+    /// before anything is written. The system half is laid last: a failure
+    /// after the old one is retired leaves the data half and no stale boot.
+    #[cfg(target_os = "linux")]
+    async fn take_split(
+        mgr: &mut crate::volume::VolumeManager,
+        data_disk: &str,
+        sys_disk: &str,
+        local_tier: &str,
+        local_disk_force: bool,
+        root: Option<&str>,
+    ) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
+        use crate::image::local as local;
+        let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let data_dev: Arc<dyn BlockDevice> = open_storage(data_disk).await?;
+        let sys_dev: Arc<dyn BlockDevice> = open_storage(sys_disk).await?;
+        let layout_for = |dev: &Arc<dyn BlockDevice>, path: &str| {
+            let mut l = local::LocalLayout::for_drive(dev.capacity_bytes());
+            l.slot_size = mgr.slot_size();
+            l.tier = tier;
+            l.lba = crate::drive::filedev::logical_sector_size(path);
+            l
+        };
+        let sys_layout = layout_for(&sys_dev, sys_disk);
+        let data_layout = layout_for(&data_dev, data_disk);
+        println!("Install: the system half on {sys_disk}, a drive of its own; the data half on {data_disk} (#402)");
+
+        let (sys_drive_data, sys_on_sys) = local::halves_on(&sys_dev).await;
+        let (_, sys_on_data) = local::halves_on(&data_dev).await;
+        if sys_drive_data.is_some() {
+            anyhow::bail!(
+                "{sys_disk} is to take the system half and carries a data half: not laying over a node's data"
+            );
+        }
+        // Where the system half is now: what the plan reads and the install
+        // replaces (its own drive) or retires (this node's one drive).
+        let old_system: Option<(Arc<dyn BlockDevice>, &str)> = if sys_on_sys.is_some() {
+            Some((sys_dev.clone(), sys_disk))
+        } else if sys_on_data.is_some() {
+            Some((data_dev.clone(), data_disk))
+        } else {
+            None
+        };
+
+        // Room for the next release beside this one (#402, #122).
+        let release_bytes = release_system_bytes(mgr).await;
+        let slab_bytes = match sys_on_sys {
+            Some(i) => {
+                let g = crate::pallet::gpt::Gpt::read(&sys_dev).await.map_err(|e| anyhow::anyhow!("reading {sys_disk}'s table: {e}"))?;
+                g.entries[i].size_bytes(g.block_size)
+            }
+            None => local::system_drive_slab_bytes(sys_dev.capacity_bytes(), sys_layout.boot_bytes),
+        };
+        let need = local::update_room_needed(release_bytes);
+        if slab_bytes < need {
+            let why = format!(
+                "{sys_disk} has room for a {} system slab, and an update needs {} (this release's system half is {},                  and the next is staged beside it): not installing onto it",
+                crate::mgmt::config::human_size(slab_bytes),
+                crate::mgmt::config::human_size(need),
+                crate::mgmt::config::human_size(release_bytes),
+            );
+            println!("Install: REFUSED: {why}");
+            anyhow::bail!("{why}");
+        }
+        println!(
+            "Install: {} system slab on {sys_disk}; this release's system half is {}, an update needs {}",
+            crate::mgmt::config::human_size(slab_bytes),
+            crate::mgmt::config::human_size(release_bytes),
+            crate::mgmt::config::human_size(need),
+        );
+
+        // The data half: kept when it is there, laid when it is not.
+        let present = local::data_half_present(&data_dev)
+            .await
+            .map_err(|e| anyhow::anyhow!("not installing over {data_disk}: its data partition cannot be read: {e}"))?;
+        let keep = present == Some(true);
+        let release: std::collections::HashSet<String> =
+            mgr.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
+        let mut plan = None;
+        let mut carried = Vec::new();
+        if keep {
+            let old_sys = old_system.as_ref().map(|(d, _)| d);
+            let mut p = crate::image::install::plan_split(&data_dev, old_sys, &release)
+                .await
+                .map_err(|e| anyhow::anyhow!("not installing over {data_disk}, its data half untouched: {e}"))?;
+            if !p.carry.is_empty() {
+                carried = crate::image::install::carry_split(&data_dev, old_sys, &p)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("not installing over {data_disk}: carrying the node's volumes out of the system half: {e}"))?;
+                for c in &carried {
+                    println!("Install: {c} — the node's, with extents in the system half: carried into the data half (#349)");
+                }
+                p = crate::image::install::plan_split(&data_dev, old_sys, &release)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("not installing over {data_disk}, its data half untouched: {e}"))?;
+            }
+            for d in &p.dropped {
+                println!("Install: {d} — the old release's, not in this one: dropped with the system half (#349)");
+            }
+            plan = Some(p);
+        } else if let Some(what) = data_slab_on(data_disk).await? {
+            if !local_disk_force {
+                anyhow::bail!("refusing to lay a data half over {data_disk}: {what}");
+            }
+            println!("Install: {what} — destroying it, as --local-disk-force was given.");
+        }
+
+        // The old system half on the data drive: retired, before the new one
+        // is laid (owner's A: stormuefi scans every drive).
+        if sys_on_data.is_some() {
+            let r = local::retire_system_half(&data_dev)
+                .await
+                .map_err(|e| anyhow::anyhow!("retiring the system half on {data_disk}: {e}"))?;
+            println!(
+                "Install: {data_disk}'s system half retired ({}): its data half kept where it was",
+                r.removed.join(", ")
+            );
+        }
+        let sys = if sys_on_sys.is_some() {
+            local::reformat_system_drive(sys_dev, &sys_layout).await
+        } else {
+            local::lay_system_drive(sys_dev, &sys_layout).await
+        }
+        .map_err(|e| anyhow::anyhow!("laying the system half on {sys_disk}: {e}"))?;
+        let system_id = sys.system.slab_id();
+        mgr.registry().write().await.add(sys.system);
+
+        let (data_id, bulk_id, report) = if keep {
+            let (data, bulk, _) = crate::image::install::halves_split(&data_dev, None)
+                .await
+                .map_err(|e| anyhow::anyhow!("opening the data half on {data_disk}: {e}"))?;
+            let (data_id, bulk_id) = (data.slab_id(), bulk.as_ref().map(|b| b.slab_id()));
+            let policy = match root {
+                Some(r) => crate::image::stage::read_policy(mgr, r).await.unwrap_or_default(),
+                None => Default::default(),
+            };
+            let version = match root {
+                Some(r) => match mgr.find_volume(r).await.and_then(|id| mgr.get_volume(&id)) {
+                    Some(dev) => crate::fs::files::read_file(&dev, "/etc/os-release")
+                        .await
+                        .ok()
+                        .and_then(|b| crate::image::install::version_id(&b)),
+                    None => None,
+                },
+                None => None,
+            }
+            .unwrap_or_else(|| "new".into());
+            let previous = "previous".to_string();
+            let plan = plan.expect("planned above");
+            let mut report = crate::image::install::adopt(mgr, data, bulk, &plan, &policy, &version, &previous)
+                .await
+                .map_err(|e| anyhow::anyhow!("keeping the data half on {data_disk}: {e}"))?;
+            report.carried = carried;
+            for k in &report.kept {
+                println!("Install: {k} — the node's, kept");
+            }
+            (data_id, bulk_id, Some(report))
+        } else {
+            let d = local::lay_data_drive(data_dev, &data_layout)
+                .await
+                .map_err(|e| anyhow::anyhow!("laying the data half on {data_disk}: {e}"))?;
+            let (data_id, bulk_id) = (d.data.slab_id(), d.bulk.as_ref().map(|b| b.slab_id()));
+            let mut reg = mgr.registry().write().await;
+            reg.add(d.data);
+            if let Some(b) = d.bulk {
+                reg.add(b);
+            }
+            (data_id, bulk_id, None)
+        };
+        let mut first = vec![data_id, system_id];
+        first.extend(bulk_id);
+        mgr.keep_metadata_in_first(&first);
+        mgr.persist().await;
+        println!(
+            "Flow-over: system slab {system_id} on {sys_disk}, data slab {data_id} on {data_disk}; handed to \
+             the engine that adopts this boot"
+        );
+        Ok((
+            Some(crate::drive::handover::FlowOver {
+                disk: sys_disk.to_string(),
+                system_slab: system_id.0.to_string(),
+                data_slab: data_id.0.to_string(),
+                data_flow: true,
+                data_disk: Some(data_disk.to_string()),
+            }),
+            report,
+        ))
+    }
+
     #[cfg(target_os = "linux")]
     async fn seed_data_half(
         mgr: &crate::volume::VolumeManager,
@@ -7928,6 +8174,7 @@ async fn handle_boot_local(
     local_disk: Option<&str>,
     local_tier: &str,
     local_disk_force: bool,
+    system_disk: Option<&str>,
     check: bool,
 ) -> anyhow::Result<()> {
     // A node disk's data half takes any space the drive has gained, before
@@ -8026,14 +8273,15 @@ async fn handle_boot_local(
         // — a failure that names the root device and says nothing about the
         // local disk, for a node whose root was reachable the whole time.
         let flow_over =
-            take_local_disk_for(&mut mgr, disk, local_tier, local_disk_force, Some(&root_name)).await;
+            take_local_disks(&mut mgr, disk, system_disk, local_tier, local_disk_force, Some(&root_name)).await;
         match flow_over {
             Ok((f, report)) => {
+                // Laid, updated or already current: the disk carries this
+                // node's layout, and the successor makes it bootable — the
+                // system drive, when the system half has its own (#402).
+                local_boot_disk = Some(f.as_ref().map(|f| f.disk.clone()).unwrap_or_else(|| disk.to_string()));
                 laid_flow_over = f;
                 installed = report;
-                // Laid, updated or already current: the disk carries this
-                // node's layout, and the successor makes it bootable.
-                local_boot_disk = Some(disk.to_string());
                 crate::mgmt::slab_report::update_local_disk("taken", Some(disk), None, "boot-local");
             }
             // Said plainly, and on the console, because this is the one line
@@ -8114,6 +8362,10 @@ async fn handle_boot_local(
             // reads the GPT and finds both slabs in it, which is the same
             // thing `rd.stormblock.slab=/dev/sda` does on a composed disk.
             slabs.push(f.disk.clone());
+            // And the data half's drive, when it is another (#402).
+            if let Some(d) = &f.data_disk {
+                slabs.push(d.clone());
+            }
         }
         // A flow-over cut short and resumed from a fresh clone (#171): the
         // successor opens the clone too, and moves what is left onto this
@@ -8128,6 +8380,7 @@ async fn handle_boot_local(
                         data_slab: data.0.to_string(),
                         // What is left of either half (#285).
                         data_flow: true,
+                        data_disk: None,
                     });
                 }
             }

@@ -829,6 +829,47 @@ pub async fn lay_data_drive(device: Arc<dyn BlockDevice>, opts: &LocalLayout) ->
     Ok(DataDrive { data: out.pop().expect("a data slab"), bulk, data_bytes, bulk_bytes, lba })
 }
 
+/// Format the system slab of a drive that already carries the system half
+/// alone again (#402: an install over a split node): the boot area, its ESP
+/// and boot pallets, are kept (the fallback a node boots when the new
+/// release does not come up); the slab holds the last release's goldens,
+/// which this install replaces.
+pub async fn reformat_system_drive(device: Arc<dyn BlockDevice>, opts: &LocalLayout) -> Result<SystemDrive> {
+    let gpt = Gpt::read(&device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    let (data_i, system_i) = halves_on(&device).await;
+    if data_i.is_some() {
+        return Err(ImageError::Spec("this drive carries a data half: not a system drive of its own".into()));
+    }
+    let system_i = system_i.ok_or_else(|| ImageError::Spec("this drive carries no system half".into()))?;
+    let lba = gpt.block_size;
+    let e = &gpt.entries[system_i];
+    let part = Arc::new(
+        PartitionDevice::new(device.clone(), e.start_bytes(lba), e.size_bytes(lba))
+            .map_err(|err| ImageError::Other(format!("the system partition: {err}")))?,
+    );
+    let system_bytes = part.capacity_bytes();
+    let dev: Arc<dyn BlockDevice> = part.clone();
+    discard_quietly(&dev, 0, system_bytes / lba as u64 * lba as u64, "the system partition").await;
+    let meta = auto_metadata_bytes(system_bytes, opts.slot_size);
+    let system = Slab::format_with(
+        part,
+        SlabFormat::new(opts.slot_size, opts.tier).with_metadata(meta).with_role(SlabRole::System),
+    )
+    .await
+    .map_err(|e| ImageError::Other(format!("formatting the system slab: {e}")))?;
+    Ok(SystemDrive { system, system_bytes, lba })
+}
+
+/// The bytes a system slab must hold so the next release can be staged
+/// beside this one (#402, #122): a stage copies N+1's goldens under their own
+/// ids, and a new build's are all new, so an update holds two system halves
+/// at once until N+1 is activated. Twice the release's mapped bytes, and 5 %.
+pub fn update_room_needed(release_bytes: u64) -> u64 {
+    release_bytes.saturating_mul(2).saturating_add(release_bytes / 20)
+}
+
 /// What [`retire_system_half`] took off a drive.
 #[derive(Debug, Default)]
 pub struct Retired {

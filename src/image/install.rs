@@ -124,23 +124,41 @@ impl InstallMigration {
 /// The data and bulk partitions of a node layout, as slabs, and the system
 /// slab (when it opens).
 async fn halves(device: &Arc<dyn BlockDevice>) -> anyhow::Result<(Slab, Option<Slab>, Option<Slab>)> {
-    let (data_i, system_i) = crate::image::local::node_layout(device)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("the drive does not carry a node layout"))?;
-    let gpt = Gpt::read(device).await.map_err(|e| anyhow::anyhow!("reading the table: {e}"))?;
-    let part = |i: usize| -> anyhow::Result<Arc<dyn BlockDevice>> {
+    halves_split(device, None).await
+}
+
+/// A drive's data half as slabs (data, bulk), and the system slab — on the
+/// same drive, or on `system` when the system half has a drive of its own
+/// (#402) — when it opens.
+pub async fn halves_split(
+    device: &Arc<dyn BlockDevice>,
+    system: Option<&Arc<dyn BlockDevice>>,
+) -> anyhow::Result<(Slab, Option<Slab>, Option<Slab>)> {
+    let data_i = crate::image::local::halves_on(device)
+        .await
+        .0
+        .ok_or_else(|| anyhow::anyhow!("the drive carries no data half"))?;
+    let part = |dev: &Arc<dyn BlockDevice>, gpt: &Gpt, i: usize| -> anyhow::Result<Arc<dyn BlockDevice>> {
         let e = &gpt.entries[i];
         Ok(Arc::new(
-            PartitionDevice::new(device.clone(), e.start_bytes(gpt.block_size), e.size_bytes(gpt.block_size))
+            PartitionDevice::new(dev.clone(), e.start_bytes(gpt.block_size), e.size_bytes(gpt.block_size))
                 .map_err(|err| anyhow::anyhow!("partition {}: {err}", i + 1))?,
         ))
     };
-    let data = Slab::open(part(data_i)?).await.map_err(|e| anyhow::anyhow!("the data slab will not open: {e}"))?;
+    let gpt = Gpt::read(device).await.map_err(|e| anyhow::anyhow!("reading the table: {e}"))?;
+    let data = Slab::open(part(device, &gpt, data_i)?).await.map_err(|e| anyhow::anyhow!("the data slab will not open: {e}"))?;
     let bulk = match crate::image::local::bulk_partition(device).await {
-        Some(i) => Some(Slab::open(part(i)?).await.map_err(|e| anyhow::anyhow!("the bulk slab will not open: {e}"))?),
+        Some(i) => Some(Slab::open(part(device, &gpt, i)?).await.map_err(|e| anyhow::anyhow!("the bulk slab will not open: {e}"))?),
         None => None,
     };
-    let system = Slab::open(part(system_i)?).await.ok();
+    let sys_dev = system.unwrap_or(device);
+    let system = match crate::image::local::halves_on(sys_dev).await.1 {
+        Some(i) => match Gpt::read(sys_dev).await {
+            Ok(g) => Slab::open(part(sys_dev, &g, i)?).await.ok(),
+            Err(_) => None,
+        },
+        None => None,
+    };
     Ok((data, bulk, system))
 }
 
@@ -156,7 +174,18 @@ async fn halves(device: &Arc<dyn BlockDevice>) -> anyhow::Result<(Slab, Option<S
 /// does not name stops the install, named; a release's own previous
 /// generation (`<name>@<version>`, #122) and sealed goldens do not.
 pub async fn plan(device: &Arc<dyn BlockDevice>, release: &HashSet<String>) -> anyhow::Result<Plan> {
-    let (data, bulk, system) = halves(device).await?;
+    plan_split(device, None, release).await
+}
+
+/// [`plan`], the system half on `system` when it has a drive of its own
+/// (#402): where it is now, which an install lays again (an update of a split
+/// node) or retires (a system half moving to its own drive).
+pub async fn plan_split(
+    device: &Arc<dyn BlockDevice>,
+    system: Option<&Arc<dyn BlockDevice>>,
+    release: &HashSet<String>,
+) -> anyhow::Result<Plan> {
+    let (data, bulk, system) = halves_split(device, system).await?;
     if !data.is_data() {
         anyhow::bail!("the partition typed as the data slab says it is a system slab");
     }
@@ -494,10 +523,19 @@ pub fn version_id(os_release: &[u8]) -> Option<String> {
 /// The data half then holds them, and `adopt` keeps them like any data
 /// volume. Refused before anything moves when the data slab has no room.
 pub async fn carry(device: &Arc<dyn BlockDevice>, plan: &Plan) -> anyhow::Result<Vec<String>> {
+    carry_split(device, None, plan).await
+}
+
+/// [`carry`], out of a system half on `system` (#402).
+pub async fn carry_split(
+    device: &Arc<dyn BlockDevice>,
+    system: Option<&Arc<dyn BlockDevice>>,
+    plan: &Plan,
+) -> anyhow::Result<Vec<String>> {
     if plan.carry.is_empty() {
         return Ok(Vec::new());
     }
-    let (data, bulk, system) = halves(device).await?;
+    let (data, bulk, system) = halves_split(device, system).await?;
     let Some(system) = system else {
         anyhow::bail!("the system half does not open: its volumes cannot be carried");
     };
