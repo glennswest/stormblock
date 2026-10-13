@@ -171,6 +171,22 @@ const MAX_DEFAULT_QUEUES: u16 = 4;
 /// its own queue instead of every CPU feeding one ring; the requests are
 /// served on the engine's runtime either way (#264). An adopted device keeps
 /// the count it was created with.
+/// The queues a device over `device` gets: `STORMBLOCK_UBLK_QUEUES` when
+/// set; one over a rotating disk; else [`default_queues`] (#409). Measured
+/// in a guest: on RAM-backed disks 4 queues took ext4 commits from 8.9–10.8k
+/// to 11.9–12.4k a second; on an 8 ms disk they cost 15 % (170 → 140–146),
+/// the flushes of a group commit arriving spread over four rings.
+fn queues_for(device: &dyn BlockDevice) -> u16 {
+    if std::env::var("STORMBLOCK_UBLK_QUEUES").is_ok() {
+        return default_queues();
+    }
+    if device.rotational() {
+        1
+    } else {
+        default_queues()
+    }
+}
+
 /// `STORMBLOCK_FUA_BY_FLUSH=1`: no FUA declared to the kernel (#409).
 fn fua_by_flush() -> bool {
     std::env::var("STORMBLOCK_FUA_BY_FLUSH").is_ok_and(|v| v == "1")
@@ -375,12 +391,13 @@ pub struct UblkServer {
 impl UblkServer {
     /// Create a new ublk server for the given block device.
     pub fn new(device: Arc<dyn BlockDevice>) -> Self {
+        let queues = queues_for(&*device);
         UblkServer {
             device,
             dev_id: AtomicI32::new(-1),
             requested_dev_id: None,
-            nr_queues: default_queues(),
-            queue_depth: depth_per_queue(default_queues()),
+            nr_queues: queues,
+            queue_depth: depth_per_queue(queues),
             running: Arc::new(AtomicBool::new(false)),
             resizable: Arc::new(AtomicBool::new(false)),
             dev_sectors: Arc::new(AtomicU64::new(0)),

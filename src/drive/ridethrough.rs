@@ -226,6 +226,9 @@ impl BlockDevice for RideThrough {
     fn device_type(&self) -> DriveType {
         self.inner.device_type()
     }
+    fn rotational(&self) -> bool {
+        self.inner.rotational()
+    }
     fn smart_status(&self) -> DriveResult<SmartData> {
         self.inner.smart_status()
     }

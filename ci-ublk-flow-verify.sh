@@ -7,8 +7,9 @@
 #
 #   before   STORMBLOCK_UBLK_QUEUES=1, STORMBLOCK_FUA_BY_FLUSH=1: one queue,
 #            and every FUA write a write and the volume's flush (as before)
-#   after    the defaults: one queue per CPU (the guest has 4), and a FUA
-#            write into a slot already on the device written FUA at the drive
+#   after    the defaults: one queue per CPU (the guest has 4) over an SSD,
+#            one over a spinning disk; a FUA write into a slot already on the
+#            device written FUA at the drive where the drive has FUA
 #
 # and two kinds of disk (each configuration its own): fast (a guest virtio
 # disk) and slow (one through dm-delay, 8 ms per read, write and flush: a
@@ -104,10 +105,16 @@ echo "GUEST kernel $(cat /proc/sys/kernel/osrelease), $(grep -c ^processor /proc
 api() { curl -sf -m 120 -H 'Authorization: Bearer t' -H 'Content-Type: application/json' "$@"; }
 
 # The slow disks: vdc to vdh through dm-delay.
+# What the engine reads to choose queues (#409): the fast disks are SSDs,
+# the delayed ones spinning disks.
+echo 0 > /sys/block/vda/queue/rotational; echo 0 > /sys/block/vdb/queue/rotational
 slow() {
+    echo 1 > /sys/block/$1/queue/rotational
     S=$(cat /sys/block/$1/size)
     dmsetup create --noudevsync slow$1 --table "0 $S delay /dev/$1 0 8 /dev/$1 0 8" || { r dm FAIL; poweroff -f; }
-    for d in /sys/block/dm-*; do [ "$(cat $d/dm/name)" = slow$1 ] && echo /dev/${d##*/}; done
+    for d in /sys/block/dm-*; do
+        [ "$(cat $d/dm/name)" = slow$1 ] && { echo 1 > $d/queue/rotational; echo /dev/${d##*/}; }
+    done
 }
 SLOWC=$(slow vdc); SLOWD=$(slow vdd); SLOWE=$(slow vde); SLOWF=$(slow vdf); SLOWG=$(slow vdg); SLOWH=$(slow vdh)
 
@@ -130,7 +137,9 @@ EOT
         before)   export STORMBLOCK_UBLK_QUEUES=1 STORMBLOCK_FUA_BY_FLUSH=1; want_q=1; want_fua=0 ;;
         q4-flush) export STORMBLOCK_UBLK_QUEUES=4 STORMBLOCK_FUA_BY_FLUSH=1; want_q=4; want_fua=0 ;;
         q1-fua)   export STORMBLOCK_UBLK_QUEUES=1; unset STORMBLOCK_FUA_BY_FLUSH; want_q=1; want_fua=1 ;;
-        *)        unset STORMBLOCK_UBLK_QUEUES STORMBLOCK_FUA_BY_FLUSH; want_q=4; want_fua=1 ;;
+        # The defaults: a queue per CPU over an SSD, one over a spinning disk.
+        *)        unset STORMBLOCK_UBLK_QUEUES STORMBLOCK_FUA_BY_FLUSH; want_q=4; want_fua=1
+                  case "$4" in slow*) want_q=1 ;; esac ;;
     esac
     RUST_LOG=stormblock=warn stormblock --config /run/$tag.toml --data-dir /run/$tag --no-iscsi \
         > /run/engine-$tag.log 2>&1 &

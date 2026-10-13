@@ -136,6 +136,10 @@ impl BlockDevice for PartitionDevice {
         self.inner.device_type()
     }
 
+    fn rotational(&self) -> bool {
+        self.inner.rotational()
+    }
+
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
         self.check(offset, buf.len() as u64)?;
         self.inner.read(self.start + offset, buf).await

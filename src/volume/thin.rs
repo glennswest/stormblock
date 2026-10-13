@@ -3112,6 +3112,24 @@ impl BlockDevice for ThinVolumeHandle {
         DriveType::File
     }
 
+    /// Any slab of the half this volume is placed in is on a rotating disk
+    /// (#409). Asked when a ublk device is made for it; a busy registry
+    /// answers no (the default queues).
+    fn rotational(&self) -> bool {
+        let role = self.placement_role();
+        let pinned = self.pinned_slab();
+        match self.registry.try_read() {
+            Ok(reg) => reg
+                .iter()
+                .filter(|(id, s)| match pinned {
+                    Some(p) => **id == p,
+                    None => s.role() == role,
+                })
+                .any(|(_, s)| s.device().rotational()),
+            Err(_) => false,
+        }
+    }
+
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
         self.resident().await?;
         FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -409,17 +409,13 @@ fn queue_value(path: &str, what: &str) -> Option<u64> {
     text.trim().parse().ok()
 }
 
-/// Detect if a block device is SSD or HDD via the rotational flag.
+/// Detect if a block device is SSD or HDD via the rotational flag. A
+/// partition has no `queue/` of its own: its disk's is read (#409; every
+/// slab on a partition of an SSD read as an HDD).
 fn detect_drive_type(path: &str) -> DriveType {
-    let devname = path.rsplit('/').next().unwrap_or("");
-    let rotational = std::fs::read_to_string(format!("/sys/block/{devname}/queue/rotational"))
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if rotational == "0" {
-        DriveType::SasSsd
-    } else {
-        DriveType::SasHdd
+    match queue_value(path, "rotational") {
+        Some(0) => DriveType::SasSsd,
+        _ => DriveType::SasHdd,
     }
 }
 

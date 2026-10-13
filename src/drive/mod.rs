@@ -356,6 +356,14 @@ pub trait BlockDevice: Send + Sync {
         write_zeroes_by_writing(self, offset, len).await
     }
 
+    /// Whether what is under this device is a rotating disk (#409): a ublk
+    /// device over it gets one queue, where more spread a group commit's
+    /// flushes and cost commits (measured on an 8 ms disk). A thin volume
+    /// answers for the slabs it is placed on.
+    fn rotational(&self) -> bool {
+        self.device_type() == DriveType::SasHdd
+    }
+
     /// Query SMART health data. Returns None if not supported.
     fn smart_status(&self) -> DriveResult<SmartData> {
         Ok(SmartData { healthy: true, ..Default::default() })
