@@ -33,6 +33,8 @@ pub trait VolumeView {
     fn parent(&self, id: &VolumeId) -> Option<VolumeId>;
     fn fs_info(&self, id: &VolumeId) -> Option<&FsInfo>;
     fn origin(&self, id: &VolumeId) -> Origin;
+    /// The namespace the volume belongs to (#408).
+    fn namespace(&self, id: &VolumeId) -> &str;
     fn is_template(&self, id: &VolumeId) -> bool;
     fn is_sealed(&self, id: &VolumeId) -> bool {
         self.get_volume_handle(id).map(|h| h.is_sealed()).unwrap_or(false)
@@ -66,6 +68,7 @@ struct Entry {
     fs: Option<FsInfo>,
     owner: Option<Owner>,
     origin: Origin,
+    namespace: String,
 }
 
 /// The volumes as the manager last published them.
@@ -94,6 +97,7 @@ impl Catalog {
                         fs: m.fs_info(&id).cloned(),
                         owner: m.owner(&id).cloned(),
                         origin: m.origin(&id),
+                        namespace: m.namespace(&id).to_string(),
                     },
                 ))
             })
@@ -125,6 +129,9 @@ impl VolumeView for Catalog {
     }
     fn origin(&self, id: &VolumeId) -> Origin {
         self.entries.get(id).map(|e| e.origin).unwrap_or_default()
+    }
+    fn namespace(&self, id: &VolumeId) -> &str {
+        self.entries.get(id).map(|e| e.namespace.as_str()).unwrap_or(super::metadata::DEFAULT_NAMESPACE)
     }
     fn is_template(&self, id: &VolumeId) -> bool {
         self.templates.contains(id)
@@ -164,6 +171,9 @@ impl VolumeView for super::VolumeManager {
     }
     fn origin(&self, id: &VolumeId) -> Origin {
         super::VolumeManager::origin(self, id)
+    }
+    fn namespace(&self, id: &VolumeId) -> &str {
+        super::VolumeManager::namespace(self, id)
     }
     fn is_template(&self, id: &VolumeId) -> bool {
         super::VolumeManager::is_template(self, id)
@@ -224,6 +234,9 @@ macro_rules! view_through {
             }
             fn origin(&self, id: &VolumeId) -> Origin {
                 VolumeView::origin(&**self, id)
+            }
+            fn namespace(&self, id: &VolumeId) -> &str {
+                VolumeView::namespace(&**self, id)
             }
             fn is_template(&self, id: &VolumeId) -> bool {
                 VolumeView::is_template(&**self, id)

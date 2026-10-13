@@ -236,6 +236,25 @@ pub struct VolumeRecord {
     /// written by bincode; a format v2 header carries it after the origin.
     #[serde(skip)]
     pub tier: Option<crate::placement::topology::StorageTier>,
+    /// The namespace the volume belongs to (#408): a family's project on
+    /// forge (`stormcos`, `nana`, …), a Kubernetes namespace there. `None`
+    /// reads as [`DEFAULT_NAMESPACE`]. Never written by bincode; a format v2
+    /// header carries it after the tier.
+    #[serde(skip)]
+    pub namespace: Option<String>,
+}
+
+/// The namespace of a volume that names none (#408): everything made before
+/// namespaces existed is stormcos's.
+pub const DEFAULT_NAMESPACE: &str = "stormcos";
+
+/// A namespace name as Kubernetes takes one: a DNS-1123 label (#408).
+pub fn valid_namespace(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-')
 }
 
 /// Where a volume came from (#349, owner: an install drops old system
@@ -445,6 +464,7 @@ impl From<v8::VolumeMetadata> for VolumeMetadata {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    namespace: None,
                 })
                 .collect(),
         }
@@ -558,6 +578,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    namespace: None,
                 })
                 .collect(),
         }
@@ -623,6 +644,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    namespace: None,
                 })
                 .collect(),
         }
@@ -689,6 +711,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    namespace: None,
                     })
                 .collect(),
         }
@@ -750,6 +773,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    namespace: None,
                     })
                 .collect(),
         }
@@ -813,6 +837,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    namespace: None,
                     })
                 .collect(),
         }
@@ -870,6 +895,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    namespace: None,
                     })
                 .collect(),
         }
@@ -930,6 +956,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    namespace: None,
                     })
                 .collect(),
         }
@@ -1224,6 +1251,7 @@ mod tests {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    namespace: None,
                 }],
         }
     }
@@ -1363,6 +1391,7 @@ mod tests {
                 extent_size: 0,
                 origin: Default::default(),
                     tier: None,
+                    namespace: None,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1451,6 +1480,7 @@ mod tests {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    namespace: None,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1677,6 +1707,7 @@ mod retention_tests {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    namespace: None,
                 }],
         }
     }

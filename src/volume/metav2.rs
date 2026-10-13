@@ -1227,6 +1227,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     record.parity.clear();
     let origin = record.origin;
     let tier = record.tier;
+    let record_namespace = record.namespace.take();
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
@@ -1239,11 +1240,19 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // Then the tier a claim asked for (#151), when not hot: a reader before
     // it reads the origin and ignores the byte after.
     let tier = tier.filter(|t| *t != crate::placement::topology::StorageTier::Hot);
-    if origin != super::metadata::Origin::Unmarked || tier.is_some() {
+    // Then the namespace (#408), when not the default: the tier byte is
+    // written first (0 = hot) so a reader that knows only the tier reads the
+    // right one and ignores the rest; a length byte and the name.
+    let namespace = record_namespace.filter(|n| n != super::metadata::DEFAULT_NAMESPACE && n.len() <= 255);
+    if origin != super::metadata::Origin::Unmarked || tier.is_some() || namespace.is_some() {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
-        if let Some(t) = tier {
-            out.push(t as u8);
+        if tier.is_some() || namespace.is_some() {
+            out.push(tier.map(|t| t as u8).unwrap_or(0));
+        }
+        if let Some(n) = namespace {
+            out.push(n.len() as u8);
+            out.extend_from_slice(n.as_bytes());
         }
     }
     out
@@ -1264,6 +1273,14 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
                 3 => Some(StorageTier::Cold),
                 _ => None,
             };
+        }
+        if rest.len() >= 7 {
+            let n = rest[6] as usize;
+            if let Some(name) = rest.get(7..7 + n).and_then(|b| std::str::from_utf8(b).ok()) {
+                if super::metadata::valid_namespace(name) {
+                    rec.namespace = Some(name.to_string());
+                }
+            }
         }
     }
 }
@@ -1452,6 +1469,7 @@ mod tests {
             extent_size: 0,
             origin: Origin::Node,
             tier: None,
+            namespace: None,
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1491,6 +1509,7 @@ mod tests {
             extent_size: 0,
             origin: Origin::Node,
             tier: None,
+            namespace: None,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -1516,6 +1535,17 @@ mod tests {
             bincode::serde::decode_from_slice(&plain[4..], bincode::config::standard()).unwrap();
         assert_eq!(used + 4, plain.len(), "nothing after an unmarked header");
         assert_eq!(document_of(header_entries(id, &plain)).unwrap().volumes[0].origin, Origin::Unmarked);
+        // #408: a namespace rides after the tier (written as 0, hot); a
+        // reader that knows the tier reads hot and ignores the rest.
+        rec.namespace = Some("nana".into());
+        let with_ns = header_bytes(&rec, 1 << 20);
+        let doc = document_of(header_entries(id, &with_ns)).unwrap();
+        assert_eq!(doc.volumes[0].namespace.as_deref(), Some("nana"));
+        assert_eq!(doc.volumes[0].tier, None);
+        assert_eq!(with_ns.len(), plain.len() + 4 + 1 + 1 + 1 + 4, "tag, origin, tier, length, name");
+        // The default namespace is not written: byte for byte as before.
+        rec.namespace = Some(crate::volume::metadata::DEFAULT_NAMESPACE.into());
+        assert_eq!(header_bytes(&rec, 1 << 20), plain);
     }
     use crate::drive::slab::SlabId;
     use crate::volume::gem::{ExtentLocation, Leg};
@@ -1748,6 +1778,7 @@ mod tests {
             extent_size: 0,
             origin: Default::default(),
             tier: None,
+            namespace: None,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -1783,6 +1814,7 @@ mod tests {
             extent_size: 0,
             origin: Default::default(),
             tier: None,
+            namespace: None,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

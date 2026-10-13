@@ -97,6 +97,9 @@ pub struct VolumeResponse {
     /// were). An install drops a release's system volume the next release
     /// does not name, and carries the node's into the data half.
     pub origin: &'static str,
+    /// The namespace the volume belongs to (#408): a family's project on
+    /// forge (`stormcos`, `nana`, …). Names are unique within one.
+    pub namespace: String,
     /// Where the volume lives — slabs, drives, RAID partners and the state of
     /// each (#136). Always on the single-volume GET; on the listing only with
     /// `?placement=true`, since it walks the volume's extent map.
@@ -126,6 +129,7 @@ struct Described {
     fs: Option<serde_json::Value>,
     fs_uuid: Option<Uuid>,
     origin: &'static str,
+    namespace: String,
     owner: Option<crate::volume::metadata::Owner>,
 }
 
@@ -150,6 +154,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
                 fs_uuid: fs.and_then(|f| f.uuid),
                 owner: vm.owner(id).cloned(),
                 origin: vm.origin(id).as_str(),
+                namespace: vm.namespace(id).to_string(),
             }
         }
         None => Described {
@@ -168,6 +173,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
             fs_uuid: None,
             owner: None,
             origin: crate::volume::metadata::Origin::Unmarked.as_str(),
+            namespace: crate::volume::metadata::DEFAULT_NAMESPACE.to_string(),
         },
     }
 }
@@ -320,6 +326,10 @@ pub struct ListVolumesQuery {
     /// Only volumes nothing has claimed as its owner (#115).
     #[serde(default)]
     pub unowned: bool,
+    /// Only this namespace's volumes (#408). Absent: every namespace the
+    /// caller may list.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// The listing, with the node's volume `generation` beside it (#136).
@@ -452,6 +462,9 @@ async fn list_from(
         if !super::usage::matches(&usage, vm.owner(id).is_some(), q.kind.as_deref(), q.in_use, q.unowned) {
             continue;
         }
+        if q.namespace.as_deref().is_some_and(|n| n != vm.namespace(id)) {
+            continue;
+        }
         let d = describe(vm, id).await;
         items.push(VolumeResponse {
             placement: None,
@@ -479,6 +492,7 @@ async fn list_from(
             fs: d.fs,
             owner: d.owner.clone(),
             origin: d.origin,
+            namespace: d.namespace.clone(),
         });
         if q.placement {
             let p = super::placement::of_volume(state, vm, *id).await;
@@ -568,6 +582,7 @@ async fn get_from(
                 fs: d.fs,
                 owner: d.owner.clone(),
             origin: d.origin,
+            namespace: d.namespace.clone(),
             };
             Json(resp).into_response()
         }
@@ -748,6 +763,7 @@ async fn compose_volume(
         lba: vm.lba(&id).unwrap_or(crate::volume::Lba::DEFAULT),
         extent_size: vm.get_volume_handle(&id).map(|h| h.extent_size()).unwrap_or(0),
         origin: vm.origin(&id).as_str(),
+        namespace: vm.namespace(&id).to_string(),
         access: crate::volume::Access::ReadWrite.to_string(),
         writable: true,
         role: vm
@@ -854,6 +870,7 @@ async fn create_volume(
             fs: d.fs,
             owner: d.owner.clone(),
             origin: d.origin,
+            namespace: d.namespace.clone(),
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
         return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
@@ -984,6 +1001,7 @@ async fn create_volume(
                 lba: vm.lba(&vol_id).unwrap_or(crate::volume::Lba::DEFAULT),
                 extent_size: vm.get_volume_handle(&vol_id).map(|h| h.extent_size()).unwrap_or(0),
                 origin: vm.origin(&vol_id).as_str(),
+                namespace: vm.namespace(&vol_id).to_string(),
                 access: crate::volume::Access::ReadWrite.to_string(),
                 writable: true,
                 // What it was actually placed in, which is not always what
@@ -1567,6 +1585,7 @@ async fn clone_volume(
                 fs: d.fs,
                 owner: d.owner.clone(),
             origin: d.origin,
+            namespace: d.namespace.clone(),
             };
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
@@ -2387,6 +2406,7 @@ async fn create_snapshot(
                 fs: d.fs,
                 owner: d.owner.clone(),
             origin: d.origin,
+            namespace: d.namespace.clone(),
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -2469,6 +2489,7 @@ async fn resize_volume(
                 fs: d.fs,
                 owner: d.owner.clone(),
             origin: d.origin,
+            namespace: d.namespace.clone(),
             };
             Json(resp).into_response()
         }
@@ -2923,6 +2944,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
         fs: d.fs,
         owner: d.owner.clone(),
             origin: d.origin,
+            namespace: d.namespace.clone(),
     })
 }
 
