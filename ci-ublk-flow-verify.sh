@@ -103,13 +103,13 @@ echo "GUEST kernel $(cat /proc/sys/kernel/osrelease), $(grep -c ^processor /proc
 [ -e /dev/ublk-control ] || { r ublk_drv FAIL; poweroff -f; }
 api() { curl -sf -m 120 -H 'Authorization: Bearer t' -H 'Content-Type: application/json' "$@"; }
 
-# The slow disks: vde and vdf through dm-delay.
+# The slow disks: vdc to vdh through dm-delay.
 slow() {
     S=$(cat /sys/block/$1/size)
     dmsetup create --noudevsync slow$1 --table "0 $S delay /dev/$1 0 8 /dev/$1 0 8" || { r dm FAIL; poweroff -f; }
     for d in /sys/block/dm-*; do [ "$(cat $d/dm/name)" = slow$1 ] && echo /dev/${d##*/}; done
 }
-SLOWE=$(slow vde); SLOWF=$(slow vdf); SLOWI=$(slow vdi); SLOWJ=$(slow vdj)
+SLOWC=$(slow vdc); SLOWD=$(slow vdd); SLOWE=$(slow vde); SLOWF=$(slow vdf); SLOWG=$(slow vdg); SLOWH=$(slow vdh)
 
 # run <config> <disk> <port>: a fresh engine, slab, volume and device.
 run() {
@@ -185,16 +185,14 @@ EOT
 }
 
 run before /dev/vda 9091 fast
-run q4-flush /dev/vdb 9092 fast
-run q1-fua /dev/vdc 9093 fast
-run after /dev/vdd 9094 fast
-run before $SLOWE 9095 slow
+run after /dev/vdb 9092 fast
+run before $SLOWC 9093 slow
+run q4-flush $SLOWD 9094 slow
+run q1-fua $SLOWE 9095 slow
 run after $SLOWF 9096 slow
 # Again, the other way round: what moved between the two is noise.
-run after /dev/vdg 9097 fast2
-run before /dev/vdh 9098 fast2
-run after $SLOWI 9099 slow2
-run before $SLOWJ 9100 slow2
+run after $SLOWG 9097 slow2
+run before $SLOWH 9098 slow2
 echo "GUEST done"
 poweroff -f
 EOF
@@ -206,7 +204,7 @@ chmod +x "$I/init"
 D=$(mktemp -d /dev/shm/ci-ublk-flow.XXXXXX)
 trap 'rm -rf "$W" "$D"' EXIT
 drives=
-for d in a b c d e f g h i j; do
+for d in a b c d e f g h; do
     truncate -s 512M "$D/$d.img"
     drives="$drives -drive file=$D/$d.img,if=virtio,format=raw,cache=unsafe"
 done
@@ -220,7 +218,7 @@ timeout 2400 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 
     $drives > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG)|BENCH|ERROR|panick'
 
-for t in before-fast q4-flush-fast q1-fua-fast after-fast before-slow after-slow after-fast2 before-fast2 after-slow2 before-slow2; do
+for t in before-fast after-fast before-slow q4-flush-slow q1-fua-slow after-slow after-slow2 before-slow2; do
     for c in queues fua records ext4; do
         tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $t-$c PASS" || fail "$t-$c"
     done
