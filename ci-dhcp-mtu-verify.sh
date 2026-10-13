@@ -37,7 +37,10 @@ for a in $("$BUSYBOX" --list); do ln -sf busybox "$I/bin/$a"; done
 # iproute2 for the test's own plumbing (busybox `ip` makes no veth pair); the
 # DHCP script runs busybox `ip`, as on a node.
 IPR=$(command -v ip)
-[ -n "$IPR" ] && cp "$IPR" "$I/bin/ipr" && ldd "$IPR" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
+# Named `ip` (iproute2 reads its subcommand from its own name: as `ipr` it
+# runs `ip route`), apart from busybox's.
+mkdir -p "$I/opt/iproute2"
+[ -n "$IPR" ] && cp "$IPR" "$I/opt/iproute2/ip" && ldd "$IPR" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
     mkdir -p "$I$(dirname "$lib")"; cp -L "$lib" "$I$lib"
 done
 # The DHCP script exactly as the generator writes it.
@@ -63,6 +66,7 @@ done
 cat > "$I/init" <<'EOF'
 #!/bin/sh
 export PATH=/bin
+ipr() { /opt/iproute2/ip "$@"; }
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
 mount -t tmpfs run /run; mount -t tmpfs tmp /tmp
 for m in $(cat /lib/mods/order); do insmod /lib/mods/$m 2>&1 | sed "s/^/LOG insmod $m: /"; done
@@ -70,7 +74,6 @@ r() { echo "RESULT $1 $2"; }
 ip link set lo up
 echo "LOG ipr: $(ipr -V 2>&1)"
 ipr link add srv type veth peer name port0 2>&1 | sed 's/^/LOG veth: /'
-ip link add srv type veth peer name port0 2>&1 | sed 's/^/LOG bb veth: /'
 echo "LOG modules: $(cut -d' ' -f1 /proc/modules | tr '\n' ' ')"
 ipr link set srv mtu 9000; ipr link set srv up
 ipr addr add 192.168.30.252/20 dev srv
