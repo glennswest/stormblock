@@ -692,6 +692,7 @@ BOOTTAG=""
 BOOTTAG_FROM=""
 TRUST_SMBIOS=""
 HOSTNQN=""
+DISKLESS_OK=""
 META=""
 VOLUME=""
 OVERLAY=""
@@ -735,6 +736,7 @@ for param in $(cat /proc/cmdline); do
         # same name here means the appliance sees one machine across the
         # handover instead of a nameless second initiator.
         rd.stormblock.hostnqn=*)     HOSTNQN="${param#*=}" ;;
+        rd.stormblock.diskless=*)    DISKLESS_OK="${param#*=}" ;;
         rd.stormblock.meta=*)        META="${param#*=}" ;;
         rd.stormblock.overlay=*)     OVERLAY="${param#*=}" ;;
         rd.stormblock.image-store=*) IMAGE_STORE="${param#*=}" ;;
@@ -3412,6 +3414,13 @@ if [ "$BOOT_MODE" = "local" ]; then
     # (media errors) looks exactly like that, and is the fault to name.
     LD_ODRIVE=""
     LD_OWHY=""
+    # Every drive the survey left, and why (#427): "<dev>: <why>" lines.
+    LD_SKIPS=""
+    RUNNING_FROM=""
+    ld_skip() { # dev why
+        LD_SKIPS="$LD_SKIPS
+    $1: $2"
+    }
     ld_refused() { # dev why -> remembered when dev carries stormblock slabs
         [ -n "$LD_DRIVE" ] && return 0
         "$SURVEY_SB" slab list "$1" 2>/dev/null | grep -q ": slab \|role=" || return 0
@@ -3584,11 +3593,21 @@ if [ "$BOOT_MODE" = "local" ]; then
             [ -n "$LOCAL_DISK" ] && break
             [ -e "$d" ] || continue
             dev="/dev/$(basename "$d")"
-            [ "$(cat "$d/removable" 2>/dev/null)" = "1" ] && continue
-            [ "$(cat "$d/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
+            # Every drive left is said why, for the diskless verdict (#427):
+            # the Dell's "no local drive to take" named none of its reasons.
+            if [ "$(cat "$d/removable" 2>/dev/null)" = "1" ]; then
+                ld_skip "$dev" "removable"; continue
+            fi
+            if ! [ "$(cat "$d/size" 2>/dev/null || echo 0)" -gt 0 ]; then
+                ld_skip "$dev" "no media (size 0)"; continue
+            fi
             # Do not eat the disk this boot is running from.
-            case "$SLAB" in *"$(basename "$d")"*) continue ;; esac
-            may_take "$d" "$dev" || continue
+            case "$SLAB" in *"$(basename "$d")"*)
+                RUNNING_FROM="$dev"
+                ld_skip "$dev" "this boot runs from it"
+                continue ;;
+            esac
+            may_take "$d" "$dev" || { ld_skip "$dev" "${LD_WHY:-not taken by the shelf rules (#347)}"; continue; }
             probe=$("$SURVEY_SB" slab list "$dev" 2>&1)
             case "$probe" in
                 *": slab "*|*"data slab"*)
@@ -3651,6 +3670,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                         break
                     fi
                     echo "  $dev is already a stormblock slab - leaving it"
+                    ld_skip "$dev" "carries stormblock slabs that rd.stormblock.assimilate=$ASSIMILATE does not take"
                     ld_refused "$dev" "carries stormblock slabs that rd.stormblock.assimilate=$ASSIMILATE does not take" ;;
                 *)
                     # Not a stormblock slab: taken only when blank (#273).
@@ -3659,6 +3679,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                     sig=$(drive_signature "$SURVEY_DEV/${d##*/}" "$d")
                     if [ -n "$sig" ] && ! { [ "$ASSIMILATE" = force ] && [ "${d##*/}" = "$NAMED_DISK" ]; }; then
                         echo "  $dev carries $sig - not ours and not blank, leaving it (#273)"
+                        ld_skip "$dev" "carries $sig, not ours and not blank (#273)"
                         if [ -z "$LD_ODRIVE" ]; then
                             LD_ODRIVE="$dev"
                             LD_OWHY="carries $sig and is not a readable stormblock slab ($(printf '%s' "$probe" | head -1))"
@@ -3666,6 +3687,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                     elif [ "$ASSIMILATE" = blank ] && \
                        "$SURVEY_SB" slab list "$dev" 2>&1 | grep -q "partition"; then
                         echo "  $dev carries partitions and the policy is 'blank' - leaving it"
+                        ld_skip "$dev" "carries partitions and the policy is 'blank'"
                     else
                         LOCAL_DISK="$dev"
                         echo "  $dev is nobody's - this node will take it"
@@ -3673,7 +3695,13 @@ if [ "$BOOT_MODE" = "local" ]; then
                     fi ;;
             esac
         done
-        [ -z "$LOCAL_DISK" ] && echo "  no local drive to take; writes stay on the appliance"
+        if [ -z "$LOCAL_DISK" ] && [ -n "$RUNNING_FROM" ]; then
+            # Not diskless: the boot runs from the node's own disk (#427).
+            # "No local drive to take" here read as a node on the appliance.
+            echo "  booting from $RUNNING_FROM, this node's own disk: no other drive to take"
+        elif [ -z "$LOCAL_DISK" ]; then
+            echo "  no local drive to take; writes stay on the appliance"
+        fi
         # The override travels with the policy, not with the branch that
         # picked the drive.
         #
@@ -3710,6 +3738,8 @@ if [ "$BOOT_MODE" = "local" ]; then
     # forge with its slabs on its own drive is the failure to name.
     if [ -n "$LOCAL_DISK" ]; then
         ld_write taken "$LOCAL_DISK" ""
+    elif [ -n "$RUNNING_FROM" ]; then
+        ld_write taken "$RUNNING_FROM" "this boot runs from it"
     elif [ -n "$LD_DRIVE" ]; then
         ld_write refused "$LD_DRIVE" "$LD_WHY"
         echo "WARNING: this node runs from the appliance although $LD_DRIVE carries"
@@ -3776,6 +3806,41 @@ if [ "$BOOT_MODE" = "local" ]; then
         fi
     fi
     # --- END hook takeable
+
+    # --- BEGIN diskless refused (covered by tests/initramfs-diskless.sh)
+    # A node never runs diskless by default (#427; owner, #344: the
+    # flow-over onto the node's own disk is mandatory). A boot from the
+    # appliance's clone that takes no local drive is a fault to fix - a
+    # drive not seen, refused, on the wrong shelf, a release it cannot tell
+    # - and the node stops here naming every drive and why, instead of
+    # running from forge with nothing it writes surviving it.
+    # `rd.stormblock.assimilate=off` (an operator's word that no drive is
+    # touched) and `rd.stormblock.diskless=1` (diskless on purpose) run it,
+    # said.
+    case "$SLAB" in
+    *://*)
+        if [ -z "$LOCAL_DISK" ]; then
+            if [ "${ASSIMILATE:-}" = off ]; then
+                echo "  DISKLESS, as rd.stormblock.assimilate=off asks: nothing written survives a reboot"
+            elif [ "${DISKLESS_OK:-}" = 1 ]; then
+                echo "  DISKLESS, as rd.stormblock.diskless=1 asks: nothing written survives a reboot"
+            else
+                echo "FATAL: this node would run diskless from the appliance: it took no local drive."
+                echo "  The flow-over onto its own disk is mandatory (#344, #427)."
+                if [ -n "$LD_SKIPS" ]; then
+                    echo "  Drives left, and why:$LD_SKIPS"
+                else
+                    echo "  No drive was seen: see the storage inventory above (a controller with no driver, a drive with no media)."
+                fi
+                [ -n "$LD_DRIVE" ] && echo "  $LD_DRIVE carries stormblock slabs: $LD_WHY"
+                echo "  To run diskless on purpose: rd.stormblock.diskless=1."
+                ld_write failed "${LD_DRIVE:-${LD_ODRIVE:-}}" "diskless refused: no local drive taken"
+                rescue_shell
+            fi
+        fi
+        ;;
+    esac
+    # --- END diskless refused
 
     # Attach the existing slab (no reformat), export boot volume as ublkb0.
     # Volume comes from --volume if given, else /etc/stormblock/boot.toml.
@@ -4533,6 +4598,7 @@ echo "           the name: the firmware's StormBootTag EFI variable (stormbootx)
 echo "           rd.stormblock.tag=<tag>, else the SMBIOS serial/UUID - a guess, which"
 echo "           installs over no disk carrying a slab unless rd.stormblock.trust-smbios=1"
 echo "           [rd.stormblock.hostnqn=<nqn>]  — the name firmware presented, echoed on every connect"
+echo "           [rd.stormblock.diskless=1]      — run from the appliance on purpose (otherwise a boot that takes no local drive stops, #427)"
 echo "           — claims boothost/<tag> and uses the namespace it names as the slab"
 echo "  local: root=/dev/ublkb0 rd.stormblock.slab=<dev-or-file-or-nvme-tcp://...> [rd.stormblock.meta=<dir>] [stormblock.volume=<uuid-or-name>]"
 echo "         — a hook in /etc/stormblock/boot.d may answer this instead: see docs/boot-hooks.md,"

@@ -820,5 +820,16 @@ case "$(ld)" in *'"state": "refused"'*'"drive": "/dev/sdc"'*'not a readable stor
 check "no drive at all: the verdict is none" "" "$(survey_m any)"
 case "$(ld)" in *'"state": "none"'*) check "  none" yes yes ;; *) check "  none: $(ld)" yes no ;; esac
 
+# #427: the Dell booted 12.21 from its own sda (a flow-over being finished)
+# and the survey said "no local drive to take; writes stay on the appliance",
+# which read as a node running diskless. It is the node's own disk.
+check "booting from sda itself: no other drive taken" "" "$(BOOTING=/dev/sda4 survey_m any sda\|layout)"
+case "$(cat "$WORK/msurvey.log")" in
+*"booting from /dev/sda, this node's own disk"*) check "  said as its own disk, not the appliance" yes yes ;;
+*) check "  said as its own disk: $(cat "$WORK/msurvey.log")" yes no ;;
+esac
+case "$(ld)" in *'"state": "taken"'*'"drive": "/dev/sda"'*) check "  the verdict: taken, sda" yes yes ;;
+*) check "  the verdict: $(ld)" yes no ;; esac
+
 [ "$fail" -eq 0 ] && echo "all boot hook, probe, identity, takeable and survey checks passed"
 exit "$fail"
