@@ -102,6 +102,12 @@ const UBLK_PARAM_TYPE_DISCARD: u32 = 1 << 1;
 /// has a write cache, so the block layer must send FLUSH, and turn FUA into
 /// write-plus-flush, for anything to be durable.
 const UBLK_ATTR_VOLATILE_CACHE: u32 = 1 << 2;
+/// `UBLK_ATTR_FUA`: the device takes FUA writes (#409). Without it the block
+/// layer turns each one (a journal's commit block, an O_DSYNC write) into a
+/// write and a whole-device FLUSH after it.
+const UBLK_ATTR_FUA: u32 = 1 << 3;
+/// `UBLK_IO_F_FUA` in a descriptor's `op_flags`: this write is FUA.
+const UBLK_IO_F_FUA: u32 = 1 << 13;
 
 // ---------------------------------------------------------------------------
 // ublk feature flags
@@ -143,8 +149,33 @@ const UBLK_S_DEV_QUIESCED: u16 = 2;
 /// Default max I/O buffer size (512 KB).
 const DEFAULT_MAX_IO_BYTES: u32 = 512 * 1024;
 
-/// Default I/O queue depth.
+/// Default I/O queue depth: what a device has in flight, over all its queues.
 const DEFAULT_QUEUE_DEPTH: u16 = 128;
+/// No queue shallower than this.
+const MIN_QUEUE_DEPTH: u16 = 32;
+/// At most this many queues by default.
+const MAX_DEFAULT_QUEUES: u16 = 4;
+
+/// The hardware queues a new device gets (#409): one per CPU, up to
+/// [`MAX_DEFAULT_QUEUES`], or `STORMBLOCK_UBLK_QUEUES` (1–16). Each queue is
+/// a ring and a thread of its own, so a submitting CPU hands its request to
+/// its own queue instead of every CPU feeding one ring; the requests are
+/// served on the engine's runtime either way (#264). An adopted device keeps
+/// the count it was created with.
+pub fn default_queues() -> u16 {
+    if let Some(n) = std::env::var("STORMBLOCK_UBLK_QUEUES").ok().and_then(|v| v.trim().parse::<u16>().ok()) {
+        return n.clamp(1, 16);
+    }
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    (cpus.min(MAX_DEFAULT_QUEUES as usize) as u16).max(1)
+}
+
+/// The depth of each of `queues` queues: [`DEFAULT_QUEUE_DEPTH`] shared out,
+/// at least [`MIN_QUEUE_DEPTH`]. Each tag holds a buffer of the largest
+/// request, so depth is memory as well as concurrency.
+pub fn depth_per_queue(queues: u16) -> u16 {
+    (DEFAULT_QUEUE_DEPTH / queues.max(1)).max(MIN_QUEUE_DEPTH)
+}
 
 // ===========================================================================
 // Kernel ABI structures — must match include/uapi/linux/ublk_cmd.h exactly.
@@ -334,8 +365,8 @@ impl UblkServer {
             device,
             dev_id: AtomicI32::new(-1),
             requested_dev_id: None,
-            nr_queues: 1,
-            queue_depth: DEFAULT_QUEUE_DEPTH,
+            nr_queues: default_queues(),
+            queue_depth: depth_per_queue(default_queues()),
             running: Arc::new(AtomicBool::new(false)),
             resizable: Arc::new(AtomicBool::new(false)),
             dev_sectors: Arc::new(AtomicU64::new(0)),
@@ -381,9 +412,11 @@ impl UblkServer {
         self
     }
 
-    /// Set the number of I/O queues (default: 1).
+    /// Set the number of I/O queues (default: [`default_queues`]), each
+    /// at [`depth_per_queue`].
     pub fn with_queues(mut self, nr_queues: u16) -> Self {
         self.nr_queues = nr_queues.max(1);
+        self.queue_depth = depth_per_queue(self.nr_queues);
         self
     }
 
@@ -736,7 +769,7 @@ impl UblkServer {
                 // came back with fastetcd's redb "DB corrupted ... All roots
                 // are corrupted" (#118). The flag is fixed at creation, so an
                 // adopted device keeps what its creator declared.
-                attrs: UBLK_ATTR_VOLATILE_CACHE,
+                attrs: UBLK_ATTR_VOLATILE_CACHE | UBLK_ATTR_FUA,
                 logical_bs_shift: bs_shift,
                 physical_bs_shift: phys_shift,
                 io_opt_shift: 12, // 4096
@@ -1593,6 +1626,7 @@ impl Completions {
 async fn serve(
     device: &dyn BlockDevice,
     op: u8,
+    fua: bool,
     offset: u64,
     length: usize,
     mut buf: Vec<u8>,
@@ -1602,6 +1636,15 @@ async fn serve(
             Ok(_) => length as i32,
             Err(e) => {
                 tracing::error!("ublk read @{}+{}: {e}", offset, length);
+                -(libc::EIO)
+            }
+        },
+        // A FUA write is durable when answered (#409): the device makes this
+        // write durable, not everything before it.
+        UBLK_IO_OP_WRITE if fua => match device.write_fua(offset, &buf[..length]).await {
+            Ok(_) => length as i32,
+            Err(e) => {
+                tracing::error!("ublk write (FUA) @{}+{}: {e}", offset, length);
                 -(libc::EIO)
             }
         },
@@ -1843,13 +1886,14 @@ fn queue_worker(
             // Read the I/O descriptor for this tag
             let desc = unsafe { &*desc_base.add(tag as usize) };
             let op = (desc.op_flags & 0xFF) as u8;
+            let fua = desc.op_flags & UBLK_IO_F_FUA != 0;
             let offset = desc.start_sector * 512;
             let length = desc.nr_sectors as usize * 512;
             let buf = std::mem::take(&mut bufs[tag as usize]);
             track.begin(tag, op);
 
             if serial {
-                let (result, buf) = rt_handle.block_on(serve(&*device, op, offset, length, buf));
+                let (result, buf) = rt_handle.block_on(serve(&*device, op, fua, offset, length, buf));
                 track.end(tag);
                 bufs[tag as usize] = buf;
                 push_commit(&mut ring, char_fd, queue_id, tag, result, &bufs[tag as usize]);
@@ -1860,7 +1904,7 @@ fn queue_worker(
             let completions = completions.clone();
             let track = track.clone();
             rt_handle.spawn(async move {
-                let (result, buf) = serve(&*device, op, offset, length, buf).await;
+                let (result, buf) = serve(&*device, op, fua, offset, length, buf).await;
                 track.end(tag);
                 completions.post(Done { tag, result, buf });
             });
@@ -1947,6 +1991,39 @@ mod tests {
         t.begin(1, UBLK_IO_OP_READ);
         drop(t);
         assert!(mine(stuck(std::time::Duration::ZERO)).is_empty(), "a device gone is not listed");
+    }
+
+    /// #409: the FUA attribute and descriptor flag as the kernel headers
+    /// define them, when the build host has the headers (a wrong bit would
+    /// either be ignored or declare something else).
+    #[test]
+    fn fua_bits_match_the_kernel_header() {
+        assert_eq!(UBLK_ATTR_FUA, 1 << 3);
+        assert_eq!(UBLK_IO_F_FUA, 1 << 13);
+        let Ok(h) = std::fs::read_to_string("/usr/include/linux/ublk_cmd.h") else {
+            eprintln!("no /usr/include/linux/ublk_cmd.h here: the constants are checked against the values only");
+            return;
+        };
+        let shift = |name: &str| -> Option<u32> {
+            let line = h.lines().find(|l| l.split_whitespace().nth(1) == Some(name) && l.trim_start().starts_with("#define"))?;
+            let rest = line.split_whitespace().skip(2).collect::<String>();
+            rest.split("<<").nth(1)?.trim_end_matches(')').trim().parse().ok()
+        };
+        if let Some(n) = shift("UBLK_ATTR_FUA") {
+            assert_eq!(1u32 << n, UBLK_ATTR_FUA, "UBLK_ATTR_FUA");
+        }
+        if let Some(n) = shift("UBLK_IO_F_FUA") {
+            assert_eq!(1u32 << n, UBLK_IO_F_FUA, "UBLK_IO_F_FUA");
+        }
+    }
+
+    #[test]
+    fn queues_default_to_the_cpus_and_share_the_depth() {
+        assert_eq!(depth_per_queue(1), 128);
+        assert_eq!(depth_per_queue(4), 32);
+        assert_eq!(depth_per_queue(16), 32, "never shallower than 32");
+        let q = default_queues();
+        assert!((1..=MAX_DEFAULT_QUEUES).contains(&q) || std::env::var("STORMBLOCK_UBLK_QUEUES").is_ok());
     }
 
     #[test]

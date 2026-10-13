@@ -147,10 +147,11 @@ async fn handle_write(
     // FUA (CDW12 bit 30, #366): the write is durable before it completes.
     // A journal commit sent with FUA was acknowledged while still volatile.
     let fua = sqe.cdw12() & (1 << 30) != 0;
-    let r = match device.write(offset, &data[..expected_len]).await {
-        Ok(_) if fua => device.flush().await,
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
+    // FUA writes that one write durable, not the whole device (#409).
+    let r = if fua {
+        device.write_fua(offset, &data[..expected_len]).await.map(|_| ())
+    } else {
+        device.write(offset, &data[..expected_len]).await.map(|_| ())
     };
     match r {
         Ok(()) => IoResult {

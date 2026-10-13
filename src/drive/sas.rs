@@ -218,6 +218,29 @@ impl BlockDevice for SasDevice {
         self.flushes.flush(&self.id.path, || self.io.sync()).await
     }
 
+    /// One write durable on its own (#409): `RWF_DSYNC`, a FUA write to a
+    /// drive with FUA, so a commit record waits for itself and not for every
+    /// other volume's writes in the drive's cache.
+    async fn write_fua(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.check_range(offset, buf.len())?;
+        let (start, len) = self.span(offset, buf.len());
+        if start == offset && len == buf.len() {
+            let mut out = DmaBuf::alloc(len);
+            out[..len].copy_from_slice(buf);
+            self.io.write_dsync(start, out, len).await?;
+            return Ok(buf.len());
+        }
+        let _one = self.rmw.lock().await;
+        let mut span = self.io.read(start, len).await?;
+        let skew = (offset - start) as usize;
+        span[skew..skew + buf.len()].copy_from_slice(buf);
+        self.io.write_dsync(start, span, len).await?;
+        Ok(buf.len())
+    }
+
     /// The drive's own zeroing (#173): `BLKZEROOUT` on a block device (WRITE
     /// ZEROES / WRITE SAME where the drive has it), a punched hole on an
     /// O_DIRECT file; zeros written only where neither works.

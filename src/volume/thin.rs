@@ -429,6 +429,28 @@ pub enum Relocated {
     Unmapped,
 }
 
+/// A FUA write in progress on this task (#409): set by
+/// [`ThinVolumeHandle::write_fua`], read where a leg is written.
+struct FuaWrite {
+    /// The write took a slot or touched one whose entry is not on the
+    /// device yet: it is made durable with the volume's flush.
+    needs_flush: std::sync::atomic::AtomicBool,
+}
+
+tokio::task_local! {
+    static FUA_WRITE: FuaWrite;
+}
+
+/// FUA writes served, and how many of them needed the volume's flush (#409).
+pub static FUA_WRITES: AtomicU64 = AtomicU64::new(0);
+pub static FUA_FLUSHED: AtomicU64 = AtomicU64::new(0);
+
+/// `STORMBLOCK_FUA_BY_FLUSH=1`: every FUA write is a write and a flush, as
+/// before #409, for measuring the difference.
+fn fua_disabled() -> bool {
+    std::env::var("STORMBLOCK_FUA_BY_FLUSH").is_ok_and(|v| v == "1")
+}
+
 pub struct ThinVolumeHandle {
     inner: tokio::sync::Mutex<ThinVolume>,
     device_id: DeviceId,
@@ -1245,7 +1267,25 @@ impl ThinVolumeHandle {
 
     async fn write_leg(&self, leg: Leg, off: u64, buf: &[u8]) -> DriveResult<()> {
         let (dev, phys) = self.leg_io(leg, off).await?;
-        let n = dev.write(phys, buf).await?;
+        // Inside a FUA write (#409): a slot already on the device takes the
+        // write durable on its own; one whose entry is not published yet
+        // cannot be, and the FUA write ends with this volume's flush.
+        let fua = if FUA_WRITE.try_with(|_| ()).is_ok() {
+            let published = self
+                .registry
+                .read()
+                .await
+                .get(&leg.slab_id)
+                .map(|s| !s.is_unpublished(leg.slot_idx))
+                .unwrap_or(false);
+            if !published {
+                FUA_WRITE.with(|f| f.needs_flush.store(true, Ordering::SeqCst));
+            }
+            published
+        } else {
+            false
+        };
+        let n = if fua { dev.write_fua(phys, buf).await? } else { dev.write(phys, buf).await? };
         if n != buf.len() {
             return Err(DriveError::Other(anyhow::anyhow!(
                 "short write: {n} of {} bytes into slab {} slot {}",
@@ -1268,6 +1308,8 @@ impl ThinVolumeHandle {
     /// Data and zeros are both covered by the next flush, and the slot's
     /// entry is published after it, as before.
     async fn write_fresh(&self, leg: Leg, off_in_slot: u64, buf: &[u8]) -> DriveResult<()> {
+        // A slot just taken: its entry is published by a flush (#409).
+        let _ = FUA_WRITE.try_with(|f| f.needs_flush.store(true, Ordering::SeqCst));
         let (dev, phys) = self.leg_io(leg, 0).await?;
         let end = off_in_slot + buf.len() as u64;
         // `STORMBLOCK_ZERO_BY_WRITING=1`: zeros written, as before #173, for
@@ -3107,6 +3149,37 @@ impl BlockDevice for ThinVolumeHandle {
         self.write_padded_to_block(offset, buf).await
     }
 
+    /// A write durable when it returns, without the volume's flush when it
+    /// can be (#409, fastetcd#142): every leg it lands on is a slot already
+    /// on the device, so each leg's write goes to the drive as FUA and
+    /// nothing else on the slab waits for it, nor it for them. A write that
+    /// takes a slot (a first write, a copy-on-write) or touches parity is
+    /// written and then made durable with this volume's flush, as a FLUSH
+    /// would.
+    async fn write_fua(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        if self.redundancy().scheme.is_parity() || fua_disabled() {
+            let n = self.write(offset, buf).await?;
+            self.flush().await?;
+            return Ok(n);
+        }
+        let scope = FuaWrite { needs_flush: std::sync::atomic::AtomicBool::new(false) };
+        let (n, scope) = FUA_WRITE
+            .scope(scope, async {
+                let n = self.write(offset, buf).await;
+                (n, FUA_WRITE.with(|f| f.needs_flush.load(Ordering::SeqCst)))
+            })
+            .await;
+        let n = n?;
+        if scope {
+            self.flush().await?;
+        }
+        FUA_WRITES.fetch_add(1, Ordering::Relaxed);
+        if scope {
+            FUA_FLUSHED.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(n)
+    }
+
     async fn flush(&self) -> DriveResult<()> {
         self.resident().await?;
         // Nothing finished since a successful flush began: nothing to make
@@ -3549,11 +3622,13 @@ mod tests {
         cleanup(&paths);
     }
 
-    /// A device that counts its flushes and can make them slow (#338).
+    /// A device that counts its flushes and can make them slow (#338), and
+    /// counts the FUA writes it is asked for (#409).
     struct SlowFlush {
         inner: Arc<dyn BlockDevice>,
         flushes: Arc<AtomicU64>,
         delay_ms: Arc<AtomicU64>,
+        fuas: Arc<AtomicU64>,
     }
 
     #[async_trait::async_trait]
@@ -3578,6 +3653,12 @@ mod tests {
         }
         async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
             self.inner.write(offset, buf).await
+        }
+        async fn write_fua(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            self.fuas.fetch_add(1, Ordering::SeqCst);
+            let n = self.inner.write(offset, buf).await?;
+            self.inner.flush().await?;
+            Ok(n)
         }
         async fn flush(&self) -> DriveResult<()> {
             self.flushes.fetch_add(1, Ordering::SeqCst);
@@ -3604,7 +3685,7 @@ mod tests {
             Arc::new(FileDevice::open_with_capacity(&path, 32 * 1024 * 1024).await.unwrap());
         let (flushes, delay_ms) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
         let dev: Arc<dyn BlockDevice> =
-            Arc::new(SlowFlush { inner: file, flushes: flushes.clone(), delay_ms: delay_ms.clone() });
+            Arc::new(SlowFlush { inner: file, flushes: flushes.clone(), delay_ms: delay_ms.clone(), fuas: Arc::new(AtomicU64::new(0)) });
         let slab = Slab::format(dev, 4096, StorageTier::Hot).await.unwrap();
         let mut registry = SlabRegistry::new();
         registry.add(slab);
@@ -3619,6 +3700,64 @@ mod tests {
             ))
         };
         (mk("busy"), mk("fresh-clone"), flushes, delay_ms, path)
+    }
+
+    /// #409: a FUA write into a slot already on the device goes to the drive
+    /// as one FUA write and flushes nothing; one that takes a slot is made
+    /// durable with the volume's flush (its slot's entry has to be on the
+    /// device too). The data reads back either way.
+    #[tokio::test]
+    async fn a_fua_write_into_a_slot_on_the_device_flushes_nothing() {
+        let path = std::env::temp_dir()
+            .join("stormblock-volume-test")
+            .join(format!("{}-409.bin", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = path.to_str().unwrap().to_string();
+        let file: Arc<dyn BlockDevice> =
+            Arc::new(FileDevice::open_with_capacity(&path, 32 * 1024 * 1024).await.unwrap());
+        let (flushes, fuas) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        let dev: Arc<dyn BlockDevice> = Arc::new(SlowFlush {
+            inner: file,
+            flushes: flushes.clone(),
+            delay_ms: Arc::new(AtomicU64::new(0)),
+            fuas: fuas.clone(),
+        });
+        let slab = Slab::format(dev, 4096, StorageTier::Hot).await.unwrap();
+        let mut registry = SlabRegistry::new();
+        registry.add(slab);
+        let registry = Arc::new(crate::lockwatch::TrackedRwLock::new(registry));
+        let gem = Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new()));
+        let v = Arc::new(ThinVolumeHandle::new(
+            ThinVolume::new("etcd".to_string(), 4 * 1024 * 1024, 4096),
+            gem.clone(),
+            registry.clone(),
+            PlacementPolicy::default(),
+        ));
+
+        // A first write: the slot is taken, so the volume's flush follows.
+        let f0 = flushes.load(Ordering::SeqCst);
+        v.write_fua(0, &[1u8; 4096]).await.unwrap();
+        assert!(flushes.load(Ordering::SeqCst) > f0, "a slot just taken is published by a flush");
+        assert_eq!(fuas.load(Ordering::SeqCst), 0, "no FUA write into a slot not yet on the device");
+
+        // The commit record overwritten: one FUA write, no flush.
+        let f1 = flushes.load(Ordering::SeqCst);
+        for i in 0..5u8 {
+            v.write_fua(0, &[i + 2; 4096]).await.unwrap();
+        }
+        assert_eq!(flushes.load(Ordering::SeqCst), f1, "a FUA write into a slot on the device flushes nothing");
+        assert_eq!(fuas.load(Ordering::SeqCst), 5, "each was a FUA write at the device");
+        let mut b = vec![0u8; 4096];
+        v.read(0, &mut b).await.unwrap();
+        assert!(b.iter().all(|&x| x == 6), "the last FUA write reads back");
+
+        // As before #409, with the switch: a write and a flush each.
+        std::env::set_var("STORMBLOCK_FUA_BY_FLUSH", "1");
+        v.write_fua(0, &[9u8; 4096]).await.unwrap();
+        std::env::remove_var("STORMBLOCK_FUA_BY_FLUSH");
+        assert!(flushes.load(Ordering::SeqCst) > f1, "by flush: flushed");
+        assert_eq!(fuas.load(Ordering::SeqCst), 5);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// #338: a flush with nothing finished since the last successful one

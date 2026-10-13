@@ -335,6 +335,17 @@ pub trait BlockDevice: Send + Sync {
     /// Flush any cached writes to stable storage.
     async fn flush(&self) -> DriveResult<()>;
 
+    /// Write `buf` at `offset`, durable when it returns: a FUA write (#409).
+    /// The default writes and then flushes the whole device; a device that
+    /// can make one write durable on its own overrides it (an O_DIRECT drive
+    /// with `RWF_DSYNC`; a thin volume whose slot is already on disk). Not a
+    /// flush: writes before it that were not FUA are not covered.
+    async fn write_fua(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        let n = self.write(offset, buf).await?;
+        self.flush().await?;
+        Ok(n)
+    }
+
     /// Discard (TRIM/UNMAP) a range. No-op on HDDs.
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()>;
 

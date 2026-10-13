@@ -1277,6 +1277,12 @@ impl Slab {
 
     /// The slot's data is written: its entry may be published at the next
     /// [`sync`](Self::sync). A no-op for a slot already on the device.
+    /// Whether a slot was taken and its entry is not on the device yet: a
+    /// write into it is durable only once a sync publishes the entry (#409).
+    pub fn is_unpublished(&self, slot_idx: u64) -> bool {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).unpublished.contains(&slot_idx)
+    }
+
     pub fn confirm(&self, slot_idx: u64) {
         let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if p.unpublished.contains(&slot_idx) {

@@ -31,8 +31,15 @@ use super::{DriveError, DriveResult};
 enum Kind {
     Read,
     Write,
+    /// A write durable when it completes (#409): `RWF_DSYNC`, which the
+    /// block layer sends as a FUA write to a drive that has FUA and as a
+    /// write and a flush to one that does not.
+    WriteDsync,
     Sync,
 }
+
+/// `RWF_DSYNC` (include/uapi/linux/fs.h).
+const RWF_DSYNC: i32 = 0x2;
 
 struct Op {
     kind: Kind,
@@ -152,6 +159,11 @@ impl DirectIo {
         write_all(offset, buf, len, |off, b, l| self.submit(Kind::Write, off, b, l)).await
     }
 
+    /// Write all of `buf[..len]` at `offset`, durable when it returns (#409).
+    pub async fn write_dsync(&self, offset: u64, buf: DmaBuf, len: usize) -> DriveResult<usize> {
+        write_all(offset, buf, len, |off, b, l| self.submit(Kind::WriteDsync, off, b, l)).await
+    }
+
     pub async fn sync(&self) -> DriveResult<()> {
         // A one-byte buffer, never touched: `DmaBuf::alloc(0)` would be a
         // zero-size allocation.
@@ -204,6 +216,12 @@ fn blocking_op(fd: RawFd, kind: Kind, offset: u64, mut buf: DmaBuf, len: usize) 
         match kind {
             Kind::Read => libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, len, offset as libc::off_t),
             Kind::Write => libc::pwrite(fd, buf.as_ptr() as *const libc::c_void, len, offset as libc::off_t),
+            Kind::WriteDsync => {
+                // pwritev2 by number: the musl build's libc has no wrapper.
+                // On a 64-bit kernel the offset is the low word alone.
+                let iov = libc::iovec { iov_base: buf.as_ptr() as *mut libc::c_void, iov_len: len };
+                libc::syscall(libc::SYS_pwritev2, fd, &iov as *const libc::iovec, 1, offset as libc::c_long, 0 as libc::c_long, RWF_DSYNC) as isize
+            }
             Kind::Sync => libc::fsync(fd) as isize,
         }
     };
@@ -252,6 +270,10 @@ fn ring_thread(mut ring: io_uring::IoUring, fd: RawFd, wake: RawFd, rx: mpsc::Re
                     .build(),
                 Kind::Write => opcode::Write::new(types::Fd(fd), op.buf.as_ptr(), op.len as u32)
                     .offset(op.offset)
+                    .build(),
+                Kind::WriteDsync => opcode::Write::new(types::Fd(fd), op.buf.as_ptr(), op.len as u32)
+                    .offset(op.offset)
+                    .rw_flags(RWF_DSYNC)
                     .build(),
                 Kind::Sync => opcode::Fsync::new(types::Fd(fd)).build(),
             }

@@ -557,10 +557,11 @@ async fn do_write(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>, dat
         return ScsiResult::check_condition(SenseData::illegal_request());
     }
 
-    let r = match device.write(offset, &data[..expected_len]).await {
-        Ok(_) if fua => device.flush().await,
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
+    // FUA writes that one write durable, not the whole device (#409).
+    let r = if fua {
+        device.write_fua(offset, &data[..expected_len]).await.map(|_| ())
+    } else {
+        device.write(offset, &data[..expected_len]).await.map(|_| ())
     };
     match r {
         Ok(()) => ScsiResult::good_empty(),

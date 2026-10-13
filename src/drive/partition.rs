@@ -146,6 +146,11 @@ impl BlockDevice for PartitionDevice {
         self.inner.write(self.start + offset, buf).await
     }
 
+    async fn write_fua(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        self.check(offset, buf.len() as u64)?;
+        self.inner.write_fua(self.start + offset, buf).await
+    }
+
     async fn flush(&self) -> DriveResult<()> {
         self.inner.flush().await
     }

@@ -263,6 +263,21 @@ impl BlockDevice for RideThrough {
         }
     }
 
+    async fn write_fua(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        let (mut started, mut backoff) = (None, FIRST_BACKOFF);
+        loop {
+            match self.inner.write_fua(offset, buf).await {
+                Ok(n) => {
+                    if started.is_some() || self.stalled.load(Ordering::Acquire) {
+                        self.on_success(started);
+                    }
+                    return Ok(n);
+                }
+                Err(e) => tokio::time::sleep(self.on_error("write", offset, e, &mut started, &mut backoff)?).await,
+            }
+        }
+    }
+
     async fn flush(&self) -> DriveResult<()> {
         let (mut started, mut backoff) = (None, FIRST_BACKOFF);
         loop {
