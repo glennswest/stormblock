@@ -191,7 +191,7 @@ pub async fn has_boot_area(device: &Arc<dyn BlockDevice>, boot_bytes: u64) -> bo
     if gpt.partitions().any(|(_, e)| e.type_guid == type_guid::ESP) {
         return true;
     }
-    let Ok(Some((_, s))) = node_layout(device).await else { return false };
+    let Some(s) = halves_on(device).await.1 else { return false };
     let bs = gpt.block_size as u64;
     let front = gpt.entries[s].first_lba.saturating_sub(gpt.first_usable_lba) * bs;
     // The first megabyte is alignment the table takes anyway.
@@ -277,6 +277,21 @@ pub async fn node_data_half_present(device: &Arc<dyn BlockDevice>) -> Result<Opt
     Ok(Some(present))
 }
 
+/// Whether a drive's data partition (with or without a system half beside
+/// it, #402) holds a slab: `None` when it has no data partition.
+pub async fn data_half_present(device: &Arc<dyn BlockDevice>) -> Result<Option<bool>> {
+    let Some(data_i) = halves_on(device).await.0 else { return Ok(None) };
+    let gpt = Gpt::read(device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    let start = |i: usize| gpt.entries[i].start_bytes(gpt.block_size);
+    let mut present = slab_magic_at(device, start(data_i)).await?;
+    if let Some(b) = bulk_partition(device).await {
+        present |= slab_magic_at(device, start(b)).await?;
+    }
+    Ok(Some(present))
+}
+
 /// The bulk partition of a node layout (#156), if it has one.
 pub async fn bulk_partition(device: &Arc<dyn BlockDevice>) -> Option<usize> {
     let gpt = Gpt::read(device).await.ok()?;
@@ -303,7 +318,9 @@ pub async fn bulk_partition(device: &Arc<dyn BlockDevice>) -> Option<usize> {
 pub async fn system_slab_volumes(
     device: &Arc<dyn BlockDevice>,
 ) -> Result<Option<std::collections::HashSet<uuid::Uuid>>> {
-    let Some((_, system_i)) = node_layout(device).await? else { return Ok(None) };
+    // The system partition, on a drive with both halves or with the system
+    // half alone (#402).
+    let Some(system_i) = halves_on(device).await.1 else { return Ok(None) };
     let gpt = Gpt::read(device)
         .await
         .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
@@ -605,6 +622,304 @@ async fn discard_quietly(device: &Arc<dyn BlockDevice>, offset: u64, len: u64, w
     }
 }
 
+/// One partition [`lay_table`] lays, and the slab formatted on it.
+struct Part {
+    name: &'static str,
+    guid: [u8; 16],
+    size: u64,
+    role: SlabRole,
+    slot: u64,
+}
+
+/// **Destroy what was there before writing what is.**
+///
+/// A fresh table is not a clean drive. Writing a GPT leaves everything the
+/// old one described exactly where it was, and every one of those things is
+/// read by something that scans rather than asks: an ext4 backup superblock,
+/// an LVM label, an mdraid superblock at the end of the device, a stale
+/// *backup* GPT that survives because the old table used a different LBA
+/// size and its backup header sits at a different offset than ours. Then udev
+/// names a drive that is ours after a filesystem that is not, mdadm assembles
+/// an array out of a slab, and a rescue tool offers to "repair" the
+/// partition table by restoring the one we replaced.
+///
+/// The two ends, because that is where signatures live: the front holds the
+/// MBR, the primary GPT and the start of the first filesystem, and the tail
+/// holds the backup GPT and the superblocks that are written from the end.
+/// Bounded by the device, so a small test image is not asked for more than it
+/// has, and block-aligned: a write that starts or ends off-block is EINVAL on
+/// anything opened O_DIRECT. The whole drive is discarded first (#401): a
+/// drive-managed SMR disk then knows every zone is empty.
+async fn wipe_drive(device: &Arc<dyn BlockDevice>, capacity: u64) -> Result<()> {
+    let bs = device.block_size().max(1) as u64;
+    discard_quietly(device, 0, capacity / bs * bs, "the drive").await;
+    let wipe = (capacity / 16).min(8 * ALIGN) / bs * bs;
+    if wipe > 0 {
+        let zeros = vec![0u8; wipe as usize];
+        device
+            .write(0, &zeros)
+            .await
+            .map_err(|e| ImageError::Other(format!("clearing the front of the drive: {e}")))?;
+        let tail = (capacity - wipe) / bs * bs;
+        device
+            .write(tail, &zeros)
+            .await
+            .map_err(|e| ImageError::Other(format!("clearing the tail of the drive: {e}")))?;
+        device
+            .flush()
+            .await
+            .map_err(|e| ImageError::Other(format!("flushing the wipe: {e}")))?;
+    }
+    Ok(())
+}
+
+/// A fresh GPT in `lba`-byte blocks with `boot_bytes` left free at the front
+/// (the boot area, #123) and `parts` after it, first-fit in order, each
+/// formatted as a slab with its own metadata region. The last partition, when
+/// it is a data slab, reserves room to grow in place to four times its size
+/// (its table and record both; 0.024 % of it): only the last partition can
+/// take space the drive gains.
+async fn lay_table(
+    device: &Arc<dyn BlockDevice>,
+    lba: u32,
+    boot_bytes: u64,
+    parts: Vec<Part>,
+    tier: StorageTier,
+) -> Result<Vec<Slab>> {
+    let mut gpt = Gpt::create_with_lba(device, lba);
+    gpt.write(device).await.map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
+    // The boot area is the free space in front of the slabs, held by a
+    // placeholder while they are allocated first-fit behind it and dropped
+    // again before the table is final. Nothing is written into it here: the
+    // ESP and the boot pallets arrive later, from the engine that outlives
+    // this boot (see `image::local_boot`).
+    let hold = if boot_bytes > 0 {
+        Some(
+            gpt.allocate("boot-area", type_guid::BASIC, boot_bytes, 0)
+                .map_err(|e| ImageError::Other(format!("reserving the boot area: {e}")))?,
+        )
+    } else {
+        None
+    };
+    let last = parts.len().saturating_sub(1);
+    let mut slots = Vec::new();
+    for (n, p) in parts.into_iter().enumerate() {
+        let slot = gpt
+            .allocate(p.name, p.guid, p.size, 0)
+            .map_err(|e| ImageError::Other(format!("allocating {}: {e}", p.name)))?;
+        slots.push((p, slot, n == last));
+    }
+    if let Some(i) = hold {
+        gpt.remove(i).map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
+    }
+    gpt.write(device).await.map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
+
+    let mut out = Vec::new();
+    for (p, slot, is_last) in slots {
+        let start = gpt.entries[slot].start_bytes(lba);
+        let len = gpt.entries[slot].size_bytes(lba);
+        let part = Arc::new(
+            PartitionDevice::new(device.clone(), start, len)
+                .map_err(|e| ImageError::Other(format!("partition {}: {e}", p.name)))?,
+        );
+        // The slab keeps its own record of what is in it. A node reads that
+        // at boot; there is no filesystem underneath it to keep one in, and a
+        // slab that cannot say what it holds boots to "no volume metadata".
+        let grow_to = if p.role == SlabRole::Data && is_last { len.saturating_mul(DATA_GROWTH) } else { 0 };
+        let meta = auto_metadata_bytes(len.max(grow_to), p.slot);
+        let slab = Slab::format_with(
+            part,
+            SlabFormat::new(p.slot, tier).with_metadata(meta).with_role(p.role).with_growth(grow_to),
+        )
+        .await
+        .map_err(|e| ImageError::Other(format!("format {}: {e}", p.name)))?;
+        out.push(slab);
+    }
+    Ok(out)
+}
+
+/// What [`lay_system_drive`] laid: a drive of its own for the system half
+/// (#402).
+pub struct SystemDrive {
+    pub system: Slab,
+    pub system_bytes: u64,
+    pub lba: u32,
+}
+
+/// What [`lay_data_drive`] laid: the data half on a drive of its own (#402).
+pub struct DataDrive {
+    pub data: Slab,
+    pub bulk: Option<Slab>,
+    pub data_bytes: u64,
+    pub bulk_bytes: u64,
+    pub lba: u32,
+}
+
+/// What the system slab on a drive of its own leaves unused at the end: a
+/// percent of the drive, at least 64 MiB (#402). Room for the table's
+/// backup, and slack for a replacement drive that is a little smaller.
+pub fn system_drive_margin(capacity: u64) -> u64 {
+    (capacity / 100).max(64 * ALIGN) / ALIGN * ALIGN
+}
+
+/// The system slab a drive of its own takes (#402): the whole drive, less
+/// the GPT at both ends, the boot area and [`system_drive_margin`].
+pub fn system_drive_slab_bytes(capacity: u64, boot_bytes: u64) -> u64 {
+    align_down(
+        capacity
+            .saturating_sub(GPT_OVERHEAD)
+            .saturating_sub(align_down(boot_bytes, ALIGN))
+            .saturating_sub(system_drive_margin(capacity)),
+        ALIGN,
+    )
+}
+
+/// Lay the system half on a drive of its own (#402, owner's A: the drive
+/// stormdrive designates `system`, an SSD beside the HDD that keeps the
+/// data): a boot area at the front for the ESP and the boot pallets, then
+/// one system slab sized to the drive. **Destroys whatever is on it**; the
+/// caller has decided the drive is the system drive.
+pub async fn lay_system_drive(device: Arc<dyn BlockDevice>, opts: &LocalLayout) -> Result<SystemDrive> {
+    let capacity = device.capacity_bytes();
+    let lba = opts.lba.unwrap_or_else(|| device.block_size());
+    let boot_bytes = align_down(opts.boot_bytes, ALIGN);
+    let system_bytes = system_drive_slab_bytes(capacity, boot_bytes);
+    if system_bytes < 64 * ALIGN {
+        return Err(ImageError::Spec(format!(
+            "a {capacity} byte drive leaves {system_bytes} bytes for a system slab"
+        )));
+    }
+    wipe_drive(&device, capacity).await?;
+    let mut out = lay_table(
+        &device,
+        lba,
+        boot_bytes,
+        vec![Part { name: "stormblock", guid: type_guid::SLAB, size: system_bytes, role: SlabRole::System, slot: opts.slot_size }],
+        opts.tier,
+    )
+    .await?;
+    Ok(SystemDrive { system: out.pop().expect("one slab"), system_bytes, lba })
+}
+
+/// Lay the data half on a drive of its own (#402): a data slab across the
+/// whole drive (and the bulk slab beside it on a large one, #156), the last
+/// one with room to grow. **Destroys whatever is on it**: only for a drive
+/// that carries no data half (a data slab there is kept, never laid over).
+pub async fn lay_data_drive(device: Arc<dyn BlockDevice>, opts: &LocalLayout) -> Result<DataDrive> {
+    let capacity = device.capacity_bytes();
+    let lba = opts.lba.unwrap_or_else(|| device.block_size());
+    let half = align_down(capacity.saturating_sub(GPT_OVERHEAD), ALIGN);
+    if half < 64 * ALIGN {
+        return Err(ImageError::Spec(format!("a {capacity} byte drive is too small for a data slab")));
+    }
+    let (data_bytes, bulk_bytes) = if opts.bulk && half >= BULK_MIN_DATA_HALF {
+        let data = align_down((half / 4).max(64 << 30), ALIGN);
+        (data, half - data)
+    } else {
+        (half, 0)
+    };
+    wipe_drive(&device, capacity).await?;
+    let mut parts =
+        vec![Part { name: "stormblock-data", guid: type_guid::SLAB_DATA, size: data_bytes, role: SlabRole::Data, slot: opts.slot_size }];
+    if bulk_bytes > 0 {
+        parts.push(Part { name: BULK_PARTITION, guid: type_guid::SLAB_DATA, size: bulk_bytes, role: SlabRole::Data, slot: crate::volume::BULK_EXTENT });
+    }
+    let mut out = lay_table(&device, lba, 0, parts, opts.tier).await?;
+    let bulk = if bulk_bytes > 0 { out.pop() } else { None };
+    Ok(DataDrive { data: out.pop().expect("a data slab"), bulk, data_bytes, bulk_bytes, lba })
+}
+
+/// What [`retire_system_half`] took off a drive.
+#[derive(Debug, Default)]
+pub struct Retired {
+    /// The partitions removed, by name.
+    pub removed: Vec<String>,
+}
+
+/// Retire the system half of a drive whose system half moves to a drive of
+/// its own (#402, owner's A): the system slab (its header zeroed, so nothing
+/// that scans finds a slab there) and everything in front of it, the boot
+/// area's ESP and boot pallets. stormuefi scans every drive: a boot pallet
+/// left here would still boot the old release. The data half, after it, is
+/// not touched: same partitions, same offsets, the node's identity and data
+/// where they were. The freed space stays unused.
+pub async fn retire_system_half(device: &Arc<dyn BlockDevice>) -> Result<Retired> {
+    let mut gpt = Gpt::read(device)
+        .await
+        .map_err(|e| ImageError::Other(format!("reading the table: {e}")))?;
+    let Some(sys) = gpt.partitions().find(|(_, e)| e.type_guid == type_guid::SLAB).map(|(i, _)| i) else {
+        return Ok(Retired::default());
+    };
+    let bs = gpt.block_size;
+    let sys_first = gpt.entries[sys].first_lba;
+    let first_data = gpt
+        .partitions()
+        .filter(|(_, e)| e.type_guid == type_guid::SLAB_DATA)
+        .map(|(_, e)| e.first_lba)
+        .min()
+        .unwrap_or(u64::MAX);
+    if first_data < sys_first {
+        return Err(ImageError::Spec(
+            "the data half is in front of the system half on this drive: not a layout this retires".into(),
+        ));
+    }
+    let doomed: Vec<usize> = gpt
+        .partitions()
+        .filter(|(i, e)| {
+            *i == sys
+                || (e.last_lba < sys_first
+                    && (e.type_guid == type_guid::ESP || e.type_guid == crate::pallet::PALLET_TYPE_GUID))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let mut out = Retired::default();
+    for i in &doomed {
+        let e = &gpt.entries[*i];
+        let (start, len) = (e.start_bytes(bs), e.size_bytes(bs));
+        // The first megabytes zeroed: a slab's magic and header, a pallet's
+        // superblock, a FAT's boot sector. A scan finds nothing there.
+        let z = len.min(8 * ALIGN) / bs as u64 * bs as u64;
+        if z > 0 {
+            device
+                .write(start, &vec![0u8; z as usize])
+                .await
+                .map_err(|err| ImageError::Other(format!("clearing {}: {err}", e.name)))?;
+        }
+        out.removed.push(e.name.clone());
+    }
+    device
+        .flush()
+        .await
+        .map_err(|e| ImageError::Other(format!("flushing the cleared system half: {e}")))?;
+    // Removed from the table last: a cut before this leaves partitions that
+    // hold nothing, which the next install retires again.
+    let mut idx = doomed.clone();
+    idx.sort_unstable_by(|a, b| b.cmp(a));
+    for i in idx {
+        gpt.remove(i).map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
+    }
+    gpt.write(device)
+        .await
+        .map_err(|e| ImageError::Other(format!("writing the table without the system half: {e}")))?;
+    Ok(out)
+}
+
+/// The drive's data partition and its system partition, each when it has
+/// one (#402: a drive may carry one half).
+pub async fn halves_on(device: &Arc<dyn BlockDevice>) -> (Option<usize>, Option<usize>) {
+    let Ok(gpt) = Gpt::read(device).await else { return (None, None) };
+    let mut data = None;
+    let mut system = None;
+    for (i, e) in gpt.partitions() {
+        if e.type_guid == type_guid::SLAB_DATA && data.is_none() && e.name != BULK_PARTITION {
+            data = Some(i);
+        } else if e.type_guid == type_guid::SLAB && system.is_none() {
+            system = Some(i);
+        }
+    }
+    (data, system)
+}
+
 /// Write a GPT with a data slab and a system slab, and format both.
 ///
 /// **This destroys whatever is on the device**, and deliberately more than the
@@ -666,122 +981,15 @@ pub async fn lay_node_slabs(
         (data_bytes, 0)
     };
 
-    // **Destroy what was there before writing what is.**
-    //
-    // A fresh table is not a clean drive. Writing a GPT leaves everything the
-    // old one described exactly where it was, and every one of those things
-    // is read by something that scans rather than asks: an ext4 backup
-    // superblock, an LVM label, an mdraid superblock at the end of the device,
-    // a stale *backup* GPT that survives because the old table used a
-    // different LBA size and its backup header sits at a different offset than
-    // ours. Then udev names a drive that is ours after a filesystem that is
-    // not, mdadm assembles an array out of a slab, and a rescue tool offers to
-    // "repair" the partition table by restoring the one we replaced.
-    //
-    // A node boots this image to be installed, so the drive is the node's and
-    // what it carried is garbage. Garbage that is still readable is garbage
-    // something will read.
-    //
-    // The two ends, because that is where signatures live: the front holds the
-    // MBR, the primary GPT and the start of the first filesystem, and the tail
-    // holds the backup GPT and the superblocks that are written from the end.
-    // Bounded by the device, so a small test image is not asked for more than
-    // it has.
-    // Block-aligned in length and in offset: a write that starts or ends
-    // off-block is EINVAL on anything opened O_DIRECT, and the tail of a drive
-    // is not a round number of megabytes.
-    let bs = device.block_size().max(1) as u64;
-    // The whole drive discarded first (#401): a drive-managed SMR disk then
-    // knows every zone is empty, and what the install writes next lands
-    // sequentially instead of being shingled over what was there. A hint: a
-    // disk that takes no discard (a conventional HDD) is left as it is.
-    discard_quietly(&device, 0, capacity / bs * bs, "the drive").await;
-    let wipe = (capacity / 16).min(8 * ALIGN) / bs * bs;
-    if wipe > 0 {
-        let zeros = vec![0u8; wipe as usize];
-        device
-            .write(0, &zeros)
-            .await
-            .map_err(|e| ImageError::Other(format!("clearing the front of the drive: {e}")))?;
-        let tail = (capacity - wipe) / bs * bs;
-        device
-            .write(tail, &zeros)
-            .await
-            .map_err(|e| ImageError::Other(format!("clearing the tail of the drive: {e}")))?;
-        device
-            .flush()
-            .await
-            .map_err(|e| ImageError::Other(format!("flushing the wipe: {e}")))?;
-    }
-
-    let mut gpt = Gpt::create_with_lba(&device, lba);
-    gpt.write(&device).await.map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
-
-    // The boot area is the free space in front of the system partition, held
-    // by a placeholder while the two slabs are allocated first-fit behind it
-    // and dropped again before the table is final. Nothing is written into
-    // it here: the ESP and the boot pallets arrive later, from the engine
-    // that outlives this boot (see `image::local_boot`).
-    let hold = if boot_bytes > 0 {
-        Some(
-            gpt.allocate("boot-area", type_guid::BASIC, boot_bytes, 0)
-                .map_err(|e| ImageError::Other(format!("reserving the boot area: {e}")))?,
-        )
-    } else {
-        None
-    };
-
-    // Both allocated before the table is written, so the placeholder never
-    // reaches the disk: a table that still carried it would read as a drive
-    // whose boot area is taken.
-    let mut slots = Vec::new();
+    wipe_drive(&device, capacity).await?;
     let mut parts = vec![
-        ("stormblock", type_guid::SLAB, system_bytes, SlabRole::System, opts.slot_size),
-        ("stormblock-data", type_guid::SLAB_DATA, data_bytes, SlabRole::Data, opts.slot_size),
+        Part { name: "stormblock", guid: type_guid::SLAB, size: system_bytes, role: SlabRole::System, slot: opts.slot_size },
+        Part { name: "stormblock-data", guid: type_guid::SLAB_DATA, size: data_bytes, role: SlabRole::Data, slot: opts.slot_size },
     ];
     if bulk_bytes > 0 {
-        parts.push((BULK_PARTITION, type_guid::SLAB_DATA, bulk_bytes, SlabRole::Data, crate::volume::BULK_EXTENT));
+        parts.push(Part { name: BULK_PARTITION, guid: type_guid::SLAB_DATA, size: bulk_bytes, role: SlabRole::Data, slot: crate::volume::BULK_EXTENT });
     }
-    let last = parts.len() - 1;
-    for (n, (name, guid, size, role, slot_size)) in parts.into_iter().enumerate() {
-        let slot = gpt
-            .allocate(name, guid, size, 0)
-            .map_err(|e| ImageError::Other(format!("allocating {name}: {e}")))?;
-        slots.push((name, slot, role, slot_size, n == last));
-    }
-    if let Some(i) = hold {
-        gpt.remove(i).map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
-    }
-    gpt.write(&device).await.map_err(|e| ImageError::Other(format!("gpt: {e}")))?;
-
-    let mut out = Vec::new();
-    for (name, slot, role, slot_size, is_last) in slots {
-        let start = gpt.entries[slot].start_bytes(lba);
-        let len = gpt.entries[slot].size_bytes(lba);
-        let part = Arc::new(
-            PartitionDevice::new(device.clone(), start, len)
-                .map_err(|e| ImageError::Other(format!("partition {name}: {e}")))?,
-        );
-        // The slab keeps its own record of what is in it. A node reads that
-        // at boot; there is no filesystem underneath it to keep one in, and a
-        // slab that cannot say what it holds boots to "no volume metadata".
-        // The data slab reserves room to grow in place to four times its
-        // size — its table and its record both — which costs 0.024% of it.
-        // Only the last partition can grow (#156: the bulk slab, when there
-        // is one).
-        let grow_to = if role == SlabRole::Data && is_last { len.saturating_mul(DATA_GROWTH) } else { 0 };
-        let meta = auto_metadata_bytes(len.max(grow_to), slot_size);
-        let slab = Slab::format_with(
-            part,
-            SlabFormat::new(slot_size, opts.tier)
-                .with_metadata(meta)
-                .with_role(role)
-                .with_growth(grow_to),
-        )
-        .await
-        .map_err(|e| ImageError::Other(format!("format {name}: {e}")))?;
-        out.push(slab);
-    }
+    let mut out = lay_table(&device, lba, boot_bytes, parts, opts.tier).await?;
 
     let bulk = if bulk_bytes > 0 { out.pop() } else { None };
     let data = out.pop().expect("two slabs");
@@ -805,7 +1013,9 @@ pub async fn lay_node_slabs(
 /// Returns the slot count before and after, or `None` when there is nothing to
 /// do: no node layout, a data partition that is not last, or no space after it.
 pub async fn grow_data_half(device: Arc<dyn BlockDevice>) -> Result<Option<(u64, u64)>> {
-    let Some((data_i, _)) = node_layout(&device).await? else { return Ok(None) };
+    // The data partition, on a drive with both halves or the data half
+    // alone (#402).
+    let Some(data_i) = halves_on(&device).await.0 else { return Ok(None) };
     // The bulk slab, when there is one, is the last (#156).
     let data_i = bulk_partition(&device).await.unwrap_or(data_i);
     let mut gpt = Gpt::read(&device)
@@ -858,6 +1068,81 @@ mod tests {
     /// Enough drive for both halves: `for_drive` gives the data slab half of a
     /// small disk, and the system slab has a floor of its own.
     const CAP: u64 = 256 * 1024 * 1024;
+
+    /// #402: a system drive of its own is a boot area and one system slab,
+    /// the drive less the GPT and the margin; a data drive of its own is the
+    /// data half alone. Each is recognised as the half it carries.
+    #[tokio::test]
+    async fn a_system_drive_and_a_data_drive_each_carry_one_half() {
+        let ssd = crate::drive::open_path(&format!("emulated://ssd-{}?size=512G", uuid::Uuid::new_v4().simple()), false)
+            .await
+            .unwrap();
+        let mut layout = LocalLayout::for_drive(ssd.capacity_bytes());
+        layout.slot_size = 1 << 20;
+        let laid = lay_system_drive(ssd.clone(), &layout).await.unwrap();
+        let cap = ssd.capacity_bytes();
+        assert_eq!(laid.system_bytes, system_drive_slab_bytes(cap, layout.boot_bytes));
+        assert!(laid.system_bytes > cap - cap / 50, "the drive, less a few percent: {} of {cap}", laid.system_bytes);
+        assert!(!laid.system.is_data());
+        assert_eq!(halves_on(&ssd).await, (None, Some(0)));
+        assert!(has_boot_area(&ssd, layout.boot_bytes).await, "the boot area in front of the slab");
+        assert!(node_layout(&ssd).await.unwrap().is_none(), "one half is not a node layout");
+        assert_eq!(system_slab_volumes(&ssd).await.unwrap().map(|v| v.len()), Some(0), "it can say it holds nothing");
+
+        let hdd = crate::drive::open_path(&format!("emulated://hdd-{}?size=2T", uuid::Uuid::new_v4().simple()), false)
+            .await
+            .unwrap();
+        let mut dl = LocalLayout::for_drive(hdd.capacity_bytes());
+        dl.slot_size = 1 << 20;
+        dl.bulk = true;
+        let d = lay_data_drive(hdd.clone(), &dl).await.unwrap();
+        assert!(d.data.is_data());
+        assert!(d.bulk.is_some(), "a 2 TB data drive gets its bulk slab");
+        assert_eq!(halves_on(&hdd).await.1, None);
+        assert!(halves_on(&hdd).await.0.is_some());
+        assert_eq!(data_half_present(&hdd).await.unwrap(), Some(true));
+        assert_eq!(data_half_present(&ssd).await.unwrap(), None);
+    }
+
+    /// #402: retiring the system half of a node's drive takes the system
+    /// slab and the boot area's ESP and pallets off it, and leaves the data
+    /// half exactly where it was, with the same slab.
+    #[tokio::test]
+    async fn retiring_the_system_half_keeps_the_data_half_where_it_was() {
+        let dev = crate::drive::open_path(&format!("emulated://both-{}?size=64G", uuid::Uuid::new_v4().simple()), false)
+            .await
+            .unwrap();
+        let mut layout = LocalLayout::for_drive(dev.capacity_bytes());
+        layout.slot_size = 1 << 20;
+        layout.bulk = false;
+        let laid = lay_node_slabs(dev.clone(), &layout).await.unwrap();
+        let data_id = laid.data.slab_id();
+        // What local boot puts in the boot area: an ESP and a boot pallet.
+        let mut gpt = Gpt::read(&dev).await.unwrap();
+        gpt.allocate("esp", type_guid::ESP, 64 << 20, 0).unwrap();
+        gpt.allocate("boot-1", crate::pallet::PALLET_TYPE_GUID, 256 << 20, 0).unwrap();
+        gpt.write(&dev).await.unwrap();
+        let (data_i, sys_i) = node_layout(&dev).await.unwrap().unwrap();
+        let before = Gpt::read(&dev).await.unwrap();
+        let data_at = (before.entries[data_i].first_lba, before.entries[data_i].last_lba);
+        let sys_at = before.entries[sys_i].start_bytes(before.block_size);
+
+        let r = retire_system_half(&dev).await.unwrap();
+        let mut removed = r.removed.clone();
+        removed.sort();
+        assert_eq!(removed, vec!["boot-1".to_string(), "esp".to_string(), "stormblock".to_string()]);
+        let after = Gpt::read(&dev).await.unwrap();
+        assert!(after.partitions().all(|(_, e)| e.type_guid != type_guid::SLAB && e.type_guid != type_guid::ESP
+            && e.type_guid != crate::pallet::PALLET_TYPE_GUID));
+        let d = halves_on(&dev).await.0.expect("the data partition is still there");
+        assert_eq!((after.entries[d].first_lba, after.entries[d].last_lba), data_at, "same place");
+        assert!(!slab_magic_at(&dev, sys_at).await.unwrap(), "no slab left where the system slab was");
+        let e = &after.entries[d];
+        let part = PartitionDevice::new(dev.clone(), e.start_bytes(after.block_size), e.size_bytes(after.block_size)).unwrap();
+        let slab = Slab::open(Arc::new(part)).await.unwrap();
+        assert_eq!(slab.slab_id(), data_id, "the same data slab");
+        assert!(retire_system_half(&dev).await.unwrap().removed.is_empty(), "nothing left to retire");
+    }
 
     /// #156: a data half of 256 GiB or more is a 1 MiB data slab and an 8 MiB
     /// bulk slab, the bulk one last; a smaller one is one data slab; a

@@ -50,6 +50,7 @@ use crate::pallet::manager::{PalletManager, DEFAULT_TRIES};
 use crate::pallet::{PalletKind, PalletLocation, PalletStore};
 
 
+#[cfg(test)]
 use super::local::node_layout;
 use super::{fat, ImageError, Result};
 
@@ -143,8 +144,9 @@ pub async fn lay_local_boot_ranked(
     sources: Vec<(String, Arc<dyn BlockDevice>)>,
     rank: BootRank,
 ) -> Result<LocalBootReport> {
-    if node_layout(&disk).await?.is_none() {
-        return Err(ImageError::Spec(format!("{disk_path} does not carry a node layout")));
+    // The system half's drive: with the data half beside it, or alone (#402).
+    if super::local::halves_on(&disk).await.1.is_none() {
+        return Err(ImageError::Spec(format!("{disk_path} does not carry a system half")));
     }
 
     // 1. The source's ESP, and room for ours. The room is taken first so the
