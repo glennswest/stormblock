@@ -146,18 +146,22 @@ pub async fn format_from_tree(
     format_from_tree_labelled(device, files, dirs, label, LabelCase::Upper).await
 }
 
-/// How a volume label is written.
+/// How the label and the names are written.
 ///
 /// FAT labels are upper case by DOS convention, and every label this writer
-/// made was. But a reader that looks a label up by name, case-sensitively —
-/// combustion and ignition look for `/dev/disk/by-label/combustion` or
-/// `ignition` — needs the bytes it asks for (#326). Linux keeps the case of
-/// both the boot sector's and the root directory's label as written.
+/// made was; a name that fits 8.3 was stored in capitals with no long name,
+/// which Linux shows as `SCRIPT`. A reader that looks things up by exact name
+/// needs the bytes it asks for (#326): combustion finds its drive at
+/// `/dev/disk/by-label/combustion` and copies `combustion/` onto a
+/// case-sensitive filesystem before running `script`. Linux keeps the case of
+/// the boot sector's and the root directory's label as written, and shows a
+/// name's long entry when there is one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LabelCase {
     /// Upper-cased, as DOS writes it (the default everywhere).
     Upper,
-    /// Exactly as given.
+    /// The label exactly as given, and a long-name entry for every name with
+    /// a lower-case letter in it.
     Keep,
 }
 
@@ -880,7 +884,8 @@ impl Fat32 {
                 }
             };
             let short = short_name(name, &mut used_short);
-            out.extend_from_slice(&lfn_entries(name, &short));
+            let keep = self.label_case == LabelCase::Keep && name.bytes().any(|b| b.is_ascii_lowercase());
+            out.extend_from_slice(&lfn_entries_with(name, &short, keep));
             out.extend_from_slice(&dir_entry(&short, attr, first, size));
         }
         Ok(out)
@@ -1117,8 +1122,13 @@ fn lfn_checksum(short: &[u8; 11]) -> u8 {
 /// VFAT long-name entries, written before the short entry and in reverse
 /// order, 13 UTF-16 units at a time.
 fn lfn_entries(name: &str, short: &[u8; 11]) -> Vec<u8> {
+    lfn_entries_with(name, short, false)
+}
+
+/// [`lfn_entries`], or always a long name when `always` (to keep its case).
+fn lfn_entries_with(name: &str, short: &[u8; 11], always: bool) -> Vec<u8> {
     let units: Vec<u16> = name.encode_utf16().collect();
-    let short_only = {
+    let short_only = !always && {
         let stem = String::from_utf8_lossy(&short[0..8]).trim_end().to_string();
         let ext = String::from_utf8_lossy(&short[8..11]).trim_end().to_string();
         let joined = if ext.is_empty() { stem.clone() } else { format!("{stem}.{ext}") };
