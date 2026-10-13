@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Seed volumes keep directories and the label's case (2026-10-13, #326, P3) — IN PROGRESS
+### Seed volumes keep directories and the label's case (2026-10-13, #326, P3) — DONE
 
 stormvm#63: combustion reads `combustion/script` on a vfat labelled
 `combustion`. `/cidata` flattened paths (`leaf()`) and upper-cased the label.
@@ -189,7 +189,9 @@ stormvm#63: combustion reads `combustion/script` on a vfat labelled
       checked 1–11 printable ASCII; flat + no keep_case unchanged
 - [x] test `integration_fstemplates::a_seed_keeps_its_directories_and_asked_
       to_its_labels_case`; README, CHANGELOG
-- [ ] sc-build check.sh; close; tell stormvm#63
+- [x] keep_case also gives lower-case 8.3 names a long entry (`script`, not
+      `SCRIPT`: combustion copies the directory before running it)
+- [x] check.sh at 62caa6e ALL PASS (1175/1175); closed; stormvm#63 told
 
 ### NVMe/TCP multipath: every storage address, paths in the initiator (2026-10-11, #90, P3) — DONE
 
