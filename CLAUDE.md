@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### ublk flow: queues, FUA, per-writer durability (2026-10-13, #409, P1, fastetcd#142) — IN PROGRESS
+### ublk flow: queues, FUA, per-writer durability (2026-10-13, #409, P1, fastetcd#142) — DONE here, metal pending
 
 Checked against today's code first: requests are served at once since #264
 (not QD1); slabs are O_DIRECT since #140 (no page cache: a flush writes back
@@ -198,12 +198,22 @@ change; a drive's cache flush is device-wide in any design).
       iSCSI FUA → write_fua (64825bf)
 - [x] queues: min(CPUs, 4) (`STORMBLOCK_UBLK_QUEUES`), depth 128 shared
       out, ≥ 32 a queue; adopted devices keep theirs
-- [ ] build VM: unit tests, power-cut/durability tests; QEMU: fio-like 1 vs
-      N queues, FUA vs by-flush, a redb-style commit loop; check.sh
-- [ ] zero copy / auto buf reg / batch I/O / segment params: a follow-up
-      issue (needs backend I/O on the ublk queue's own ring)
-- [ ] docs (durability.md, README ublk), CHANGELOG; #410 told (FUA is the
-      marker for its persists)
+- [x] found by the QEMU check: every queue past the first mapped queue 0's
+      descriptors (q × a page, not q × the 24-page command buffer): fixed
+- [x] measured (ci-ublk-flow-verify.sh, disks in RAM, dm-delay 8 ms):
+      4 queues help on fast storage (ext4 commits 8.9–10.8k → 11.9–12.4k/s)
+      and cost 15 % on the 8 ms disk; FUA alone costs nothing there; a drive
+      without FUA: write + group-committed flush, not RWF_DSYNC (measured
+      slower). So: 1 queue over a rotational slab, else min(CPUs, 4)
+      (`BlockDevice::rotational`); partitions read their disk's flag (bug)
+- [x] tests: thin FUA unit, crashdev FUA, power-cut trials with FUA (300
+      cuts × 2), ublk header/stride/queues units; ci-ublk-qd-verify.sh and
+      ci-adopt-retry-verify.sh ALL PASS with multi-queue; check.sh at
+      e95a61b 1184/1185 (the dropping-mirror import, 5/5 alone: load flake)
+- [x] zero copy / batch / segment params: #420
+- [x] docs (durability rule 15, README serving), CHANGELOG
+- [ ] golden; #410 and fastetcd#142 told; close. Not on metal: fastetcd's
+      own benchmark on an X9 blade (HDD) and an NVMe node
 
 ### forge stops answering for ~1 min under build load (2026-10-13, #418, P0) — DONE (golden-stormblock-f86a80fdceac)
 
