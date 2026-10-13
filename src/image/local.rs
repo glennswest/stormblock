@@ -1084,7 +1084,8 @@ mod tests {
         assert_eq!(laid.system_bytes, system_drive_slab_bytes(cap, layout.boot_bytes));
         assert!(laid.system_bytes > cap - cap / 50, "the drive, less a few percent: {} of {cap}", laid.system_bytes);
         assert!(!laid.system.is_data());
-        assert_eq!(halves_on(&ssd).await, (None, Some(0)));
+        let (d0, s0) = halves_on(&ssd).await;
+        assert!(d0.is_none() && s0.is_some(), "the system half alone");
         assert!(has_boot_area(&ssd, layout.boot_bytes).await, "the boot area in front of the slab");
         assert!(node_layout(&ssd).await.unwrap().is_none(), "one half is not a node layout");
         assert_eq!(system_slab_volumes(&ssd).await.unwrap().map(|v| v.len()), Some(0), "it can say it holds nothing");
