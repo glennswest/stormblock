@@ -180,6 +180,28 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — IN PROGRESS
+
+Forge holds more than stormcos (nana builds goldens there): a namespace per
+family, a Kubernetes namespace on forge's apiserver.
+- [ ] model: `namespace` on the volume (v2 header extension after the
+      tier; none = `stormcos`), kept by the manager like origins, inherited
+      by snapshots/clones unless the clone names one; catalog; immutable once
+      sealed
+- [ ] API: `namespace` on every volume (and label `storm.io/namespace` on
+      the kube projection, metadata.namespace); `?namespace=` on the list;
+      create, clone, import, goldens make take it; a name is unique within
+      its namespace at those and at rename (409 naming the other); `{id}`
+      routes take `?namespace=` to resolve a name; PATCH namespace (unsealed)
+- [ ] quota: `/api/v1/namespaces` (usage: volumes, goldens, distinct
+      allocated bytes) and `/{ns}/quota` (PUT/DELETE destructive), kept in
+      `quotas.json`; create/clone/import/seal/goldens make over quota → 403
+      `quota_exceeded` with the numbers
+- [ ] RBAC: a Kubernetes bearer's SubjectAccessReview carries the volume's
+      (or the request's) namespace; a list by a bearer shows the namespaces
+      it may list. Node/admin tokens stay node-wide; boot claims unchanged
+- [ ] tests, docs, CHANGELOG; stormcentral#642 told
+
 ### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — WAITING ON THE OWNER
 
 X9 blades get a 256 GB SATA SSD for the system half; data stays on the 2 TB
