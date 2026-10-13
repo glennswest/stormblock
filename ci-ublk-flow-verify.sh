@@ -109,7 +109,7 @@ slow() {
     dmsetup create --noudevsync slow$1 --table "0 $S delay /dev/$1 0 8 /dev/$1 0 8" || { r dm FAIL; poweroff -f; }
     for d in /sys/block/dm-*; do [ "$(cat $d/dm/name)" = slow$1 ] && echo /dev/${d##*/}; done
 }
-SLOWE=$(slow vde); SLOWF=$(slow vdf)
+SLOWE=$(slow vde); SLOWF=$(slow vdf); SLOWI=$(slow vdi); SLOWJ=$(slow vdj)
 
 # run <config> <disk> <port>: a fresh engine, slab, volume and device.
 run() {
@@ -154,7 +154,7 @@ EOT
     # database's file is once it has run a while.
     dd if=/dev/urandom of=$dev bs=1M count=64 oflag=direct 2>/dev/null
     sync
-    if [ "$4" = fast ]; then
+    if [ "$4" = fast ] || [ "$4" = fast2 ]; then
         timeout 120 flow_bench rand $dev 8 $SECS read | sed "s/^/$tag /"
         timeout 120 flow_bench rand $dev 8 $SECS write | sed "s/^/$tag /"
     fi
@@ -190,36 +190,47 @@ run q1-fua /dev/vdc 9093 fast
 run after /dev/vdd 9094 fast
 run before $SLOWE 9095 slow
 run after $SLOWF 9096 slow
+# Again, the other way round: what moved between the two is noise.
+run after /dev/vdg 9097 fast2
+run before /dev/vdh 9098 fast2
+run after $SLOWI 9099 slow2
+run before $SLOWJ 9100 slow2
 echo "GUEST done"
 poweroff -f
 EOF
 chmod +x "$I/init"
 (cd "$I" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$W/initrd.gz"
-truncate -s 1G "$W/a.img" "$W/b.img" "$W/c.img" "$W/d.img" "$W/e.img" "$W/f.img"
+# The disks in memory (#409): on a build VM's shared storage the same
+# configuration measured 14k and 49k IOPS in two runs. In RAM a flush costs
+# nothing and dm-delay's 8 ms is the only slow thing.
+D=$(mktemp -d /dev/shm/ci-ublk-flow.XXXXXX)
+trap 'rm -rf "$W" "$D"' EXIT
+drives=
+for d in a b c d e f g h i j; do
+    truncate -s 512M "$D/$d.img"
+    drives="$drives -drive file=$D/$d.img,if=virtio,format=raw,cache=unsafe"
+done
 
 say "boot $KERNEL in QEMU"
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
-timeout 1500 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4 \
+# shellcheck disable=SC2086
+timeout 2400 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4 \
     -nographic -no-reboot -kernel "$KERNEL" -initrd "$W/initrd.gz" \
     -append "console=ttyS0 panic=-1 loglevel=4" \
-    -drive file="$W/a.img",if=virtio,format=raw \
-    -drive file="$W/b.img",if=virtio,format=raw \
-    -drive file="$W/c.img",if=virtio,format=raw \
-    -drive file="$W/d.img",if=virtio,format=raw \
-    -drive file="$W/e.img",if=virtio,format=raw \
-    -drive file="$W/f.img",if=virtio,format=raw > "$W/guest.log" 2>&1
+    $drives > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG)|BENCH|ERROR|panick'
 
-for t in before-fast q4-flush-fast q1-fua-fast after-fast before-slow after-slow; do
+for t in before-fast q4-flush-fast q1-fua-fast after-fast before-slow after-slow after-fast2 before-fast2 after-slow2 before-slow2; do
     for c in queues fua records ext4; do
         tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $t-$c PASS" || fail "$t-$c"
     done
 done
 per() { tr -d '\r' < "$W/guest.log" | awk -v t="$1" -v k="$2" '$1==t && $4==k {sub("per_s=","",$7); print $7}'; }
 fper() { tr -d '\r' < "$W/guest.log" | awk -v t="$1" -v k="$2" '$1==t && $3=="fcommit" && $4==k {sub("per_s=","",$7); print $7}'; }
-B=$(fper before-slow fsync); A=$(fper after-slow fsync)
-echo "slow disk, ext4 file commits (fdatasync) /s: before ${B:-?}, after ${A:-?}"
-if [ -n "$B" ] && [ -n "$A" ]; then
+B1=$(fper before-slow fsync); A1=$(fper after-slow fsync); B2=$(fper before-slow2 fsync); A2=$(fper after-slow2 fsync)
+echo "slow disk, ext4 file commits (fdatasync) /s: before ${B1:-?} / ${B2:-?}, after ${A1:-?} / ${A2:-?}"
+B=$(( (${B1:-0} + ${B2:-0}) / 2 )); A=$(( (${A1:-0} + ${A2:-0}) / 2 ))
+if [ "$B" -gt 0 ] && [ "$A" -gt 0 ]; then
     [ "$A" -ge $((B * 9 / 10)) ] || fail "file commits slower after #409 ($A vs $B per s)"
 else
     fail "no commit numbers"
