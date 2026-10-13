@@ -180,6 +180,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### forge stops answering for ~1 min under build load (2026-10-13, #418, P0) — IN PROGRESS
+
+forge runs 13.7.0 (#235: recreated, not upgraded), whose log names no lock
+holder (#365 came later); the syslog query timed out. By reading today's
+code: compose/pallet (members read twice) and compose/slab (slab laid,
+clones stamped, flush) held the volume manager throughout; check_golden_slots
+read slot pages under it on every seal and clone; a listing fell back to the
+manager whenever the catalog was stale.
+- [x] test (d7c3d89): slow reads/writes/flushes, composes + clones + seals +
+      exports; health and listing < 1 s
+- [x] compose_pallet_unlocked / compose_slab_unlocked (5419291)
+- [x] golden slot check unlocked; listing and GET answer from the catalog
+      while the manager is held (f522c75)
+- [ ] build VM: clippy, the test (before: d7c3d89, after), check.sh
+- [ ] golden; tell stormcentral#… the new forge needs it
+
 ### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — PAUSED for P0 #418; WIP on branch wip/408-namespaces
 
 Forge holds more than stormcos (nana builds goldens there): a namespace per

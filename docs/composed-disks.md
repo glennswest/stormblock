@@ -307,7 +307,20 @@ a ublk block device, and hands it to tools that are not ours:
   finds the ESP, shim loads grub, grub reads the config on the ESP and lists
   `(hd0,gpt1)` and `(hd0,gpt2)` on the serial console.
 
-## 6. Not done
+## 6. While a compose runs, the node answers (#418)
+
+A compose reads: `compose/pallet` digests every member and then reads it all
+again through the pallet reader to check where it landed (a release's root
+image is gigabytes, twice); `compose/slab` lays a slab inside the volume
+(its table's first step zeroed), probes each golden, stamps every clone and
+flushes. The volume manager's lock is held only for the bookkeeping: the
+plan (members resolved, names checked), the create, and the seal (or the
+take-back of a compose that failed). The reads, writes and the flush run
+with no manager lock, so creates, clones, seals, exports, listings and
+health go on beside a release's compose. Forge stopped answering for a
+minute under a compose on 13.7, which held the manager throughout.
+
+## 7. Not done
 
 - **No CLI subcommand.** Composing is REST and library only:
   `POST /api/v1/volumes/compose`, `…/compose/pallet`, `…/compose/disk` and
