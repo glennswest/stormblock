@@ -296,6 +296,12 @@ pub trait BlockDevice: Send + Sync {
         0
     }
 
+    /// For a device reached over a fabric (NVMe/TCP): its path MTU and the
+    /// transfer one command carries (#407). `None` for a local device.
+    fn fabric_path(&self) -> Option<nvmeof_dev::FabricPath> {
+        None
+    }
+
     /// Total capacity in bytes.
     fn capacity_bytes(&self) -> u64;
 

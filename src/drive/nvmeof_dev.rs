@@ -100,9 +100,57 @@ fn io_queues() -> usize {
     std::env::var("STORMBLOCK_NVME_TCP_QUEUES").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(4)
 }
 
-/// Per-op transfer cap: fits every target's defaults (our ICResp
-/// advertises maxh2cdata 131072) and keeps NLB well inside 16 bits.
-const MAX_CHUNK: usize = 128 * 1024;
+/// The transfer one command carries (#407): the target's MDTS (4 KiB pages;
+/// 0 is "no limit"), never more than this engine's own
+/// [`default_max_transfer`](crate::target::nvmeof::default_max_transfer)
+/// nor 65536 blocks (NLB is 16 bits). An older engine (forge 13.7) says
+/// 128 KiB, and gets 128 KiB.
+pub fn transfer_for(mdts: u8, block_size: u32) -> usize {
+    let target = if mdts == 0 {
+        crate::target::nvmeof::MAX_TRANSFER_CEILING
+    } else {
+        4096usize.checked_shl(mdts as u32).unwrap_or(usize::MAX)
+    };
+    let ours = crate::target::nvmeof::default_max_transfer();
+    let nlb_cap = 65536 * block_size.max(512) as usize;
+    target.min(ours).min(nlb_cap).max(block_size as usize)
+}
+
+/// The path MTU of a connected socket (`IP_MTU` / `IPV6_MTU`), or `None`
+/// where the system will not say. What a jumbo-frame storage network is
+/// checked by (#407): 9000 end to end, or 1500 somewhere on the way.
+pub fn path_mtu(stream: &TcpStream) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let v6 = stream.peer_addr().ok()?.is_ipv6();
+        let (level, name) = if v6 { (libc::IPPROTO_IPV6, libc::IPV6_MTU) } else { (libc::IPPROTO_IP, libc::IP_MTU) };
+        let mut mtu: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: a valid fd, an int-sized out value and its length.
+        let r = unsafe {
+            libc::getsockopt(stream.as_raw_fd(), level, name, &mut mtu as *mut _ as *mut libc::c_void, &mut len)
+        };
+        (r == 0 && mtu > 0).then_some(mtu as u32)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        None
+    }
+}
+
+/// What a fabric device's path is (#407): its MTU and the transfer one
+/// command carries, for the flow-over's health and log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct FabricPath {
+    /// The largest path MTU among the paths connected so far; 0 unknown.
+    pub mtu: u32,
+    /// MTU 9000 or more.
+    pub jumbo: bool,
+    /// Bytes one command carries.
+    pub max_transfer: u32,
+}
 
 static HOSTID_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -270,6 +318,8 @@ struct Conn {
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: BufWriter<tokio::net::tcp::OwnedWriteHalf>,
     cid: u16,
+    /// The connection's path MTU when it was made (#407); 0 unknown.
+    mtu: u32,
 }
 
 /// How long one NVMe/TCP command may take before the connection is given up
@@ -348,11 +398,14 @@ impl Conn {
         if let Err(e) = socket2::SockRef::from(&stream).set_tcp_keepalive(&ka) {
             tracing::debug!("NVMe-TCP {addr}: TCP keepalive not set: {e}");
         }
+        let mtu = path_mtu(&stream).unwrap_or(0);
         let (reader, writer) = stream.into_split();
         let mut conn = Conn {
-            reader: BufReader::new(reader),
-            writer: BufWriter::new(writer),
+            // Room for an extent-sized PDU in one read (#407).
+            reader: BufReader::with_capacity(256 << 10, reader),
+            writer: BufWriter::with_capacity(256 << 10, writer),
             cid: 1,
+            mtu,
         };
         bounded("handshake", conn.ic_handshake()).await?;
         let dw0 = bounded("connect command", conn.fabric_connect_as(nqn, host_nqn, qid)).await?;
@@ -533,7 +586,13 @@ impl Conn {
                     let datal = u32::from_le_bytes(specific[8..12].try_into().unwrap());
                     let last = ch.flags & 0x04 != 0;
                     let success = ch.flags & 0x08 != 0;
-                    let payload_len = ch.plen as usize - ch.hlen as usize;
+                    let payload_len = (ch.plen as usize).saturating_sub(ch.hlen as usize);
+                    if payload_len > crate::target::nvmeof::pdu::MAX_PDU_BYTES {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("a C2H PDU of {payload_len} bytes is more than any command carries"),
+                        ));
+                    }
                     if payload_len > 0 {
                         let mut payload = vec![0u8; payload_len];
                         self.reader.read_exact(&mut payload).await?;
@@ -605,7 +664,7 @@ impl Conn {
         self.cmd_read_data(&sqe, 4096).await
     }
 
-    async fn io_read(&mut self, nsid: u32, slba: u64, nlb: u16, bytes: usize) -> io::Result<Vec<u8>> {
+    async fn io_read(&mut self, nsid: u32, slba: u64, nlb: u32, bytes: usize) -> io::Result<Vec<u8>> {
         let cid = self.next_cid();
         let mut sqe = [0u8; 64];
         sqe[0] = IO_READ;
@@ -613,7 +672,7 @@ impl Conn {
         sqe[4..8].copy_from_slice(&nsid.to_le_bytes());
         sqe[40..44].copy_from_slice(&(slba as u32).to_le_bytes());
         sqe[44..48].copy_from_slice(&((slba >> 32) as u32).to_le_bytes());
-        sqe[48..52].copy_from_slice(&((nlb - 1) as u32).to_le_bytes());
+        sqe[48..52].copy_from_slice(&(nlb - 1).to_le_bytes());
         let data = self.cmd_read_data(&sqe, bytes).await?;
         if data.len() != bytes {
             return Err(io::Error::other(format!(
@@ -624,7 +683,7 @@ impl Conn {
         Ok(data)
     }
 
-    async fn io_write(&mut self, nsid: u32, slba: u64, nlb: u16, data: &[u8]) -> io::Result<()> {
+    async fn io_write(&mut self, nsid: u32, slba: u64, nlb: u32, data: &[u8]) -> io::Result<()> {
         let cid = self.next_cid();
         let mut sqe = [0u8; 64];
         sqe[0] = IO_WRITE;
@@ -632,7 +691,7 @@ impl Conn {
         sqe[4..8].copy_from_slice(&nsid.to_le_bytes());
         sqe[40..44].copy_from_slice(&(slba as u32).to_le_bytes());
         sqe[44..48].copy_from_slice(&((slba >> 32) as u32).to_le_bytes());
-        sqe[48..52].copy_from_slice(&((nlb - 1) as u32).to_le_bytes());
+        sqe[48..52].copy_from_slice(&(nlb - 1).to_le_bytes());
         self.cmd_write_data(&sqe, data).await
     }
 
@@ -674,6 +733,8 @@ struct Path {
     /// Commands and bytes carried.
     ops: std::sync::atomic::AtomicU64,
     bytes: std::sync::atomic::AtomicU64,
+    /// The path MTU its last connection had (#407); 0 unknown.
+    mtu: AtomicU32,
 }
 
 impl Path {
@@ -685,6 +746,7 @@ impl Path {
             down_until: std::sync::Mutex::new(None),
             ops: std::sync::atomic::AtomicU64::new(0),
             bytes: std::sync::atomic::AtomicU64::new(0),
+            mtu: AtomicU32::new(0),
         }
     }
 
@@ -749,6 +811,8 @@ pub struct NvmeofDevice {
     spec: NvmeTcpSpec,
     capacity: u64,
     block_size: u32,
+    /// Bytes one command carries: the target's MDTS and ours (#407).
+    max_transfer: usize,
     id: DeviceId,
 }
 
@@ -790,6 +854,7 @@ impl NvmeofDevice {
         };
         let ctrl = bounded("identify", admin.identify(CNS_CONTROLLER, 0)).await.map_err(DriveError::Io)?;
         let (serial, model) = decode_identify_ctrl(&ctrl);
+        let mdts = ctrl.get(77).copied().unwrap_or(0);
         let ns = bounded("identify", admin.identify(CNS_NAMESPACE, spec.nsid))
             .await
             .map_err(DriveError::Io)?;
@@ -808,19 +873,28 @@ impl NvmeofDevice {
             )));
         }
         let capacity = nsze * block_size as u64;
-        tracing::info!(
-            "NVMe-TCP initiator: {} = {} bytes, block_size {}, model {:?}",
-            spec.uri(),
-            capacity,
-            block_size,
-            model
-        );
+        let max_transfer = transfer_for(mdts, block_size);
         drop(admin);
 
         let io_conn = Conn::establish(spec, addrs[first], first, 1)
             .await
             .map_err(DriveError::Io)?;
+        let mtu = io_conn.mtu;
+        paths[first].mtu.store(mtu, Ordering::Relaxed);
         *paths[first].conns[0].lock().await = Some(io_conn);
+        tracing::info!(
+            "NVMe-TCP initiator: {} = {} bytes, block_size {}, model {:?}, {} KiB per command (target MDTS {mdts}), path MTU {}",
+            spec.uri(),
+            capacity,
+            block_size,
+            model,
+            max_transfer >> 10,
+            match mtu {
+                0 => "unknown".to_string(),
+                m if m >= 9000 => format!("{m}, jumbo"),
+                m => m.to_string(),
+            },
+        );
 
         let uri = spec.uri();
         let id = DeviceId {
@@ -843,6 +917,7 @@ impl NvmeofDevice {
             spec: spec.clone(),
             capacity,
             block_size,
+            max_transfer,
             id,
         })
     }
@@ -898,6 +973,9 @@ impl NvmeofDevice {
         if guard.is_none() {
             match Conn::establish(&self.spec, &path.addr, pi, 1).await {
                 Ok(c) => {
+                    if c.mtu > 0 {
+                        path.mtu.store(c.mtu, Ordering::Relaxed);
+                    }
                     *guard = Some(c);
                     tracing::debug!("NVMe-TCP initiator: connected to {}", path.addr);
                 }
@@ -941,9 +1019,9 @@ impl NvmeofDevice {
         let bs = self.block_size as u64;
         let mut done = 0usize;
         while done < buf.len() {
-            let chunk = (buf.len() - done).min(MAX_CHUNK);
+            let chunk = (buf.len() - done).min(self.max_transfer);
             let slba = (offset + done as u64) / bs;
-            let nlb = (chunk as u64 / bs) as u16;
+            let nlb = (chunk as u64 / bs) as u32;
             let data = bounded("read", conn.io_read(self.spec.nsid, slba, nlb, chunk)).await?;
             buf[done..done + chunk].copy_from_slice(&data);
             done += chunk;
@@ -955,9 +1033,9 @@ impl NvmeofDevice {
         let bs = self.block_size as u64;
         let mut done = 0usize;
         while done < buf.len() {
-            let chunk = (buf.len() - done).min(MAX_CHUNK);
+            let chunk = (buf.len() - done).min(self.max_transfer);
             let slba = (offset + done as u64) / bs;
-            let nlb = (chunk as u64 / bs) as u16;
+            let nlb = (chunk as u64 / bs) as u32;
             bounded("write", conn.io_write(self.spec.nsid, slba, nlb, &buf[done..done + chunk])).await?;
             done += chunk;
         }
@@ -998,7 +1076,12 @@ impl BlockDevice for NvmeofDevice {
     }
 
     fn optimal_io_size(&self) -> u32 {
-        MAX_CHUNK as u32
+        self.max_transfer as u32
+    }
+
+    fn fabric_path(&self) -> Option<FabricPath> {
+        let mtu = self.paths.iter().map(|p| p.mtu.load(Ordering::Relaxed)).max().unwrap_or(0);
+        Some(FabricPath { mtu, jumbo: mtu >= 9000, max_transfer: self.max_transfer as u32 })
     }
 
     fn device_type(&self) -> DriveType {
@@ -1157,6 +1240,18 @@ impl NvmeofDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #407: the transfer per command follows the target's MDTS, capped by
+    /// ours and by a 16-bit NLB.
+    #[test]
+    fn the_transfer_per_command_is_the_targets_mdts_within_ours() {
+        let ours = crate::target::nvmeof::default_max_transfer();
+        assert_eq!(transfer_for(5, 4096), 128 << 10, "an older engine's 128 KiB");
+        assert_eq!(transfer_for(8, 4096), (1 << 20).min(ours));
+        assert_eq!(transfer_for(11, 4096), (8 << 20).min(ours));
+        assert_eq!(transfer_for(0, 4096), ours, "no limit stated: ours");
+        assert_eq!(transfer_for(30, 512), ours.min(65536 * 512), "never past 65536 blocks");
+    }
 
     #[test]
     fn uri_parses_and_roundtrips() {

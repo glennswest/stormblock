@@ -68,8 +68,12 @@ pub struct NvmeofConfig {
     pub max_io_queues: u16,
     /// Queue depth (per queue).
     pub queue_depth: u16,
-    /// Maximum H2C data payload per PDU.
+    /// Maximum H2C data payload per PDU (and the C2H PDUs this target
+    /// sends): the transfer size, so a command's data moves as one PDU.
     pub maxh2cdata: u32,
+    /// The largest transfer one command may carry, advertised as MDTS
+    /// (#407). A read or write asking for more is refused.
+    pub max_transfer: usize,
     /// Address reported in the discovery log page. `listen_addr` is usually a
     /// wildcard, which a remote initiator cannot connect back to (#26).
     pub advertised_addr: Option<SocketAddr>,
@@ -79,6 +83,39 @@ pub struct NvmeofConfig {
     /// same subsystem need ranges that do not overlap.
     pub cntlid_min: u16,
     pub cntlid_max: u16,
+}
+
+/// The largest transfer one command carries unless told otherwise (#407):
+/// 8 MiB, so an extent of either class (1 MiB hot, 8 MiB bulk, #156) moves
+/// as one command rather than eight or sixty-four of 128 KiB.
+pub const DEFAULT_MAX_TRANSFER: usize = 8 << 20;
+
+/// The most a target may be told to take: NLB is 16 bits, so 65536 blocks
+/// of 512 bytes is the most a command can name on a 512-byte namespace.
+pub const MAX_TRANSFER_CEILING: usize = 32 << 20;
+
+/// `STORMBLOCK_NVME_MAX_TRANSFER` (bytes, a power of two from 4096 to
+/// 32 MiB), else [`DEFAULT_MAX_TRANSFER`]. For measuring before and after:
+/// 131072 is what every target advertised before #407.
+pub fn default_max_transfer() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("STORMBLOCK_NVME_MAX_TRANSFER") {
+        Ok(v) => match v.parse::<usize>() {
+            Ok(n) if n.is_power_of_two() && (4096..=MAX_TRANSFER_CEILING).contains(&n) => n,
+            _ => {
+                tracing::warn!(
+                    "STORMBLOCK_NVME_MAX_TRANSFER={v} is not a power of two from 4096 to {MAX_TRANSFER_CEILING}; using {DEFAULT_MAX_TRANSFER}"
+                );
+                DEFAULT_MAX_TRANSFER
+            }
+        },
+        Err(_) => DEFAULT_MAX_TRANSFER,
+    })
+}
+
+/// MDTS for a transfer size: log2 of it in 4 KiB pages (CAP.MPSMIN = 0).
+pub fn mdts_for(bytes: usize) -> u8 {
+    (bytes.max(4096) / 4096).trailing_zeros() as u8
 }
 
 /// The controller-ID range a target gets unless its config says otherwise:
@@ -99,7 +136,8 @@ impl Default for NvmeofConfig {
             nqn: "nqn.2024.io.stormblock:default".into(),
             max_io_queues: 64,
             queue_depth: 128,
-            maxh2cdata: 131072,
+            maxh2cdata: default_max_transfer() as u32,
+            max_transfer: default_max_transfer(),
             advertised_addr: None,
             cntlid_min: (range >> 16) as u16,
             cntlid_max: (range & 0xFFFF) as u16,
@@ -1389,6 +1427,7 @@ impl NvmeofTarget {
                             count,
                             is_discovery,
                         );
+                        d[77] = mdts_for(self.config.max_transfer);
                         // Set CNTLID
                         d[78..80].copy_from_slice(&cntlid.to_le_bytes());
                         d
@@ -1584,6 +1623,15 @@ impl NvmeofTarget {
         }
         let device = &ns.device;
 
+        // More than MDTS: refused before any buffer is made for it (#407).
+        if matches!(sqe.opcode(), io::IO_READ | io::IO_WRITE) {
+            let nlb = (sqe.cdw12() & 0xFFFF) as usize + 1;
+            if nlb * device.block_size() as usize > self.config.max_transfer {
+                let cqe = NvmeCqe::error_dnr(cid, 0, 0, 0, 0x02); // Invalid Field in Command
+                return pdu::write_capsule_resp(writer, &cqe, hdgst).await;
+            }
+        }
+
         // Writes larger than the in-capsule allowance arrive without their
         // data: send an R2T for the remainder and collect H2CData PDUs,
         // parking any interleaved commands for the main loop.
@@ -1685,7 +1733,11 @@ mod tests {
     fn nvmeof_config_defaults() {
         let config = NvmeofConfig::default();
         assert_eq!(config.listen_addr.port(), 4420);
-        assert_eq!(config.maxh2cdata, 131072);
+        assert_eq!(config.max_transfer, DEFAULT_MAX_TRANSFER);
+        assert_eq!(config.maxh2cdata as usize, DEFAULT_MAX_TRANSFER);
+        assert_eq!(mdts_for(DEFAULT_MAX_TRANSFER), 11);
+        assert_eq!(mdts_for(1 << 20), 8);
+        assert_eq!(mdts_for(128 << 10), 5);
     }
 
     async fn test_device(tag: &str) -> (Arc<dyn BlockDevice>, String) {

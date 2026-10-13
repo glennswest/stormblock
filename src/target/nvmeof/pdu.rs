@@ -282,12 +282,24 @@ const C2H_DATA_HLEN: u8 = 24;
 const _H2C_DATA_HLEN: u8 = 24;
 const R2T_HLEN: u8 = 24;
 
+/// The largest PDU a target reads (#407): the largest transfer a command may
+/// carry ([`super::MAX_TRANSFER_CEILING`]) and its headers. A PDU's length
+/// is the peer's word, read before anything is authenticated; without a
+/// bound, one header could make the target allocate 4 GiB.
+pub const MAX_PDU_BYTES: usize = super::MAX_TRANSFER_CEILING + 4096;
+
 /// Read a complete NVMe-oF/TCP PDU from a stream.
 pub async fn read_pdu<R: AsyncReadExt + Unpin>(stream: &mut R) -> std::io::Result<NvmeofPdu> {
     // Read 8-byte common header
     let mut hdr_buf = [0u8; 8];
     stream.read_exact(&mut hdr_buf).await?;
     let ch = CommonHeader::from_bytes(&hdr_buf);
+    if ch.plen as usize > MAX_PDU_BYTES || (ch.plen as usize) < (ch.hlen as usize).max(8) || ch.pdo as u32 > ch.plen {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("PDU length {} (header {}, data at {}) is not one this target takes", ch.plen, ch.hlen, ch.pdo),
+        ));
+    }
 
     let pdu_type = PduType::from_byte(ch.pdu_type).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, format!("unknown PDU type: {}", ch.pdu_type))

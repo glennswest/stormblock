@@ -523,3 +523,73 @@ async fn a_target_listens_on_and_lists_every_storage_address() {
     assert_eq!(traddrs, vec!["127.0.0.1", "127.0.0.2"]);
     server.abort();
 }
+
+/// #407: an extent moves as one command. The target advertises MDTS 11
+/// (8 MiB) and takes a 1 MiB read and write in one command each; more than
+/// it advertises is refused, not buffered. The engine's initiator sizes its
+/// commands by the target's MDTS — 8 MiB here, and 128 KiB against a target
+/// that says 128 KiB (every engine before #407, forge 13.7) — and reports its
+/// path's MTU and the transfer.
+#[tokio::test]
+async fn an_extent_moves_as_one_command_and_an_older_target_still_gets_its_size() {
+    use stormblock::target::nvmeof::{mdts_for, DEFAULT_MAX_TRANSFER};
+    const MIB: usize = 1 << 20;
+    let (_dir, vol, _vm) = common::setup_raid1_volume(64 * MIB as u64, 32 * MIB as u64).await;
+    let (addr, server) = common::start_nvmeof_target(vol.clone(), default_nvmeof_config()).await;
+
+    let mut ini = NvmeofInitiator::connect(addr).await.unwrap();
+    ini.ic_handshake().await.unwrap();
+    ini.fabric_connect(SUBSYSTEM_NQN, HOST_NQN, 0).await.unwrap();
+    let ctrl = ini.identify_controller().await.unwrap();
+    assert_eq!(ctrl[77], 11, "MDTS = 8 MiB in 4 KiB pages");
+    assert_eq!(mdts_for(DEFAULT_MAX_TRANSFER), 11);
+    let mut io = NvmeofInitiator::connect(addr).await.unwrap();
+    io.ic_handshake().await.unwrap();
+    io.fabric_connect(SUBSYSTEM_NQN, HOST_NQN, 1).await.unwrap();
+    let extent: Vec<u8> = (0..MIB).map(|i| (i % 253) as u8).collect();
+    io.write(1, 0, &extent).await.expect("a 1 MiB write is one command");
+    let back = io.read(1, 0, (MIB / 4096) as u16).await.expect("a 1 MiB read is one command");
+    assert_eq!(back, extent);
+    // Past MDTS (8 MiB + one block): refused with Invalid Field, the
+    // connection kept.
+    let over = (DEFAULT_MAX_TRANSFER / 4096 + 1) as u16;
+    assert!(io.read(1, 0, over).await.is_err(), "more than MDTS is refused");
+    assert_eq!(io.read(1, 0, 1).await.unwrap().len(), 4096, "and the connection still answers");
+
+    // The engine's initiator: 8 MiB commands, an MTU it can name.
+    let uri = format!("nvme-tcp://{addr}/{SUBSYSTEM_NQN}?nsid=1");
+    let dev = open_one_drive(&uri).await.unwrap();
+    let p = dev.fabric_path().expect("a fabric device says its path");
+    assert_eq!(p.max_transfer as usize, DEFAULT_MAX_TRANSFER);
+    assert_eq!(dev.optimal_io_size() as usize, DEFAULT_MAX_TRANSFER);
+    #[cfg(target_os = "linux")]
+    assert!(p.mtu >= 1500 && p.jumbo == (p.mtu >= 9000), "{p:?} (loopback)");
+    let run: Vec<u8> = (0..12 * MIB).map(|i| (i % 241) as u8).collect();
+    dev.write(4 * MIB as u64, &run).await.unwrap();
+    let mut got = vec![0u8; run.len()];
+    dev.read(4 * MIB as u64, &mut got).await.unwrap();
+    assert!(got == run, "a 12 MiB run (two commands) is byte-exact");
+    server.abort();
+
+    // An older engine's target: MDTS 5, 128 KiB. The initiator goes down to it.
+    let old = NvmeofConfig { max_transfer: 128 << 10, maxh2cdata: 128 << 10, ..default_nvmeof_config() };
+    let (addr, server) = common::start_nvmeof_target(vol, old).await;
+    let mut ini = NvmeofInitiator::connect(addr).await.unwrap();
+    ini.ic_handshake().await.unwrap();
+    ini.fabric_connect(SUBSYSTEM_NQN, HOST_NQN, 0).await.unwrap();
+    assert_eq!(ini.identify_controller().await.unwrap()[77], 5);
+    let uri = format!("nvme-tcp://{addr}/{SUBSYSTEM_NQN}?nsid=1");
+    let dev = open_one_drive(&uri).await.unwrap();
+    assert_eq!(dev.fabric_path().unwrap().max_transfer, 128 << 10);
+    let mut got = vec![0u8; 12 * MIB];
+    dev.read(4 * MIB as u64, &mut got).await.unwrap();
+    assert!(got == run, "the same run in 96 commands of 128 KiB");
+    let local = stormblock::drive::filedev::FileDevice::open_with_capacity(
+        _dir.path().join("plain.bin").to_str().unwrap(),
+        MIB as u64,
+    )
+    .await
+    .unwrap();
+    assert!(local.fabric_path().is_none(), "a local device has no fabric path");
+    server.abort();
+}

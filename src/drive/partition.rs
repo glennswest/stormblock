@@ -112,6 +112,10 @@ impl BlockDevice for PartitionDevice {
         self.inner.drive_offset() + self.start
     }
 
+    fn fabric_path(&self) -> Option<super::nvmeof_dev::FabricPath> {
+        self.inner.fabric_path()
+    }
+
     fn capacity_bytes(&self) -> u64 {
         self.len
     }

@@ -5990,6 +5990,23 @@ pub async fn run() -> anyhow::Result<()> {
         for (i, &source) in sources.iter().enumerate() {
             later[i] = 0;
             let source_slot = registry.read().await.get(&source).map(|s| s.slot_size()).unwrap_or(1 << 20);
+            // Its path (#407): the MTU and what one command carries, in health
+            // and said once per source, so a 1500 hop or an older target's
+            // 128 KiB commands are seen where the rate is.
+            let fabric = registry.read().await.get(&source).and_then(|s| s.device().fabric_path());
+            crate::flowprogress::FLOW.source(fabric);
+            if let Some(p) = fabric {
+                let line = format!(
+                    "flow-over: source {source} over NVMe/TCP: path MTU {}{}, {} KiB per command ({} per {} KiB extent)",
+                    if p.mtu == 0 { "unknown".to_string() } else { p.mtu.to_string() },
+                    if p.jumbo { ", jumbo" } else { "" },
+                    p.max_transfer >> 10,
+                    (source_slot as u32).div_ceil(p.max_transfer.max(1)).max(1),
+                    source_slot >> 10,
+                );
+                println!("{line}");
+                tracing::info!("{line}");
+            }
             let after: usize = later.iter().sum();
             // What is on the source, taken once per pass (#155: finding it walks
             // every map) and worked through; a pass that leaves anything behind

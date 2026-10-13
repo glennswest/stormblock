@@ -13,6 +13,7 @@ pub static FLOW: FlowProgress = FlowProgress {
     moved: AtomicU64::new(0),
     zeroed: AtomicU64::new(0),
     bytes: AtomicU64::new(0),
+    source: Mutex::new(None),
 };
 
 pub struct FlowProgress {
@@ -20,6 +21,8 @@ pub struct FlowProgress {
     moved: AtomicU64,
     zeroed: AtomicU64,
     bytes: AtomicU64,
+    /// The source's fabric path, when it is reached over NVMe/TCP (#407).
+    source: Mutex<Option<crate::drive::nvmeof_dev::FabricPath>>,
 }
 
 /// What [`FlowProgress::snapshot`] reports.
@@ -37,6 +40,10 @@ pub struct Snapshot {
     pub mb_per_s: f64,
     /// Extents (moved or zeroed) per second.
     pub extents_per_s: f64,
+    /// The source's path (#407): its MTU, whether that is jumbo, the bytes
+    /// one command carries. Absent for a local source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<crate::drive::nvmeof_dev::FabricPath>,
 }
 
 impl FlowProgress {
@@ -55,6 +62,11 @@ impl FlowProgress {
         self.zeroed.fetch_add(extents, Relaxed);
     }
 
+    /// The source being read from now.
+    pub fn source(&self, path: Option<crate::drive::nvmeof_dev::FabricPath>) {
+        *self.source.lock().unwrap_or_else(|e| e.into_inner()) = path;
+    }
+
     /// Nothing when no flow-over has begun in this process.
     pub fn snapshot(&self) -> Option<Snapshot> {
         let began = (*self.began.lock().unwrap_or_else(|e| e.into_inner()))?;
@@ -68,6 +80,7 @@ impl FlowProgress {
             seconds,
             mb_per_s: per(bytes as f64 / 1e6),
             extents_per_s: per((moved + zeroed) as f64),
+            source_path: *self.source.lock().unwrap_or_else(|e| e.into_inner()),
         })
     }
 
@@ -89,6 +102,7 @@ mod tests {
             moved: AtomicU64::new(0),
             zeroed: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
+            source: Mutex::new(None),
         };
         assert!(p.snapshot().is_none());
         p.begin();

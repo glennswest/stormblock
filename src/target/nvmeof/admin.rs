@@ -75,8 +75,9 @@ pub fn identify_controller(
     data[64..64 + fw_len].copy_from_slice(&fw[..fw_len]);
     for b in &mut data[64 + fw_len..72] { *b = b' '; }
 
-    // MDTS (Maximum Data Transfer Size) — log2(pages), 5 = 32 pages = 128KB
-    data[77] = 5;
+    // MDTS (Maximum Data Transfer Size) — log2 of 4 KiB pages. The target
+    // overwrites it with its configured transfer size (#407).
+    data[77] = super::mdts_for(super::DEFAULT_MAX_TRANSFER);
 
     // CNTLID (assigned during connect, filled by caller)
     // data[78..80] set externally
@@ -302,8 +303,8 @@ mod tests {
         let mn = std::str::from_utf8(&data[24..64]).unwrap().trim();
         assert_eq!(mn, "StormBlock Virtual");
 
-        // MDTS
-        assert_eq!(data[77], 5);
+        // MDTS: 8 MiB = 2^11 pages (#407)
+        assert_eq!(data[77], 11);
 
         // NN (number of namespaces)
         let nn = u32::from_le_bytes(data[516..520].try_into().unwrap());

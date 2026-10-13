@@ -180,6 +180,24 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — IN PROGRESS
+
+The target advertised MDTS 5 (128 KiB) and maxh2cdata 131072, so a 1 MiB
+extent moved as 8 commands; the initiator's `MAX_CHUNK` was 128 KiB.
+- [x] target: `max_transfer` (default 8 MiB = MDTS 11, both extent classes
+      in one command; `STORMBLOCK_NVME_MAX_TRANSFER` for measuring), maxh2cdata
+      to match, a read/write past it refused (Invalid Field, DNR); a PDU past
+      32 MiB + headers refused before anything is allocated
+- [x] initiator: `transfer_for(MDTS, bs)` (forge 13.7 still gets 128 KiB),
+      NLB u32, path MTU (`IP_MTU`) per path, `BlockDevice::fabric_path`
+- [x] flow-over: health `flow_over.source_path {mtu, jumbo, max_transfer}`,
+      one line per source; the copy already reads one extent per read
+- [x] tests: `integration_nvmeof::an_extent_moves_as_one_command_and_an_
+      older_target_still_gets_its_size`, `transfer_for` unit
+- [ ] sc-build targeted + check.sh; rate model before/after
+      (`STORMBLOCK_NVME_MAX_TRANSFER=131072`); docs, CHANGELOG; golden.
+      Metal numbers (pve VM, server8) need a release with it
+
 ### Seed volumes keep directories and the label's case (2026-10-13, #326, P3) — DONE
 
 stormvm#63: combustion reads `combustion/script` on a vfat labelled
