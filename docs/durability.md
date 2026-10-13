@@ -246,9 +246,12 @@ tests run on.
    and iSCSI targets take the FUA bit, so a journal's commit block or an
    `O_DSYNC` write arrives as one FUA write rather than a write followed by
    a FLUSH of everything. The thin volume writes each leg of it with FUA at
-   the drive (`RWF_DSYNC` on the O_DIRECT device: a FUA write where the
-   drive has FUA, a write and a flush where it does not) when the leg's slot
-   is already on the device: that write waits for itself, not for every
+   the drive when the leg's slot is already on the device: `RWF_DSYNC` on
+   the O_DIRECT device where the drive itself takes FUA (`queue/fua` = 1:
+   NVMe, a SAS/SATA drive the kernel lets FUA through), and a write and the
+   device's group-committed flush where it does not (a SATA drive under
+   libata's default) — there `RWF_DSYNC` becomes a kernel flush per
+   request, which shares nothing and measured slower: that write waits for itself, not for every
    other volume's data in the drive's cache. When the write takes a slot (a
    first write, a copy-on-write) or lands in one whose entry is not
    published yet, its data is not enough: the entry has to be durable too
