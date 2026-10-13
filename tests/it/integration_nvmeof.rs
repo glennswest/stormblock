@@ -553,7 +553,9 @@ async fn an_extent_moves_as_one_command_and_an_older_target_still_gets_its_size(
     // Past MDTS (8 MiB + one block): refused with Invalid Field, the
     // connection kept.
     let over = (DEFAULT_MAX_TRANSFER / 4096 + 1) as u16;
-    assert!(io.read(1, 0, over).await.is_err(), "more than MDTS is refused");
+    // (This test initiator answers an error status with no data.)
+    let refused = io.read(1, 0, over).await;
+    assert!(refused.as_ref().map(|d| d.is_empty()).unwrap_or(true), "more than MDTS is refused, no data sent");
     assert_eq!(io.read(1, 0, 1).await.unwrap().len(), 4096, "and the connection still answers");
 
     // The engine's initiator: 8 MiB commands, an MTU it can name.
