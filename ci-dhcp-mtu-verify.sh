@@ -68,10 +68,13 @@ mount -t tmpfs run /run; mount -t tmpfs tmp /tmp
 for m in $(cat /lib/mods/order); do insmod /lib/mods/$m 2>&1 | sed "s/^/LOG insmod $m: /"; done
 r() { echo "RESULT $1 $2"; }
 ip link set lo up
-ipr link add srv type veth peer name port0 || echo "LOG veth: $?"
+echo "LOG ipr: $(ipr -V 2>&1)"
+ipr link add srv type veth peer name port0 2>&1 | sed 's/^/LOG veth: /'
+ip link add srv type veth peer name port0 2>&1 | sed 's/^/LOG bb veth: /'
+echo "LOG modules: $(cut -d' ' -f1 /proc/modules | tr '\n' ' ')"
 ipr link set srv mtu 9000; ipr link set srv up
 ipr addr add 192.168.30.252/20 dev srv
-ipr link add stormbr0 type bridge
+ipr link add stormbr0 type bridge 2>&1 | sed 's/^/LOG bridge: /' 
 ipr link set port0 master stormbr0
 ipr link set port0 up; ipr link set stormbr0 up
 cat > /etc/udhcpd.conf <<EOT
