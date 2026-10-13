@@ -23,6 +23,8 @@ use tokio::net::TcpListener;
 
 struct Slow {
     inner: Arc<dyn BlockDevice>,
+    /// A delay per read (#418): reading a golden is what a compose does.
+    read_ms: u64,
 }
 
 #[async_trait]
@@ -43,6 +45,9 @@ impl BlockDevice for Slow {
         self.inner.device_type()
     }
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        if self.read_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(self.read_ms)).await;
+        }
         self.inner.read(offset, buf).await
     }
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
@@ -60,10 +65,14 @@ impl BlockDevice for Slow {
 }
 
 async fn setup(dir: &TempDir) -> Arc<AppState> {
+    setup_with(dir, 0).await
+}
+
+async fn setup_with(dir: &TempDir, read_ms: u64) -> Arc<AppState> {
     let devices = common::create_file_devices(dir, 2, 512 * 1024 * 1024).await;
     let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
     for (dev, role) in devices.into_iter().zip([SlabRole::System, SlabRole::Data]) {
-        let slow: Arc<dyn BlockDevice> = Arc::new(Slow { inner: dev });
+        let slow: Arc<dyn BlockDevice> = Arc::new(Slow { inner: dev, read_ms });
         let slab = Slab::format_with(slow, SlabFormat::new(DEFAULT_EXTENT_SIZE, StorageTier::Hot).with_role(role))
             .await
             .unwrap();
@@ -197,4 +206,123 @@ async fn one_long_operation_per_volume() {
     drop(first);
     assert!(vm.begin_op(ids[0], "restripe").is_ok(), "released when its guard drops");
     drop(other);
+}
+
+/// #418: forge stopped answering for a minute under build load (a compose,
+/// exports, clones and seals at once; `GET /volumes` 64 s). Under the same
+/// mix, on a disk whose reads, writes and flushes are slow, `GET /health`
+/// and `GET /volumes` each answer in under a second, every time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_and_listings_answer_while_composes_exports_clones_and_seals_run() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_with(&dir, 40).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    let router = stormblock::mgmt::api::router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    common::wait_for_listener(addr).await;
+    let c = reqwest::Client::new();
+
+    // Two goldens with every extent written: a pallet of them digests both,
+    // then reads them again to verify, at 40 ms a read.
+    let mut goldens = Vec::new();
+    for g in 0..2 {
+        let r = c.post(format!("{base}/api/v1/volumes")).json(&serde_json::json!({"name": format!("golden-{g}"), "size": "24M"})).send().await.unwrap();
+        assert_eq!(r.status(), 201, "{}", r.text().await.unwrap());
+        let v: serde_json::Value = r.json().await.unwrap();
+        let id: VolumeId = VolumeId(v["id"].as_str().unwrap().parse().unwrap());
+        let dev = state.volume_manager.lock().await.get_volume(&id).unwrap();
+        for e in 0..24u64 {
+            dev.write(e * DEFAULT_EXTENT_SIZE, &vec![g as u8 + e as u8 + 1; DEFAULT_EXTENT_SIZE as usize]).await.unwrap();
+        }
+        dev.flush().await.unwrap();
+        state.volume_manager.lock().await.seal_volume(id, None).await.unwrap();
+        goldens.push(id.0.to_string());
+    }
+    std::env::set_var("STORMBLOCK_LOCK_ASSERT", "1");
+
+    let mut work = Vec::new();
+    // Two composes, as a release does.
+    for i in 0..2 {
+        let (c, base, g) = (c.clone(), base.clone(), goldens.clone());
+        work.push(tokio::spawn(async move {
+            let r = c
+                .post(format!("{base}/api/v1/volumes/compose/pallet"))
+                .json(&serde_json::json!({
+                    "name": format!("pallet-{i}"), "pallet": format!("p{i}"), "kind": "system",
+                    "members": [
+                        {"name": "a", "role": "rootimage", "volume": g[0]},
+                        {"name": "b", "role": "rootimage", "volume": g[1]},
+                        {"name": "cmdline", "role": "bootconfig", "text": "console=ttyS0"}
+                    ]
+                }))
+                .send()
+                .await
+                .unwrap();
+            (format!("compose pallet-{i}"), r.status().as_u16(), r.text().await.unwrap())
+        }));
+    }
+    // Clones of the goldens, creates that are written and sealed, exports.
+    for i in 0..6 {
+        let (c1, b1, src) = (c.clone(), base.clone(), goldens[i % 2].clone());
+        work.push(tokio::spawn(async move {
+            let r = c1.post(format!("{b1}/api/v1/volumes/{src}/clone")).json(&serde_json::json!({"name": format!("cow-{i}")})).send().await.unwrap();
+            (format!("clone cow-{i}"), r.status().as_u16(), r.text().await.unwrap())
+        }));
+        let (c2, b2, st) = (c.clone(), base.clone(), state.clone());
+        work.push(tokio::spawn(async move {
+            let r = c2.post(format!("{b2}/api/v1/volumes")).json(&serde_json::json!({"name": format!("built-{i}"), "size": "8M"})).send().await.unwrap();
+            let status = r.status().as_u16();
+            let v: serde_json::Value = r.json().await.unwrap();
+            if status != 201 {
+                return (format!("create built-{i}"), status, v.to_string());
+            }
+            let id = v["id"].as_str().unwrap().to_string();
+            let dev = st.volume_manager.lock().await.get_volume(&VolumeId(id.parse().unwrap())).unwrap();
+            dev.write(0, &vec![i as u8; 4096]).await.unwrap();
+            let r = c2.post(format!("{b2}/api/v1/volumes/{id}/seal")).json(&serde_json::json!({"force": true})).send().await.unwrap();
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap();
+            if !(200..300).contains(&status) {
+                return (format!("seal built-{i}"), status, body);
+            }
+            let r = c2.post(format!("{b2}/api/v1/exports")).json(&serde_json::json!({"volume_id": id, "protocol": "nvmeof"})).send().await.unwrap();
+            (format!("export built-{i}"), r.status().as_u16(), r.text().await.unwrap())
+        }));
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (mut slow_health, mut slow_list) = (Duration::ZERO, Duration::ZERO);
+    let mut polls = 0;
+    let started = Instant::now();
+    while work.iter().any(|w| !w.is_finished()) && started.elapsed() < Duration::from_secs(180) {
+        let t = Instant::now();
+        let r = c.get(format!("{base}/api/v1/health")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        slow_health = slow_health.max(t.elapsed());
+        let t = Instant::now();
+        let r = c.get(format!("{base}/api/v1/volumes")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        slow_list = slow_list.max(t.elapsed());
+        polls += 1;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let busy_for = started.elapsed();
+    for w in work {
+        let (what, status, body) = w.await.unwrap();
+        assert!((200..300).contains(&status), "{what}: {status} {body}");
+    }
+    println!("{polls} health + listing pairs during {busy_for:?}; slowest health {slow_health:?}, listing {slow_list:?}");
+    assert!(polls >= 5, "the work ended before the reads ran alongside it ({busy_for:?})");
+    assert!(slow_health < Duration::from_secs(1), "health waited {slow_health:?}");
+    assert!(slow_list < Duration::from_secs(1), "a listing waited {slow_list:?}");
+
+    // What was made is there.
+    let v: serde_json::Value = c.get(format!("{base}/api/v1/volumes")).send().await.unwrap().json().await.unwrap();
+    let names: Vec<String> = v["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap().to_string()).collect();
+    for n in ["pallet-0", "pallet-1", "cow-5", "built-5"] {
+        assert!(names.contains(&n.to_string()), "{n} missing from {names:?}");
+    }
+    server.abort();
 }
