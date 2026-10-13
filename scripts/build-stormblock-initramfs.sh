@@ -2345,8 +2345,12 @@ fi
 fi
 fi
 
-# The node's own config, copied for the network step: not kept past it.
-rm -f "${STATE_TOML:?}" "${STATE_NODE:?}"
+# The node's own config, copied for the network step: not kept past it. Set
+# only when the boot took the network branch: a boot with no network (a local
+# disk, no ip=, no appliance) never read it, and `${STATE_TOML:?}` here
+# aborted /init and panicked the kernel (found by ci-no-appliance-verify.sh
+# with #427; broken since #229).
+[ -n "${STATE_TOML:-}" ] && rm -f "$STATE_TOML" "${STATE_NODE:-}"
 
 # --- BEGIN clock step (covered by tests/initramfs-clock.sh)
 # Set the clock once, bounded, before anything reads it (#251).
