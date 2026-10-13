@@ -281,6 +281,41 @@ impl VolumeManager {
         &mut self,
         spec: PalletVolumeSpec,
     ) -> Result<PalletVolumeReport, VolumeError> {
+        let plan = self.plan_pallet(spec).await?;
+        let built = plan.build().await?;
+        let id = self.create_pallet_volume(&plan, &built).await?;
+        let handle = self.get_volume_handle(&id).ok_or(VolumeError::VolumeNotFound(id))?;
+        let result = plan.fill(&built, id, handle, &self.gem, &self.registry).await;
+        self.finish_pallet(&plan, id, result).await
+    }
+
+    /// [`compose_pallet`](Self::compose_pallet) holding the manager only for
+    /// its bookkeeping (#418): every member is read twice (the digest, then
+    /// the check where it landed), a golden of gigabytes each, and with the
+    /// manager held through that forge stopped answering for a minute under
+    /// a release's compose. Planned under the lock, digested with none,
+    /// created under it, written and checked with none, sealed under it.
+    pub async fn compose_pallet_unlocked(
+        vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
+        spec: PalletVolumeSpec,
+    ) -> Result<PalletVolumeReport, VolumeError> {
+        let (plan, gem, registry) = {
+            let m = vm.lock().await;
+            (m.plan_pallet(spec).await?, m.gem.clone(), m.registry.clone())
+        };
+        let built = plan.build().await?;
+        let (id, handle) = {
+            let mut m = vm.lock().await;
+            let id = m.create_pallet_volume(&plan, &built).await?;
+            (id, m.get_volume_handle(&id).ok_or(VolumeError::VolumeNotFound(id))?)
+        };
+        let result = plan.fill(&built, id, handle, &gem, &registry).await;
+        vm.lock().await.finish_pallet(&plan, id, result).await
+    }
+
+    /// What a compose reads and writes, resolved before anything exists, so a
+    /// bad member is refused first.
+    async fn plan_pallet(&self, spec: PalletVolumeSpec) -> Result<PalletPlan, VolumeError> {
         if spec.members.is_empty() {
             return Err(invalid("a composed pallet needs at least one member"));
         }
@@ -294,9 +329,6 @@ impl VolumeManager {
             Some(v) => v,
             None => self.highest_pallet_version(&pallet_name).await + 1,
         };
-
-        // Resolve every volume member first, so a bad one is refused before
-        // anything exists.
         let mut role = spec.role;
         let mut specs: Vec<(MemberSpec, bool, u64)> = Vec::with_capacity(spec.members.len());
         for m in &spec.members {
@@ -329,120 +361,31 @@ impl VolumeManager {
                 }
             }
         }
+        Ok(PalletPlan { spec, slot, lba, pallet_name, version, role, specs })
+    }
 
-        let attrs = Attributes {
-            priority: 1,
-            tries_left: crate::pallet::manager::DEFAULT_TRIES,
-            successful: false,
-            sealed: spec.sealed,
-            read_only: spec.read_only,
-            required: true,
-        };
-        let mut builder = PalletBuilder::new(pallet_name.clone(), version)
-            .kind(spec.kind)
-            .version_label(spec.version_label.clone())
-            .attributes(attrs)
-            .block_size(lba)
-            .content_align(slot);
-        for (m, _, _) in &specs {
-            builder = builder.member(MemberSpec {
-                name: m.name.clone(),
-                role: m.role.clone(),
-                kind: m.kind,
-                flags: m.flags,
-                content: m.content.clone(),
-                reserve: m.reserve,
-            });
-        }
-        // Digests every member — reading a golden through the engine, once.
-        let built = builder.build().await.map_err(pallet_err)?;
+    async fn create_pallet_volume(&mut self, plan: &PalletPlan, built: &crate::pallet::format::BuiltPallet) -> Result<VolumeId, VolumeError> {
+        let virtual_size = align_up(plan.spec.size.unwrap_or(0).max(built.total_bytes), plan.slot);
+        self.create_volume_with(&plan.spec.name, virtual_size, CreateOptions::default().in_role_opt(plan.role)).await
+    }
 
-        let virtual_size = align_up(spec.size.unwrap_or(0).max(built.total_bytes), slot);
-        let id = self
-            .create_volume_with(&spec.name, virtual_size, CreateOptions::default().in_role_opt(role))
-            .await?;
-
-        let result: Result<PalletVolumeReport, VolumeError> = async {
-            let handle = self.get_volume_handle(&id).ok_or(VolumeError::VolumeNotFound(id))?;
-            let dev: Arc<dyn BlockDevice> = handle.clone();
-
-            // The header, without its zero padding: the volume reads
-            // unallocated space as zeros already.
-            let used = built.header.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
-            let header_len = align_up(used as u64, lba as u64) as usize;
-            handle.write(0, &built.header[..header_len]).await?;
-            let mut written = header_len as u64;
-            let mut shared_bytes = 0u64;
-
-            let mut members = Vec::with_capacity(specs.len());
-            for p in &built.placements {
-                let (m, is_volume, span) = &specs[p.member];
-                if *is_volume {
-                    let source = match &spec.members[p.member].source {
-                        MemberSource::Volume { id, .. } => *id,
-                        MemberSource::Bytes(_) => unreachable!(),
-                    };
-                    let comp = Component { source, at: p.offset, span: *span };
-                    {
-                        let mut gem = self.gem.write().await;
-                        let mut reg = self.registry.write().await;
-                        compose::share_into(id, slot, &[comp], &mut gem, &mut reg).await?;
-                    }
-                    shared_bytes += span;
-                } else if p.len > 0 {
-                    let bytes = match &spec.members[p.member].source {
-                        MemberSource::Bytes(b) => b,
-                        MemberSource::Volume { .. } => unreachable!(),
-                    };
-                    handle.write(p.offset, bytes).await?;
-                    written += align_up(bytes.len() as u64, lba as u64);
-                }
-                members.push(ComposedMember {
-                    name: m.name.clone(),
-                    role: m.role.clone(),
-                    offset: p.offset,
-                    len: p.len,
-                    span: *span,
-                    shared: *is_volume,
-                    digest: hex::encode(p.digest),
-                });
-            }
-
-            // Check it where it landed, through the reader every consumer
-            // uses. A map that put a member one slot off would digest wrong
-            // here and nowhere sooner.
-            let view = PartitionView::whole(dev.clone());
-            let pallet = Pallet::read(&view).await.map_err(pallet_err)?;
-            pallet.verify_all(&view).await.map_err(|e| {
-                VolumeError::AllocatorError(format!("composed pallet did not verify: {e}"))
-            })?;
-
-            Ok(PalletVolumeReport {
-                id: id.0,
-                name: spec.name.clone(),
-                pallet: pallet_name.clone(),
-                version,
-                kind: spec.kind.to_string(),
-                manifest_digest: hex::encode(built.manifest_digest),
-                lba,
-                virtual_size,
-                members,
-                shared_bytes,
-                written_bytes: written,
-            })
-        }
-        .await;
-
+    /// Sealed when it verified; taken back when it did not.
+    async fn finish_pallet(
+        &mut self,
+        plan: &PalletPlan,
+        id: VolumeId,
+        result: Result<PalletVolumeReport, VolumeError>,
+    ) -> Result<PalletVolumeReport, VolumeError> {
         match result {
             Ok(report) => {
                 let fs = FsInfo {
                     kind: "pallet".into(),
                     journal: false,
-                    features: Some(format!("lba={lba}")),
+                    features: Some(format!("lba={}", plan.lba)),
                     sixty_four_bit: false,
                     metadata_csum: false,
                     csum_seed: false,
-                    label: pallet_name,
+                    label: plan.pallet_name.clone(),
                     uuid: None,
                 };
                 self.seal_volume(id, Some(fs)).await?;
@@ -875,10 +818,36 @@ impl VolumeManager {
     /// share the wrong slot, and the fault would surface as a golden that
     /// reads as a different golden a slot in.
     pub async fn compose_slab(&mut self, spec: SlabVolumeSpec) -> Result<SlabVolumeReport, VolumeError> {
-        use crate::drive::slab::{auto_metadata_bytes, Slab, SlabFormat};
-        use crate::raid::RaidArrayId;
-        use crate::volume::gem::ExtentLocation;
+        let plan = self.plan_slab(spec).await?;
+        let id = self.create_volume_with(&plan.spec.name, plan.size, CreateOptions::default().in_role_opt(plan.placement)).await?;
+        let handle = self.get_volume_handle(&id).ok_or(VolumeError::VolumeNotFound(id))?;
+        let result = plan.fill(id, handle, &self.gem, &self.registry).await;
+        self.finish_slab(plan, id, result).await
+    }
 
+    /// [`compose_slab`](Self::compose_slab) holding the manager only for its
+    /// bookkeeping (#418): laying a slab inside the volume, probing and
+    /// stamping its clones and flushing it is I/O, and with the manager held
+    /// through it nothing else on the node answered. Planned under the lock,
+    /// created under it, filled with none, sealed under it.
+    pub async fn compose_slab_unlocked(
+        vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
+        spec: SlabVolumeSpec,
+    ) -> Result<SlabVolumeReport, VolumeError> {
+        let (plan, gem, registry) = {
+            let m = vm.lock().await;
+            (m.plan_slab(spec).await?, m.gem.clone(), m.registry.clone())
+        };
+        let (id, handle) = {
+            let mut m = vm.lock().await;
+            let id = m.create_volume_with(&plan.spec.name, plan.size, CreateOptions::default().in_role_opt(plan.placement)).await?;
+            (id, m.get_volume_handle(&id).ok_or(VolumeError::VolumeNotFound(id))?)
+        };
+        let result = plan.fill(id, handle, &gem, &registry).await;
+        vm.lock().await.finish_slab(plan, id, result).await
+    }
+
+    async fn plan_slab(&self, spec: SlabVolumeSpec) -> Result<SlabPlan, VolumeError> {
         if spec.goldens.is_empty() {
             return Err(invalid("a composed slab needs at least one golden"));
         }
@@ -889,14 +858,6 @@ impl VolumeManager {
         // exists. A name a boot resolves has to be unique inside the slab.
         let mut taken = std::collections::HashSet::new();
         let mut placement = spec.placement;
-        struct Planned {
-            golden_name: String,
-            clone_names: Vec<String>,
-            source: VolumeId,
-            source_bytes: u64,
-            size: u64,
-            template: bool,
-        }
         let mut planned = Vec::with_capacity(spec.goldens.len());
         for g in &spec.goldens {
             let handle = self.get_volume_handle(&g.source).ok_or(VolumeError::VolumeNotFound(g.source))?;
@@ -937,228 +898,16 @@ impl VolumeManager {
             });
         }
 
-        let id = self
-            .create_volume_with(&spec.name, size, CreateOptions::default().in_role_opt(placement))
-            .await?;
+        Ok(SlabPlan { spec, slot, size, placement, planned })
+    }
 
-        let result: Result<SlabVolumeReport, VolumeError> = async {
-            let handle = self.get_volume_handle(&id).ok_or(VolumeError::VolumeNotFound(id))?;
-            let dev: Arc<dyn BlockDevice> = handle.clone();
-
-            // The slab's own record lives inside it: an image has no
-            // filesystem to keep one anywhere else.
-            let meta = spec.meta_bytes.unwrap_or_else(|| auto_metadata_bytes(size, slot));
-            let slab = Slab::format_with(
-                dev.clone(),
-                SlabFormat::new(slot, spec.tier).with_metadata(meta).with_role(spec.role),
-            )
-            .await
-            .map_err(VolumeError::Drive)?;
-            let slab_id = slab.slab_id();
-            let data_offset = slab.data_offset();
-            let total_slots = slab.total_slots();
-            if data_offset % slot != 0 {
-                return Err(invalid(format!(
-                    "the slab's data region starts at {data_offset}, which is not on a {slot}-byte slot boundary"
-                )));
-            }
-            let mut written = data_offset;
-            let mut shared = 0u64;
-
-            let mut nested = VolumeManager::new(slot);
-            nested.attach_slab(RaidArrayId(Uuid::new_v4()), slab).await?;
-            nested.persist_to_slab(slab_id);
-
-            let mut volumes = Vec::new();
-            let mut free = total_slots;
-            for p in &planned {
-                // Thin (#362): a golden takes a slot only for each extent its
-                // source maps. A blank's holes (a 16 TiB ext4 is tens of MiB
-                // of metadata) read as zeros either way; taking a slot for
-                // every extent of the declared size refused a ladder of
-                // blanks up to 16 TiB in a 16 GiB slab. A source with parity
-                // keeps the full contiguous run: its stripes cannot be
-                // renumbered extent by extent.
-                crate::volume::gem::ensure_resident(&self.gem, p.source)
-                    .await
-                    .map_err(|e| VolumeError::AllocatorError(format!("golden '{}': {e}", p.golden_name)))?;
-                let mapped: Option<Vec<u64>> = {
-                    let gem = self.gem.read().await;
-                    match gem.get_volume_map(&p.source) {
-                        Some(m) if !m.parity.is_empty() => None,
-                        Some(m) => {
-                            let mut k: Vec<u64> = m.extents.keys().collect();
-                            k.sort_unstable();
-                            Some(k)
-                        }
-                        None => Some(Vec::new()),
-                    }
-                };
-                let slots = match &mapped {
-                    Some(m) => m.len() as u64,
-                    None => p.size / slot,
-                };
-                if slots > free {
-                    return Err(invalid(format!(
-                        "golden '{}' needs {slots} slots (the extents it maps) and the slab has {free} left of {total_slots}",
-                        p.golden_name
-                    )));
-                }
-                free -= slots;
-
-                let gid = nested
-                    .create_volume_with(&p.golden_name, p.size, CreateOptions::default().in_role(spec.role))
-                    .await?;
-
-                // Take the golden's slots explicitly — a thin volume maps
-                // nothing until written, and nothing is going to be written.
-                // The nested golden's extent k is the source's extent at the
-                // same offset: the k-th mapped one when thin, k itself when not.
-                let nested_vext = |k: usize| -> u64 {
-                    match &mapped {
-                        Some(m) => m[k],
-                        None => k as u64,
-                    }
-                };
-                let run: Vec<u64> = {
-                    let mut reg = nested.registry.write().await;
-                    let s = reg
-                        .get_mut(&slab_id)
-                        .ok_or_else(|| VolumeError::AllocatorError("nested slab vanished".into()))?;
-                    let mut run = Vec::with_capacity(slots as usize);
-                    for k in 0..slots as usize {
-                        run.push(s.allocate(gid, nested_vext(k)).await.map_err(VolumeError::Drive)?);
-                    }
-                    run
-                };
-                if run.windows(2).any(|w| w[1] != w[0] + 1) {
-                    return Err(VolumeError::AllocatorError(format!(
-                        "golden '{}' was not given a contiguous run of slots ({:?}...)",
-                        p.golden_name,
-                        &run[..run.len().min(4)]
-                    )));
-                }
-                {
-                    let mut gem = nested.gem.write().await;
-                    for (k, &s) in run.iter().enumerate() {
-                        gem.insert(gid, nested_vext(k), ExtentLocation::new(slab_id, s));
-                    }
-                }
-                {
-                    let mut reg = nested.registry.write().await;
-                    for &s in &run {
-                        reg.commit(slab_id, s);
-                    }
-                }
-
-                // Now the outer map: the bytes of those nested slots are the
-                // source's slots. From here on the golden reads as its content.
-                match &mapped {
-                    Some(m) => {
-                        // Each mapped source extent lands where its nested slot is.
-                        let base = data_offset / slot;
-                        let place: std::collections::HashMap<u64, u64> =
-                            m.iter().zip(&run).map(|(&v, &s)| (v, base + s)).collect();
-                        let mut gem = self.gem.write().await;
-                        let mut reg = self.registry.write().await;
-                        compose::share_remapped(id, p.source, &place, &mut gem, &mut reg)
-                            .await?
-                            .ok_or_else(|| VolumeError::AllocatorError(format!(
-                                "golden '{}': its source gained parity while composing",
-                                p.golden_name
-                            )))?;
-                        shared += m.len() as u64 * slot;
-                    }
-                    None => {
-                        let at = data_offset + run[0] * slot;
-                        let comp = Component { source: p.source, at, span: p.size };
-                        let mut gem = self.gem.write().await;
-                        let mut reg = self.registry.write().await;
-                        compose::share_into(id, slot, &[comp], &mut gem, &mut reg).await?;
-                        shared += align_up(p.source_bytes, slot);
-                    }
-                }
-                let first_slot = run.first().copied().unwrap_or(0);
-
-                let fs = {
-                    let vol = nested.get_volume(&gid).ok_or(VolumeError::VolumeNotFound(gid))?;
-                    crate::fs::disk::probe(&vol).await
-                };
-                nested.seal_volume(gid, fs.clone()).await?;
-                if p.template {
-                    nested.mark_template(gid);
-                }
-                volumes.push(ComposedSlabVolume {
-                    id: gid.0,
-                    name: p.golden_name.clone(),
-                    size_bytes: p.size,
-                    first_slot,
-                    slots,
-                    clone_of: None,
-                    template: p.template,
-                    fs_uuid: fs.as_ref().and_then(|f| f.uuid),
-                });
-
-                for cname in &p.clone_names {
-                    let cid = nested.create_snapshot(gid, cname).await?;
-                    // A clone is a filesystem of its own (#76). Stamping it
-                    // is the one write a clone costs: the slot the superblock
-                    // sits in is copied, and the rest stays shared.
-                    let mut fresh = None;
-                    if let Some(f) = &fs {
-                        let cdev = nested.get_volume(&cid).ok_or(VolumeError::VolumeNotFound(cid))?;
-                        fresh = if f.kind == "ext4" {
-                            let u = Uuid::new_v4();
-                            crate::fs::ext4::stamp_uuid(&cdev, u, false)
-                                .await
-                                .map_err(|e| VolumeError::AllocatorError(format!("stamp clone '{cname}': {e}")))?;
-                            Some(u)
-                        } else {
-                            crate::fs::disk::stamp(&cdev, f).await.map_err(VolumeError::Drive)?
-                        };
-                        if fresh.is_some() {
-                            written += slot;
-                        }
-                    }
-                    if let Some(u) = fresh {
-                        nested.set_fs_uuid(cid, u).await?;
-                    }
-                    volumes.push(ComposedSlabVolume {
-                        id: cid.0,
-                        name: cname.clone(),
-                        size_bytes: p.size,
-                        first_slot,
-                        slots,
-                        clone_of: Some(gid.0),
-                        template: false,
-                        fs_uuid: fresh,
-                    });
-                }
-            }
-
-            // The record. A slab that cannot say what is in it boots to "no
-            // volume metadata", so this failing is the composition failing.
-            nested
-                .persist_checked()
-                .await
-                .map_err(|e| VolumeError::AllocatorError(format!("slab metadata: {e}")))?;
-            handle.flush().await?;
-
-            Ok(SlabVolumeReport {
-                id: id.0,
-                name: spec.name.clone(),
-                role: spec.role.to_string(),
-                slab_uuid: slab_id.0,
-                slot_size: slot,
-                total_slots,
-                data_offset,
-                volumes,
-                shared_bytes: shared,
-                written_bytes: written,
-            })
-        }
-        .await;
-
+    async fn finish_slab(
+        &mut self,
+        plan: SlabPlan,
+        id: VolumeId,
+        result: Result<SlabVolumeReport, VolumeError>,
+    ) -> Result<SlabVolumeReport, VolumeError> {
+        let (spec, slot) = (plan.spec, plan.slot);
         match result {
             Ok(report) => {
                 let fs = FsInfo {
@@ -1186,6 +935,379 @@ impl VolumeManager {
                 Err(e)
             }
         }
+    }
+}
+
+/// A pallet compose, planned (#418): what each step needs, so the steps that
+/// read and write run with no manager lock.
+pub struct PalletPlan {
+    spec: PalletVolumeSpec,
+    slot: u64,
+    lba: u32,
+    pallet_name: String,
+    version: u64,
+    role: Option<SlabRole>,
+    specs: Vec<(MemberSpec, bool, u64)>,
+}
+
+impl PalletPlan {
+    /// The header, every member digested — reading each golden once.
+    async fn build(&self) -> Result<crate::pallet::format::BuiltPallet, VolumeError> {
+        let attrs = Attributes {
+            priority: 1,
+            tries_left: crate::pallet::manager::DEFAULT_TRIES,
+            successful: false,
+            sealed: self.spec.sealed,
+            read_only: self.spec.read_only,
+            required: true,
+        };
+        let mut builder = PalletBuilder::new(self.pallet_name.clone(), self.version)
+            .kind(self.spec.kind)
+            .version_label(self.spec.version_label.clone())
+            .attributes(attrs)
+            .block_size(self.lba)
+            .content_align(self.slot);
+        for (m, _, _) in &self.specs {
+            builder = builder.member(MemberSpec {
+                name: m.name.clone(),
+                role: m.role.clone(),
+                kind: m.kind,
+                flags: m.flags,
+                content: m.content.clone(),
+                reserve: m.reserve,
+            });
+        }
+        builder.build().await.map_err(pallet_err)
+    }
+
+    /// The header written, each golden's slots shared in, inline members
+    /// written, and the whole read back through the reader every consumer
+    /// uses.
+    async fn fill(
+        &self,
+        built: &crate::pallet::format::BuiltPallet,
+        id: VolumeId,
+        handle: Arc<crate::volume::thin::ThinVolumeHandle>,
+        gem: &Arc<crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>>,
+        registry: &Arc<crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>>,
+    ) -> Result<PalletVolumeReport, VolumeError> {
+        let (slot, lba, spec) = (self.slot, self.lba, &self.spec);
+        let dev: Arc<dyn BlockDevice> = handle.clone();
+
+        // The header, without its zero padding: the volume reads
+        // unallocated space as zeros already.
+        let used = built.header.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
+        let header_len = align_up(used as u64, lba as u64) as usize;
+        handle.write(0, &built.header[..header_len]).await?;
+        let mut written = header_len as u64;
+        let mut shared_bytes = 0u64;
+
+        let mut members = Vec::with_capacity(self.specs.len());
+        for p in &built.placements {
+            let (m, is_volume, span) = &self.specs[p.member];
+            if *is_volume {
+                let source = match &spec.members[p.member].source {
+                    MemberSource::Volume { id, .. } => *id,
+                    MemberSource::Bytes(_) => unreachable!(),
+                };
+                let comp = Component { source, at: p.offset, span: *span };
+                {
+                    let mut gem = gem.write().await;
+                    let mut reg = registry.write().await;
+                    compose::share_into(id, slot, &[comp], &mut gem, &mut reg).await?;
+                }
+                shared_bytes += span;
+            } else if p.len > 0 {
+                let bytes = match &spec.members[p.member].source {
+                    MemberSource::Bytes(b) => b,
+                    MemberSource::Volume { .. } => unreachable!(),
+                };
+                handle.write(p.offset, bytes).await?;
+                written += align_up(bytes.len() as u64, lba as u64);
+            }
+            members.push(ComposedMember {
+                name: m.name.clone(),
+                role: m.role.clone(),
+                offset: p.offset,
+                len: p.len,
+                span: *span,
+                shared: *is_volume,
+                digest: hex::encode(p.digest),
+            });
+        }
+
+        // Check it where it landed, through the reader every consumer
+        // uses. A map that put a member one slot off would digest wrong
+        // here and nowhere sooner.
+        let view = PartitionView::whole(dev.clone());
+        let pallet = Pallet::read(&view).await.map_err(pallet_err)?;
+        pallet.verify_all(&view).await.map_err(|e| {
+            VolumeError::AllocatorError(format!("composed pallet did not verify: {e}"))
+        })?;
+
+        Ok(PalletVolumeReport {
+            id: id.0,
+            name: spec.name.clone(),
+            pallet: self.pallet_name.clone(),
+            version: self.version,
+            kind: spec.kind.to_string(),
+            manifest_digest: hex::encode(built.manifest_digest),
+            lba,
+            virtual_size: handle.capacity_bytes(),
+            members,
+            shared_bytes,
+            written_bytes: written,
+        })
+    }
+}
+
+/// A golden a composed slab carries, resolved.
+struct Planned {
+    golden_name: String,
+    clone_names: Vec<String>,
+    source: VolumeId,
+    source_bytes: u64,
+    size: u64,
+    template: bool,
+}
+
+/// A slab compose, planned (#418).
+pub struct SlabPlan {
+    spec: SlabVolumeSpec,
+    slot: u64,
+    size: u64,
+    placement: Option<SlabRole>,
+    planned: Vec<Planned>,
+}
+
+impl SlabPlan {
+    /// The slab laid inside the volume, its goldens' slots shared in, its
+    /// clones made and stamped, its record written and flushed — with no
+    /// manager lock (#418).
+    async fn fill(
+        &self,
+        id: VolumeId,
+        handle: Arc<crate::volume::thin::ThinVolumeHandle>,
+        gem: &Arc<crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>>,
+        registry: &Arc<crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>>,
+    ) -> Result<SlabVolumeReport, VolumeError> {
+        use crate::drive::slab::{auto_metadata_bytes, Slab, SlabFormat};
+        use crate::raid::RaidArrayId;
+        use crate::volume::gem::ExtentLocation;
+        let (spec, slot, size, planned) = (&self.spec, self.slot, self.size, &self.planned);
+        let dev: Arc<dyn BlockDevice> = handle.clone();
+
+        // The slab's own record lives inside it: an image has no
+        // filesystem to keep one anywhere else.
+        let meta = spec.meta_bytes.unwrap_or_else(|| auto_metadata_bytes(size, slot));
+        let slab = Slab::format_with(
+            dev.clone(),
+            SlabFormat::new(slot, spec.tier).with_metadata(meta).with_role(spec.role),
+        )
+        .await
+        .map_err(VolumeError::Drive)?;
+        let slab_id = slab.slab_id();
+        let data_offset = slab.data_offset();
+        let total_slots = slab.total_slots();
+        if data_offset % slot != 0 {
+            return Err(invalid(format!(
+                "the slab's data region starts at {data_offset}, which is not on a {slot}-byte slot boundary"
+            )));
+        }
+        let mut written = data_offset;
+        let mut shared = 0u64;
+
+        let mut nested = VolumeManager::new(slot);
+        nested.attach_slab(RaidArrayId(Uuid::new_v4()), slab).await?;
+        nested.persist_to_slab(slab_id);
+
+        let mut volumes = Vec::new();
+        let mut free = total_slots;
+        for p in planned.iter() {
+            // Thin (#362): a golden takes a slot only for each extent its
+            // source maps. A blank's holes (a 16 TiB ext4 is tens of MiB
+            // of metadata) read as zeros either way; taking a slot for
+            // every extent of the declared size refused a ladder of
+            // blanks up to 16 TiB in a 16 GiB slab. A source with parity
+            // keeps the full contiguous run: its stripes cannot be
+            // renumbered extent by extent.
+            crate::volume::gem::ensure_resident(gem, p.source)
+                .await
+                .map_err(|e| VolumeError::AllocatorError(format!("golden '{}': {e}", p.golden_name)))?;
+            let mapped: Option<Vec<u64>> = {
+                let gem = gem.read().await;
+                match gem.get_volume_map(&p.source) {
+                    Some(m) if !m.parity.is_empty() => None,
+                    Some(m) => {
+                        let mut k: Vec<u64> = m.extents.keys().collect();
+                        k.sort_unstable();
+                        Some(k)
+                    }
+                    None => Some(Vec::new()),
+                }
+            };
+            let slots = match &mapped {
+                Some(m) => m.len() as u64,
+                None => p.size / slot,
+            };
+            if slots > free {
+                return Err(invalid(format!(
+                    "golden '{}' needs {slots} slots (the extents it maps) and the slab has {free} left of {total_slots}",
+                    p.golden_name
+                )));
+            }
+            free -= slots;
+
+            let gid = nested
+                .create_volume_with(&p.golden_name, p.size, CreateOptions::default().in_role(spec.role))
+                .await?;
+
+            // Take the golden's slots explicitly — a thin volume maps
+            // nothing until written, and nothing is going to be written.
+            // The nested golden's extent k is the source's extent at the
+            // same offset: the k-th mapped one when thin, k itself when not.
+            let nested_vext = |k: usize| -> u64 {
+                match &mapped {
+                    Some(m) => m[k],
+                    None => k as u64,
+                }
+            };
+            let run: Vec<u64> = {
+                let mut reg = nested.registry.write().await;
+                let s = reg
+                    .get_mut(&slab_id)
+                    .ok_or_else(|| VolumeError::AllocatorError("nested slab vanished".into()))?;
+                let mut run = Vec::with_capacity(slots as usize);
+                for k in 0..slots as usize {
+                    run.push(s.allocate(gid, nested_vext(k)).await.map_err(VolumeError::Drive)?);
+                }
+                run
+            };
+            if run.windows(2).any(|w| w[1] != w[0] + 1) {
+                return Err(VolumeError::AllocatorError(format!(
+                    "golden '{}' was not given a contiguous run of slots ({:?}...)",
+                    p.golden_name,
+                    &run[..run.len().min(4)]
+                )));
+            }
+            {
+                let mut gem = nested.gem.write().await;
+                for (k, &s) in run.iter().enumerate() {
+                    gem.insert(gid, nested_vext(k), ExtentLocation::new(slab_id, s));
+                }
+            }
+            {
+                let mut reg = nested.registry.write().await;
+                for &s in &run {
+                    reg.commit(slab_id, s);
+                }
+            }
+
+            // Now the outer map: the bytes of those nested slots are the
+            // source's slots. From here on the golden reads as its content.
+            match &mapped {
+                Some(m) => {
+                    // Each mapped source extent lands where its nested slot is.
+                    let base = data_offset / slot;
+                    let place: std::collections::HashMap<u64, u64> =
+                        m.iter().zip(&run).map(|(&v, &s)| (v, base + s)).collect();
+                    let mut gem = gem.write().await;
+                    let mut reg = registry.write().await;
+                    compose::share_remapped(id, p.source, &place, &mut gem, &mut reg)
+                        .await?
+                        .ok_or_else(|| VolumeError::AllocatorError(format!(
+                            "golden '{}': its source gained parity while composing",
+                            p.golden_name
+                        )))?;
+                    shared += m.len() as u64 * slot;
+                }
+                None => {
+                    let at = data_offset + run[0] * slot;
+                    let comp = Component { source: p.source, at, span: p.size };
+                    let mut gem = gem.write().await;
+                    let mut reg = registry.write().await;
+                    compose::share_into(id, slot, &[comp], &mut gem, &mut reg).await?;
+                    shared += align_up(p.source_bytes, slot);
+                }
+            }
+            let first_slot = run.first().copied().unwrap_or(0);
+
+            let fs = {
+                let vol = nested.get_volume(&gid).ok_or(VolumeError::VolumeNotFound(gid))?;
+                crate::fs::disk::probe(&vol).await
+            };
+            nested.seal_volume(gid, fs.clone()).await?;
+            if p.template {
+                nested.mark_template(gid);
+            }
+            volumes.push(ComposedSlabVolume {
+                id: gid.0,
+                name: p.golden_name.clone(),
+                size_bytes: p.size,
+                first_slot,
+                slots,
+                clone_of: None,
+                template: p.template,
+                fs_uuid: fs.as_ref().and_then(|f| f.uuid),
+            });
+
+            for cname in &p.clone_names {
+                let cid = nested.create_snapshot(gid, cname).await?;
+                // A clone is a filesystem of its own (#76). Stamping it
+                // is the one write a clone costs: the slot the superblock
+                // sits in is copied, and the rest stays shared.
+                let mut fresh = None;
+                if let Some(f) = &fs {
+                    let cdev = nested.get_volume(&cid).ok_or(VolumeError::VolumeNotFound(cid))?;
+                    fresh = if f.kind == "ext4" {
+                        let u = Uuid::new_v4();
+                        crate::fs::ext4::stamp_uuid(&cdev, u, false)
+                            .await
+                            .map_err(|e| VolumeError::AllocatorError(format!("stamp clone '{cname}': {e}")))?;
+                        Some(u)
+                    } else {
+                        crate::fs::disk::stamp(&cdev, f).await.map_err(VolumeError::Drive)?
+                    };
+                    if fresh.is_some() {
+                        written += slot;
+                    }
+                }
+                if let Some(u) = fresh {
+                    nested.set_fs_uuid(cid, u).await?;
+                }
+                volumes.push(ComposedSlabVolume {
+                    id: cid.0,
+                    name: cname.clone(),
+                    size_bytes: p.size,
+                    first_slot,
+                    slots,
+                    clone_of: Some(gid.0),
+                    template: false,
+                    fs_uuid: fresh,
+                });
+            }
+        }
+
+        // The record. A slab that cannot say what is in it boots to "no
+        // volume metadata", so this failing is the composition failing.
+        nested
+            .persist_checked()
+            .await
+            .map_err(|e| VolumeError::AllocatorError(format!("slab metadata: {e}")))?;
+        handle.flush().await?;
+
+        Ok(SlabVolumeReport {
+            id: id.0,
+            name: spec.name.clone(),
+            role: spec.role.to_string(),
+            slab_uuid: slab_id.0,
+            slot_size: slot,
+            total_slots,
+            data_offset,
+            volumes,
+            shared_bytes: shared,
+            written_bytes: written,
+        })
     }
 }
 

@@ -2957,7 +2957,7 @@ async fn compose_pallet(
         Err(e) => return ApiError::bad_request(e),
     };
 
-    let mut vm = state.volume_manager.lock().await;
+    let vm = state.volume_manager.lock().await;
     let mut members = Vec::with_capacity(req.members.len());
     for m in &req.members {
         let kind = m
@@ -3005,10 +3005,14 @@ async fn compose_pallet(
     spec.read_only = req.read_only.unwrap_or(true);
     spec.members = members;
 
-    let report = match vm.compose_pallet(spec).await {
+    // Every member is read twice (digest, check): not with the manager held,
+    // or nothing else on the node answers meanwhile (#418).
+    drop(vm);
+    let report = match crate::volume::VolumeManager::compose_pallet_unlocked(&state.volume_manager, spec).await {
         Ok(r) => r,
         Err(e) => return ApiError::bad_request(format!("failed to compose pallet: {e}")),
     };
+    let vm = state.volume_manager.lock().await;
     match volume_response(&vm, VolumeId(report.id)).await {
         Some(volume) => {
             (axum::http::StatusCode::CREATED, Json(ComposePalletResponse { volume, pallet: report })).into_response()
@@ -3117,7 +3121,7 @@ async fn compose_slab(
         Err(e) => return ApiError::bad_request(format!("meta_size: {e}")),
     };
 
-    let mut vm = state.volume_manager.lock().await;
+    let vm = state.volume_manager.lock().await;
     let mut goldens = Vec::with_capacity(req.goldens.len());
     for g in &req.goldens {
         let source = match vm.find_volume(&g.volume).await {
@@ -3148,10 +3152,14 @@ async fn compose_slab(
         goldens,
         placement,
     };
-    let report = match vm.compose_slab(spec).await {
+    // Laying the slab, stamping its clones and flushing it is I/O: not with
+    // the manager held (#418).
+    drop(vm);
+    let report = match crate::volume::VolumeManager::compose_slab_unlocked(&state.volume_manager, spec).await {
         Ok(r) => r,
         Err(e) => return ApiError::bad_request(format!("failed to compose slab: {e}")),
     };
+    let vm = state.volume_manager.lock().await;
     match volume_response(&vm, VolumeId(report.id)).await {
         Some(volume) => (axum::http::StatusCode::CREATED, Json(ComposeSlabResponse { volume, slab: report })).into_response(),
         None => ApiError::internal("composed slab vanished"),

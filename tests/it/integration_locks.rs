@@ -263,6 +263,22 @@ async fn health_and_listings_answer_while_composes_exports_clones_and_seals_run(
             (format!("compose pallet-{i}"), r.status().as_u16(), r.text().await.unwrap())
         }));
     }
+    // And a release's slab, laid inside a volume, its goldens shared in.
+    {
+        let (c, base, g) = (c.clone(), base.clone(), goldens.clone());
+        work.push(tokio::spawn(async move {
+            let r = c
+                .post(format!("{base}/api/v1/volumes/compose/slab"))
+                .json(&serde_json::json!({
+                    "name": "release-slab", "role": "system", "size": "256M",
+                    "goldens": [{"name": "a", "volume": g[0]}, {"name": "b", "volume": g[1]}]
+                }))
+                .send()
+                .await
+                .unwrap();
+            ("compose release-slab".to_string(), r.status().as_u16(), r.text().await.unwrap())
+        }));
+    }
     // Clones of the goldens, creates that are written and sealed, exports.
     for i in 0..6 {
         let (c1, b1, src) = (c.clone(), base.clone(), goldens[i % 2].clone());
@@ -321,7 +337,7 @@ async fn health_and_listings_answer_while_composes_exports_clones_and_seals_run(
     // What was made is there.
     let v: serde_json::Value = c.get(format!("{base}/api/v1/volumes")).send().await.unwrap().json().await.unwrap();
     let names: Vec<String> = v["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap().to_string()).collect();
-    for n in ["pallet-0", "pallet-1", "cow-5", "built-5"] {
+    for n in ["pallet-0", "pallet-1", "release-slab", "cow-5", "built-5"] {
         assert!(names.contains(&n.to_string()), "{n} missing from {names:?}");
     }
     server.abort();
