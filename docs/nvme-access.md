@@ -189,6 +189,26 @@ null`).
 | `require_dhchap` | `false` | every host of a host subsystem gets a secret — except boot hosts: a claim is unauthenticated and firmware cannot be handed a secret, so a boot subsystem is bound by NQN only |
 | `boothost_host_nqn` | `nqn.2026-09.lo.storm:host-{name}` | what a boot host presents |
 
+## Transfer size: an extent per command (#407)
+
+Every target (shared, forge, host subsystems, `/serve/v1`) advertises MDTS
+11 (8 MiB, in 4 KiB pages) and MAXH2CDATA 8 MiB, so an extent of either
+class (1 MiB hot, 8 MiB bulk) moves as one command. Until #407 it was MDTS
+5 (128 KiB): a 1 MiB extent was 8 commands. A read or write asking for more
+than MDTS is refused (Invalid Field in Command, DNR) before any buffer is
+made for it, and a PDU longer than 32 MiB plus headers drops the
+connection: its length is the peer's word, read before anything is
+authenticated.
+
+The engine's initiator reads the target's MDTS at attach and sizes its
+commands by it, within its own limit and a 16-bit NLB: an older target
+(forge 13.7 says 128 KiB) gets 128 KiB commands as before. Its writes go
+in-capsule (only our targets take them that way; IOCCSZ says 8 KiB). The
+attach log line names the transfer and the path MTU (`jumbo` at 9000 or
+more); a flow-over from a remote source reports both in health
+(`flow_over.source_path`). `STORMBLOCK_NVME_MAX_TRANSFER` (bytes) sets both
+sides, for measuring.
+
 ## Files
 
 `<data_dir>/nvme_hosts.json` (mode 0600 — it holds the secrets): every host

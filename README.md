@@ -366,6 +366,7 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_FLOW_RUN_MB` | the largest write a flow-over makes on its destination: neighbouring slots merged into one (#401) | `32` |
 | `STORMBLOCK_FLOW_COALESCE` | `0`: one write and read-back per extent, as before #401, for measuring | on |
 | `STORMBLOCK_FLOW_FLUSH_BOUND_MS` | the destination disk's flush time (p90, 30 s) above which a flow-over halves its window and pauses for one flush after each (#282) | `1000`; `0` off |
+| `STORMBLOCK_NVME_MAX_TRANSFER` | The most one NVMe/TCP command carries, in bytes (a power of two, 4096 to 32 MiB): what a target advertises as MDTS and maxh2cdata, and what the initiator sends at most (#407). 131072 is what every engine did before | `8388608` |
 | `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per path of an attached NVMe/TCP namespace (#331, #90) | `4` |
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
@@ -570,7 +571,12 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   flow-over has finished, left out when there is none. Beside it,
   `"flow_over"` (#401): `moved`, `zeroed` (extents that read all zeros and
   were unmapped, not copied), `bytes`, `seconds`, `mb_per_s`,
-  `extents_per_s` and `eta_seconds` (for what is left, at the rate so far).
+  `extents_per_s` and `eta_seconds` (for what is left, at the rate so far),
+  and `source_path` when the source is reached over NVMe/TCP (#407): `mtu`
+  (the connection's path MTU, `IP_MTU`; 0 unknown), `jumbo` (≥ 9000) and
+  `max_transfer` (the bytes one command carries: the target's MDTS, 8 MiB
+  on an engine with #407, 128 KiB on an older one such as forge 13.7). The
+  flow-over also says it once per source on the console.
   Kept by the flow-over
   as it goes, so it is never missing for being busy; an abandoned flow-over
   leaves it above 0 (the node still runs from the appliance), and
