@@ -180,6 +180,25 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — WAITING ON THE OWNER
+
+X9 blades get a 256 GB SATA SSD for the system half; data stays on the 2 TB
+SMR HDD. Today one drive carries both halves (`lay_node_slabs`,
+`update_system_slab`, `FlowOver.disk`, /init's `INSTALL_OVER`). Asked on #402
+(needs-owner): rule 3 (#351) puts install-over first, which picks the HDD
+(it holds the old system slab) over the designated SSD (stormdrive#66,
+`system-drives.json`, read by nothing here yet). A designation outranks
+install-over, the HDD's old system partition and boot area retired
+(recommended); B only `rd.stormblock.system=`; C move only onto a blank
+designated drive. Settled either way, to build after the answer:
+- two-drive layout: system drive = boot area + system slab (the drive less
+  GPT and 1 %); data drive = data (+ bulk) slab, kept in place
+- an update (#122 stage) copies N+1's goldens by id, and a new build has new
+  ids: it needs a full second system half. Refuse a system slab under
+  2 × the release's mapped system-half bytes + 5 %
+- test: QEMU/pve VM with a 256 GB and a 2 TB disk; install, then stage N+1
+Nothing built.
+
 ### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — DONE (golden-stormblock-0f2728dcf2ef)
 
 The target advertised MDTS 5 (128 KiB) and maxh2cdata 131072, so a 1 MiB
