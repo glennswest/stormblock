@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — IN PROGRESS
+### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — DONE (golden-stormblock-195314cf5831), metal pending
 
 Found: a cut-short sda (`slab holds` 3) booted with the clone as resume
 source; the mount list was read from sda alone and failed ("none"); the
@@ -191,19 +191,26 @@ survey skipped sda as the boot's own disk and said "no local drive to take".
       taken; `diskless refused` block (FATAL; assimilate=off,
       rd.stormblock.diskless=1) (296a9a3)
 - [x] every initramfs test under sh and busybox sh
-- [ ] ci-no-appliance-verify.sh; check.sh; golden + initramfs with #425; tell
+- [x] found by ci-no-appliance-verify.sh: any boot with no network panicked
+      (`${STATE_TOML:?}` outside #229's network branch); fixed (e7da15c)
+- [x] ci-no-appliance-verify.sh ALL PASS; check.sh at e7da15c ALL PASS
+      (1185/1185); golden golden-stormblock-195314cf5831 (c2f10cd), the
+      initramfs from ≥ c2f10cd. Metal: the Dell's reinstall (stormcos#561)
 
-### The initramfs ignores the DHCP MTU (2026-10-13, #425, P0) — IN PROGRESS
+### The initramfs ignores the DHCP MTU (2026-10-13, #425, P0) — DONE (golden-stormblock-195314cf5831), metal pending
 
 Dell 12.21: g16 offers MTU 9000, stormbr0 came up 1500 (path MTU 1500).
 - [x] DHCP script `dhcp mtu` block: slaves → bridge ports → stormbr0, on
       bound/renew; declared `[network] mtu` wins (/run/declared-mtu, now
       written in dhcp mode too); `udhcpc -O mtu` (8955527)
 - [x] tests/initramfs-mtu.sh; ci-dhcp-mtu-verify.sh (c5759a2)
-- [ ] build VM: both, check.sh; golden + initramfs; tell the master
+- [x] tests/initramfs-mtu.sh (sh, busybox); ci-dhcp-mtu-verify.sh ALL PASS
+      (real udhcpd offering 9000: port0 + stormbr0 at 9000, said; declared
+      1500 wins); check.sh ALL PASS; golden golden-stormblock-195314cf5831.
+      Metal: the Dell's path MTU 9000 on the next install
 - #409 paused for this: done on main except its golden (see below)
 
-### ublk flow: queues, FUA, per-writer durability (2026-10-13, #409, P1, fastetcd#142) — PAUSED for P0 #425; done on main, golden pending
+### ublk flow: queues, FUA, per-writer durability (2026-10-13, #409, P1, fastetcd#142) — DONE (in golden-stormblock-195314cf5831), metal pending
 
 Checked against today's code first: requests are served at once since #264
 (not QD1); slabs are O_DIRECT since #140 (no page cache: a flush writes back
