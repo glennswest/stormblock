@@ -582,18 +582,43 @@ impl VolumeManager {
     /// would read zeros there. `Err` names the extents.
     pub async fn check_golden_slots(&self, id: VolumeId) -> Result<(), String> {
         let lineage: HashSet<VolumeId> = self.lineage(&id).into_iter().collect();
-        if let Err(e) = gem::ensure_resident(&self.gem, id).await {
+        Self::golden_slots_counted(&self.gem, &self.registry, id, &lineage).await
+    }
+
+    /// [`check_golden_slots`](Self::check_golden_slots) with the manager held
+    /// only to read the lineage (#418): the check reads a slot-table entry per
+    /// extent, pages from the drive when they are not cached, and it runs on
+    /// every seal and every clone of a golden.
+    pub async fn check_golden_slots_unlocked(
+        vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
+        id: VolumeId,
+    ) -> Result<(), String> {
+        let (lineage, gem, registry) = {
+            let m = vm.lock().await;
+            let lineage: HashSet<VolumeId> = m.lineage(&id).into_iter().collect();
+            (lineage, m.gem.clone(), m.registry.clone())
+        };
+        Self::golden_slots_counted(&gem, &registry, id, &lineage).await
+    }
+
+    async fn golden_slots_counted(
+        gem: &Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+        registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+        id: VolumeId,
+        lineage: &HashSet<VolumeId>,
+    ) -> Result<(), String> {
+        if let Err(e) = gem::ensure_resident(gem, id).await {
             return Err(format!("volume {id}: its extent map does not load: {e}"));
         }
         let legs: Vec<(u64, gem::Leg)> = {
-            let gem = self.gem.read().await;
+            let gem = gem.read().await;
             let legs: Vec<(u64, gem::Leg)> = match gem.volume_extents(&id) {
                 Some(it) => it.flat_map(|(v, loc)| loc.legs().map(move |l| (v, l)).collect::<Vec<_>>()).collect(),
                 None => Vec::new(),
             };
             legs
         };
-        let reg = self.registry.read().await;
+        let reg = registry.read().await;
         let mut bad = Vec::new();
         for (vext, leg) in legs {
             let Some(slab) = reg.get(&leg.slab_id) else { continue };
@@ -620,11 +645,18 @@ impl VolumeManager {
     }
 
     pub async fn seal_volume(&mut self, id: VolumeId, fs: Option<FsInfo>) -> Result<(), VolumeError> {
-        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
         if let Err(why) = self.check_golden_slots(id).await {
             tracing::error!("{why}");
             return Err(VolumeError::AllocatorError(why));
         }
+        self.seal_volume_checked(id, fs).await
+    }
+
+    /// Seal a volume whose slots the caller has just checked with
+    /// [`check_golden_slots_unlocked`](Self::check_golden_slots_unlocked)
+    /// (#418).
+    pub async fn seal_volume_checked(&mut self, id: VolumeId, fs: Option<FsInfo>) -> Result<(), VolumeError> {
+        let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
         handle.set_sealed(true);
         let before = self.fs_info.get(&id).cloned();
         if let Some(fs) = fs {

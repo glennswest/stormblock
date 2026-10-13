@@ -419,14 +419,29 @@ async fn list_volumes(
     // so a listing never waits on a create, a clone or a persist. Only when
     // it does not name exactly the volumes that exist (one added or removed
     // since its last persist) is the manager read instead.
-    if let Some(c) = state.volume_catalog.latest() {
-        if crate::volume::catalog::is_current(&c, &state.volume_presence) {
-            return list_from(&state, &c, &ctx, &q, &headers).await;
+    let latest = state.volume_catalog.latest();
+    if let Some(c) = &latest {
+        if crate::volume::catalog::is_current(c, &state.volume_presence) {
+            return list_from(&state, c, &ctx, &q, &headers).await;
         }
     }
-    let vm = state.volume_manager.lock().await;
-    vm.publish_catalog();
-    list_from(&state, &vm, &ctx, &q, &headers).await
+    // Never in line behind a writer (#418): while the manager is held, the
+    // last catalog answers. It lacks only what was made or removed since the
+    // manager's last persist, and the next listing has it.
+    match state.volume_manager.try_lock() {
+        Ok(vm) => {
+            vm.publish_catalog();
+            list_from(&state, &vm, &ctx, &q, &headers).await
+        }
+        Err(_) => match &latest {
+            Some(c) => list_from(&state, c, &ctx, &q, &headers).await,
+            None => {
+                let vm = state.volume_manager.lock().await;
+                vm.publish_catalog();
+                list_from(&state, &vm, &ctx, &q, &headers).await
+            }
+        },
+    }
 }
 
 async fn list_from(
@@ -519,7 +534,11 @@ async fn get_volume(
     let ctx = super::usage::Context::gather(&state).await;
     // The published catalog when it is current (#364), else the manager.
     if let Some(c) = state.volume_catalog.latest() {
-        if crate::volume::catalog::is_current(&c, &state.volume_presence) {
+        // Current, or the volume is in it and the manager is busy (#418): a
+        // read never waits in line behind a writer for what it already has.
+        if crate::volume::catalog::is_current(&c, &state.volume_presence)
+            || (c.get_volume_handle(&vol_id).is_some() && state.volume_manager.try_lock().is_err())
+        {
             return get_from(&state, &c, &ctx, vol_id, uuid).await;
         }
     }
@@ -1139,8 +1158,13 @@ async fn seal_volume(
         },
     };
     drop(dev);
+    // The golden's slots checked with no manager lock (#418).
+    if let Err(why) = crate::volume::VolumeManager::check_golden_slots_unlocked(&state.volume_manager, vol_id).await {
+        tracing::error!("{why}");
+        return ApiError::internal(why);
+    }
     let mut vm = state.volume_manager.lock().await;
-    match vm.seal_volume(vol_id, fs).await {
+    match vm.seal_volume_checked(vol_id, fs).await {
         Ok(()) => {
             let d = describe(&vm, &vol_id).await;
             Json(serde_json::json!({ "id": uuid, "sealed": true, "fs": d.fs })).into_response()

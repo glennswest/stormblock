@@ -1278,7 +1278,7 @@ async fn clone_volume_impl(
     // (#370): a clone would read zeros where the table lost track. Loud,
     // never a damaged filesystem handed out.
     if sealed {
-        if let Err(why) = vm.lock().await.check_golden_slots(source).await {
+        if let Err(why) = crate::volume::VolumeManager::check_golden_slots_unlocked(vm, source).await {
             tracing::error!("{why}");
             return Err(TemplateError::Conflict(why));
         }
