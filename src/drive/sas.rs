@@ -43,6 +43,12 @@ pub struct SasDevice {
     /// takes TRIM (#401), which then knows its zones are empty. A
     /// conventional HDD advertises none.
     discards: bool,
+    /// The drive takes FUA writes itself (`queue/fua` = 1, #409): NVMe, and a
+    /// SATA or SAS drive the kernel lets FUA through. Without it a FUA write
+    /// is a write and this device's own flush, which joins the flushes of
+    /// every other caller (group commit) instead of the kernel's flush per
+    /// request that `RWF_DSYNC` turns into on such a drive.
+    fua: bool,
     /// Held across a read-modify-write, so two partial-block writes to the
     /// same block cannot each keep the other's bytes out.
     rmw: tokio::sync::Mutex<()>,
@@ -117,6 +123,7 @@ impl SasDevice {
         };
         let device_type = detect_drive_type(&path);
         let discards = file_block.is_none() && queue_value(&path, "discard_max_bytes").is_some_and(|v| v > 0);
+        let fua = file_block.is_none() && queue_value(&path, "fua") == Some(1);
         // A zoned or drive-managed SMR disk is said once (#282).
         if file_block.is_none() && !read_only {
             super::identity::note_recording(&path);
@@ -132,6 +139,7 @@ impl SasDevice {
             block_size,
             device_type,
             discards,
+            fua,
             rmw: tokio::sync::Mutex::new(()),
             flushes: Default::default(),
         })
@@ -218,12 +226,21 @@ impl BlockDevice for SasDevice {
         self.flushes.flush(&self.id.path, || self.io.sync()).await
     }
 
-    /// One write durable on its own (#409): `RWF_DSYNC`, a FUA write to a
-    /// drive with FUA, so a commit record waits for itself and not for every
-    /// other volume's writes in the drive's cache.
+    /// One write durable on its own (#409): on a drive with FUA,
+    /// `RWF_DSYNC`, a FUA write, so a commit record waits for itself and not
+    /// for every other volume's writes in the drive's cache; on one without,
+    /// a write and the group-committed flush.
     async fn write_fua(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
         if buf.is_empty() {
             return Ok(0);
+        }
+        if !self.fua {
+            // No FUA at the drive: measured on a delay disk with none, an
+            // `RWF_DSYNC` per write (the kernel's flush each) was slower than
+            // a write and the group-committed flush (#409).
+            let n = self.write(offset, buf).await?;
+            self.flush().await?;
+            return Ok(n);
         }
         self.check_range(offset, buf.len())?;
         let (start, len) = self.span(offset, buf.len());

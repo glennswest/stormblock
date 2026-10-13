@@ -146,7 +146,7 @@ EOT
     b=${dev##*/}
     q=$(ls -d /sys/block/$b/mq/* 2>/dev/null | wc -l)
     fua=$(cat /sys/block/$b/queue/fua 2>/dev/null)
-    echo "GUEST $tag: $dev queues=$q fua=$fua"
+    echo "GUEST $tag: $dev queues=$q fua=$fua (the disk below: fua=$(cat /sys/block/${disk##*/}/queue/fua 2>/dev/null))"
     [ "$q" = "$want_q" ] && r $tag-queues PASS || r $tag-queues "FAIL ($q, wanted $want_q)"
     [ "$fua" = "$want_fua" ] && r $tag-fua PASS || r $tag-fua "FAIL (queue/fua=$fua, wanted $want_fua)"
 
