@@ -18,7 +18,6 @@ use std::time::Instant;
 
 use stormblock::drive::emulated::{self, parse_size};
 use stormblock::drive::slab::{Slab, SlabFormat};
-use stormblock::drive::BlockDevice;
 use stormblock::placement::topology::StorageTier;
 use stormblock::volume::extent::VolumeId;
 
