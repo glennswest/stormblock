@@ -296,24 +296,34 @@ namespace for a bearer.
       it may list. Node/admin tokens stay node-wide; boot claims unchanged
 - [ ] tests, docs, CHANGELOG; stormcentral#642 told
 
-### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — WAITING ON THE OWNER
+### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — IN PROGRESS
 
-X9 blades get a 256 GB SATA SSD for the system half; data stays on the 2 TB
-SMR HDD. Today one drive carries both halves (`lay_node_slabs`,
-`update_system_slab`, `FlowOver.disk`, /init's `INSTALL_OVER`). Asked on #402
-(needs-owner): rule 3 (#351) puts install-over first, which picks the HDD
-(it holds the old system slab) over the designated SSD (stormdrive#66,
-`system-drives.json`, read by nothing here yet). A designation outranks
-install-over, the HDD's old system partition and boot area retired
-(recommended); B only `rd.stormblock.system=`; C move only onto a blank
-designated drive. Settled either way, to build after the answer:
-- two-drive layout: system drive = boot area + system slab (the drive less
-  GPT and 1 %); data drive = data (+ bulk) slab, kept in place
-- an update (#122 stage) copies N+1's goldens by id, and a new build has new
-  ids: it needs a full second system half. Refuse a system slab under
-  2 × the release's mapped system-half bytes + 5 %
-- test: QEMU/pve VM with a 256 GB and a 2 TB disk; install, then stage N+1
-Nothing built.
+Owner/master on #402 (2026-10-13): **A** — a drive designated `system` in
+stormdrive (`<system-data>/stormdrive/system-drives.json`, matched by WWN,
+else model+serial) outranks install-over; the HDD's data half stays in place,
+its old system partition and boot area are retired (stormuefi scans every
+drive). server8's SSD is 512 GB: the slab is sized to the drive, whatever it
+is. Every release cmdline says `rd.stormblock.slab=/dev/sda`, and with two
+drives either may be sda.
+- [ ] layout (`image/local.rs`): `lay_system_drive` (boot area + system slab,
+      the drive less the GPT and 1 %), `lay_data_drive` (data + bulk),
+      `retire_system_half` (system slab header zeroed, its partition, the ESP
+      and boot pallets out of the GPT, data kept), layout probes for a drive
+      with one half; update room: system slab ≥ 2 × the release's mapped
+      system-half bytes + 5 % (a stage copies N+1 whole beside N), refused
+      with the numbers
+- [ ] install (`take_local_disk_for`, `--system-disk`): split from a
+      both-halves disk, an update of a split layout, a fresh pair;
+      `FlowOver.data_disk`; successor opens both; local boot onto the system
+      drive
+- [ ] discovery: slabs the records name and that did not open are looked
+      for on the machine's own drives by id before the appliance
+- [ ] /init: read the designation; the designated drive is the system disk
+      (`--system-disk`), the data-slab drive the data disk; a named drive
+      with only a data half boots via the drive holding the system half
+- [ ] tests: install_tests (file drives: both halves → split, data kept,
+      old half retired, a boot from either drive; room refused), boot-hook
+      cases; QEMU two disks; docs, CHANGELOG
 
 ### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — DONE (golden-stormblock-0f2728dcf2ef)
 
