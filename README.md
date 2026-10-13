@@ -2023,6 +2023,14 @@ older golden) gets them there too (#380). The
 lease's domain (option 15, else the first of 119, else the name's own) becomes
 the kernel's `domainname`, and the console prints the FQDN.
 
+**The link MTU** (#425). `udhcpc` asks for DHCP option 26 (`-O mtu`), and
+the DHCP script sets it on the bond's slaves, the bridge's ports and
+`stormbr0`, in that order (a bridge takes no MTU above its ports'), before
+anything connects over it: the NVMe/TCP root's path MTU is decided there. A
+declared `[network] mtu` in the node's state wins over the lease's; a value
+outside 576–65535 is ignored and said. The console says `mtu 9000 on stormbr0
+(from DHCP)`, and `/run/stormblock-mtu` holds it.
+
 **What the node asks DHCP under.** The node asks for its lease as a name, with
 `udhcpc -x hostname:<name>`, so the server's lease table says who holds each
 lease. The name comes from what the machine already knows before the lease:

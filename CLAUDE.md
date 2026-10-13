@@ -180,7 +180,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### ublk flow: queues, FUA, per-writer durability (2026-10-13, #409, P1, fastetcd#142) — DONE here, metal pending
+### The initramfs ignores the DHCP MTU (2026-10-13, #425, P0) — IN PROGRESS
+
+Dell 12.21: g16 offers MTU 9000, stormbr0 came up 1500 (path MTU 1500).
+- [x] DHCP script `dhcp mtu` block: slaves → bridge ports → stormbr0, on
+      bound/renew; declared `[network] mtu` wins (/run/declared-mtu, now
+      written in dhcp mode too); `udhcpc -O mtu` (8955527)
+- [x] tests/initramfs-mtu.sh; ci-dhcp-mtu-verify.sh (c5759a2)
+- [ ] build VM: both, check.sh; golden + initramfs; tell the master
+- #409 paused for this: done on main except its golden (see below)
+
+### ublk flow: queues, FUA, per-writer durability (2026-10-13, #409, P1, fastetcd#142) — PAUSED for P0 #425; done on main, golden pending
 
 Checked against today's code first: requests are served at once since #264
 (not QD1); slabs are O_DIRECT since #140 (no page cache: a flush writes back
