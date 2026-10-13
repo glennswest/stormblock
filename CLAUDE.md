@@ -180,7 +180,7 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — IN PROGRESS
+### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — DONE
 
 The target advertised MDTS 5 (128 KiB) and maxh2cdata 131072, so a 1 MiB
 extent moved as 8 commands; the initiator's `MAX_CHUNK` was 128 KiB.
@@ -194,9 +194,13 @@ extent moved as 8 commands; the initiator's `MAX_CHUNK` was 128 KiB.
       one line per source; the copy already reads one extent per read
 - [x] tests: `integration_nvmeof::an_extent_moves_as_one_command_and_an_
       older_target_still_gets_its_size`, `transfer_for` unit
-- [ ] sc-build targeted + check.sh; rate model before/after
-      (`STORMBLOCK_NVME_MAX_TRANSFER=131072`); docs, CHANGELOG; golden.
-      Metal numbers (pve VM, server8) need a release with it
+- [x] check.sh at e3c9ccf ALL PASS (1177/1177); docs (nvme-access.md, README),
+      CHANGELOG
+- [x] rate model on a build VM (release, loopback, 3030 extents, no
+      foreground, two runs each): copy phase 9.5 / 9.1 s at 8 MiB vs 11.5 /
+      15.7 s at 128 KiB; totals 49 / 36 s vs 35 / 41 s, dominated by persist
+      (the VM disk's flush, 15–28 s): loopback has no RTT to save
+- [ ] metal numbers (pve VM, server8) need a release with it
 
 ### Seed volumes keep directories and the label's case (2026-10-13, #326, P3) — DONE
 
