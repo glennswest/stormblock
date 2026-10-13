@@ -8,6 +8,10 @@
 //! flow_bench commit <dev> <threads> <secs> fsync|dsync  each thread rewrites its own 4 KiB record
 //!                                                       and makes it durable: write + fdatasync, or
 //!                                                       an O_DSYNC write (a FUA write to the device)
+//! flow_bench fcommit <dir> <threads> <secs> fsync|dsync the same through a filesystem: each thread a
+//!                                                       file of its own, rewritten and made durable,
+//!                                                       as a database's commits are (a journal
+//!                                                       commit each: FLUSH + a FUA commit block)
 //! ```
 //!
 //! One line out: `BENCH <mode> <kind> threads=<n> ops=<n> per_s=<n> p50_us=<n> p99_us=<n>`.
@@ -55,8 +59,19 @@ fn next(x: &mut u64) -> u64 {
 }
 
 fn worker(dev: String, mode: String, kind: String, thread: usize, secs: u64) -> Vec<u32> {
-    let dsync = mode == "commit" && kind == "dsync";
-    let f = open(&dev, dsync);
+    let dsync = (mode == "commit" || mode == "fcommit") && kind == "dsync";
+    let f = if mode == "fcommit" {
+        let mut o = std::fs::OpenOptions::new();
+        o.read(true).write(true).create(true);
+        if dsync {
+            o.custom_flags(libc::O_DSYNC);
+        }
+        let f = o.open(format!("{dev}/w{thread}")).expect("open the record file");
+        f.set_len(1 << 20).expect("size the record file");
+        f
+    } else {
+        open(&dev, dsync)
+    };
     let fd = f.as_raw_fd();
     let buf = Aligned::new(thread as u8 + 1);
     let mut lat = Vec::new();
@@ -74,9 +89,10 @@ fn worker(dev: String, mode: String, kind: String, thread: usize, secs: u64) -> 
                 unsafe { libc::pwrite(fd, buf.0 as *const libc::c_void, BLOCK, off as libc::off_t) }
             }
             _ => {
-                // Each writer its own record, a megabyte apart: unrelated
-                // commits, as fastetcd's would be (fastetcd#142).
-                let off = thread as u64 * (1 << 20);
+                // Each writer its own record, a megabyte apart (or a file of
+                // its own): unrelated commits, as fastetcd's would be
+                // (fastetcd#142).
+                let off = if mode == "fcommit" { 0 } else { thread as u64 * (1 << 20) };
                 let n = unsafe { libc::pwrite(fd, buf.0 as *const libc::c_void, BLOCK, off as libc::off_t) };
                 if n >= 0 && kind == "fsync" && unsafe { libc::fdatasync(fd) } != 0 {
                     -1
@@ -97,7 +113,7 @@ fn worker(dev: String, mode: String, kind: String, thread: usize, secs: u64) -> 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     if a.len() != 6 {
-        eprintln!("usage: flow_bench rand|commit <dev> <threads> <secs> read|write|fsync|dsync");
+        eprintln!("usage: flow_bench rand|commit|fcommit <dev|dir> <threads> <secs> read|write|fsync|dsync");
         std::process::exit(2);
     }
     let (mode, dev, threads, secs, kind) =

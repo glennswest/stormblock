@@ -19,9 +19,12 @@
 #   commit fsync      4 writers, each rewriting its own record + fdatasync
 #   commit dsync      the same with O_DSYNC writes (a FUA write each)
 #
-# Pass: the kernel sees the device as FUA-capable and with the queue count
-# asked for; every commit record reads back as its writer left it; and, after
-# #409, O_DSYNC commits on the slow disk are not slower than before. The
+#   fcommit fsync|dsync  the same through ext4: a file per writer, so each
+#            commit is a journal commit (FLUSH + a FUA commit block)
+#
+# Pass: the kernel sees the device as FUA-capable (after; not before, which
+# declares no FUA) and with the queue count asked for; every commit record reads back as its writer left it; and, after
+# #409, ext4 file commits on the slow disk are not slower than before. The
 # numbers are printed for the issue; they are not otherwise asserted (a build
 # VM's disk is not a node's).
 #
@@ -34,6 +37,7 @@ KVER=${KVER:-$(uname -r)}
 KERNEL=${KERNEL:-/boot/vmlinuz-$KVER}
 BUSYBOX=${BUSYBOX:-$(command -v busybox.musl.static || command -v busybox)}
 DMSETUP=$(command -v dmsetup || true)
+MKFS=$(command -v mkfs.ext4 || command -v mke2fs || true)
 CURL=$(command -v curl || true)
 ROOT=$(pwd)
 mkdir -p "$ROOT/tmp"
@@ -46,7 +50,7 @@ say()  { echo "== $*"; }
 fail() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }
 trap 'rm -rf "$W"' EXIT
 
-for need in "$KERNEL" "$BUSYBOX" "$DMSETUP" "$CURL"; do
+for need in "$KERNEL" "$BUSYBOX" "$DMSETUP" "$CURL" "$MKFS"; do
     [ -n "$need" ] && [ -r "$need" ] || { echo "SKIP: missing $need"; exit 2; }
 done
 command -v qemu-system-x86_64 >/dev/null || { echo "SKIP: no qemu-system-x86_64"; exit 2; }
@@ -59,20 +63,20 @@ BIN="$T/stormblock"; BENCH="$T/examples/flow_bench"
 
 say "guest initramfs"
 I="$W/initrd"
-mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods}
+mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,mnt,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
 for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed \
          awk cut tr kill seq mkdir rm timeout pidof ps touch sync; do
     ln -sf busybox "$I/bin/$a"
 done
-for b in "$BIN" "$BENCH" "$DMSETUP" "$CURL"; do
+for b in "$BIN" "$BENCH" "$DMSETUP" "$CURL" "$MKFS"; do
     cp "$b" "$I/bin/$(basename "$b")"
     ldd "$b" 2>/dev/null | grep -o '/[^ ]*' | while read -r lib; do
         mkdir -p "$I$(dirname "$lib")"; cp -L "$lib" "$I$lib"
     done
 done
 : > "$I/lib/mods/order"
-for m in ublk_drv dm-delay; do
+for m in ublk_drv dm-delay ext4; do
     modprobe -S "$KVER" --show-depends "$m" 2>/dev/null | awk '$1=="insmod"{print $2}'
 done | awk '!seen[$0]++' | while read -r ko; do
     base=$(basename "$ko" | sed 's/\.xz$//; s/\.zst$//')
@@ -86,6 +90,7 @@ done
 cat > "$I/init" <<EOF
 #!/bin/sh
 SECS=$SECS
+MKFS_NAME=$(basename "$MKFS")
 EOF
 cat >> "$I/init" <<'EOF'
 export PATH=/bin
@@ -140,18 +145,19 @@ EOT
     fua=$(cat /sys/block/$b/queue/fua 2>/dev/null)
     echo "GUEST $tag: $dev queues=$q fua=$fua"
     [ "$q" = "$want_q" ] && r $tag-queues PASS || r $tag-queues "FAIL ($q, wanted $want_q)"
-    [ "$fua" = 1 ] && r $tag-fua PASS || r $tag-fua "FAIL (queue/fua=$fua)"
+    want_fua=1; [ "$cfg" = before ] && want_fua=0
+    [ "$fua" = "$want_fua" ] && r $tag-fua PASS || r $tag-fua "FAIL (queue/fua=$fua, wanted $want_fua)"
 
     # Every slot the benchmarks touch taken and on the device first: what a
     # database's file is once it has run a while.
     dd if=/dev/urandom of=$dev bs=1M count=64 oflag=direct 2>/dev/null
     sync
     if [ "$4" = fast ]; then
-        flow_bench rand $dev 8 $SECS read | sed "s/^/$tag /"
-        flow_bench rand $dev 8 $SECS write | sed "s/^/$tag /"
+        timeout 120 flow_bench rand $dev 8 $SECS read | sed "s/^/$tag /"
+        timeout 120 flow_bench rand $dev 8 $SECS write | sed "s/^/$tag /"
     fi
-    flow_bench commit $dev 4 $SECS fsync | sed "s/^/$tag /"
-    flow_bench commit $dev 4 $SECS dsync | sed "s/^/$tag /"
+    timeout 120 flow_bench commit $dev 4 $SECS fsync | sed "s/^/$tag /"
+    timeout 120 flow_bench commit $dev 4 $SECS dsync | sed "s/^/$tag /"
     # Each writer's record is its own pattern (byte = writer + 1).
     ok=1
     for w in 0 1 2 3; do
@@ -161,6 +167,17 @@ EOT
         [ "$n" = 0 ] || ok=0
     done
     [ $ok = 1 ] && r $tag-records PASS || r $tag-records FAIL
+    # Through a filesystem: ext4 on the device, a file per writer.
+    $MKFS_NAME -q -F -t ext4 $dev > /tmp/mkfs.out 2>&1 || { r $tag-mkfs "FAIL ($(cat /tmp/mkfs.out))"; }
+    mkdir -p /mnt/$tag
+    if mount -t ext4 $dev /mnt/$tag; then
+        timeout 120 flow_bench fcommit /mnt/$tag 4 $SECS fsync | sed "s/^/$tag /"
+        timeout 120 flow_bench fcommit /mnt/$tag 4 $SECS dsync | sed "s/^/$tag /"
+        umount /mnt/$tag && r $tag-ext4 PASS || r $tag-ext4 "FAIL (umount)"
+    else
+        r $tag-ext4 "FAIL (mount)"
+    fi
+    grep -E "ERROR|WARN" /run/engine-$tag.log | tail -5 | sed "s/^/LOG $tag engine: /"
     api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$id/attach > /dev/null
     kill $pid; wait $pid 2>/dev/null
 }
@@ -188,15 +205,16 @@ timeout 900 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG)|BENCH|ERROR|panick'
 
 for t in before-fast after-fast before-slow after-slow; do
-    for c in queues fua records; do
+    for c in queues fua records ext4; do
         tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $t-$c PASS" || fail "$t-$c"
     done
 done
 per() { tr -d '\r' < "$W/guest.log" | awk -v t="$1" -v k="$2" '$1==t && $4==k {sub("per_s=","",$7); print $7}'; }
-B=$(per before-slow dsync); A=$(per after-slow dsync)
-echo "slow disk, O_DSYNC commits/s: before ${B:-?}, after ${A:-?}"
+fper() { tr -d '\r' < "$W/guest.log" | awk -v t="$1" -v k="$2" '$1==t && $3=="fcommit" && $4==k {sub("per_s=","",$7); print $7}'; }
+B=$(fper before-slow fsync); A=$(fper after-slow fsync)
+echo "slow disk, ext4 file commits (fdatasync) /s: before ${B:-?}, after ${A:-?}"
 if [ -n "$B" ] && [ -n "$A" ]; then
-    [ "$A" -ge $((B * 9 / 10)) ] || fail "O_DSYNC commits slower after #409 ($A vs $B per s)"
+    [ "$A" -ge $((B * 9 / 10)) ] || fail "file commits slower after #409 ($A vs $B per s)"
 else
     fail "no commit numbers"
 fi

@@ -146,6 +146,15 @@ const UBLK_S_DEV_DEAD: u16 = 0;
 const UBLK_S_DEV_LIVE: u16 = 1;
 const UBLK_S_DEV_QUIESCED: u16 = 2;
 
+/// `UBLK_MAX_QUEUE_DEPTH` (include/uapi/linux/ublk_cmd.h).
+const UBLK_MAX_QUEUE_DEPTH: usize = 4096;
+
+/// Where one queue's descriptor area ends and the next begins in the char
+/// device's mmap space: the kernel's `ublk_max_cmd_buf_size()`.
+fn queue_cmd_buf_stride(page_size: usize) -> usize {
+    (UBLK_MAX_QUEUE_DEPTH * std::mem::size_of::<UblkIoDesc>()).div_ceil(page_size) * page_size
+}
+
 /// Default max I/O buffer size (512 KB).
 const DEFAULT_MAX_IO_BYTES: u32 = 512 * 1024;
 
@@ -162,6 +171,11 @@ const MAX_DEFAULT_QUEUES: u16 = 4;
 /// its own queue instead of every CPU feeding one ring; the requests are
 /// served on the engine's runtime either way (#264). An adopted device keeps
 /// the count it was created with.
+/// `STORMBLOCK_FUA_BY_FLUSH=1`: no FUA declared to the kernel (#409).
+fn fua_by_flush() -> bool {
+    std::env::var("STORMBLOCK_FUA_BY_FLUSH").is_ok_and(|v| v == "1")
+}
+
 pub fn default_queues() -> u16 {
     if let Some(n) = std::env::var("STORMBLOCK_UBLK_QUEUES").ok().and_then(|v| v.trim().parse::<u16>().ok()) {
         return n.clamp(1, 16);
@@ -769,7 +783,9 @@ impl UblkServer {
                 // came back with fastetcd's redb "DB corrupted ... All roots
                 // are corrupted" (#118). The flag is fixed at creation, so an
                 // adopted device keeps what its creator declared.
-                attrs: UBLK_ATTR_VOLATILE_CACHE | UBLK_ATTR_FUA,
+                // FUA declared unless asked to measure without it: then the
+                // kernel sends a write and FLUSHes, as before #409.
+                attrs: if fua_by_flush() { UBLK_ATTR_VOLATILE_CACHE } else { UBLK_ATTR_VOLATILE_CACHE | UBLK_ATTR_FUA },
                 logical_bs_shift: bs_shift,
                 physical_bs_shift: phys_shift,
                 io_opt_shift: 12, // 4096
@@ -875,8 +891,14 @@ impl UblkServer {
         let desc_buf_size = queue_depth as usize * std::mem::size_of::<UblkIoDesc>();
 
         let mut desc_ptrs: Vec<*const UblkIoDesc> = Vec::with_capacity(nr_queues as usize);
+        // Each queue's descriptors at its own offset: the kernel's
+        // `ublk_max_cmd_buf_size()`, room for the deepest queue a device may
+        // have, rounded to a page (#409). Queue q at q × that. At q × a page,
+        // as this was, every queue past the first mapped queue 0's
+        // descriptors — unseen while every device had one queue.
+        let cmd_buf_stride = queue_cmd_buf_stride(page_size as usize) as libc::off_t;
         for q in 0..nr_queues {
-            let mmap_offset = q as libc::off_t * page_size;
+            let mmap_offset = q as libc::off_t * cmd_buf_stride;
             let ptr = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -2015,6 +2037,14 @@ mod tests {
         if let Some(n) = shift("UBLK_IO_F_FUA") {
             assert_eq!(1u32 << n, UBLK_IO_F_FUA, "UBLK_IO_F_FUA");
         }
+    }
+
+    /// #409: queue q's descriptors are at q × the kernel's max command
+    /// buffer (4096 descriptors of 24 bytes = 24 pages), not q × a page.
+    #[test]
+    fn each_queue_maps_its_own_descriptors() {
+        assert_eq!(queue_cmd_buf_stride(4096), 98_304);
+        assert_eq!(queue_cmd_buf_stride(65_536), 131_072);
     }
 
     #[test]
