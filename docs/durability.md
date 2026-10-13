@@ -241,6 +241,24 @@ tests run on.
    clears it. Nothing acknowledged is acknowledged before the device took
    it, so the retry changes no ordering rule above.
 
+15. **A FUA write is durable when it returns, and owes nothing else**
+   (#409). A ublk device declares FUA (`UBLK_ATTR_FUA`), and the NVMe/TCP
+   and iSCSI targets take the FUA bit, so a journal's commit block or an
+   `O_DSYNC` write arrives as one FUA write rather than a write followed by
+   a FLUSH of everything. The thin volume writes each leg of it with FUA at
+   the drive (`RWF_DSYNC` on the O_DIRECT device: a FUA write where the
+   drive has FUA, a write and a flush where it does not) when the leg's slot
+   is already on the device: that write waits for itself, not for every
+   other volume's data in the drive's cache. When the write takes a slot (a
+   first write, a copy-on-write) or lands in one whose entry is not
+   published yet, its data is not enough: the entry has to be durable too
+   (rule 1), so it is written and then made durable with the volume's flush,
+   as a FLUSH would. A parity volume's FUA write is always a write and a
+   flush. `STORMBLOCK_FUA_BY_FLUSH=1` makes every FUA write a write and a
+   flush, for measuring. The marker is the drive's own FUA; there is no
+   per-volume log, because a drive's cache flush is device-wide in any
+   design and a FUA write needs none.
+
 ## How it is checked
 
 * `tests/integration_power_cut.rs`:
