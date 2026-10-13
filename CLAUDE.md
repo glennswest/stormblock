@@ -180,6 +180,31 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### ublk flow: queues, FUA, per-writer durability (2026-10-13, #409, P1, fastetcd#142) — IN PROGRESS
+
+Checked against today's code first: requests are served at once since #264
+(not QD1); slabs are O_DIRECT since #140 (no page cache: a flush writes back
+no other volume's pages); a FLUSH with nothing new is skipped (#338) and one
+with nothing allocated is ONE device flush per slab, group-committed. True
+still: one queue per device, no FUA (each FUA write = write + FLUSH + …).
+The marker chosen: FUA (the issue's "or FUA"), no per-volume log (a format
+change; a drive's cache flush is device-wide in any design).
+- [x] `BlockDevice::write_fua` (default write + flush); `SasDevice`:
+      `RWF_DSYNC` (io_uring rw_flags; pwritev2 by syscall); partition and
+      ridethrough forward; thin volume: task-local FUA scope, a leg in a
+      published slot written FUA, a fresh/CoW/unpublished slot → the
+      volume's flush; parity → write + flush; `STORMBLOCK_FUA_BY_FLUSH=1`
+- [x] ublk: `UBLK_ATTR_FUA`, `UBLK_IO_F_FUA` → write_fua; NVMe/TCP and
+      iSCSI FUA → write_fua (64825bf)
+- [x] queues: min(CPUs, 4) (`STORMBLOCK_UBLK_QUEUES`), depth 128 shared
+      out, ≥ 32 a queue; adopted devices keep theirs
+- [ ] build VM: unit tests, power-cut/durability tests; QEMU: fio-like 1 vs
+      N queues, FUA vs by-flush, a redb-style commit loop; check.sh
+- [ ] zero copy / auto buf reg / batch I/O / segment params: a follow-up
+      issue (needs backend I/O on the ublk queue's own ring)
+- [ ] docs (durability.md, README ublk), CHANGELOG; #410 told (FUA is the
+      marker for its persists)
+
 ### forge stops answering for ~1 min under build load (2026-10-13, #418, P0) — DONE (golden-stormblock-f86a80fdceac)
 
 forge runs 13.7.0 (#235: recreated, not upgraded), whose log names no lock
