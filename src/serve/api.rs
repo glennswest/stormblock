@@ -1787,6 +1787,13 @@ mod tests {
     /// The boot claim is the only write that needs no token, and only in its
     /// exact shape: the re-point beside it, other namespaces and other verbs
     /// on the same path all stay guarded (#107).
+    /// #154: formatting a drive is destructive; opening one is not.
+    #[test]
+    fn formatting_a_drive_is_destructive() {
+        assert_eq!(classify(&Method::POST, "/api/v1/drives/0e6b3c1a-1111-4222-8333-444455556666/format", None), Class::Destructive);
+        assert_eq!(classify(&Method::POST, "/api/v1/drives", None), Class::Ordinary);
+    }
+
     #[test]
     fn only_the_boot_claim_is_an_open_write() {
         let auth = AuthConfig { api_token: Some("t".into()), admin_token: None, audit_only: false };
