@@ -370,12 +370,51 @@ shared host, so read those as scaling, not as a drive's rate. What a 256 TB
 drive takes on real hardware is the test stormcos#92 (emulated drives) and a
 shelf are for.
 
+## Scrub (#160)
+
+A scrub reads every leg of every extent of a mirrored volume, and every
+stripe's data and parity of a parity volume, and says what disagrees. Each
+extent (or stripe) is read under its lock and its slots' fence, as a write
+takes them, so a write in flight never reads as a mismatch.
+
+There are no per-block checksums, so when copies disagree nothing can say
+which is right. What repairs it (owner's decision on #160, (c) with (a)):
+
+| volume | a mismatch is |
+|---|---|
+| `mirror:3` and up | repaired: the copy a strict majority of the legs agree on is written over the others |
+| `mirror:2`, or no majority (three versions), or legs failed down to two | reported, never guessed; an operator writes a chosen leg over the others: `POST /api/v1/volumes/{id}/scrub/repair {extent, from: <slab>}` (destructive) |
+| parity (`raid5`, `raid6`) | reported; rewritten from the data only when asked: `POST …/scrub/repair-parity` (destructive) |
+
+A leg that will not read is marked failed for the volume, as a read marks it,
+and reported; the rebuild queue takes it from there.
+
+**When.** Every redundant volume once a week (`[scrub] period_days`, 7), one
+volume at a time, oldest pass first, throttled to a share of the drives' time
+(`duty_percent`, 10: after work that took `t`, it waits `9t`). It waits while
+an install's flow-over runs, and leaves a volume the rebuild queue holds.
+`POST /api/v1/volumes/{id}/scrub` asks for one now; `DELETE /api/v1/scrub`
+stops the one running (what it found so far is kept, and the schedule still
+owes the volume a full pass).
+
+**What it found** is kept per volume in `<data_dir>/scrub.json`:
+`GET /api/v1/volumes/{id}/scrub` (the last pass in full: counts and up to 256
+findings, each extent or stripe, its legs grouped by content, and what was
+done) and `GET /api/v1/scrub` (settings, the pass running with its progress
+and whether it is paused, the queue, every volume in short). Metrics:
+`stormblock_scrub_units_total`, `_bytes_total`, `_mismatches_total{kind}`,
+`_repaired_total{kind}`, `_unreadable_total`.
+
+A RAID set's own scrub (`docs/raid-sets.md`) agrees: its `repair` is off
+unless asked.
+
 ## Not in this cut
 
 - StormFS chunk/versioned volumes stay `none` — StormFS replicates above.
-- Erasure coding wider than two parity members (`k+m` with m > 2), and a
-  periodic scrub that compares mirror legs and parity on a schedule (#159,
-  #160). `resync?verify=true` is the manual parity check.
+- Erasure coding wider than two parity members (`k+m` with m > 2, #159).
+- A checksum per slot or block (#160's option (b)): what would say which of
+  two copies is right. Worth building if a scrub reports real mismatches on
+  `mirror:2` volumes.
 - A restripe of a volume with live writers (it is offline).
 
 ## Whole-disk goldens: VM images, cloud images, ISOs

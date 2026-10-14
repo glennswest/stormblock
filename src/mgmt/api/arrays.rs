@@ -573,7 +573,8 @@ async fn replace_member(
 #[derive(Debug, Deserialize, Default)]
 pub struct ScrubRequest {
     /// Rewrite parity (or the other mirror legs) where they disagree.
-    /// Default true.
+    /// Default false (#160): with no checksums a mismatch is reported, and
+    /// rewritten only when asked, as a volume's scrub does.
     #[serde(default)]
     pub repair: Option<bool>,
     /// Member data bytes a second; 0 or absent = unlimited.
@@ -591,7 +592,7 @@ async fn start_scrub(
         Err(r) => return r,
     };
     let req = body.map(|b| b.0).unwrap_or_default();
-    let p = info.array.start_scrub(ScrubConfig { max_bytes_per_sec: req.max_bytes_per_sec, repair: req.repair.unwrap_or(true) });
+    let p = info.array.start_scrub(ScrubConfig { max_bytes_per_sec: req.max_bytes_per_sec, repair: req.repair.unwrap_or(false) });
     (axum::http::StatusCode::ACCEPTED, Json(p.status())).into_response()
 }
 

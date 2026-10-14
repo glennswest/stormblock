@@ -483,6 +483,10 @@ where the drives are the engine's pool). Who may connect
 (`4`), `max_bytes_per_sec` (`0` = unlimited). Live-adjustable at
 `PUT /api/v1/rebuilds/settings`.
 
+**`[scrub]`** (#160) — `enabled` (`true`), `period_days` (`7`), `duty_percent`
+(`10`): every redundant volume read in full once a period, at that share of
+the drives' time, paused while a flow-over runs (`docs/redundancy.md`).
+
 **`[gc]`** — `enabled` (`true`), `interval_secs` (`600`), `confirm_passes`
 (`true`), `max_reclaim_per_pass` (`4096`), `dry_run` (`false`): the collector
 for slab slots no volume maps.
@@ -738,6 +742,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 
 | surface | for |
 |---|---|
+| `/api/v1/scrub`, `/api/v1/volumes/{id}/scrub` | the scrub (#160, `docs/redundancy.md`): `GET /api/v1/scrub` (settings, the pass running and its progress, the queue, every volume in short), `DELETE` stops the pass running; `GET …/{id}/scrub` (its last pass: counts and findings), `POST …/{id}/scrub` (scrub it next; `409` for a single copy), `POST …/{id}/scrub/repair-parity` (the same, rewriting parity that does not match; destructive), `POST …/{id}/scrub/repair {extent, from}` (a chosen leg written over the extent's others; destructive). `mirror:3`+ is repaired by majority; `mirror:2` and parity are reported |
 | `/api/v1/drives`, `/arrays`, `/shelves`, `/spares`, `/slabs`, `/rebuilds` | drives (open, label, drain, health, smart, slabs, adopt; a node's system disk, the one its own slabs were opened from at boot, is listed with `"system": true` and read-only: close, drain, adopt, labels, health, emulate and a second open answer `409`, #133), RAID sets (create, `assemble`, members `{slot}/fail` and `/replace`, `scrub`, `rebuild` rate), shelf layout, hot spares, slabs and the pool (`durability`, `{id}/slots`, `{id}/upgrade` to metadata format 2, #158; `rebalance`: `POST {dry_run (default true), pool, max_moves, max_bytes_per_sec}` plans moving extents from fuller slabs onto emptier ones of the same role and slot size, keeping each volume's legs apart at its rung, and with `dry_run: false` runs it in the background with only each extent's fence held and yielding to live I/O; `GET` its progress, `DELETE` stops it, #154), GC, rebuild queue |
 | `/api/v1/volumes` | volumes (every `{id}` is the volume's UUID, its name, or a synonym: a name nothing answers to is `404`, one two volumes share is `409` naming both, #112): create (`id` to take a given one, #83), rename (`PATCH …/{id} {name, force?}`, destructive; a sealed volume only with `force`, a taken name `409`, #219), clone, digest (`GET …/{id}/digest`: the sha256 of a sealed volume's every byte, kept for its seal, `?refresh=true`; unsealed `409`, #271; and `seal`, the digest it was sealed with and this copy's verdict, #384), legs (`GET …/{id}/legs[?start=&limit=]`: each mapped extent's legs with their drive and the slot's byte offset on it, and a parity stripe's P/Q, for a reader that takes one good leg rather than reconstruct, #176), `ana` (the NVMe ANA state here, #83), seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, restripe, resize, attach (`transport`: `ublk`, `nvme_tcp`, or `vhost_user_blk` for a VMM on this node, `docs/vhost-user-blk.md`, #82), fsck, files, cidata (a vfat config drive: `{files, label?, keep_case?}`; paths keep their directories, `keep_case` writes the label and the names as given — cloud-init `CIDATA` by default, combustion `{"label": "combustion", "keep_case": true, "files": [{"path": "/combustion/script", …}]}`, #326), import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route. The list carries a `generation` (and an `ETag`); `?since=N` or `If-None-Match` answers `304` when nothing it reports has changed. It moves on every metadata persist and on what changes without one (#218): attaches and detaches on every transport (mounts too), slab presence, quarantine and failure, drains, the rebuild queue, RAID member states and owners. Not on `allocated_bytes`, a usage counter that moves with every write |
 | `/api/v1/erasures` | secure delete (#286): the node's level, slots waiting, volumes being erased, and the audit record of every finished erase (`erasures.json`). `DELETE /api/v1/volumes/{id}?erase=once\|dod3\|dod7` asks for more than the default |
@@ -2199,8 +2204,9 @@ What earlier docs described and the code does not do, each with its issue:
 - **The StormFS shared-ring IPC server** (`drive/uring_server.rs`): built and
   tested, started by nothing; the counterpart of StormFS's client (#169).
   vhost-user-blk (#82) did not need it.
-- **Scrub** of mirror legs and parity on a schedule (#160), **erasure coding
-  beyond P+Q** (#159), metadata at 40 PB a node (#155–#158), drive affinity,
+- **Erasure coding
+  beyond P+Q** (#159), a per-block checksum to tell which of two copies is
+  right (#160's option (b)), metadata at 40 PB a node (#155–#158), drive affinity,
   overcommit and StorageClass policy for claims (#151–#154).
 - **Serving at registry scale**: each per-volume subsystem takes its own
   portal port, so `/serve/v1` serves at most 128 volumes per node by default

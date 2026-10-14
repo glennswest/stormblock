@@ -367,6 +367,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if seg.len() == 6 && seg[3] == "slabs" && seg[5] == "upgrade" {
             return true;
         }
+        // A scrub's repairs an operator asks for (#160): a chosen leg written
+        // over an extent's others, or parity rewritten from the data.
+        if seg.len() == 7 && seg[3] == "volumes" && seg[5] == "scrub" && matches!(seg[6], "repair" | "repair-parity") {
+            return true;
+        }
     }
     // A volume's rename (#219): tools that go by name follow it or break.
     if *method == Method::PATCH && seg.len() == 5 && seg[1] == "api" && seg[2] == "v1" && seg[3] == "volumes" {
@@ -1787,6 +1792,19 @@ mod tests {
     /// The boot claim is the only write that needs no token, and only in its
     /// exact shape: the re-point beside it, other namespaces and other verbs
     /// on the same path all stay guarded (#107).
+    /// #160: a scrub and its reads are ordinary; the repairs an operator
+    /// asks for (a chosen leg written over the others, parity rewritten)
+    /// are destructive.
+    #[test]
+    fn a_scrubs_repairs_are_destructive_and_the_scrub_is_not() {
+        let v = "/api/v1/volumes/0e6b3c1a-1111-4222-8333-444455556666";
+        assert_eq!(classify(&Method::POST, &format!("{v}/scrub/repair"), None), Class::Destructive);
+        assert_eq!(classify(&Method::POST, &format!("{v}/scrub/repair-parity"), None), Class::Destructive);
+        assert_eq!(classify(&Method::POST, &format!("{v}/scrub"), None), Class::Ordinary);
+        assert_eq!(classify(&Method::GET, &format!("{v}/scrub"), None), Class::Ordinary);
+        assert_eq!(classify(&Method::GET, "/api/v1/scrub", None), Class::Ordinary);
+    }
+
     #[test]
     fn only_the_boot_claim_is_an_open_write() {
         let auth = AuthConfig { api_token: Some("t".into()), admin_token: None, audit_only: false };

@@ -362,6 +362,8 @@ pub struct AppState {
     /// Tells the digester to check the goldens that arrived with a digest
     /// (#384): a finished flow-over or stage, or a start with neither.
     pub digest_check: Arc<tokio::sync::Notify>,
+    /// The scrub (#160): a weekly, throttled read of every redundant volume.
+    pub scrubber: Arc<crate::scrub::Scrubber>,
     /// The apiserver a destructive call's Kubernetes bearer is reviewed
     /// against (#274); `None` refuses such bearers.
     pub kube_auth: Option<Arc<kubeauth::KubeAuth>>,
@@ -474,6 +476,18 @@ impl AppState {
     /// with a digest when [`check_goldens`](Self::check_goldens) says so.
     pub fn start_digests(&self) {
         crate::volume::digest::spawn(self.volume_manager.clone(), self.digest_check.clone());
+    }
+
+    /// The scrubber (#160), on its schedule.
+    pub fn start_scrub(self: &Arc<Self>) {
+        let s = self.scrubber.clone();
+        s.spawn(self);
+        if self.config.scrub.enabled {
+            tracing::info!(
+                "scrub: every redundant volume read once in {} day(s), at {} % of the drives' time",
+                self.config.scrub.period_days, self.config.scrub.duty_percent
+            );
+        }
     }
 
     /// Check this node's goldens against their digests, in the background.
@@ -606,6 +620,7 @@ impl AppState {
                 .map(std::path::PathBuf::from)
                 .or_else(|| config.management.data_dir.as_ref().map(|d| std::path::Path::new(d).join("audit.log"))),
             digest_check: Arc::new(tokio::sync::Notify::new()),
+            scrubber: crate::scrub::Scrubber::new(config.management.data_dir.as_deref().map(std::path::Path::new)),
             eraser: crate::volume::erase::Eraser::new(
                 slab_registry_for_eraser,
                 config.management.data_dir.as_ref().map(std::path::PathBuf::from),
