@@ -240,6 +240,10 @@ pub struct VolumeRecord {
     /// bincode; a format v2 header carries it after the tier.
     #[serde(skip)]
     pub digest: Option<SealDigest>,
+    /// A scheme the record's `redundancy` does not say (#159): carried in a
+    /// format-2 header after the digest. Never written by bincode.
+    #[serde(skip)]
+    pub scheme: Option<SchemeExt>,
 }
 
 /// Where a volume came from (#349, owner: an install drops old system
@@ -298,6 +302,49 @@ pub struct SealDigest {
     pub verdict: Verdict,
     /// Seconds since the epoch of the last check; 0 when never checked.
     pub checked_at: u64,
+}
+
+/// A redundancy scheme carried in a volume's format-2 header extension
+/// rather than in its record (#159, step 1 of 3(b)): erasure coding, and
+/// whatever comes after it. An engine that does not know `code` **refuses
+/// the volume**: it is kept, listed, and written back as it was, but never
+/// read, written, rebuilt or cloned, so it is never misread as the `Parity`
+/// the record's own field says (an older engine would compute P and Q over
+/// an `ec:8+3` stripe and leave its third parity leg stale).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemeExt {
+    /// 1 = Reed-Solomon `ec:K+M` (#159); no engine reads any code yet.
+    pub code: u8,
+    pub data: u8,
+    pub parity: u8,
+}
+
+impl SchemeExt {
+    pub const ERASURE: u8 = 1;
+
+    /// The scheme as a policy spells it.
+    pub fn spelling(&self) -> String {
+        match self.code {
+            Self::ERASURE => format!("ec:{}+{}", self.data, self.parity),
+            c => format!("scheme {c} ({}+{})", self.data, self.parity),
+        }
+    }
+
+    /// Whether this engine reads the scheme. None yet: erasure coding is
+    /// built once every release a node could roll back to refuses it (#159).
+    pub fn known(&self) -> bool {
+        false
+    }
+
+    /// Why this engine refuses the volume.
+    pub fn refusal(&self, name: &str, id: &crate::volume::VolumeId) -> String {
+        format!(
+            "volume '{name}' ({}) is {}, a scheme this engine does not read (#159): it is kept as it \
+             is and refused, never read, written, rebuilt or cloned here; an engine that reads it does",
+            id.0,
+            self.spelling()
+        )
+    }
 }
 
 /// What the last read of a sealed volume's copy found against its digest.
@@ -523,6 +570,7 @@ impl From<v8::VolumeMetadata> for VolumeMetadata {
                     origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                 })
                 .collect(),
         }
@@ -637,6 +685,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                 })
                 .collect(),
         }
@@ -703,6 +752,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                 })
                 .collect(),
         }
@@ -770,6 +820,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                         origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                     })
                 .collect(),
         }
@@ -832,6 +883,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                         origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                     })
                 .collect(),
         }
@@ -896,6 +948,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                         origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                     })
                 .collect(),
         }
@@ -954,6 +1007,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                         origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                     })
                 .collect(),
         }
@@ -1015,6 +1069,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                         origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                     })
                 .collect(),
         }
@@ -1310,6 +1365,7 @@ mod tests {
                     origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                 }],
         }
     }
@@ -1450,6 +1506,7 @@ mod tests {
                 origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1539,6 +1596,7 @@ mod tests {
                     origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1766,6 +1824,7 @@ mod retention_tests {
                     origin: Default::default(),
                     tier: None,
                     digest: None,
+                    scheme: None,
                 }],
         }
     }

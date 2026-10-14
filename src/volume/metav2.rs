@@ -1228,6 +1228,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     let origin = record.origin;
     let tier = record.tier;
     let digest = record.digest;
+    let scheme = record.scheme;
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
@@ -1245,10 +1246,12 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // opens the disk as before. The tier byte is written whenever a digest
     // follows (0 for hot, which every reader reads as hot).
     let tier = tier.filter(|t| *t != crate::placement::topology::StorageTier::Hot);
-    if origin != super::metadata::Origin::Unmarked || tier.is_some() || digest.is_some() {
+    // Then a scheme the record does not say (#159): `S`, the code, K, M.
+    // After the digest, so a reader of #384 finds its digest where it looks.
+    if origin != super::metadata::Origin::Unmarked || tier.is_some() || digest.is_some() || scheme.is_some() {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
-        if tier.is_some() || digest.is_some() {
+        if tier.is_some() || digest.is_some() || scheme.is_some() {
             out.push(tier.map(|t| t as u8).unwrap_or(0));
         }
         if let Some(d) = digest {
@@ -1257,9 +1260,18 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
             out.push(d.verdict.code());
             out.extend_from_slice(&d.checked_at.to_le_bytes());
         }
+        if let Some(sc) = scheme {
+            out.push(SCHEME_TAG);
+            out.extend_from_slice(&[sc.code, sc.data, sc.parity]);
+        }
     }
     out
 }
+
+/// A scheme's place in a header's extension (#159): after the digest.
+const SCHEME_TAG: u8 = b'S';
+/// The tag, the code, K, M.
+const SCHEME_LEN: usize = 4;
 
 /// The digest's place in a header's extension (#384): after the tier.
 const DIGEST_TAG: u8 = b'D';
@@ -1282,13 +1294,23 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
                 _ => None,
             };
         }
-        let d = &rest[rest.len().min(6)..];
-        if d.len() >= DIGEST_LEN && d[0] == DIGEST_TAG {
-            rec.digest = Some(super::metadata::SealDigest {
-                sha256: d[1..33].try_into().unwrap(),
-                verdict: super::metadata::Verdict::from_code(d[33]),
-                checked_at: u64::from_le_bytes(d[34..42].try_into().unwrap()),
-            });
+        // Tagged blocks after the tier, in order; a tag not known here ends
+        // the walk (its length is not known).
+        let mut d = &rest[rest.len().min(6)..];
+        loop {
+            if d.len() >= DIGEST_LEN && d[0] == DIGEST_TAG {
+                rec.digest = Some(super::metadata::SealDigest {
+                    sha256: d[1..33].try_into().unwrap(),
+                    verdict: super::metadata::Verdict::from_code(d[33]),
+                    checked_at: u64::from_le_bytes(d[34..42].try_into().unwrap()),
+                });
+                d = &d[DIGEST_LEN..];
+            } else if d.len() >= SCHEME_LEN && d[0] == SCHEME_TAG {
+                rec.scheme = Some(super::metadata::SchemeExt { code: d[1], data: d[2], parity: d[3] });
+                d = &d[SCHEME_LEN..];
+            } else {
+                break;
+            }
         }
     }
 }
@@ -1478,6 +1500,7 @@ mod tests {
             origin: Origin::Node,
             tier: None,
             digest: None,
+            scheme: None,
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1525,6 +1548,7 @@ mod tests {
                 origin,
                 tier,
                 digest: Some(digest),
+                scheme: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = document_of(header_entries(id, &bytes)).unwrap();
@@ -1577,6 +1601,7 @@ mod tests {
             origin: Origin::Node,
             tier: None,
             digest: None,
+            scheme: None,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -1835,6 +1860,7 @@ mod tests {
             origin: Default::default(),
             tier: None,
             digest: None,
+            scheme: None,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -1871,6 +1897,7 @@ mod tests {
             origin: Default::default(),
             tier: None,
             digest: None,
+            scheme: None,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

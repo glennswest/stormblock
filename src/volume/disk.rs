@@ -334,6 +334,7 @@ impl VolumeManager {
         for m in &spec.members {
             match &m.source {
                 MemberSource::Volume { id, len } => {
+                    self.refuse_unknown_scheme(id)?;
                     let dev = self.get_volume(id).ok_or(VolumeError::VolumeNotFound(*id))?;
                     let cap = dev.capacity_bytes();
                     let len = len.unwrap_or(cap);
@@ -860,6 +861,7 @@ impl VolumeManager {
         let mut placement = spec.placement;
         let mut planned = Vec::with_capacity(spec.goldens.len());
         for g in &spec.goldens {
+            self.refuse_unknown_scheme(&g.source)?;
             let handle = self.get_volume_handle(&g.source).ok_or(VolumeError::VolumeNotFound(g.source))?;
             if !self.is_sealed(&g.source) {
                 return Err(invalid(format!(
