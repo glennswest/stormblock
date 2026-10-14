@@ -314,7 +314,7 @@ namespace for a bearer.
 - [ ] golden: held with #428/#410 until stormcentral#841 is live (master);
       proposed after it. Then shipped/close; stormcos_qa's known.toml entry
 
-### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — IN PROGRESS (decision A)
+### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — DONE here (decision A); golden waits on stormcentral#841
 
 Master for the owner (2026-10-13): **A**. Each moved extent is checked
 against the still-attached forge clone's bytes (nothing new on disk, so a
@@ -323,24 +323,23 @@ node can roll back past golden-stormblock-47e88a267077. Always on, every
 flow-over. Found: a freed slot is discarded, and over NVMe/TCP that unmaps
 the clone's extent on forge, so the flow-over holds its source slots (never
 frees them) until the check passes.
-- [ ] `flow_slabs` records (source leg → destination leg) and the zeroed
-      sources; with a hold it persists but frees no source slot
-- [ ] `validate_flow`: every destination slot a sealed volume names, read
-      from the local device (O_DIRECT there) and from its source, sha256
-      compared; a mismatch is written again from the source, flushed, read
-      back (3 tries); still wrong = FlowOverCorrupt: maps pointed back at the
-      source (correct, on forge), persisted, health/console, no local boot,
-      sources kept, install not reported. Writable-only slots skipped
-      (written since: not comparable), counted. Paced as #410, 16 at once
-- [ ] then: free the held sources, local boot, retire sources, install report
-- [ ] health `flow_over.validation` {state, validated, skipped, mismatched,
-      repaired, unrepaired, bytes, seconds, mb_per_s}
-- [ ] tests: a flipped byte repaired; a drive that keeps reading wrong →
-      corrupt, maps back on the source, reads correct; writable skipped
-- [ ] a power cut during validation: a later step (needs a durable
-      "validation owed" mark the initramfs reads, system-data, and the
-      resume claim attached for it)
-- [ ] docs, CHANGELOG, check.sh, golden
+- [x] `flow_slabs_held` records (source leg → destination leg) and the
+      zeroed sources; with a hold it persists but frees no source slot
+- [x] `validate_flow` (every sealed volume's own map: `slab_extents` lists
+      a shared slot once, under whichever map it meets first), repair 3
+      tries, `revert_to_sources`, `free_held`, `settle_flow`; wired into
+      `spawn_flow_over` before local boot / retire / install report
+- [x] health `flow_over.validation`; flow_over_stalled on corrupt
+- [x] tests: flipped byte repaired; a drive that keeps reading wrong →
+      corrupt, maps back on the appliance, reads right; a cut during the
+      validation lets go of nothing, a re-run passes and frees. 44/44
+- [x] cut on metal: nothing is let go or reported before a pass, so the
+      intent stays `install` (#220) and the next boot moves and checks again
+- [x] rate model: 1500 extents validated over NVMe/TCP loopback in
+      1.7–2.6 s (600–900 MB/s), clones' own extents skipped
+- [x] docs (durability rule 17, README), CHANGELOG; stormcentral#844
+      (settle waits for validation passed, corrupt fails)
+- [ ] check.sh; golden (held with #428/#410/#413/#417 for stormcentral#841)
 
 ### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — DONE here; golden waits on stormcentral#841
 
