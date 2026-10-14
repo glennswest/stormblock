@@ -108,6 +108,8 @@ impl Default for PlacementPolicy {
     }
 }
 
+pub mod scrub;
+
 /// Reads and writes of volumes, as their consumers issue them (#269). A
 /// background mover (the flow-over) compares this between its moves to know
 /// whether anything else wants the disk; its own copies go to the slabs

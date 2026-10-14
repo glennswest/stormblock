@@ -1675,6 +1675,10 @@ pub async fn run() -> anyhow::Result<()> {
 
         start_serving(&config, &state, &iscsi_bind, &nvmeof_bind, &reactor).await;
 
+        // The scrub (#160): here, once nothing changes `state` in place (it
+        // keeps a weak reference, which `Arc::get_mut` above would refuse).
+        state.start_scrub();
+
         // Phase 6: Start management API. Last, so the router it builds sees
         // everything above it.
         tokio::spawn({
@@ -8242,6 +8246,7 @@ async fn handle_adopt_ublk(
         let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));
         state.start_eraser().await;
         state.start_digests();
+        state.start_scrub();
         // Where a staged release's boot pallet goes (#122).
         *state.slab_paths.write().await = slab_paths.to_vec();
         // Their disks, so `/api/v1/pallets` lists and verifies the boot

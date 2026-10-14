@@ -37,6 +37,9 @@ pub struct StormBlockConfig {
     /// Rebuilding volumes after a drive fails (#146).
     #[serde(default)]
     pub rebuild: crate::rebuild::RebuildConfig,
+    /// The scrub of redundant volumes (#160).
+    #[serde(default)]
+    pub scrub: crate::scrub::ScrubConfig,
     /// The serving surface — `/serve/v1` (#60).
     #[serde(default)]
     pub serve: ServeSection,

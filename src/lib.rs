@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod drain;
 pub mod rebalance;
 pub mod rebuild;
+pub mod scrub;
 pub mod http;
 pub mod logging;
 pub mod lockwatch;

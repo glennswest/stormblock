@@ -367,6 +367,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if seg.len() == 6 && seg[3] == "slabs" && seg[5] == "upgrade" {
             return true;
         }
+        // A scrub's repairs an operator asks for (#160): a chosen leg written
+        // over an extent's others, or parity rewritten from the data.
+        if seg.len() == 7 && seg[3] == "volumes" && seg[5] == "scrub" && matches!(seg[6], "repair" | "repair-parity") {
+            return true;
+        }
     }
     // A volume's rename (#219): tools that go by name follow it or break.
     if *method == Method::PATCH && seg.len() == 5 && seg[1] == "api" && seg[2] == "v1" && seg[3] == "volumes" {
