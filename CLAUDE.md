@@ -649,12 +649,19 @@ through the kernel, O_DIRECT + io_uring. Asked on #167 (needs-owner): A
 build VFIO, B delete the stub (and dma.rs's VFIO/hugepage parts; `DmaBuf`
 stays, direct.rs uses it), C keep it documented. Recommended B.
 
-### Non-redundant volumes: drive affinity (2026-10-11, #153, P3) — WAITING ON THE OWNER
+### Non-redundant volumes: drive affinity (2026-10-11, #153, P3) — BUILT on branch wip/153-affinity (C); merges after 12.23
 
-Decision 1 of multi-drive §2. Asked on #153 (needs-owner): A affinity for
-`none` (spill when full), B keep spreading, C per-volume `placement:
-affine|spread`, default affine. Recommended C. Either way the #154
-rebalance must keep an affine volume whole. Nothing built.
+Decision 1, C (2026-10-13): `placement: affine | spread` per volume, default
+affine; redundant volumes spread; the rebalance keeps an affine volume whole.
+Built on **wip/153-affinity**: `thin::Layout` on `PlacementPolicy`, the
+handle's affinity slab (`allocate_slot`), `SlabRegistry::takes`, the v2
+header `L` block (spread only), clones inherit, affinity at restore from
+the map; rebalance leaves affine volumes, the drain moves one onto one
+destination; API `placement` on create, `layout` on responses.
+- [x] tests (multidrive, rebalance, drain, metav2); multi-drive.md, README,
+      CHANGELOG
+- [x] check.sh on wip/153-affinity at 1d3148a ALL PASS (1216/1216)
+- [ ] after 12.23 passes: merge, check.sh, the next stage; close
 
 ### Erasure coding k+m (2026-10-11, #159, P3) — STEP 1 BUILT on branch wip/159-refuse-unknown-scheme; EC (step 2) after the rollback gate
 
