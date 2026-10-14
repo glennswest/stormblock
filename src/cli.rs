@@ -13108,8 +13108,19 @@ mod forge_mode_tests {
             async move { crate::volume::VolumeManager::persist_detached(&st.volume_manager).await }
         };
         let t = Instant::now();
-        let r = super::flow_system_half(&state.gem, &state.slab_registry, &[src], dest, persist, None).await;
+        let held = super::FlowHeld::default();
+        let r = super::flow_slabs_held(&state.gem, &state.slab_registry, &[src], dest, persist, None, 0, Some(&held)).await;
         let secs = t.elapsed().as_secs_f64();
+        // The validation every flow-over ends with (#412), over the same path.
+        let sealed: std::collections::HashSet<crate::volume::VolumeId> = {
+            let vm = state.volume_manager.lock().await;
+            vm.volume_ids().into_iter().filter(|id| vm.is_sealed(id)).collect()
+        };
+        let tv = Instant::now();
+        let v = super::settle_flow(&state.gem, &state.slab_registry, &held, &sealed, "sda.bin", persist)
+            .await
+            .expect("the validation passes");
+        let vsecs = tv.elapsed().as_secs_f64();
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         fg.await.unwrap();
         let (moved, failed) = r.expect("the flow-over finished");
@@ -13119,6 +13130,8 @@ mod forge_mode_tests {
                 "extents_on_source": left, "moved": moved, "failed": failed, "secs": secs,
                 "extents_per_hour": moved as f64 * 3600.0 / secs, "mb_per_s": moved as f64 / secs,
                 "foreground": foreground, "built_secs": built.as_secs_f64(), "dest_flush_ms": dest_flush,
+                "validated": v.validated, "validate_skipped": v.skipped, "validate_secs": vsecs,
+                "validate_mb_per_s": v.bytes as f64 / 1e6 / vsecs.max(1e-9),
             })
         );
         assert_eq!(failed, 0);
