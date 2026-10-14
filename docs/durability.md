@@ -271,9 +271,14 @@ tests run on.
    write, so the fault clears itself when it can); `/api/v1/health` says
    `status: degraded` with `durability`; the extent GC frees nothing (a
    record not written cannot be the GC's evidence) and its `POST` answers
-   409. A format-1 slab whose record no longer fits a copy migrates to format
-   2 over the whole region (the v1 copies are not kept: they could not hold
-   it); a WARN says when a record passes 80 % of what its slab reserves.
+   409. Deletes still persist,
+   so removing volumes brings the record back under its copy and the fault
+   clears by itself. Format 2 does not rescue such a slab: its entries carry
+   a 25-byte key each and measured larger than format 1's record for the
+   same volumes, so a record that outgrew a v1 copy does not fit the region
+   as v2 either (the migration, when it is tried, takes the whole region
+   with no v1 copy, and is refused as full when it does not fit). A WARN
+   says when a record passes 80 % of what its slab reserves.
 
 ## How it is checked
 
