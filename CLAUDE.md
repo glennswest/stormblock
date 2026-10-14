@@ -433,6 +433,24 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       the engine stopped, GC off on the first start, .prev / snapshot
       rollback)
 
+### Nodes refused by forge: the claim URI names the host (2026-10-14, #443, P0) — DONE (golden-stormblock-b2adfbc04f9a, on forge)
+
+Owner's model (#445, replacing option A): one clone, one host; no change
+to who forge admits. 12.25's engine after switch_root connected to its own
+clone as `nqn.2024.io.stormblock:initiator`: the claim's URI had no
+`hostnqn=`, and only the initramfs had `STORMBLOCK_HOST_NQN`.
+- [x] `claim_uri_with_host`: ours when admitted, else the reply's first
+      `host_nqns`, else the boot host default (5b2e16a); test fix bb27399
+- [x] tests: the URI unit; two never-seen hosts each get their own clone,
+      connect by the URI alone, generic name and the other host refused
+- [x] check.sh at bb27399 1238/1239 (vhost flake, 15/15 alone: #447);
+      forge on golden-stormblock-b2adfbc04f9a (5b2e16a, master's runbook);
+      pvetest2 12.27 claimed, laid, rebooted, apiserver up
+- Double claim per install boot (stormbootx + initramfs) is #97/#107's
+  design; stormcentral's check reads the wrong one (master told)
+- #428's 44 "mapping dropped" (stale boothost-C2NR0Q2): #171's rule,
+  unchanged since v19.1.4; answered to the master
+
 ### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — DONE (golden-stormblock-10eab8535dd2), metal pending
 
 Owner/master on #402 (2026-10-13): **A** — a drive designated `system` in
