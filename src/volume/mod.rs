@@ -3823,7 +3823,9 @@ impl VolumeManager {
                 if !sc.known() {
                     let why = sc.refusal(&vrec.name, &vrec.id);
                     tracing::warn!("{why}");
-                    handle.refuse(why);
+                    if let Some(h) = self.volumes.get(&vrec.id) {
+                            h.refuse(why);
+                        }
                 }
             }
             restored += 1;
