@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-14
+- **test:** #424's `two_first_boot_claims_at_once_answer_in_seconds_on_a_slow_disk` no longer asserts a total time (under twice a lone claim): in a full-suite run on a busy build VM it took 6.4 s against 2.9 s alone. It asserts what #424 changed: neither claim waits for another machine's (`wait` < 300 ms).
 - **refactor:** #167 (decision B, 2026-10-13): the userspace (VFIO) NVMe driver stub is removed. `src/drive/nvme.rs` (298 lines) built nothing outside itself, and nothing measured says the kernel path costs throughput (#36: CPU per I/O flat across queue depths); VFIO would also hide a drive from stormdrive, udev and the boot survey, and needs root. With it go `dma.rs`'s hugepage allocator and IOVA lookup; `DmaBuf`, the page-aligned buffer the O_DIRECT path uses, stays. NVMe drives are opened by the kernel, O_DIRECT and io_uring, as before. The README and the deck no longer list a VFIO driver. No behaviour change.
 - **docs:** #193 closed as covered (option C, decided 2026-10-13): the boot clone stays read-write. The sealed golden is never written; a node with a disk writes nothing in place on its clone (#239); the boot ladder and diskless nodes write a clone the next claim discards. docs/auth.md no longer lists a read-only overlay as still to come.
 - **feat:** #384 (#245 step 2, the owner's decision A): a sealed volume's digest, checked in the background; `slab holds` reads the verdicts.
