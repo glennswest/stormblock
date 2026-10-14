@@ -306,17 +306,24 @@ window halved (down to 1) + a pause of that flush time. A DRAM-less SSD
 (Patriot P210) flushing the flow-over's own writes trips the second on its
 own and collapses to ~1 extent per flush: the ~1 MB/s. And the NVMe/TCP
 initiator carries one command per connection (4), forge 13.7 128 KiB each.
-- [ ] `fglat`: foreground latency (volume reads/writes, flushes), p90 over
-      seconds, cheap (atomic histograms)
-- [ ] pacing on foreground latency only: flat out while the node's own I/O
-      is fast; AIMD window + pause when its p90 passes a bound; no yield on
-      mere activity, no pacing on the flow-over's own flushes
-- [ ] persist per N extents (256) or 10 s, not per window; before give-up
-- [ ] in flight: 16 reads at once, 8 NVMe/TCP connections; pipelining on
-      one connection filed as its own issue
-- [ ] health `flow_over.pace` (window, state, why, the p90s), persists
-- [ ] tests; rate model with a slow-flush destination, before/after; docs,
-      CHANGELOG; check.sh; golden
+- [x] `fglat`: foreground latency (volume reads/writes, flushes), p90 over
+      seconds, atomic histograms, apart while moving / not (1d4eb23)
+- [x] pacing on foreground latency only: flat out unless the node's p90
+      while moving is past a floor (25 / 100 ms) and 3× its p90 without;
+      then window halved + pause 0.25–5 s. No yield on mere activity, no
+      pacing on the flow-over's own flushes
+- [x] persist per 256 moves or 10 s (`STORMBLOCK_FLOW_BATCH`,
+      `_PERSIST_SECS`; window `STORMBLOCK_FLOW_WINDOW` 64); before give-up
+- [x] in flight: 16 reads at once, 8 NVMe/TCP connections; pipelining on
+      one connection is #433
+- [x] health `flow_over.pace`, `flow_over.persists`
+- [x] tests (3 new, 3 updated to set window and batch); flow/install/
+      power-cut/nvmeof 122/122. Rate model (600 × 1 MiB, release, loopback),
+      MB/s before → after: no flush cost + writer 33.8 → 358.8, idle 134.6 →
+      182.8; 800 ms flushes + writer 4.5 → 34.7, idle 5.3 → 57.4. Docs
+      (durability rule 10, README), CHANGELOG
+- [ ] check.sh; golden; close. Metal (server8, an X9, a pve VM) needs a
+      release with it: health `flow_over.mb_per_s` and `pace`
 
 ### Forge lost 483 volumes: records unwritten since 10-10 (2026-10-13, #428, P0) — IN PROGRESS
 
