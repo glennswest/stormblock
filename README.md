@@ -1960,6 +1960,7 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.allow-external=1` | off | let the survey take a drive on an external shelf as the machine's own (#273, #347) |
 | `rd.stormblock.wipe=<dev>` | — | clear that disk's partition table and slab headers once, before the survey |
 | `rd.stormblock.slab=<dev\|file\|nvme-tcp://…>` | — | boot from a local (or named) slab instead of claiming |
+| `rd.stormblock.system=<drive>` | stormdrive's designation, else the drive holding the system half | at an install, the drive for the system half when it is not the data drive (#402): laid as a boot area and one system slab sized to it; the data half stays on (or is laid on) the drive the survey takes. For a fresh pair nothing has designated yet |
 | `rd.stormblock.meta=<dir>` | — | where the volume records are, for a slab that keeps none |
 | `stormblock.volume=<uuid\|name>` | `boot.toml`, else the slab's boot volume | the root volume |
 | `rd.stormblock.overlay=tmpfs[:SIZE]\|<blockdev>` | `tmpfs`, 512m | writable overlay over a read-only (erofs) root |
@@ -2012,6 +2013,56 @@ too; which console `/dev/console` is comes from
 ports share the 8250 driver's one console, and the first wins).
 `tests/initramfs-console.sh` pins the block; `ci-console-verify.sh` boots
 dev's kernel in QEMU with it as PID 1 and two serial ports as the consoles.
+
+### The system half on a drive of its own (#402)
+
+A node may keep its data on one drive and its system half on another: the X9
+blades' 2 TB SMR HDD keeps the data, a SATA SSD (server8's is 512 GB) takes the
+goldens the node runs from. Owner's decision (A): **a drive stormdrive
+designates `system` outranks the drive the system half is on now.**
+
+**Which drive.** At an install `/init` picks the system drive, in order:
+`rd.stormblock.system=<drive>` (a fresh pair nothing has designated yet), else
+the drive stormdrive designates (`stormblock slab designated --slab <data
+drive>`: `<system-data>/stormdrive/system-drives.json` in the node's
+`system-data` volume, matched by WWN, else model and serial, never by path),
+else the drive already holding this node's system half alone. None of them:
+one drive takes both halves, as before. It hands the engine `boot-local
+--local-disk <data drive> --system-disk <system drive>`.
+
+**What the install does** (`take_split`, everything that can refuse first):
+- **the move** (the HDD holds both halves): the data half stays exactly where
+  it is, same partition, same slab, every volume adopted under its id; the
+  node's own volumes in the old system half are carried into the data half
+  (#349); then the HDD's system slab, ESP and boot pallets are taken out of
+  its table (stormuefi scans every drive and would otherwise still boot the old
+  release from it), and the SSD is laid: a boot area and one system slab, the
+  whole drive less the GPT and 1 % (at least 64 MiB);
+- **an update of a split node**: the SSD's system slab is formatted again, its
+  boot area kept; the HDD's data half kept;
+- **a fresh pair**: both laid.
+
+**Room for an update.** A stage (#122) copies N+1's goldens beside N under
+their own ids, and a new build makes new ids, so an update needs a **full
+second system half**, not just the changed extents: only what N and N+1 share
+by id is stored once. An install refuses a system slab smaller than twice the
+release's system half (its distinct mapped slots) plus 5 %, and says how much
+it needs, before either drive is touched. A release of ~11 GB fits a 256 GB
+SSD many times over.
+
+**Booting from two drives.** The system slab records its data slab's id in its
+header (`partner`, format 2, bytes 152..168, under the v2 checksum; an older
+engine ignores it). `stormblock slab partner <drive>` finds the other drive
+among the machine's disks by that id, from either side. `/init`'s probe pairs
+the drive `rd.stormblock.slab=` names with its partner, boots through the one
+holding the system half (either may enumerate as sda), asks `slab volumes`
+and `slab holds … --with <partner>` of both, and hands both to `boot-local`.
+An install of such a node is over the data drive; the survey's scan never lays
+over one half of a pair. Half a node (the other drive gone) does not boot from
+its disk: with an appliance it asks it, without one it stops and says why.
+
+`ci-split-verify.sh` boots the shipped initramfs in QEMU from the two drives
+the split install test leaves: either drive named, and the data drive alone.
 
 ### The initramfs network: every port a driver took
 

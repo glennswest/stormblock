@@ -261,6 +261,29 @@ A volume the node and the claimed image share by id (the same release) keeps
 the node's bytes; the claim's copy is dropped. A second failure, or a boot
 that does not qualify, stops at the shell as before, and says why.
 
+### A node on two drives (#402)
+
+The system half may have a drive of its own (an SSD), the data half staying on
+another (the HDD). The system slab records its data slab's id in its header,
+and `stormblock slab partner <drive>` finds the other drive by that id among
+the machine's disks (exit 0 with its path last, 1 none, 2 cannot say).
+
+- **The probe** pairs the drive `rd.stormblock.slab=` names with its partner
+  and boots through the one holding the system half; both go to `slab
+  volumes`, `slab cat` (the mount list), `slab holds --with` and `boot-local`.
+  Not held: an install over the **data** drive (`INSTALL_OVER`), never the
+  system drive alone, which carries no data slab and would be laid fresh.
+- **The survey** asks the release of both drives, and its scan never takes one
+  half of a pair ("system slabs only, no identity" is true of the SSD).
+- **The system drive** (block `system drive`), once the survey has the data
+  drive (`LOCAL_DISK`): `rd.stormblock.system=`, else stormdrive's
+  designation (`slab designated --slab <data drive>`, owner's A: it outranks
+  the drive the system half is on now), else the partner. Not on this
+  machine, the data drive itself, or carrying a data half: one drive takes
+  both halves, said. Passed as `--system-disk`; a data drive with a data slab
+  is never forced.
+- **The root fallback** (#244) installs over the data drive too.
+
 ### Whose image: the name the firmware claimed on (#249)
 
 `/init` claims as the machine **stormbootx claimed as**, not as whatever it

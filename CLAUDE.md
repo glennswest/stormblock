@@ -430,7 +430,7 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       the engine stopped, GC off on the first start, .prev / snapshot
       rollback)
 
-### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — PAUSED for P0 #428 (engine half built, b9j6oila5 run pending; /init half not started)
+### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — IN PROGRESS (resumed 2026-10-14)
 
 Owner/master on #402 (2026-10-13): **A** — a drive designated `system` in
 stormdrive (`<system-data>/stormdrive/system-drives.json`, matched by WWN,
@@ -439,25 +439,27 @@ its old system partition and boot area are retired (stormuefi scans every
 drive). server8's SSD is 512 GB: the slab is sized to the drive, whatever it
 is. Every release cmdline says `rd.stormblock.slab=/dev/sda`, and with two
 drives either may be sda.
-- [ ] layout (`image/local.rs`): `lay_system_drive` (boot area + system slab,
-      the drive less the GPT and 1 %), `lay_data_drive` (data + bulk),
-      `retire_system_half` (system slab header zeroed, its partition, the ESP
-      and boot pallets out of the GPT, data kept), layout probes for a drive
-      with one half; update room: system slab ≥ 2 × the release's mapped
-      system-half bytes + 5 % (a stage copies N+1 whole beside N), refused
-      with the numbers
-- [ ] install (`take_local_disk_for`, `--system-disk`): split from a
-      both-halves disk, an update of a split layout, a fresh pair;
-      `FlowOver.data_disk`; successor opens both; local boot onto the system
-      drive
-- [ ] discovery: slabs the records name and that did not open are looked
-      for on the machine's own drives by id before the appliance
-- [ ] /init: read the designation; the designated drive is the system disk
-      (`--system-disk`), the data-slab drive the data disk; a named drive
-      with only a data half boots via the drive holding the system half
-- [ ] tests: install_tests (file drives: both halves → split, data kept,
-      old half retired, a boot from either drive; room refused), boot-hook
-      cases; QEMU two disks; docs, CHANGELOG
+- [x] layout (`image/local.rs`): `lay_system_drive`, `lay_data_drive`,
+      `retire_system_half`, `reformat_system_drive`, update room (7d649ef);
+      the 64 MiB floor checked before anything is retired (b8017eb)
+- [x] install `take_split` (`--system-disk`): the move, an update of a split
+      node, a fresh pair; `FlowOver.data_disk` (28bfecc); `slab designated`
+      (df164f1)
+- [x] pairing: slab header `partner` (v2, 152..168), set by the install;
+      `slab partner`; `slab holds --with` / `release_held_on` (b8017eb).
+      Found: the system drive alone is NotHeld (the data goldens are on the
+      HDD), and the records do not reliably name the other drive: hence the
+      header field rather than "discovery by the records"
+- [x] /init (6a4c0e6): block `node halves` (disk_of, partner_of); the probe
+      pairs and boots through the system drive; install over the data drive;
+      block `system drive` (rd.stormblock.system= > designation > partner);
+      the scan never takes one half; root fallback over the data drive
+- [x] tests: the two install tests un-ignored; partner units; boot-hook +15
+      (sh and busybox sh locally); `ci-split-verify.sh` (QEMU, the test's two
+      drives); README, boot-hooks.md, CHANGELOG
+- [ ] on a build VM: clippy, the targeted tests, every initramfs test,
+      `ci-split-verify.sh`, then check.sh; close #402. Not on metal: server8
+      with its SSD (a release with this engine and initramfs)
 
 ### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — DONE (golden-stormblock-0f2728dcf2ef)
 

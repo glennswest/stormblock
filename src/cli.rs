@@ -11059,6 +11059,16 @@ file = "{state}"
             }
         };
         check("from the two drives after the flow-over").await;
+        // ci-split-verify.sh boots the shipped /init from these two drives.
+        if let Ok(out) = std::env::var("STORMBLOCK_SPLIT_OUT") {
+            for (src, name) in [(&ssd, "ssd.raw"), (&hdd, "hdd.raw")] {
+                let st = std::process::Command::new("cp")
+                    .args(["--sparse=always", src.as_str(), &format!("{out}/{name}")])
+                    .status()
+                    .unwrap();
+                assert!(st.success(), "copying {src} to {out}");
+            }
+        }
         let i = super::open_storage(&image_n1).await.unwrap();
         let l = super::open_storage(&ssd).await.unwrap();
         let d = super::open_storage(&hdd).await.unwrap();
