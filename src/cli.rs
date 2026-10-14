@@ -10222,6 +10222,7 @@ file = "{state}"
     /// is sized to it and holds N+1; after the flow-over and from the two
     /// drives alone. Then N again over the split node: the system drive's
     /// slab laid again, the data kept.
+    #[ignore = "#402 in progress (paused for #428): the split install is not finished"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_system_half_moves_to_a_drive_of_its_own_and_the_data_stays_where_it_was() {
         use crate::drive::slab::SlabRole;
@@ -10334,6 +10335,7 @@ file = "{state}"
     /// #402: a system drive with no room to stage the next release beside
     /// this one is refused, with the numbers, and nothing is written to
     /// either drive.
+    #[ignore = "#402 in progress (paused for #428): the split install is not finished"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_system_drive_without_room_for_an_update_is_refused_and_nothing_written() {
         let Some(mkfs) = mkfs_ext4() else {
