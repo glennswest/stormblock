@@ -69,7 +69,7 @@ pub struct Plan {
     /// Slabs the data half's records name that are in neither half of this
     /// disk (#451): an earlier boot's appliance clone, its flow-over cut
     /// short. Each with the volumes that had extents on it and how many.
-    pub missing: std::collections::BTreeMap<SlabId, Vec<(String, usize)>>,
+    pub missing: HashMap<SlabId, Vec<(String, usize)>>,
 }
 
 /// What an install did with the node's data half, for the console, the
@@ -203,7 +203,7 @@ pub async fn plan_split(
     let mut outside: Vec<String> = Vec::new();
     let mut release_strays: Vec<(VolumeId, String)> = Vec::new();
     let mut carry_from_data: Vec<(VolumeId, String)> = Vec::new();
-    let mut missing: std::collections::BTreeMap<SlabId, Vec<(String, usize)>> = Default::default();
+    let mut missing: HashMap<SlabId, Vec<(String, usize)>> = Default::default();
     let sys_id = system.as_ref().map(|s| s.slab_id());
     for slab in std::iter::once(&data).chain(bulk.as_ref()) {
         if !slab.has_metadata_region() {
@@ -225,7 +225,7 @@ pub async fn plan_split(
                 .chain(v.parity.values().flat_map(|g| g.legs.clone()));
             let away: Vec<SlabId> = legs.map(|l| l.slab_id).filter(|s| !half.contains(s)).collect();
             {
-                let mut gone: std::collections::BTreeMap<SlabId, usize> = Default::default();
+                let mut gone: HashMap<SlabId, usize> = HashMap::new();
                 for s in away.iter().filter(|s| Some(**s) != system.as_ref().map(|x| x.slab_id())) {
                     *gone.entry(*s).or_default() += 1;
                 }
