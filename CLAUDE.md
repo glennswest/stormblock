@@ -294,8 +294,9 @@ bearer's list per namespace (`auth::ListNamespaces`), kube label; test
 `integration_destructive::a_familys_bearer_keeps_to_its_namespace_and_its_quota`;
 README, auth.md, CHANGELOG. First check.sh: only that test red (a test
 fault: cloned an unsealed source; fixed 02c9733, #440 filed by sc-build).
-Next: read tmp/check-408b.log (check.sh at 02c9733); green → close #440,
-merge to main, tell stormcentral#642, close #408.
+check.sh at 02c9733 ALL PASS (1236/1236, no warnings); #440 closed by
+sc-build. Next: rebase on main, merge, check.sh on main's head, tell
+stormcentral#642, close #408.
 
 Forge holds more than stormcos (nana builds goldens there): a namespace per
 family, a Kubernetes namespace on forge's apiserver. Branch
