@@ -2052,7 +2052,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SlabAction::Partner { disk, among, sys, dev } => {
                 use crate::image::partner;
-                let d = match inspect_storage(&disk).await {
+                let d = match inspect_storage(disk).await {
                     Ok(d) => d,
                     Err(e) => {
                         println!("{disk}: cannot open ({e})");
@@ -2073,7 +2073,7 @@ pub async fn run() -> anyhow::Result<()> {
                 } else {
                     among.clone()
                 };
-                let found = partner::find_among(&own, &candidates, &disk).await;
+                let found = partner::find_among(&own, &candidates, disk).await;
                 let names = own.iter().filter_map(|s| s.partner).map(|p| p.to_string()).collect::<Vec<_>>();
                 match found.as_slice() {
                     [] if names.is_empty() => {
