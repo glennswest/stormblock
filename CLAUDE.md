@@ -189,8 +189,10 @@ wake-up in the NVMe-oF accept loop (the port race behind a red
 `integration_forge` on the #170 merge) and the build's warnings (#398 part).
 The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
 - [x] ad33637 (#167 + #424 test) check.sh ALL PASS, main fast-forwarded
-- [ ] check.sh twice on the final head (8e10cc0), then main fast-forwarded,
-      the head commit to the master
+- [x] check.sh twice on 8e10cc0 ALL PASS (1233/1233 both); main at 3fb445f,
+      then 4d79108 (an unused test import, the master's ask); master told
+- [x] the 12.23 stage: golden-stormblock-12891c0025b2 (4d79108). #428
+      shipped; the rest of the list below still to comment/ship/close
 - [ ] when stormcentral#841 is live: `stormcentral component build stormblock`
       (stage of main's head) for 12.23; then shipped/close #428, #410, #413,
       #417, #412, #300, #383, #411, #415, #422/#416, #424, #384 and the merged
@@ -391,7 +393,7 @@ initiator carries one command per connection (4), forge 13.7 128 KiB each.
       master told. Then golden, shipped, close. Metal (server8, an X9, a pve
       VM) needs a release: health `flow_over.mb_per_s` and `pace`
 
-### Forge lost 483 volumes: records unwritten since 10-10 (2026-10-13, #428, P0) — IN PROGRESS
+### Forge lost 483 volumes: records unwritten since 10-10 (2026-10-13, #428, P0) — DONE (golden-stormblock-12891c0025b2), shipped; forge needs the engine
 
 Forge's hot slab 7661cf8b (format 1) outgrew its 100 MiB record copy; every
 persist failed, volumes were made in memory, the restart lost them. Owner
@@ -406,11 +408,10 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       refuses_creates_until_deletes_make_room`; docs (durability rule 16,
       README), CHANGELOG; check.sh at fe5e339 ALL PASS (1190/1190; #402's
       two split tests ignored while it is paused)
-- [ ] golden: the stage failed on forge (404 for b1682c21 =
-      golden-stormd-13e688ca601e, lost in the 00:15Z restart). Waits on
-      stormcentral#841 + `component build stormd --force` (master will say);
-      proposed after stormcentral#841. Then build, tell master (puts it on
-      forge), shipped, close
+- [x] golden golden-stormblock-12891c0025b2 (the 12.23 stage, main
+      4d79108 ⊇ b29a9bd); commented, `stormcentral shipped` (closes with the
+      release); master told. Forge still runs an older engine (404 on
+      `/api/v1/scrub`, 2026-10-14): putting it on forge is the master's
 
 ### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — PAUSED for P0 #428 (engine half built, b9j6oila5 run pending; /init half not started)
 
