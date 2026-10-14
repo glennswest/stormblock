@@ -1650,6 +1650,7 @@ mod tests {
                 digest: d,
                 scheme: Some(sc),
                 layout: Default::default(),
+                namespace: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1695,6 +1696,7 @@ mod tests {
                 digest: d,
                 scheme: None,
                 layout,
+                namespace: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1706,6 +1708,64 @@ mod tests {
                 assert_eq!(bytes[4 + used + 6] == DIGEST_TAG, d.is_some(), "the digest first");
             }
         }
+    }
+
+    /// #408: a volume's namespace rides last, after the digest, the scheme
+    /// and the layout; the default (`stormcos`) writes nothing, and an
+    /// engine that does not know the tag stops there, having read the rest.
+    #[test]
+    fn a_namespace_rides_last_and_the_default_writes_nothing() {
+        use crate::volume::metadata::{Origin, SchemeExt, SealDigest, Verdict};
+        use crate::volume::thin::Layout;
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let digest = SealDigest { sha256: [5; 32], verdict: Verdict::Intact, checked_at: 7 };
+        let sc = SchemeExt { code: SchemeExt::ERASURE, data: 8, parity: 3 };
+        let make = |ns: Option<&str>, d, scheme, layout| VolumeRecord {
+            id,
+            name: "golden-x".into(),
+            virtual_size: 1 << 20,
+            array_id: None,
+            extents: Default::default(),
+            retention: Default::default(),
+            redundancy: Default::default(),
+            parity: Default::default(),
+            failed_slabs: Vec::new(),
+            parent: None,
+            sealed: false,
+            template: false,
+            access: Default::default(),
+            fs: None,
+            owner: None,
+            lba: 4096,
+            extent_size: 0,
+            origin: Origin::Unmarked,
+            tier: None,
+            digest: d,
+            scheme,
+            layout,
+            namespace: ns.map(String::from),
+        };
+        for (d, scheme, layout) in [(None, None, Layout::Affine), (Some(digest), Some(sc), Layout::Spread)] {
+            let rec = make(Some("nana"), d, scheme, layout);
+            let bytes = header_bytes(&rec, 1 << 20);
+            let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
+            assert_eq!(back.namespace.as_deref(), Some("nana"));
+            assert_eq!((back.digest, back.scheme, back.layout), (d, scheme, layout));
+            assert!(bytes.ends_with(b"N\x04nana"), "the namespace last");
+            // A reader that stops at an unknown tag keeps what came before it.
+            let mut cut = bytes.clone();
+            let at = cut.len() - 6;
+            cut[at] = b'?';
+            let back = &document_of(header_entries(id, &cut)).unwrap().volumes[0];
+            assert_eq!((back.namespace.as_deref(), back.digest, back.scheme), (None, d, scheme));
+        }
+        let plain = make(None, None, None, Layout::Affine);
+        assert_eq!(header_bytes(&make(Some("stormcos"), None, None, Layout::Affine), 1 << 20), header_bytes(&plain, 1 << 20));
+        // Not a DNS label: not taken.
+        let mut bad = header_bytes(&plain, 1 << 20);
+        bad.extend_from_slice(HEADER_EXT_TAG);
+        bad.extend_from_slice(&[Origin::Unmarked.code(), 0, NAMESPACE_TAG, 3, b'N', b'_', b'x']);
+        assert_eq!(document_of(header_entries(id, &bad)).unwrap().volumes[0].namespace, None);
     }
 
     /// #349: a volume's origin rides after its header; a reader that knows
