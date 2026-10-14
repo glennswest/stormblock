@@ -736,7 +736,7 @@ async fn a_storage_user_deletes_what_it_created_and_nothing_else() {
     assert_eq!(call(&n, M::DELETE, &format!("/boothost/{mac}"), Some(ME), None).await, 200, "its host record");
     assert_eq!(call(&n, M::GET, &format!("/boothost/{mac}"), Some(ME), None).await, 404, "gone");
     let left: Value = c.get(format!("{}/volumes", n.base)).bearer_auth(ME).send().await.unwrap().json().await.unwrap();
-    let names: Vec<String> = left["volumes"].as_array().or(left.as_array()).unwrap().iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect();
+    let names: Vec<String> = left["items"].as_array().unwrap().iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect();
     assert!(!names.iter().any(|n| n.starts_with("boothost-") || n.starts_with("hostgolden-") || n == "boot-image"), "{names:?}");
 
     // Reviewed as `delete`, said in the audit log; the node's are still `destroy`.
