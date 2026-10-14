@@ -430,7 +430,7 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       the engine stopped, GC off on the first start, .prev / snapshot
       rollback)
 
-### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — IN PROGRESS (resumed 2026-10-14)
+### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — DONE (check.sh at ee1e77a), golden requested
 
 Owner/master on #402 (2026-10-13): **A** — a drive designated `system` in
 stormdrive (`<system-data>/stormdrive/system-drives.json`, matched by WWN,
@@ -457,9 +457,14 @@ drives either may be sda.
 - [x] tests: the two install tests un-ignored; partner units; boot-hook +15
       (sh and busybox sh locally); `ci-split-verify.sh` (QEMU, the test's two
       drives); README, boot-hooks.md, CHANGELOG
-- [ ] on a build VM: clippy, the targeted tests, every initramfs test,
-      `ci-split-verify.sh`, then check.sh; close #402. Not on metal: server8
-      with its SSD (a release with this engine and initramfs)
+- [x] on build VMs: every initramfs test under sh and busybox sh;
+      `ci-split-verify.sh` ALL PASS at ee1e77a (kernel 7.2.8: either drive
+      named, the root comes up through the SSD; the HDD alone stops, engine
+      never started); check.sh at ee1e77a ALL PASS (1237/1237). Plain
+      `cargo test` of install_tests runs five flow-over tests together that
+      share process globals and fail that way only: nextest is the gate
+- [ ] golden (`component build stormblock`), shipped, close #402. Not on
+      metal: server8 with its SSD (a release with this engine and initramfs)
 
 ### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — DONE (golden-stormblock-0f2728dcf2ef)
 
