@@ -117,6 +117,9 @@ pub struct ClientBuilder {
     root_pem: Vec<Vec<u8>>,
     bearer: Option<String>,
     follow: bool,
+    /// A client certificate and its key (PEM), presented to a server that
+    /// asks (#383: a node's enrolled certificate, to forge).
+    identity: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 impl ClientBuilder {
@@ -139,6 +142,12 @@ impl ClientBuilder {
     /// that only shows up under load.
     pub fn bearer(mut self, token: Option<String>) -> Self {
         self.bearer = token;
+        self
+    }
+
+    /// Present this client certificate (PEM, leaf first) with its key (PEM).
+    pub fn identity_pem(mut self, cert: Vec<u8>, key: Vec<u8>) -> Self {
+        self.identity = Some((cert, key));
         self
     }
 
@@ -167,9 +176,22 @@ impl ClientBuilder {
                 roots.add(c).map_err(|e| Error::Tls(format!("adding CA: {e}")))?;
             }
         }
-        let tls = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let tls = rustls::ClientConfig::builder().with_root_certificates(roots);
+        let tls = match &self.identity {
+            None => tls.with_no_client_auth(),
+            Some((cert, key)) => {
+                let chain: Vec<_> = rustls_pemfile::certs(&mut std::io::Cursor::new(cert))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| Error::Tls(format!("reading the client certificate: {e}")))?;
+                if chain.is_empty() {
+                    return Err(Error::Tls("the client certificate pem holds no certificate".into()));
+                }
+                let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(key))
+                    .map_err(|e| Error::Tls(format!("reading the client key: {e}")))?
+                    .ok_or_else(|| Error::Tls("the client key pem holds no key".into()))?;
+                tls.with_client_auth_cert(chain, key).map_err(|e| Error::Tls(format!("client certificate: {e}")))?
+            }
+        };
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_tls_config(tls)
             .https_or_http()
@@ -202,7 +224,7 @@ impl Client {
     }
 
     pub fn builder() -> ClientBuilder {
-        ClientBuilder { timeout: Duration::from_secs(30), root_pem: Vec::new(), bearer: None, follow: true }
+        ClientBuilder { timeout: Duration::from_secs(30), root_pem: Vec::new(), bearer: None, follow: true, identity: None }
     }
 
     pub fn post(&self, url: impl AsRef<str>) -> RequestBuilder {

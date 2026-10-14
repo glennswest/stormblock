@@ -17,6 +17,7 @@ mod crash_recovery;
 mod integration_array_pin;
 mod integration_auth;
 mod integration_capacity;
+mod integration_kernelopt;
 mod integration_locks;
 mod integration_compose_disk;
 mod integration_destructive;

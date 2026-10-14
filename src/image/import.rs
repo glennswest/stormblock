@@ -23,6 +23,26 @@ use crate::image::decode::{self, SourceFormat};
 use crate::mgmt::AppState;
 use crate::volume::{CreateOptions, RedundancyPolicy, VolumeId};
 
+/// A server CA and a client identity, PEM (#383).
+#[derive(Debug, Clone, Default)]
+pub struct ClientTls {
+    pub ca: Option<Vec<u8>>,
+    pub cert: Vec<u8>,
+    pub key: Vec<u8>,
+}
+
+/// The client an import fetches with.
+fn client_for(spec: &ImportSpec, timeout: std::time::Duration) -> Result<crate::http::Client, String> {
+    let mut b = crate::http::Client::builder().timeout(timeout);
+    if let Some(t) = &spec.tls {
+        if let Some(ca) = &t.ca {
+            b = b.add_root_certificate_pem(ca.clone());
+        }
+        b = b.identity_pem(t.cert.clone(), t.key.clone());
+    }
+    b.build().map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ImportSpec {
     /// Name of the golden volume.
@@ -74,6 +94,11 @@ pub struct ImportSpec {
     /// true; `false` still finds and reports them, without walking.
     #[serde(default = "yes")]
     pub verify: bool,
+    /// How the URL is fetched over TLS (#383): the server's CA and a client
+    /// certificate to present. Set by the engine (a node pulling from forge
+    /// with its enrolled certificate), never by a request.
+    #[serde(skip)]
+    pub tls: Option<ClientTls>,
     /// The logical block the golden and its clones are presented at: 512 or
     /// 4096 (#110). Absent means what the image was authored for: a GPT at
     /// the LBA its header is at, an MBR disk or an ISO 9660 image at 512,
@@ -472,7 +497,7 @@ async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportSta
             // An idle bound, per frame and to the headers (#359): the download
             // itself may take hours, a server that stops sending may not. It
             // resumes on failure and removes its partial file when it gives up.
-            let client = crate::http::Client::builder().timeout(std::time::Duration::from_secs(120)).build().map_err(|e| e.to_string())?;
+            let client = client_for(spec, std::time::Duration::from_secs(120))?;
             let n = client.get_to_file(url, &target).await.map_err(Fail::http)?;
             {
                 let mut s = st.write().await;
@@ -506,10 +531,7 @@ async fn stream_raw(
     st: &Arc<RwLock<ImportStatus>>,
     url: &str,
 ) -> Result<(), Fail> {
-    let client = crate::http::Client::builder()
-        .timeout(std::time::Duration::from_secs(6 * 3600))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = client_for(spec, std::time::Duration::from_secs(6 * 3600))?;
     let declared = match &spec.size {
         Some(s) => Some(crate::mgmt::config::parse_size(s).map_err(|e| format!("size: {e}"))?),
         None => None,

@@ -1182,6 +1182,36 @@ async fn seal_volume(
 /// writes); `?refresh=true` reads it again. On a task of its own, so a
 /// caller that gives up does not waste the read. An unsealed volume is 409:
 /// its bytes may change under the answer.
+/// `GET /api/v1/volumes/{id}/content` (#383): a sealed volume's bytes, by
+/// Range, for a node pulling a golden from forge (its kernel's `gpu`, with
+/// its enrolled certificate, `serve::api::forge_node_read`). Sealed only: a
+/// reader resuming a transfer must get the bytes it started on.
+async fn volume_content(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let vol_id = match volume_key(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let (h, dev) = {
+        let vm = state.volume_manager.lock().await;
+        match (vm.get_volume_handle(&vol_id), vm.get_volume(&vol_id)) {
+            (Some(h), Some(d)) => (h, d),
+            _ => return ApiError::not_found(format!("volume {} not found", vol_id.0)),
+        }
+    };
+    if !h.is_sealed() {
+        return ApiError::conflict(format!(
+            "volume {} is not sealed: its content could change under a reader",
+            vol_id.0
+        ));
+    }
+    let name = h.name().await;
+    super::releases::serve_device(dev, &headers, name.clone(), format!("{name}.img"))
+}
+
 async fn volume_digest(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -3204,6 +3234,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
         .route("/{id}/pallet-signature", get(pallet_signature).post(sign_pallet_volume))
         .route("/{id}/digest", get(volume_digest))
+        .route("/{id}/content", get(volume_content))
         .route("/{id}/legs", get(super::legs::volume_legs))
         .route("/{id}/access", get(get_access).put(set_access))
         .route("/{id}/clone", axum::routing::post(clone_volume))

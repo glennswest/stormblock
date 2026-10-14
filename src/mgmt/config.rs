@@ -52,6 +52,39 @@ pub struct StormBlockConfig {
     /// The storage network: the interface the data path is on (#85).
     #[serde(default)]
     pub storage: StorageSection,
+    /// Optional kernel images from forge (#383).
+    #[serde(default)]
+    pub kernel: KernelSection,
+}
+
+/// `[kernel]` (#383): where a node pulls its kernel's optional images (`gpu`,
+/// `misc`) from, and with what. Every key has a default that fits a stormcos
+/// node: forge is the host the node booted from (port 9090), and the node
+/// presents the certificate forge enrolled it with (stormcert#79).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KernelSection {
+    /// Forge's engine, `https://forge.g16.lo:9090`.
+    pub forge_url: Option<String>,
+    /// The node's enrolled certificate; `/data/stormcert/forge-node.crt.pem`.
+    pub client_cert: Option<String>,
+    /// Its key; `/data/stormcert/forge-node.key.pem`.
+    pub client_key: Option<String>,
+    /// The CA forge's engine certificate chains to; forge's CA, as a boot
+    /// from it left it (`/run/stormblock/forge/ca.crt`, #381).
+    pub forge_ca: Option<String>,
+}
+
+impl KernelSection {
+    pub fn client_cert(&self) -> std::path::PathBuf {
+        self.client_cert.clone().unwrap_or_else(|| "/data/stormcert/forge-node.crt.pem".into()).into()
+    }
+    pub fn client_key(&self) -> std::path::PathBuf {
+        self.client_key.clone().unwrap_or_else(|| "/data/stormcert/forge-node.key.pem".into()).into()
+    }
+    pub fn forge_ca(&self) -> std::path::PathBuf {
+        self.forge_ca.clone().unwrap_or_else(|| format!("{}/ca.crt", crate::mgmt::forge_trust::NODE_DIR)).into()
+    }
 }
 
 /// `[storage]` (#85): the data path's own network. A storage VLAN is a

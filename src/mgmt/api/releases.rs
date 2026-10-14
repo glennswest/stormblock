@@ -57,6 +57,16 @@ pub struct ManifestEntry {
     /// What changed in this component since the last release that carried it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Not in the release's image: a golden a node takes only when asked
+    /// (#383, stormcos#276), such as the kernel set's `gpu` and `misc`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+    /// The image it is, as a node asks for it: `gpu`, `misc`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// The kernel it was built for, as `uname -r` says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
 }
 
 /// A published version.

@@ -511,6 +511,18 @@ pub async fn require_token(
             }
         }
     }
+    // A node forge enrolled (#383): its certificate reads a sealed volume's
+    // content and a release's manifest, and nothing else.
+    if !is_admin && !is_node && cert.as_ref().is_some_and(|c| c.forge_node) {
+        if crate::serve::api::forge_node_read(&method, &path) {
+            if let Some(s) = &slot {
+                s.set("forge-node");
+            }
+            let fp = cert.as_ref().map(|c| c.fingerprint.clone()).unwrap_or_default();
+            req.extensions_mut().insert(Caller(format!("forge-node:{fp}")));
+            return next.run(req).await;
+        }
+    }
     let destructive = match class {
         Class::Public => {
             // An open route answers anyone; one holding a token sees more

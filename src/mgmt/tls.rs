@@ -33,6 +33,10 @@ pub struct ClientCert {
     /// Verified against forge's CA, not revoked by forge's CRL, and valid for
     /// this listed name (`tls_admin_names`): the admin tier.
     pub admin: Option<String>,
+    /// Verified against forge's CA and not revoked, but not a listed admin:
+    /// a node forge enrolled (#383, stormcert#78). It may only read a sealed
+    /// volume's content and a release's manifest (`serve::api::forge_node_read`).
+    pub forge_node: bool,
 }
 
 impl ClientCert {
@@ -40,7 +44,7 @@ impl ClientCert {
         use sha2::Digest;
         let d = sha2::Sha256::digest(der);
         let hex: String = d.iter().take(8).map(|b| format!("{b:02x}")).collect();
-        ClientCert { fingerprint: format!("sha256:{hex}"), node: false, admin: None }
+        ClientCert { fingerprint: format!("sha256:{hex}"), node: false, admin: None, forge_node: false }
     }
 }
 
@@ -100,15 +104,16 @@ impl Classifier {
         let leaf = chain.first()?;
         let mut c = ClientCert::from_der(leaf.as_ref());
         c.node = !self.node_cas.is_empty() && Self::verifies(&self.node_cas, &[], chain).is_some();
-        if !self.admin_cas.is_empty() && !self.admin_names.is_empty() && Self::verifies(&self.admin_cas, &self.crls, chain).is_some() {
+        if !self.admin_cas.is_empty() && Self::verifies(&self.admin_cas, &self.crls, chain).is_some() {
             let ee = webpki::EndEntityCert::try_from(leaf).ok()?;
             c.admin = self.admin_names.iter().find(|n| {
                 rustls::pki_types::ServerName::try_from(n.as_str())
                     .ok()
                     .is_some_and(|sn| ee.verify_is_valid_for_subject_name(&sn).is_ok())
             }).cloned();
+            c.forge_node = c.admin.is_none();
         }
-        (c.node || c.admin.is_some()).then_some(c)
+        (c.node || c.admin.is_some() || c.forge_node).then_some(c)
     }
 }
 

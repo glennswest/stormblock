@@ -121,6 +121,18 @@ pub struct AuthConfig {
 /// names this node's volumes and says how full it is, which is a read of the
 /// node's state rather than a question about whether it is alive. A scraper
 /// presents the token like any other client.
+/// What a node forge enrolled may read with its certificate alone (#383,
+/// the owner's decision on it): a sealed volume's content and a release's
+/// manifest, by GET. Nothing it could change, nothing that names another
+/// node's state.
+pub fn forge_node_read(method: &Method, path: &str) -> bool {
+    if method != Method::GET {
+        return false;
+    }
+    let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    matches!(seg.as_slice(), ["", "api", "v1", "volumes", _, "content"] | ["", "api", "v1", "releases", _, "manifest"])
+}
+
 fn is_public(path: &str) -> bool {
     matches!(
         path,
