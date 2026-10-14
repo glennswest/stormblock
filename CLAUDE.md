@@ -1044,6 +1044,17 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
+### lockwatch: the volume manager held across a flush, still (2026-10-14, #415) — IN PROGRESS
+
+- [x] import task: `spawn_owing` + `persist_detached_checked`, done after it
+- [x] flow-over retire: `retire_drained_slab` no longer persists; the
+      flow-over `persist_detached` after the lock is let go
+- [x] kernelopt clone: `spawn_owing`
+- [x] test `integration_locks::an_import_never_flushes_with_the_volume_
+      manager_held` (records on the slabs): fails without the fix with
+      12.21's line, passes with it; targeted 14/14; CHANGELOG
+- [ ] check.sh; golden (held for stormcentral#841); close
+
 ### The netdev wait never saw a virtio NIC (2026-10-14, #414) — DONE (initramfs at 87343f8)
 
 - [x] `netdev_missing` looks under `<fn>/net` and `<fn>/*/net` (virtio0)
