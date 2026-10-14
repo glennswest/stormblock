@@ -199,6 +199,24 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
+### A keep-data install over a flow-over cut short drops goldens' extents (2026-10-14, #451, P0) — IN PROGRESS
+
+server2 (X9): 12.27 over a 12.14 install hard-powered-off ~2 min in (mid
+flow-over). 218 "slab 135f7828 not attached, mapping dropped" at the
+successor's restore: pvc-ext4j-256m.golden 72, cadvisor-data.golden 62,
+vmimages-data.golden 59, stormconsole-data.golden 16 (+9 garbled). 135f7828
+= 12.14's clone data slab (never attached again). By reading: a data-half
+golden is composed in by id, so an unchanged blank has the same id in 12.14
+and 12.27; `plan` takes it as a release stray (#369), the claim holding the
+id keeps it in memory (`adopt_slabs` skips known ids), but the disk's data
+slab keeps the old record, and restore takes the first record it meets.
+12.27 and 12.27-flowsdn tombstoned (owner) for this.
+- [x] reproduction `install_tests::a_data_half_cut_short_mid_flow_over_gets_
+      its_goldens_from_the_release` (b…): to run
+- [ ] fix: the release's golden from the release; the stale record gone
+      from the data half; a loud finding naming the missing slab
+- [ ] tests, docs (durability), CHANGELOG, check.sh, golden, close
+
 ### server1 (X9) at the EFI shell after a 12.27 install (2026-10-14, #449, P0) — NOT stormblock's; waits on stormbootx#89 (v0.26.0 on server1's stick)
 
 The disk is laid and bootable: the shell's map shows `fs0` = sda's ESP
