@@ -217,6 +217,27 @@ pub fn data_addresses() -> Vec<IpAddr> {
     DATA_ADDRESSES.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// The address this machine reaches others from, of `addr`'s family: the
+/// source the routing table picks for a documentation address (a UDP
+/// connect sends nothing). What a target listening on a wildcard, with no
+/// address configured, can honestly advertise (#417): on a node the address
+/// is known only at boot. `None` with no route of that family.
+/// `STORMBLOCK_ROUTE_SOURCE` stands in for it (tests; `none` = no route).
+pub fn route_source(addr: SocketAddr) -> Option<IpAddr> {
+    if let Ok(v) = std::env::var("STORMBLOCK_ROUTE_SOURCE") {
+        return v.trim().parse().ok();
+    }
+    let (bind, probe): (SocketAddr, SocketAddr) = if addr.is_ipv4() {
+        ((Ipv4Addr::UNSPECIFIED, 0).into(), (Ipv4Addr::new(192, 0, 2, 1), 9).into())
+    } else {
+        ((Ipv6Addr::UNSPECIFIED, 0).into(), ("2001:db8::1".parse::<Ipv6Addr>().ok()?, 9).into())
+    };
+    let sock = std::net::UdpSocket::bind(bind).ok()?;
+    sock.connect(probe).ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
 /// Where a data-path listener (NVMe/TCP, iSCSI) really binds: a wildcard
 /// address becomes the storage network's, port kept. A concrete address is
 /// the operator's choice and is kept. Without a storage network, `addr`.

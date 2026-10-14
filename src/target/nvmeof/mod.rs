@@ -631,13 +631,29 @@ impl NvmeofTarget {
         let listen_addrs = crate::netif::data_binds(config.listen_addr);
         config.listen_addr = listen_addrs[0];
         if config.advertised_addr.is_none() && config.listen_addr.ip().is_unspecified() {
-            tracing::warn!(
-                "NVMe-oF {}: listening on {} with no advertised address: its discovery log page says {} \
-                 (#116), which no initiator can dial. Set [management] advertised_addr",
-                config.nqn,
-                config.listen_addr,
-                config.listen_addr
-            );
+            // Every node's config is the same file, and its address is known
+            // only at boot (#417): advertise the one its default route uses.
+            // A configured advertised_addr (forge sets one) always wins.
+            match crate::netif::route_source(config.listen_addr) {
+                Some(ip) => {
+                    let at = SocketAddr::new(ip, config.listen_addr.port());
+                    tracing::info!(
+                        "NVMe-oF {}: listening on {}: advertising {at}, the address of the default route \
+                         (set [management] advertised_addr to choose another)",
+                        config.nqn,
+                        config.listen_addr
+                    );
+                    config.advertised_addr = Some(at);
+                }
+                None => tracing::warn!(
+                    "NVMe-oF {}: listening on {} with no advertised address and no default route: its \
+                     discovery log page says {} (#116), which no initiator can dial. Set [management] \
+                     advertised_addr",
+                    config.nqn,
+                    config.listen_addr,
+                    config.listen_addr
+                ),
+            }
         }
         let default = Arc::new(Subsystem::new(config.nqn.clone(), HostAccess::Any));
         let first_cntlid = config.cntlid_min.max(1);
@@ -1727,6 +1743,35 @@ mod tests {
         let lh = advertise_at("localhost", 7).expect("localhost resolves");
         assert!(lh.ip().is_loopback() && lh.port() == 7, "{lh}");
         assert_eq!(advertise_at("no-such-host.invalid", 4420), None);
+    }
+
+    /// #417: a target on a wildcard with nothing configured advertises the
+    /// default route's address, not 0.0.0.0; a configured one wins; with no
+    /// route it is left unset (and said loudly).
+    #[test]
+    fn a_wildcard_target_advertises_the_default_routes_address() {
+        let cfg = |listen: &str, adv: Option<&str>| NvmeofConfig {
+            listen_addr: listen.parse().unwrap(),
+            advertised_addr: adv.map(|a| a.parse().unwrap()),
+            ..NvmeofConfig::default()
+        };
+        std::env::set_var("STORMBLOCK_ROUTE_SOURCE", "192.168.30.17");
+        let t = NvmeofTarget::new(cfg("0.0.0.0:4420", None));
+        assert_eq!(t.config.advertised_addr, Some("192.168.30.17:4420".parse().unwrap()));
+        let t = NvmeofTarget::new(cfg("0.0.0.0:4420", Some("10.0.0.5:4420")));
+        assert_eq!(t.config.advertised_addr, Some("10.0.0.5:4420".parse().unwrap()), "configured wins");
+        let t = NvmeofTarget::new(cfg("127.0.0.1:4420", None));
+        assert_eq!(t.config.advertised_addr, None, "a concrete listen address is what it says");
+        std::env::set_var("STORMBLOCK_ROUTE_SOURCE", "none");
+        let t = NvmeofTarget::new(cfg("0.0.0.0:4420", None));
+        assert_eq!(t.config.advertised_addr, None, "no route: left unset");
+        std::env::remove_var("STORMBLOCK_ROUTE_SOURCE");
+        // The real routing table (a build VM has a default route).
+        if let Some(ip) = crate::netif::route_source("0.0.0.0:1".parse().unwrap()) {
+            assert!(ip.is_ipv4() && !ip.is_loopback());
+            let t = NvmeofTarget::new(cfg("0.0.0.0:4420", None));
+            assert_eq!(t.config.advertised_addr, Some(SocketAddr::new(ip, 4420)));
+        }
     }
 
     #[test]
