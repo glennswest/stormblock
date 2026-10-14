@@ -23,13 +23,20 @@ trap 'rm -rf "$WORK"' EXIT
 
 sed -n '/# --- BEGIN boot hook/,/# --- END boot hook/p' "$GEN" > "$WORK/hook.sh"
 [ -s "$WORK/hook.sh" ] || { echo "FAIL: could not extract the boot hook block"; exit 1; }
-sed -n '/# --- BEGIN local-slab probe/,/# --- END local-slab probe/p' "$GEN" > "$WORK/probe.sh"
+# The node's two drives (#402) first: the probe and the survey both ask.
+sed -n '/# --- BEGIN node halves/,/# --- END node halves/p' "$GEN" > "$WORK/halves.sh"
+[ -s "$WORK/halves.sh" ] || { echo "FAIL: could not extract the node halves block"; exit 1; }
+cp "$WORK/halves.sh" "$WORK/probe.sh"
+sed -n '/# --- BEGIN local-slab probe/,/# --- END local-slab probe/p' "$GEN" >> "$WORK/probe.sh"
 [ -s "$WORK/probe.sh" ] || { echo "FAIL: could not extract the local-slab probe"; exit 1; }
 sed -n '/# --- BEGIN hook takeable/,/# --- END hook takeable/p' "$GEN" > "$WORK/takeable.sh"
 [ -s "$WORK/takeable.sh" ] || { echo "FAIL: could not extract the takeable block"; exit 1; }
 # The shelves (#347) first: the survey decides by a shelf's position.
-sed -n '/# --- BEGIN shelves/,/# --- END shelves/p' "$GEN" > "$WORK/survey.sh"
+cp "$WORK/halves.sh" "$WORK/survey.sh"
+sed -n '/# --- BEGIN shelves/,/# --- END shelves/p' "$GEN" >> "$WORK/survey.sh"
 sed -n '/# --- BEGIN assimilate survey/,/# --- END assimilate survey/p' "$GEN" >> "$WORK/survey.sh"
+sed -n '/# --- BEGIN system drive/,/# --- END system drive/p' "$GEN" >> "$WORK/survey.sh"
+grep -q 'END system drive' "$WORK/survey.sh" || { echo "FAIL: could not extract the system drive block"; exit 1; }
 [ -s "$WORK/survey.sh" ] || { echo "FAIL: could not extract the assimilate survey"; exit 1; }
 sed -n '/# --- BEGIN boothost claim/,/# --- END boothost claim/p' "$GEN" > "$WORK/claim.sh"
 [ -s "$WORK/claim.sh" ] || { echo "FAIL: could not extract the boothost claim"; exit 1; }
@@ -232,8 +239,10 @@ fi
 answers="$STUB_ANSWERS/$(basename "$3")"
 case "$2" in
 list)    sed -n '1p' "$answers" 2>/dev/null ;;
-volumes) sed -n '2,$p' "$answers" 2>/dev/null ;;
-holds)   echo "holds? (stub)"; exit "${STUB_HOLDS:-2}" ;;
+volumes) shift 2; for d in "$@"; do sed -n '2,$p' "$STUB_ANSWERS/$(basename "$d")" 2>/dev/null; done ;;
+holds)   echo "$*" > "$STUB_ANSWERS/holds.args"; echo "holds? (stub)"; exit "${STUB_HOLDS:-2}" ;;
+# `slab partner` (#402): the drive named in <device>.partner, else none.
+partner) [ -s "$answers.partner" ] || exit 1; cat "$answers.partner" ;;
 esac
 exit 0
 STUBEOF
@@ -255,6 +264,8 @@ probe() { # slab-path [VOLUME] [META] -> the SLAB the probe leaves behind
         SLAB="$1"
         VOLUME="${2:-}"
         META="${3:-}"
+        MOUNTS_CMDLINE="${MOUNTS_T:-}"
+        MOUNTS="${MOUNTS_T:-}"
         BOOTHOST="http://boothost:9090"
         # GUESS=1: nothing handed a name down, so SMBIOS is read (#249).
         if [ -n "${GUESS:-}" ]; then BOOTTAG=""; HOSTNQN=""; else BOOTTAG="TESTTAG"; HOSTNQN="nqn.test"; fi
@@ -368,6 +379,34 @@ TICKET=""
 echo recovery > "$WORK/override"
 check "override recovery: the claimed image boots, nothing installed over the disk" "$URI" \
     "$(OVR="$WORK/override" STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+
+# #402: the node on two drives. The SSD holds the system half (the root),
+# the HDD the data half; either may be the one the command line names.
+ssd="$WORK/ssd"; hdd="$WORK/hdd"; : > "$ssd"; : > "$hdd"
+answer_for ssd "$ssd: slab 66666666-7777-8888-9999-000000000000 (role=system, tier=hot, in stormblock)" \
+    "$ssd: volume stormpump (2.1 GB, 540 slots) 9f1c0000-0000-0000-0000-000000000001"
+answer_for hdd "$hdd: slab 11111111-2222-3333-4444-555555555555 (role=data, tier=hot, in stormblock-data)" \
+    "$hdd: volume state (1.0 GB, 256 slots) 9f1c0000-0000-0000-0000-000000000003"
+echo "$hdd" > "$WORK/answers/ssd.partner"; echo "$ssd" > "$WORK/answers/hdd.partner"
+check "two drives, the system drive named: it boots" "$ssd" \
+    "$(MOUNTS_T=state:/var/lib/state probe "$ssd")"
+check "two drives, the data drive named: the boot goes through the system drive" "$ssd" \
+    "$(MOUNTS_T=state:/var/lib/state probe "$hdd")"
+rm -f "$WORK/answers/hdd.partner" "$WORK/answers/ssd.partner"
+check "the data drive alone, its partner gone: the appliance decides" "" \
+    "$(MOUNTS_T=state:/var/lib/state probe "$hdd")"
+check "the system drive alone: a mounted data volume is missing" "" \
+    "$(MOUNTS_T=state:/var/lib/state probe "$ssd")"
+echo "$hdd" > "$WORK/answers/ssd.partner"; echo "$ssd" > "$WORK/answers/hdd.partner"
+check "two drives, another release: an install over the data drive" "$URI|$hdd" \
+    "$(STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$hdd")"
+case "$(cat "$WORK/answers/holds.args" 2>/dev/null)" in
+*"$ssd"*"--with $hdd"*) check "  the release asked of both drives" yes yes ;;
+*) check "  the release asked of both drives: $(cat "$WORK/answers/holds.args")" yes no ;;
+esac
+check "two drives, the same release: the system drive boots" "$ssd" \
+    "$(STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$hdd")"
+rm -f "$WORK/answers/hdd.partner" "$WORK/answers/ssd.partner"
 
 # ---------------------------------------------------------------------------
 # The machine's name: handed down by the firmware, or guessed (#249).
@@ -492,7 +531,16 @@ SVSTUB="$WORK/stormblock-survey"
 cat > "$SVSTUB" <<'STUBEOF'
 #!/bin/sh
 # `slab holds`: the release check (#261), answered by STUB_HOLDS (2 = cannot say)
-if [ "$2" = holds ]; then echo "holds? (stub)"; exit "${STUB_HOLDS:-2}"; fi
+if [ "$2" = holds ]; then echo "$*" > "$SURVEY_ANSWERS/holds.args"; echo "holds? (stub)"; exit "${STUB_HOLDS:-2}"; fi
+# `slab partner` (#402): <device>.partner; `slab designated`: STUB_DESIGNATED.
+if [ "$2" = partner ]; then
+    [ -s "$SURVEY_ANSWERS/$(basename "$3").partner" ] || exit 1
+    cat "$SURVEY_ANSWERS/$(basename "$3").partner"; exit 0
+fi
+if [ "$2" = designated ]; then
+    [ -n "${STUB_DESIGNATED:-}" ] || { echo "no system drive designated"; exit 1; }
+    echo "designated (stub): $STUB_DESIGNATED"; echo "$STUB_DESIGNATED"; exit 0
+fi
 cat "$SURVEY_ANSWERS/$(basename "$3")" 2>/dev/null
 exit 0
 STUBEOF
@@ -695,9 +743,17 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
             foreign) printf '\125\252' | dd of="$dev/$n" bs=1 seek=510 conv=notrunc 2>/dev/null ;;
             tail) printf 'a92b4efc' | dd of="$dev/$n" bs=1 seek=$((4 * 1048576 - 4096)) conv=notrunc 2>/dev/null ;;
             layout|baylayout) printf '%s\n' "$DATA_ONLY" "$SYS_HALF" > "$ans/$n" ;;
+            dataonly) printf '%s\n' "$DATA_ONLY" > "$ans/$n" ;;
+            sysonly) printf '%s\n' "$SYS_HALF" > "$ans/$n" ;;
             datashelf) printf '%s\n' "$DATA_ONLY" > "$ans/$n" ;;
             esac
         done
+        # PAIR="a:b": drives a and b hold one node's two halves (#402).
+        for pr in ${PAIR:-}; do
+            echo "/dev/${pr#*:}" > "$ans/${pr%%:*}.partner"
+            echo "/dev/${pr%%:*}" > "$ans/${pr#*:}.partner"
+        done
+        SYSTEM_NAMED="${SYSNAMED:-}"
         STORM_STORMBLOCK="$SVSTUB"; STORM_SYS_BLOCK="$sys"; SURVEY_ANSWERS="$ans"; STORM_DEV="$dev"
         export STORM_STORMBLOCK STORM_SYS_BLOCK SURVEY_ANSWERS STORM_DEV
         STORM_NO_INTENT="${NOINTENT:-$WORK/no-marker}"; export STORM_NO_INTENT
@@ -712,7 +768,7 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
         . "$WORK/identity.sh" >/dev/null 2>&1
         BOOTTAG_FROM=firmware
         . "$WORK/survey.sh" > "$WORK/msurvey.log" 2>&1
-        echo "$LOCAL_DISK${FORCE_LOCAL:+ force}"
+        echo "$LOCAL_DISK${FORCE_LOCAL:+ force}${SYSTEM_DISK:+ system=$SYSTEM_DISK}"
     )
 }
 
@@ -747,6 +803,33 @@ check "none named, 'force': a shelf drive with a data slab is still left" "" \
     "$(survey_m force sdb\|datashelf)"
 check "rd.stormblock.allow-external=1: a blank drive in an enclosure is taken" "/dev/sdb" \
     "$(EXTERNAL=1 survey_m any sdb\|shelf)"
+
+echo "the system half on a drive of its own (#402):"
+# server8: the HDD (sda) holds both halves, the SSD (sdb) is blank and
+# designated by stormdrive. An install moves the system half onto the SSD.
+check "designated: the HDD keeps its data half, the SSD takes the system half" "/dev/sda system=/dev/sdb" \
+    "$(STUB_DESIGNATED=/dev/sdb STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|blank)"
+grep -q "SYSTEM DRIVE: /dev/sdb (designated by stormdrive)" "$WORK/msurvey.log" \
+    && check "  and the console says so" yes yes || check "  and the console says so" yes no
+# The node on two drives, either order: the release is asked of both.
+check "two drives, another release: data drive taken, its partner the system drive" "/dev/sda system=/dev/sdb" \
+    "$(PAIR=sda:sdb STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|dataonly sdb\|sysonly)"
+case "$(cat "$WORK/msurvey/holds.args" 2>/dev/null)" in
+*"--with /dev/sdb"*) check "  the release asked of both drives" yes yes ;;
+*) check "  the release asked of both drives: $(cat "$WORK/msurvey/holds.args" 2>/dev/null)" yes no ;;
+esac
+check "two drives, the same release: a recovery, nothing taken" "" \
+    "$(PAIR=sda:sdb STUB_HOLDS=0 CLAIMED_T="$CLAIM_URI" survey_m any sda\|dataonly sdb\|sysonly)"
+check "a designated drive with a data half is not laid over" "/dev/sda" \
+    "$(STUB_DESIGNATED=/dev/sdb STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|dataonly)"
+check "a designated drive not on this machine: one drive, as before" "/dev/sda" \
+    "$(STUB_DESIGNATED=/dev/sdz STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|blank)"
+NOINTENT="$WORK/no-intent"; : > "$NOINTENT"
+check "a fresh pair, rd.stormblock.system= names the SSD" "/dev/sda force system=/dev/sdb" \
+    "$(NAMED=/dev/sda SYSNAMED=/dev/sdb CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
+check "no designation, no name: one drive takes both halves" "/dev/sda force" \
+    "$(NAMED=/dev/sda CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
+NOINTENT=""
 
 echo "the machine's own disk, and what the boot says about it (#344):"
 ld() { tr -d '\n' < "$WORK/local-disk.json" 2>/dev/null; }

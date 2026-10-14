@@ -2071,7 +2071,7 @@ pub async fn run() -> anyhow::Result<()> {
                         .map(|n| format!("{dev}/{n}"))
                         .collect()
                 } else {
-                    among
+                    among.clone()
                 };
                 let found = partner::find_among(&own, &candidates, &disk).await;
                 let names = own.iter().filter_map(|s| s.partner).map(|p| p.to_string()).collect::<Vec<_>>();
@@ -2145,7 +2145,7 @@ pub async fn run() -> anyhow::Result<()> {
                 };
                 let mut locals = vec![l];
                 for w in with {
-                    match open(w).await {
+                    match open(w.clone()).await {
                         Ok(d) => locals.push(d),
                         Err(e) => {
                             println!("cannot say: {e}");

@@ -700,6 +700,7 @@ IMAGE_STORE=""
 WRITABLE=""
 MOUNTS=""
 NTP_MODE=""
+SYSTEM_NAMED=""
 DECLARED_NET=""
 
 for param in $(cat /proc/cmdline); do
@@ -709,6 +710,8 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.layout=*)      LAYOUT="${param#*=}" ;;
         rd.stormblock.port=*)        PORT="${param#*=}" ;;
         rd.stormblock.slab=*)        SLAB="${param#*=}" ;;
+        # The drive for the system half when it is not the slab's (#402).
+        rd.stormblock.system=*)      SYSTEM_NAMED="${param#*=}" ;;
         # Diskless: ask the appliance which image this machine boots. The
         # cmdline is baked into the image and identical on every node that
         # boots it, so it names the appliance, never the namespace.
@@ -753,6 +756,32 @@ done
 # The drive the command line names, before any probe replaces SLAB with a
 # claimed image: the one local drive an install may take (#273).
 SLAB_NAMED="$SLAB"
+
+# --- BEGIN node halves (covered by tests/initramfs-boot-hook.sh)
+# A node whose system half has a drive of its own (#402: the X9 blades' SSD)
+# keeps its data half on another (the HDD). Either one alone is half a node,
+# and with two drives either may enumerate as sda. The system slab records
+# its data slab's id, and `stormblock slab partner` finds the other drive by
+# that id among the machine's drives - never by path or role.
+disk_of() { # slab path -> its drive (a partition's disk; anything else as is)
+    case "$1" in
+    /dev/nvme*p[0-9]*) echo "${1%p[0-9]*}" ;;
+    /dev/sd*[0-9]|/dev/vd*[0-9]) echo "${1%%[0-9]*}" ;;
+    *) echo "$1" ;;
+    esac
+}
+partner_of() { # drive -> the drive holding this node's other half; 1 when none
+    _po=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab partner "$1" 2>/dev/null) || return 1
+    _po=$(printf '%s\n' "$_po" | tail -n 1)
+    [ -n "$_po" ] && [ "$_po" != "$1" ] || return 1
+    echo "$_po"
+}
+carries_system_half() { # drive -> 0 when one of its slabs is a system slab
+    "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab list "$1" 2>/dev/null | grep -q "role=system"
+}
+# The system drive named on the command line (#402), for a machine whose
+# drives nothing has designated yet (a fresh pair): `rd.stormblock.system=`.
+# --- END node halves
 
 # --- BEGIN boot identity (covered by tests/initramfs-boot-hook.sh)
 # Who this machine is, as the firmware that loaded this kernel claimed it
@@ -920,7 +949,7 @@ install_config_read
 # wins when it is there: an older image carries its list nowhere else.
 MOUNTS_CMDLINE="$MOUNTS"
 MOUNTS_FROM=""
-mounts_from() { # slab -> MOUNTS (comma-separated) and MOUNTS_FROM
+mounts_from() { # slab [partner drive, #402] -> MOUNTS (comma-separated) and MOUNTS_FROM
     MOUNTS="$MOUNTS_CMDLINE"
     if [ -n "$MOUNTS" ]; then
         MOUNTS_FROM="the command line"
@@ -938,7 +967,7 @@ mounts_from() { # slab -> MOUNTS (comma-separated) and MOUNTS_FROM
     # A disk whose flow-over was cut short holds part of the root volume;
     # the rest is on the clone this boot resumes from (#427): `slab cat`
     # opens both when STORMBLOCK_RESUME_SOURCE names it, as boot-local does.
-    _ml_said=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$1" \
+    _ml_said=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab cat --slab "$1" ${2:+--slab "$2"} \
             --volume "${VOLUME:-stormpump}" --out "$_ml_out" /etc/stormblock/mounts 2>&1)
     _ml_rc=$?
     if [ "$_ml_rc" = 0 ] && [ -r "$_ml_out" ]; then
@@ -971,13 +1000,13 @@ slab_has_volume() { # listing name
     printf '%s\n' "$1" | grep -qE ": volume $2 | $2\$"
 }
 MOUNTS_SKIPPED=""
-mounts_optional() { # slab; MOUNTS -> MOUNTS without `?`, MOUNTS_SKIPPED
+mounts_optional() { # slab [partner drive]; MOUNTS -> MOUNTS without `?`, MOUNTS_SKIPPED
     MOUNTS_SKIPPED=""
     case ",$MOUNTS" in *",?"*) ;; *) return 0 ;; esac
     _mo_vols=""
     _mo_why=""
     if [ -n "${1:-}" ]; then
-        _mo_vols=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab volumes "$1" 2>/dev/null)
+        _mo_vols=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab volumes "$1" ${2:-} 2>/dev/null)
     fi
     if ! printf '%s\n' "$_mo_vols" | grep -q ': volume '; then
         _mo_why="${1:-no slab} cannot list its volumes"
@@ -2919,6 +2948,32 @@ if [ "$BOOT_MODE" = "local" ]; then
             PROBE_STOP="$1"
         fi
     }
+    # The node's two drives (#402): the drive named and the one holding its
+    # other half, each found from the other by slab id. The boot goes through
+    # the drive with the system half (where the root is), the other beside it
+    # (PARTNER). A named drive with only a data half boots via its partner.
+    PARTNER=""
+    PAIRED_SLAB=""
+    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ]; then
+        case "$SLAB" in
+        *://*) ;;
+        *)
+            _pd=$(disk_of "$SLAB")
+            if PARTNER=$(partner_of "$_pd"); then
+                if carries_system_half "$_pd"; then
+                    echo "$_pd holds this node's system half, $PARTNER its data half (#402)"
+                else
+                    echo "$_pd holds this node's data half, $PARTNER its system half: booting through $PARTNER (#402)"
+                    SLAB="$PARTNER"
+                    PARTNER="$_pd"
+                fi
+                PAIRED_SLAB="$SLAB"
+            else
+                PARTNER=""
+            fi
+            ;;
+        esac
+    fi
     # Run with or without an appliance (#294): without one, the checks are
     # what stops a disk that cannot boot this node before it is handed over.
     if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ]; then
@@ -2969,7 +3024,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                 # front of it, whether that is a partition, a whole disk or a
                 # file.
                 VOL="${VOLUME:-stormpump}"
-                VOLS=$($SB slab volumes "$SLAB" 2>/dev/null)
+                VOLS=$($SB slab volumes "$SLAB" $PARTNER 2>/dev/null)
                 case "$VOLS" in
                 *"keeps no volume metadata"*)
                     # The slab cannot answer, which is not the same as
@@ -3011,7 +3066,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                         # volume the command line mounts has to be here, or
                         # this disk cannot boot this node yet.
                         # This disk's own release says what it mounts (#262).
-                        mounts_from "$SLAB"
+                        mounts_from "$SLAB" "$PARTNER"
                         MISSING=""
                         for entry in $(printf '%s' "$MOUNTS" | tr ',' ' '); do
                             # Optional (#288): absent is not missing.
@@ -3075,7 +3130,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                     echo "  $BOOTHOST asks for an install: booting the claimed image, installing over $SLAB"
                     HELD_RC=1
                 else
-                    HELD=$($SB slab holds "$SLAB" "$CLAIMED" 2>&1)
+                    HELD=$($SB slab holds "$SLAB" "$CLAIMED" ${PARTNER:+--with "$PARTNER"} 2>&1)
                     HELD_RC=$?
                     echo "  $HELD"
                 fi
@@ -3110,6 +3165,10 @@ if [ "$BOOT_MODE" = "local" ]; then
                     /dev/sd*[0-9])     INSTALL_OVER="${SLAB%%[0-9]*}" ;;
                     *)                 INSTALL_OVER="$SLAB" ;;
                     esac
+                    # Two drives (#402): the install is over the data drive,
+                    # which keeps its half; the system drive is found again
+                    # by the survey (designated, else the partner).
+                    [ -n "$PARTNER" ] && INSTALL_OVER="$PARTNER"
                     SLAB="$CLAIMED"
                     ;;
                 *) echo "  cannot tell which release $SLAB holds - booting it as before" ;;
@@ -3232,8 +3291,14 @@ if [ "$BOOT_MODE" = "local" ]; then
     # is built in the same pass so the indices cannot drift apart.
     # The release this boot runs says what it mounts (#262): read again, since
     # the slab may have changed since the probe (a claimed image, an install).
-    mounts_from "$SLAB"
-    mounts_optional "$SLAB"
+    # The other drive of a node on two (#402), when this boot is the one the
+    # probe paired: never beside a claimed image.
+    BOOT_PARTNER=""
+    if [ -n "${PARTNER:-}" ] && [ "$SLAB" = "${PAIRED_SLAB:-}" ]; then
+        BOOT_PARTNER="$PARTNER"
+    fi
+    mounts_from "$SLAB" "$BOOT_PARTNER"
+    mounts_optional "$SLAB" "$BOOT_PARTNER"
     if [ -n "$MOUNTS" ]; then
         echo "Mount list: $(printf '%s' "$MOUNTS" | tr ',' '\n' | grep -c .) volume(s), from $MOUNTS_FROM"
     else
@@ -3506,7 +3571,9 @@ if [ "$BOOT_MODE" = "local" ]; then
         return 1
     }
     release_on() { # disk -> sets RELEASE_ON: another | same | cut | unknown
-        R_OUT=$("$SURVEY_SB" slab holds "$1" "$CLAIMED" 2>&1)
+        # A node on two drives holds its release on both (#402).
+        _ro_with=$(partner_of "$1") || _ro_with=""
+        R_OUT=$("$SURVEY_SB" slab holds "$1" "$CLAIMED" ${_ro_with:+--with "$_ro_with"} 2>&1)
         R_RC=$?
         [ -n "$R_OUT" ] && echo "  $R_OUT"
         case "$R_RC" in
@@ -3619,6 +3686,16 @@ if [ "$BOOT_MODE" = "local" ]; then
                 continue ;;
             esac
             may_take "$d" "$dev" || { ld_skip "$dev" "${LD_WHY:-not taken by the shelf rules (#347)}"; continue; }
+            # One half of a node on two drives (#402): its system slab names
+            # the other's data slab. Never laid over by the scan - "system
+            # slabs only, no identity" is true of the SSD and its partner holds
+            # the identity. An install of such a node takes its data drive
+            # above and finds the system drive by the pairing.
+            if _sv_pp=$(partner_of "$dev"); then
+                echo "  $dev holds one half of this node, $_sv_pp the other - not taken by the scan (#402)"
+                ld_skip "$dev" "one half of this node on two drives, with $_sv_pp (#402)"
+                continue
+            fi
             probe=$("$SURVEY_SB" slab list "$dev" 2>&1)
             case "$probe" in
                 *": slab "*|*"data slab"*)
@@ -3818,6 +3895,55 @@ if [ "$BOOT_MODE" = "local" ]; then
     fi
     # --- END hook takeable
 
+    # --- BEGIN system drive (covered by tests/initramfs-boot-hook.sh)
+    # Which drive takes the system half of an install (#402, owner's A): a
+    # drive of its own when one is named or designated, the data half staying
+    # on LOCAL_DISK. In order:
+    #
+    #   1. rd.stormblock.system= (a fresh pair that nothing designated yet);
+    #   2. the drive stormdrive designates `system`, read from the node's data
+    #      half (`slab designated`): it outranks the drive the system half is
+    #      on now, which is retired - the move onto the SSD;
+    #   3. the drive already holding this node's system half alone (`slab
+    #      partner`): an install over a node on two drives.
+    #
+    # None of them: one drive takes both halves, as before. A system drive
+    # that carries a data half is never laid over (the engine refuses too).
+    SYSTEM_DISK=""
+    if [ -n "$LOCAL_DISK" ]; then
+        _sd_from=""
+        if [ -n "${SYSTEM_NAMED:-}" ]; then
+            SYSTEM_DISK=$(disk_of "$SYSTEM_NAMED")
+            _sd_from="rd.stormblock.system="
+        elif has_data_slab "$LOCAL_DISK" \
+           && _sd=$("$SURVEY_SB" slab designated --slab "$LOCAL_DISK" 2>/dev/null); then
+            SYSTEM_DISK=$(printf '%s\n' "$_sd" | tail -n 1)
+            _sd_from="designated by stormdrive"
+        elif _sd=$(partner_of "$LOCAL_DISK"); then
+            SYSTEM_DISK="$_sd"
+            _sd_from="it holds this node's system half"
+        fi
+        if [ "$SYSTEM_DISK" = "$LOCAL_DISK" ]; then
+            SYSTEM_DISK=""
+        elif [ -n "$SYSTEM_DISK" ] && [ ! -e "$SURVEY_DEV/${SYSTEM_DISK##*/}" ]; then
+            echo "  the system drive $SYSTEM_DISK ($_sd_from) is not on this machine - $LOCAL_DISK takes both halves"
+            SYSTEM_DISK=""
+        elif [ -n "$SYSTEM_DISK" ] && has_data_slab "$SYSTEM_DISK"; then
+            echo "  the system drive $SYSTEM_DISK ($_sd_from) carries a data half - not laying over it;"
+            echo "  $LOCAL_DISK takes both halves (#402)"
+            SYSTEM_DISK=""
+        fi
+        if [ -n "$SYSTEM_DISK" ]; then
+            echo "  SYSTEM DRIVE: $SYSTEM_DISK ($_sd_from) takes the system half, sized to it with"
+            echo "  room for an update; $LOCAL_DISK keeps (or is laid with) the data half (#402)"
+            # A data half on the data drive is kept, never forced over.
+            if [ -n "${FORCE_LOCAL:-}" ] && has_data_slab "$LOCAL_DISK"; then
+                FORCE_LOCAL=""
+            fi
+        fi
+    fi
+    # --- END system drive
+
     # --- BEGIN diskless refused (covered by tests/initramfs-diskless.sh)
     # A node never runs diskless by default (#427; owner, #344: the
     # flow-over onto the node's own disk is mandatory). A boot from the
@@ -3865,7 +3991,9 @@ if [ "$BOOT_MODE" = "local" ]; then
     : > "$ENGINE_LOG"
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \
+        ${BOOT_PARTNER:+--slab "$BOOT_PARTNER"} \
         ${LOCAL_DISK:+--local-disk "$LOCAL_DISK"} \
+        ${SYSTEM_DISK:+--system-disk "$SYSTEM_DISK"} \
         ${LOCAL_DISK:+${FORCE_LOCAL:+--local-disk-force}} \
         ${META:+--meta "$META"} \
         ${IMAGE_STORE:+--image-store "$IMAGE_STORE"} \
@@ -4006,6 +4134,9 @@ root_fallback() { # why
     /dev/sd*[0-9])     INSTALL_OVER="${LOCAL_ROOT_SLAB%%[0-9]*}" ;;
     *)                 INSTALL_OVER="$LOCAL_ROOT_SLAB" ;;
     esac
+    # Two drives (#402): over the data drive, which keeps its half.
+    [ -n "${BOOT_PARTNER:-}" ] && INSTALL_OVER="$BOOT_PARTNER"
+    PARTNER=""
     echo "  FALLING BACK: booting the image $BOOTHOST assigns ($CLAIMED) and installing"
     echo "  it over $INSTALL_OVER: its system half laid again, its data half kept (#244, #311)"
     # The engine that served the failed root stands down first: its devices
