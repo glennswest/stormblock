@@ -1044,6 +1044,24 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
+### A sealed volume's digest, checked in the background (2026-10-14, #384, P2, #245 step 2) — IN PROGRESS
+
+Owner's A on #245. Found: the issue's wait (every rollback target carrying
+step 1) is not needed. The digest rides in the v2 header extension after
+the tier (#349's), which every v2 reader since 44fc8e3 skips; 11.88 (the
+newest published, 9cbe6ca) reads no v2 at all. So no new key kind.
+- [x] `SealDigest`/`Verdict` on the record (serde skip), header ext `D`
+- [x] manager: digests map, seal queues (not origin release), unseal and
+      delete forget; `volume::digest` (64 KiB chunks, non-zero, offsets)
+- [x] digester task (`start_digests`), `check_goldens` after settle_flow,
+      after a stage, at a start with no flow-over
+- [x] compose/slab and stage carry the source's digest unchecked
+- [x] `slab holds` `Corrupt` (exit 1); `GET …/digest` `seal`; health
+      `digests`
+- [x] tests (unit, metav2, local, compose, HTTP); README, metadata-v2.md,
+      CHANGELOG
+- [ ] check.sh; golden (held for stormcentral#841); close
+
 ### A boot claim timed out at 10 s and was sent again (2026-10-14, #424, P2) — DONE here; golden waits on stormcentral#841
 
 pvetest1 12.21 (forge on 13.7.0): pvetest2's claim ~9 s, pvetest1's queued

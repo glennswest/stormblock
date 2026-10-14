@@ -1681,6 +1681,13 @@ mod tests {
         let a = golden(&mut vm, "a.blob", 3 * SLOT, 0x41).await;
         let b = golden(&mut vm, "b.blob", 2 * SLOT, 0x42).await;
         let before = free_slots(&vm).await;
+        // a's forge took its digest at the seal (#384).
+        let sealed_with = crate::volume::metadata::SealDigest {
+            sha256: [9; 32],
+            verdict: crate::volume::metadata::Verdict::Intact,
+            checked_at: 5,
+        };
+        vm.set_seal_digest(a, Some(sealed_with));
 
         let spec = SlabVolumeSpec {
             name: "system-1".into(),
@@ -1756,6 +1763,11 @@ mod tests {
         }
         let ag = node.find_volume("a.golden").await.unwrap();
         assert!(node.is_sealed(&ag));
+        // The image's golden carries its source's digest, to be checked on
+        // every node's copy (#384): unchecked, never forge's verdict.
+        assert_eq!(node.seal_digest(&ag), Some(sealed_with.unchecked()));
+        let bg = node.find_volume("bee.golden").await.unwrap();
+        assert_eq!(node.seal_digest(&bg), None, "b had none");
         let clone = node.get_volume(&node.find_volume("a").await.unwrap()).unwrap();
         let mut buf = vec![0u8; 4096];
         clone.read(0, &mut buf).await.unwrap();

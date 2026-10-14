@@ -162,7 +162,13 @@ on first open"), and as built:
     most 1536 bytes (the last shorter, so a reader knows where it ends), 2 an
     extent, 3 a parity group. A header is the volume's record without extents
     or parity, with the volume's extent size (#156), prefixed with the header
-    version (10).
+    version (10). After it, an extension every reader skips (they decode the
+    header with `decode_from_slice`, which leaves trailing bytes alone):
+    `SBX1`, the origin (#349), the tier (#151; written as 0, hot, when a
+    digest follows), then a sealed volume's digest (#384): `D`, its sha256
+    (32), the verdict (0 unchecked, 1 intact, 2 mismatch) and when it was
+    given (u64). Kinds 4 and up are skipped by every reader since #245 step 1,
+    and none is written.
   - Log record: magic, the store's nonce, sequence, length, kind (ops or
     wrap), CRC, then the ops (`Put`, `Del`, `DropVolume`), padded to pages. A
     record that does not fit before the end of the ring is preceded by a wrap
