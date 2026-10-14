@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-14
+- **docs:** #193 closed as covered (option C, decided 2026-10-13): the boot clone stays read-write. The sealed golden is never written; a node with a disk writes nothing in place on its clone (#239); the boot ladder and diskless nodes write a clone the next claim discards. docs/auth.md no longer lists a read-only overlay as still to come.
 - **feat:** #384 (#245 step 2, the owner's decision A): a sealed volume's digest, checked in the background; `slab holds` reads the verdicts.
   - **The digest:** taken when a volume is sealed on the node that made it (forge, for a release's goldens), in the background with no lock held. It is the sha256 of the volume's content as 64 KiB chunks: each non-zero chunk inside a mapped extent, in offset order, as its byte offset and its bytes, after the prefix `sb-seal-1`. So it costs what the volume holds and does not depend on extent size or placement: a composed image's golden and a flowed-over copy (zeros unmapped, #401) hash as their source does. An unseal forgets it.
   - **Carried, never re-taken:** a volume a release laid is never digested from its own copy. `compose/slab` gives the image's golden its source's digest, and a stage its release's, both unchecked.

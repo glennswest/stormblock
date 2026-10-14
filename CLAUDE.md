@@ -794,7 +794,7 @@ stop". A pallet's mirror legs are whole partitions (moot); for volumes:
       check.sh at a25b468 ALL PASS (1144/1144)
 - [x] golden golden-stormblock-dfc1c805a509; closed
 
-### Boot clone read-only with a writable overlay (2026-10-10, #193, P3) — WAITING ON THE OWNER
+### Boot clone read-only with a writable overlay (2026-10-10, #193, P3) — CLOSED: C (decided 2026-10-13), no change
 
 #107's point 3 ("consider"). Today: a fresh CoW clone per boot, the sealed
 golden never written; a node with a disk relocates writes off the clone

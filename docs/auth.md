@@ -316,8 +316,17 @@ it safe by what it **cannot** do rather than by who calls it:
 So the worst a caller that is not machine X can do by claiming as X is get
 X's image. Until a claim is bound to the host itself — a host key recorded on
 first use, a TPM, or mutual boot auth (stormcos#35) — the tag is the binding.
-Also still to come: attaching the boot clone read-only with a writable
-overlay, so the image is not modified even within a boot.
+The boot clone is attached read-write, and that is decided (#193, option C,
+2026-10-13): the image the decision on #107 protects, the sealed golden, is
+never written; each boot's clone is a fresh copy-on-write clone, released by
+the next claim. Within a boot, a node with a disk writes nothing in place on
+the clone (its slabs are quarantined from the handover: a write is a
+copy-on-write onto the local disk, #239); what writes the clone is
+stormuefi's boot ladder (`tries_left` in its GPT attributes, meant to be
+written) and a diskless node, whose clone is discarded at the next claim. A
+read-only clone with a per-boot overlay volume is the shape to build if a
+diskless node ever needs an untouched clone (forensics after a failed
+boot).
 
 The claim answers with `host` (`name`, `claimed_as`, `aliases`),
 `host_golden` (`volume`, `minted`, `collected`) and `claimed_from.release`
