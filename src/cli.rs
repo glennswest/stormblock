@@ -14617,7 +14617,8 @@ mod boot_claim_wait_tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let t = std::time::Instant::now();
         let uri = super::claim_boot_uri(&addr.to_string(), "slow", "boothost", 120, None).await.unwrap();
-        assert_eq!(uri, "nvme-tcp://192.0.2.1:4420/nqn.test?nsid=1");
+        // With the host NQN this machine connects as (#443).
+        assert_eq!(uri, "nvme-tcp://192.0.2.1:4420/nqn.test?nsid=1&hostnqn=nqn.2026-09.lo.storm:host-slow");
         assert!(t.elapsed() >= std::time::Duration::from_secs(12));
         assert_eq!(asked.load(Ordering::SeqCst), 1, "a second claim was sent behind the first");
         server.abort();
