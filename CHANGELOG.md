@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-14
+- **feat:** #422 (and #416), the owner's option 1 on stormbootx-test#2: a storage-user may remove what it created, and nothing else.
+  - **Who made what:** recorded in `<data_dir>/creators.json`, with the request's `labels` (`storm.io/test-run`), for every volume create, clone and import, every synonym and every host record (through its `boothost/` synonym). A boot claim's host golden, its `hostgolden/` synonym and its boot clone are recorded as the host's creator's. `GET` of a volume, a synonym or a host says `creator` and `labels`.
+  - **The review:** a Kubernetes bearer's volume delete or detach, synonym delete or host delete is reviewed as `delete` when the bearer is the recorded creator, and as `destroy` otherwise, which covers anyone else's object and every object with no record. It is audited with `reason: its own: created by …`. The node and admin tokens are unchanged.
+  - **New:** `DELETE /api/v1/boothost/{name}` removes the host record and its synonyms.
+  - **Test:** `integration_destructive::a_storage_user_deletes_what_it_created_and_nothing_else`, against a stand-in apiserver. A storage-user (with `delete`, as stormcos#557 grants) imports an image, adds `boothost/<mac>`, the machine claims, and it detaches and deletes the clone, the synonyms, the host golden, the image and the host record. Another storage-user gets 403 on each of those, and the first gets 403 on the node's unrecorded volumes.
 - **fix:** #415: three background paths still persisted while holding the volume manager, across the slabs' device flushes (#364's rule), and lockwatch said so on the console:
   - **an import's task:** its create, seal and record. Seen on 12.21 as `held by task …` when sbregistry imported its fedora media.
   - **the flow-over's retire of the appliance's slabs:** at its end. Seen on 12.16 as `held by the flow-over`.

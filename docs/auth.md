@@ -142,10 +142,26 @@ a shared secret. The review is the same, with the ordinary verb:
 
 stormcos's roles, then:
 - **`storage-admin`** (`*`): everything, `destroy` included.
-- **`storage-user`** (`get`, `list`, `watch`, `create`, `update`): reads,
-  creates, clones and attaches, and is refused every destructive call. It
-  needs `delete` too to detach or delete its own volumes.
+- **`storage-user`** (`get`, `list`, `watch`, `create`, `update`, and
+  `delete` once stormcos#557 adds it): reads, creates, clones and attaches,
+  removes what it created itself (below), and is refused every other
+  destructive call.
 - **`storage-viewer`** (`get`, `list`, `watch`): reads.
+
+**What a caller created is its own to remove** (#422, the owner's option 1
+on stormbootx-test#2). The engine records who made each volume (a create, a
+clone, an import), each synonym and each host record (its `boothost/`
+synonym), with the request body's `labels` (such as `storm.io/test-run`), in
+`<data_dir>/creators.json`; a boot claim's host golden, its `hostgolden/`
+synonym and its boot clone are recorded as the host's creator's. `GET` of a
+volume, a synonym or a host says `creator` and `labels`. Then, for a
+**Kubernetes bearer**, a volume's delete or detach, a synonym's delete and a
+host's delete (`DELETE /api/v1/boothost/{name}`, #416) are reviewed as
+`delete` when the bearer is the object's recorded creator, and as `destroy`
+otherwise: anyone else's object, and every object with no record (all made
+before this), needs storage-admin. The audit line says `verb: delete` and
+`reason: its own: created by …`. The node and admin tokens are not touched
+by this. Losing the record only makes a delete need storage-admin again.
 
 A bearer that does not review is 401, a denied one 403. With no
 `[management.kubernetes]` a bearer that is not a node or admin token is no

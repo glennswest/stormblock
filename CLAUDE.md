@@ -1044,6 +1044,20 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
+### A storage-user deletes what it created (2026-10-14, #422 + #416, P2) — IN PROGRESS
+
+Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).
+- [x] `mgmt::creators` (`creators.json`): volumes (create, clone, import),
+      synonyms, hosts (`host:<name>`, from its `boothost/` synonym); a claim's
+      host golden, `hostgolden/` synonym and boot clone take the host's
+- [x] auth: a bearer's delete/detach/synonym delete/host delete: `delete` if
+      its own, else `destroy` (unrecorded included); audited
+- [x] `DELETE /api/v1/boothost/{name}` (record + synonyms), destructive
+- [x] `creator`/`labels` on GET volume, synonym, host
+- [x] test `integration_destructive::a_storage_user_deletes_what_it_created_
+      and_nothing_else`; 103/103 targeted; auth.md, README, CHANGELOG
+- [ ] check.sh; golden (held for stormcentral#841); stormcos#557 told; close
+
 ### lockwatch: the volume manager held across a flush, still (2026-10-14, #415) — DONE here; golden waits on stormcentral#841
 
 - [x] import task: `spawn_owing` + `persist_detached_checked`, done after it
