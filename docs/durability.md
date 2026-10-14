@@ -289,6 +289,28 @@ tests run on.
    with no v1 copy, and is refused as full when it does not fit). A WARN
    says when a record passes 80 % of what its slab reserves.
 
+17. **A flow-over is proven before the node lets go of the appliance**
+   (#412; the owner: "a post-flow-over validation via sha", on every
+   flow-over, an OS feature). The flow-over holds every source slot it
+   moved from (persisted away from, never freed: a freed slot is discarded,
+   and over NVMe/TCP that unmaps the clone's extent on forge). When both
+   halves have moved, every destination slot a sealed volume names is read
+   back from the local drive (O_DIRECT there) and from its source, and the
+   sha256s compared, paced as the flow-over is (#410), 16 at once. A slot
+   only writable volumes name has been written since and is skipped (its
+   golden's slots are checked). A mismatch is written again from the
+   source, flushed and read back, up to 3 times. One still different is
+   **FlowOverCorrupt**: every map naming it is pointed back at its source
+   (the node reads it, correctly, from forge), persisted, said on the
+   console and in health (`flow_over_stalled`, `flow_over.validation.state =
+   corrupt`), and the node does not go local: no local boot, the sources
+   kept, the install not reported. Only a pass frees the sources, lays local
+   boot, retires them and reports the install, so a cut anywhere before it
+   leaves the intent `install` (#220) and the next boot moves and checks
+   again. The reference is the clone's own bytes (the owner's decision A):
+   per-extent hashes recorded at seal come with #384, once no node can roll
+   back past golden-stormblock-47e88a267077.
+
 ## How it is checked
 
 * `tests/integration_power_cut.rs`:
