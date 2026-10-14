@@ -66,6 +66,10 @@ pub struct Plan {
     /// never a reason to refuse. Dropped from the data half after it is
     /// adopted.
     pub release_strays: Vec<(VolumeId, String)>,
+    /// Slabs the data half's records name that are in neither half of this
+    /// disk (#451): an earlier boot's appliance clone, its flow-over cut
+    /// short. Each with the volumes that had extents on it and how many.
+    pub missing: std::collections::BTreeMap<SlabId, Vec<(String, usize)>>,
 }
 
 /// What an install did with the node's data half, for the console, the
@@ -96,6 +100,10 @@ pub struct Report {
     /// it (#369), dropped from it: they come back with the release.
     #[serde(default)]
     pub release_dropped: Vec<String>,
+    /// The release's goldens the data half recorded half-moved by an install
+    /// cut short (#451), taken from the release instead.
+    #[serde(default)]
+    pub relaid: Vec<String>,
 }
 
 /// A migration an install leaves for stormupdate (#122's `migrate`).
@@ -195,6 +203,7 @@ pub async fn plan_split(
     let mut outside: Vec<String> = Vec::new();
     let mut release_strays: Vec<(VolumeId, String)> = Vec::new();
     let mut carry_from_data: Vec<(VolumeId, String)> = Vec::new();
+    let mut missing: std::collections::BTreeMap<SlabId, Vec<(String, usize)>> = Default::default();
     let sys_id = system.as_ref().map(|s| s.slab_id());
     for slab in std::iter::once(&data).chain(bulk.as_ref()) {
         if !slab.has_metadata_region() {
@@ -215,6 +224,15 @@ pub async fn plan_split(
                 .flat_map(|l| l.legs().collect::<Vec<_>>())
                 .chain(v.parity.values().flat_map(|g| g.legs.clone()));
             let away: Vec<SlabId> = legs.map(|l| l.slab_id).filter(|s| !half.contains(s)).collect();
+            {
+                let mut gone: std::collections::BTreeMap<SlabId, usize> = Default::default();
+                for s in away.iter().filter(|s| Some(**s) != system.as_ref().map(|x| x.slab_id())) {
+                    *gone.entry(*s).or_default() += 1;
+                }
+                for (s, n) in gone {
+                    missing.entry(s).or_insert_with(Vec::new).push((v.name.clone(), n));
+                }
+            }
             if away.is_empty() {
                 volumes.push((v.id, v.name, v.sealed));
                 continue;
@@ -282,6 +300,7 @@ pub async fn plan_split(
             carry,
             dropped,
             release_strays,
+            missing,
         });
     }
     Ok(Plan {
@@ -291,6 +310,7 @@ pub async fn plan_split(
         carry: carry_from_data,
         dropped: Vec::new(),
         release_strays,
+        missing,
     })
 }
 
@@ -440,6 +460,29 @@ pub async fn adopt(
         .cloned()
         .collect();
 
+    // A release stray the claim holds under the same id (#451): an unchanged
+    // golden, composed in by id, so the release before and this one share
+    // it. The data half's record of it is what an install cut short left (an
+    // earlier boot's flow-over: some extents moved, the rest on a clone
+    // that is never attached again). The claim's copy is the whole golden
+    // and flows in; the data half's record goes, before it is adopted, so
+    // no restore can ever read it instead (the first record of an id wins).
+    let stale: Vec<VolumeId> = plan
+        .release_strays
+        .iter()
+        .filter(|(id, _)| mgr.get_volume(id).is_some())
+        .map(|(id, _)| *id)
+        .collect();
+    let mut stale_held = 0;
+    for slab in std::iter::once(&data).chain(bulk.as_ref()) {
+        stale_held += crate::volume::metav2::drop_volumes(slab, &stale)
+            .await
+            .map_err(|e| anyhow::anyhow!("dropping the data half's stale records of the release's goldens: {e}"))?;
+    }
+    if stale_held > 0 {
+        tracing::info!("install: {stale_held} stale record(s) of the release's own goldens dropped from the data half (#451)");
+    }
+
     let mut found = vec![crate::drive::discover::FoundSlab { label: "data".into(), slab: data }];
     if let Some(b) = bulk {
         found.push(crate::drive::discover::FoundSlab { label: "bulk".into(), slab: b });
@@ -455,6 +498,9 @@ pub async fn adopt(
         adopted: adopted.volumes.len() + adopted.already_known,
         ..Default::default()
     };
+    for (_, name) in plan.release_strays.iter().filter(|(id, _)| stale.contains(id)) {
+        report.relaid.push(name.clone());
+    }
     for (id, name) in strays {
         if mgr.get_volume(&id).is_none() {
             continue;

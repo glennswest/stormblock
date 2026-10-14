@@ -5346,6 +5346,20 @@ pub async fn run() -> anyhow::Result<()> {
             for d in &plan.dropped {
                 println!("Install: {d} — the old release's, not in this one: dropped with the system half (#349)");
             }
+            // Said once a slab, not once an extent at every restore (#451).
+            for (slab, held) in &plan.missing {
+                let extents: usize = held.iter().map(|(_, n)| n).sum();
+                let names: Vec<&str> = held.iter().map(|(n, _)| n.as_str()).collect();
+                println!(
+                    "Install: FINDING: {disk}'s data half records {extents} extent(s) of {} volume(s) on slab {}, \
+                     which is in neither half of this disk: an earlier boot's appliance clone, its flow-over \
+                     cut short. The release's own are taken from this release; anything else stops the \
+                     install. {}",
+                    held.len(),
+                    slab.0,
+                    names.join(", ")
+                );
+            }
             // Room for what the release brings into the data half (#172): the
             // node's data stays and the release's data volumes flow in beside
             // it. Laid without room, the flow-over stops on a full slab, and
@@ -5454,6 +5468,9 @@ pub async fn run() -> anyhow::Result<()> {
             report.carried = carried;
             for k in &report.kept {
                 println!("Install: {k} — the node's, kept");
+            }
+            for r in &report.relaid {
+                println!("Install: {r} — the release's golden, recorded half-moved in the data half: taken whole from this release (#451)");
             }
             for d in &report.release_dropped {
                 println!("Install: {d} — the old release's, recorded in the data half: re-laid with the system half (#369)");
@@ -10940,10 +10957,12 @@ file = "{state}"
         let claim = dir.path().join("claim-n1-451.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
         let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
-        let (flow, _report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump"))
+        let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump"))
             .await
             .unwrap_or_else(|e| panic!("the install refused: {e}"));
         let flow = flow.expect("laid");
+        let report = report.expect("an install report");
+        assert_eq!(report.relaid, vec!["kubelet-data.golden".to_string()], "{report:?}");
         assert_eq!(volume_bytes(&mgr, "kubelet-data.golden").await.unwrap(), golden_bytes, "after the install");
         super::quarantine_flow_sources(&mgr, &flow).await;
         drop(mgr);

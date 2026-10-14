@@ -1191,6 +1191,41 @@ pub async fn read_slab(slab: &crate::drive::slab::Slab) -> io::Result<Option<Vol
     document_of(entries).map(Some)
 }
 
+/// Take these volumes' records out of a slab's document, in either format
+/// (#451): what an install drops before it adopts a data half whose record of
+/// a volume is not to be believed. Returns how many it held.
+pub async fn drop_volumes(slab: &crate::drive::slab::Slab, ids: &[super::extent::VolumeId]) -> io::Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    if slab.format_version() != crate::drive::slab::SLAB_VERSION_2 {
+        let Some(bytes) = slab.read_metadata().await.map_err(|e| io::Error::other(e.to_string()))? else { return Ok(0) };
+        let mut doc = super::metadata::MetadataStore::decode(&bytes)?;
+        let before = doc.volumes.len();
+        doc.volumes.retain(|v| !ids.contains(&v.id));
+        let held = before - doc.volumes.len();
+        if held > 0 {
+            let out = super::metadata::MetadataStore::encode(&doc)?;
+            slab.write_metadata(&out).await.map_err(|e| io::Error::other(e.to_string()))?;
+        }
+        return Ok(held);
+    }
+    let Some((dev, off, size)) = slab.metadata_region() else { return Ok(0) };
+    let Some(mut store) = MetaV2::open(dev, off, size).await? else { return Ok(0) };
+    let mut ops = Vec::new();
+    for id in ids {
+        if !store.scan_volume(*id.0.as_bytes()).await?.is_empty() {
+            ops.push(Op::DropVolume(*id.0.as_bytes()));
+        }
+    }
+    let held = ops.len();
+    if held > 0 {
+        store.append(ops).await?;
+        store.checkpoint().await?;
+    }
+    Ok(held)
+}
+
 use super::metadata::{ArrayRecord, VolumeMetadata, VolumeRecord};
 use super::extent::VolumeId;
 
