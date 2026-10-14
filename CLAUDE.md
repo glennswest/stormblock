@@ -213,6 +213,10 @@ intents, so server1 had never booted its own disk.
 - [ ] the master promotes the canary to server1 (stormbootx#89), server1
       reinstalls: `boot : starting \EFI\BOOT\BOOTX64.EFI from the local
       disk`, forge's `booted_at` set; then close
+- Master, 2026-10-14: no stick has ever self-updated (stormbootx's update
+  looks up stormcentral before the lease gives a DNS server; being fixed).
+  The owner re-images the sticks once on Saturday 2026-10-17 (the servers
+  are off until then); that run is the check
 
 ### forge's NVMe/TCP target left a reader 30 s under two large writers (2026-10-14, #441, P1) — NOT REPRODUCED in the engine; closed
 
