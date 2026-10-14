@@ -18,6 +18,7 @@ pub mod http;
 pub mod logging;
 pub mod lockwatch;
 pub mod fglat;
+pub mod flowhot;
 pub mod flowprogress;
 pub mod retry;
 pub mod netif;

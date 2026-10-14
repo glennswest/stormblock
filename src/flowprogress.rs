@@ -17,6 +17,7 @@ pub static FLOW: FlowProgress = FlowProgress {
     persists: AtomicU64::new(0),
     pace: Mutex::new(None),
     validation: Mutex::new(None),
+    hot: AtomicU64::new(0),
 };
 
 pub struct FlowProgress {
@@ -32,6 +33,8 @@ pub struct FlowProgress {
     pace: Mutex<Option<Pace>>,
     /// Its validation (#412).
     validation: Mutex<Option<ValidationReport>>,
+    /// Extents moved ahead of the rest because the node read them (#411).
+    hot: AtomicU64,
 }
 
 /// A flow-over's validation by sha256 (#412): each moved extent read back
@@ -108,6 +111,8 @@ pub struct Snapshot {
     /// Its validation (#412).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub validation: Option<ValidationReport>,
+    /// Extents moved first because the node read them from the appliance (#411).
+    pub hot_moved: u64,
 }
 
 impl FlowProgress {
@@ -129,6 +134,10 @@ impl FlowProgress {
     /// The source being read from now.
     pub fn source(&self, path: Option<crate::drive::nvmeof_dev::FabricPath>) {
         *self.source.lock().unwrap_or_else(|e| e.into_inner()) = path;
+    }
+
+    pub fn hot(&self, n: u64) {
+        self.hot.fetch_add(n, Relaxed);
     }
 
     pub fn persisted(&self) {
@@ -160,6 +169,7 @@ impl FlowProgress {
             persists: self.persists.load(Relaxed),
             pace: self.pace.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             validation: self.validation.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            hot_moved: self.hot.load(Relaxed),
         })
     }
 
@@ -185,6 +195,7 @@ mod tests {
             persists: AtomicU64::new(0),
             pace: Mutex::new(None),
             validation: Mutex::new(None),
+            hot: AtomicU64::new(0),
         };
         assert!(p.snapshot().is_none());
         p.begin();

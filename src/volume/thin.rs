@@ -3028,6 +3028,8 @@ impl ThinVolumeHandle {
 
             match location {
                 Some(loc) => {
+                    // Still read from the appliance: moved first (#411).
+                    crate::flowhot::note(&loc);
                     self.read_extent(vext_idx, &loc, off_in_slot, &mut buf[buf_start..buf_end]).await?;
                 }
                 None => {

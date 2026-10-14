@@ -6099,6 +6099,8 @@ pub async fn run() -> anyhow::Result<()> {
             }
             (sources, data_sources)
         };
+        // What the node reads from them is counted: moved first (#411).
+        crate::flowhot::set_sources(&sources.iter().chain(&data_sources).copied().collect::<Vec<_>>());
         if !sources.is_empty() || !data_sources.is_empty() {
             println!(
                 "Flow-over: {} appliance slab(s) quarantined — writes to what is still on them go to {}",
@@ -6403,6 +6405,9 @@ pub async fn run() -> anyhow::Result<()> {
                 Default::default();
             // Moves made by the pass under way, and whether it had anything.
             let (mut pass_moved, mut pass_had) = (0u64, false);
+            // How hot each source slot is, as the batch was last ordered (#411).
+            let (mut hits, mut sorted_at, mut sorted_gen) =
+                (std::collections::HashMap::new(), std::time::Instant::now(), 0u64);
             loop {
                 // Which slot, under the map's read lock only: the fence is waited
                 // for with no lock held, since an I/O holding it may be waiting
@@ -6434,7 +6439,22 @@ pub async fn run() -> anyhow::Result<()> {
                         .into_iter()
                         .filter_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
                         .collect();
+                    drop(g);
                     (pass_moved, pass_had) = (0, !batch.is_empty());
+                    // What the node reads first (#411).
+                    hits = crate::flowhot::hits();
+                    let hot = crate::flowhot::hot_first(&mut batch, &hits);
+                    (sorted_at, sorted_gen) = (std::time::Instant::now(), crate::flowhot::generation());
+                    if hot > 0 {
+                        tracing::info!("flow-over: {hot} extent(s) the node reads from the appliance go first");
+                    }
+                } else if crate::flowhot::generation() != sorted_gen
+                    && sorted_at.elapsed() >= std::time::Duration::from_secs(1)
+                {
+                    // Read since: moved up.
+                    hits = crate::flowhot::hits();
+                    crate::flowhot::hot_first(&mut batch, &hits);
+                    (sorted_at, sorted_gen) = (std::time::Instant::now(), crate::flowhot::generation());
                 }
                 report(batch.len() + after);
                 if batch.is_empty() {
@@ -6449,6 +6469,9 @@ pub async fn run() -> anyhow::Result<()> {
                 while window.len() < cap {
                     let Some((vol, vext, leg)) = batch.pop_front() else { break };
                     if seen.insert(leg) {
+                        if hits.contains_key(&leg) {
+                            crate::flowprogress::FLOW.hot(1);
+                        }
                         window.push((vol, vext, leg));
                     }
                 }
@@ -7311,6 +7334,12 @@ pub async fn run() -> anyhow::Result<()> {
                     crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
                 }
             };
+            // What the boot read from the appliance (#411): its initramfs
+            // engine counted it and stood down before this one started.
+            let n = crate::flowhot::load(std::path::Path::new(crate::flowhot::HANDOVER_FILE));
+            if n > 0 {
+                println!("Flow-over: {n} extent(s) the boot read from the appliance go first");
+            }
             let (mut moved, mut failed) = (0u64, 0u64);
             // What it moved, its sources held until the validation (#412).
             let held = FlowHeld::default();
@@ -7372,6 +7401,7 @@ pub async fn run() -> anyhow::Result<()> {
                 moved += m;
                 failed += f;
             }
+            crate::flowhot::set_sources(&[]);
             tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
             println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
             if failed == 0 {
@@ -9155,6 +9185,14 @@ async fn handle_boot_local(
             eprintln!("WARNING: {stuck} ublk export(s) did not finish their teardown");
         }
         steps.mark(format_args!("{} of {n} ublk device(s) released", n - stuck));
+        // What this boot read from the appliance, for the successor's
+        // flow-over to move first (#411).
+        if !crate::flowhot::hits().is_empty() {
+            match crate::flowhot::save(std::path::Path::new(crate::flowhot::HANDOVER_FILE)) {
+                Ok(k) => steps.mark(format_args!("{k} hot extent(s) left for the flow-over")),
+                Err(e) => tracing::warn!("{}: {e}", crate::flowhot::HANDOVER_FILE),
+            }
+        }
         // Capture extent maps mutated while serving (COW allocations) so
         // snapshots stay bootable across the next reattach (#13).
         mgr.persist().await;
@@ -11745,6 +11783,78 @@ file = "{state}"
         assert!(pace.reason.contains("flushes"), "{pace:?}");
         assert_eq!(pace.still_flush_p90_ms.map(|v| v.round() as u64), Some(5), "{pace:?}");
         assert!(t.elapsed() >= Duration::from_millis(800), "it paused: {:?}", t.elapsed());
+    }
+
+    /// #411: what the node reads from the appliance moves first. Extents
+    /// 20–23 of a golden are read while it is still on the appliance; with
+    /// windows of 4 the first window is those four, and health counts them.
+    #[tokio::test]
+    async fn the_extents_the_node_reads_from_the_appliance_move_first() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::placement::topology::StorageTier;
+        std::env::set_var("STORMBLOCK_FLOW_WINDOW", "4");
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 32;
+        let dir = tempfile::tempdir().unwrap();
+        let slab = |name: &str| {
+            let path = dir.path().join(name).display().to_string();
+            async move {
+                let dev = Arc::new(FileDevice::open_with_capacity(&path, 4 * EXTENTS * SLOT).await.unwrap())
+                    as Arc<dyn BlockDevice>;
+                Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System))
+                    .await
+                    .unwrap()
+            }
+        };
+        let mut mgr = VolumeManager::new(SLOT);
+        let source = slab("appliance.slab").await;
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("golden", EXTENTS * SLOT).await.unwrap();
+        let g = mgr.get_volume(&golden).unwrap();
+        g.write(0, &vec![0x5A; (EXTENTS * SLOT) as usize]).await.unwrap();
+        g.flush().await.unwrap();
+        let local = slab("local.slab").await;
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+
+        crate::flowhot::set_sources(&[source_id]);
+        let mut buf = vec![0u8; 4096];
+        for e in 20..24u64 {
+            for _ in 0..3 {
+                g.read(e * SLOT, &mut buf).await.unwrap();
+            }
+        }
+        let hot: std::collections::HashSet<_> = {
+            let gem = mgr.gem().read().await;
+            (20..24u64).map(|e| gem.lookup(golden, e).unwrap().primary()).collect()
+        };
+        assert_eq!(crate::flowhot::hits().len(), 4, "four slots read from the appliance");
+
+        let held = super::FlowHeld::default();
+        let (moved, failed) = super::flow_slabs_held(
+            mgr.gem(),
+            mgr.registry(),
+            &[source_id],
+            local_id,
+            || mgr.persist(),
+            None,
+            0,
+            Some(&held),
+        )
+        .await
+        .expect("the flow-over finished");
+        assert_eq!((moved, failed), (EXTENTS, 0));
+        let first: std::collections::HashSet<_> = held.moved.lock().unwrap()[..4].iter().map(|(src, _)| *src).collect();
+        assert_eq!(first, hot, "the first window is what the node read");
+        assert_eq!(crate::flowprogress::FLOW.snapshot().unwrap().hot_moved, 4);
+
+        // And what the boot counted reaches its successor's flow-over.
+        let file = dir.path().join("hot-extents.json");
+        assert_eq!(crate::flowhot::save(&file).unwrap(), 4);
+        let saved: Vec<(crate::volume::gem::Leg, u32)> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert!(saved.iter().all(|(l, n)| hot.contains(l) && *n == 3), "{saved:?}");
     }
 
     /// A drive that hands back a flipped byte at `bad` whatever was written
