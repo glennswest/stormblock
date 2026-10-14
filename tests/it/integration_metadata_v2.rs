@@ -940,6 +940,8 @@ async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_ca
     // Format 2 the default, as it is: the next create retries, migrates the
     // slab (the whole region, no v1 copy kept) and goes on.
     stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
+    let tried = vm.upgrade_slabs(Some(sid)).await;
+    eprintln!("#428: {n} volumes; v1 copy holds {capacity} bytes; migration: {tried:?}");
     let after = vm.create_volume_any("after", VOL).await.expect("made once records are written again");
     assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
     assert_eq!(vm.registry().read().await.get(&sid).unwrap().format_version(), SLAB_VERSION_2);
