@@ -26,6 +26,8 @@ pub mod gc;
 pub mod extable;
 pub mod erase;
 pub mod digest;
+#[cfg(test)]
+mod scheme_tests;
 pub mod holds;
 pub mod pressure;
 pub mod relocate;
@@ -358,6 +360,9 @@ pub struct VolumeManager {
     owners: HashMap<VolumeId, crate::volume::metadata::Owner>,
     /// Where each volume came from (#349). Absent = unmarked.
     origins: HashMap<VolumeId, crate::volume::metadata::Origin>,
+    /// Schemes carried beside a volume's record (#159): kept, and written
+    /// back as they were, whether or not this engine reads them.
+    schemes: HashMap<VolumeId, crate::volume::metadata::SchemeExt>,
     /// Sealed volumes' digests and verdicts (#384).
     digests: HashMap<VolumeId, crate::volume::metadata::SealDigest>,
     /// Sealed here with no digest: the digester takes them (#384).
@@ -447,6 +452,7 @@ impl VolumeManager {
             owners: HashMap::new(),
             origins: HashMap::new(),
             digests: HashMap::new(),
+            schemes: HashMap::new(),
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             durability: Arc::new(std::sync::Mutex::new(None)),
@@ -483,6 +489,7 @@ impl VolumeManager {
             owners: HashMap::new(),
             origins: HashMap::new(),
             digests: HashMap::new(),
+            schemes: HashMap::new(),
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             durability: Arc::new(std::sync::Mutex::new(None)),
@@ -734,6 +741,34 @@ impl VolumeManager {
         self.to_digest.remove(&id);
         self.persist().await;
         Ok(())
+    }
+
+    /// A volume's scheme is one this engine does not read (#159): no clone,
+    /// snapshot or restripe of it, which would copy or rewrite its stripes
+    /// as the record's `Parity` says rather than as they are.
+    pub fn refuse_unknown_scheme(&self, id: &VolumeId) -> Result<(), VolumeError> {
+        match self.volumes.get(id).and_then(|h| h.refused().map(str::to_string)) {
+            Some(why) => Err(VolumeError::Busy(why)),
+            None => Ok(()),
+        }
+    }
+
+    /// Record a scheme beside a volume's record (#159): what an engine that
+    /// writes erasure-coded volumes says of one. The caller persists.
+    pub fn set_scheme_ext(&mut self, id: VolumeId, sc: Option<crate::volume::metadata::SchemeExt>) {
+        match sc {
+            Some(sc) => {
+                self.schemes.insert(id, sc);
+            }
+            None => {
+                self.schemes.remove(&id);
+            }
+        }
+    }
+
+    /// The scheme a volume carries beside its record (#159).
+    pub fn scheme_ext(&self, id: &VolumeId) -> Option<crate::volume::metadata::SchemeExt> {
+        self.schemes.get(id).copied()
     }
 
     /// A sealed volume's digest and verdict (#384).
@@ -1592,6 +1627,14 @@ impl VolumeManager {
             if let Some(d) = vrec.digest {
                 self.digests.insert(vrec.id, d);
             }
+            if let Some(sc) = vrec.scheme {
+                self.schemes.insert(vrec.id, sc);
+                if !sc.known() {
+                    let why = sc.refusal(&vrec.name, &vrec.id);
+                    tracing::warn!("{why}");
+                    handle.refuse(why);
+                }
+            }
             self.volumes.insert(vrec.id, handle);
             self.present.insert(vrec.id);
             if let Some(parent) = vrec.parent {
@@ -1718,6 +1761,7 @@ impl VolumeManager {
         let mut components = Vec::with_capacity(placements.len());
         let mut sizes: Vec<u64> = Vec::new();
         for (source, at) in placements {
+            self.refuse_unknown_scheme(source)?;
             let handle = self.volumes.get(source)
                 .ok_or(VolumeError::VolumeNotFound(*source))?;
             components.push(compose::Component {
@@ -1850,6 +1894,7 @@ impl VolumeManager {
     /// released. Holds the volume's mapping lock throughout, so it is an
     /// offline operation — the API refuses it while the volume is exported.
     pub async fn restripe(&mut self, id: VolumeId, policy: RedundancyPolicy) -> Result<RestripeReport, VolumeError> {
+        self.refuse_unknown_scheme(&id)?;
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
         let (mut r, old) = Self::restripe_work(handle, self.gem.clone(), self.registry.clone(), self.slot_size, id, policy).await?;
         // The old placement is freed only once the map that stopped naming
@@ -1871,6 +1916,7 @@ impl VolumeManager {
     ) -> Result<RestripeReport, VolumeError> {
         let (handle, gem, registry, slot, _op) = {
             let m = vm.lock().await;
+            m.refuse_unknown_scheme(&id)?;
             let h = m.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
             let op = m.begin_op(id, "restripe").map_err(|r| VolumeError::Busy(format!("volume {id} has a {r} running")))?;
             (h, m.gem.clone(), m.registry.clone(), m.slot_size, op)
@@ -2021,6 +2067,9 @@ impl VolumeManager {
         sources: &[(VolumeId, String)],
     ) -> Result<Vec<VolumeId>, VolumeError> {
         self.refuse_if_undurable().await?;
+        for (source_id, _) in sources {
+            self.refuse_unknown_scheme(source_id)?;
+        }
         let mut params = Vec::with_capacity(sources.len());
         for (source_id, name) in sources {
             let handle = self.volumes.get(source_id)
@@ -2108,6 +2157,7 @@ impl VolumeManager {
         self.origins.remove(&id);
         self.digests.remove(&id);
         self.to_digest.remove(&id);
+        self.schemes.remove(&id);
         self.retentions.remove(&id);
 
         // Remove all extents from GEM and dec_ref on slabs (their table
@@ -2229,6 +2279,7 @@ impl VolumeManager {
         name: &str,
     ) -> Result<VolumeId, VolumeError> {
         self.refuse_if_undurable().await?;
+        self.refuse_unknown_scheme(&source_id)?;
         let source_handle = self.volumes.get(&source_id)
             .ok_or(VolumeError::VolumeNotFound(source_id))?
             .clone();
@@ -3472,6 +3523,7 @@ impl VolumeManager {
                 origin: self.origins.get(id).copied().unwrap_or_default(),
                 tier: Some(handle.preferred_tier()).filter(|t| *t != StorageTier::Hot),
                 digest: self.digests.get(id).copied(),
+                scheme: self.schemes.get(id).copied(),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -3536,6 +3588,7 @@ impl VolumeManager {
                 origin: self.origins.get(&id).copied().unwrap_or_default(),
                 tier: self.volumes.get(&id).map(|h| h.preferred_tier()).filter(|t| *t != StorageTier::Hot),
                 digest: self.digests.get(&id).copied(),
+                scheme: self.schemes.get(&id).copied(),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -3763,7 +3816,10 @@ impl VolumeManager {
             if let Some(fs) = vrec.fs.clone() {
                 self.fs_info.insert(vrec.id, fs);
             }
-            if let (Some(store), true) = (&self.metadata_store, vrec.redundancy.scheme.is_parity()) {
+            // Not for a scheme this engine does not read (#159): verifying
+            // its stripes would recompute P and Q over them.
+            let read_here = vrec.scheme.is_none_or(|sc| sc.known());
+            if let (Some(store), true) = (&self.metadata_store, vrec.redundancy.scheme.is_parity() && read_here) {
                 let dirty = handle.use_stripe_log(store.dir());
                 if !dirty.is_empty() {
                     dirty_to_verify.push((vrec.id, handle.clone(), dirty));
@@ -3776,6 +3832,16 @@ impl VolumeManager {
             }
             if let Some(d) = vrec.digest {
                 self.digests.insert(vrec.id, d);
+            }
+            if let Some(sc) = vrec.scheme {
+                self.schemes.insert(vrec.id, sc);
+                if !sc.known() {
+                    let why = sc.refusal(&vrec.name, &vrec.id);
+                    tracing::warn!("{why}");
+                    if let Some(h) = self.volumes.get(&vrec.id) {
+                            h.refuse(why);
+                        }
+                }
             }
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);

@@ -411,7 +411,13 @@ unless asked.
 ## Not in this cut
 
 - StormFS chunk/versioned volumes stay `none` — StormFS replicates above.
-- Erasure coding wider than two parity members (`k+m` with m > 2, #159).
+- Erasure coding wider than two parity members (`ec:K+M`, M 3–4, K+M ≤
+  24, 8+3 by default and 16+4 at scale; RAID-6's P+Q stays, #159). It
+  arrives in two steps (the owner's 3(b)): first every engine refuses a
+  volume whose header names a scheme it does not read (built: the `S` tag,
+  `docs/metadata-v2.md`), so a node rolled back can never compute P and Q
+  over an 8+3 stripe; then EC itself, once every release a node could roll
+  back to carries that.
 - A checksum per slot or block (#160's option (b)): what would say which of
   two copies is right. Worth building if a scrub reports real mismatches on
   `mirror:2` volumes.

@@ -472,6 +472,9 @@ pub struct ThinVolumeHandle {
     stripe_log: std::sync::RwLock<super::stripelog::StripeLog>,
     /// Sealed: refuses writes, discards and shrinks (#76).
     sealed: std::sync::atomic::AtomicBool,
+    /// Set when the volume's scheme is one this engine does not read
+    /// (#159): every I/O, resync and rebuild of it is refused, with this.
+    refused: std::sync::OnceLock<String>,
     /// The sha256 of every byte, once computed for this seal (#271): a
     /// sealed volume takes no writes, so it cannot go stale; a change of the
     /// sealed flag either way forgets it, and a deleted volume's handle goes.
@@ -579,6 +582,7 @@ impl ThinVolumeHandle {
             shards: (0..SHARDS).map(|_| tokio::sync::Mutex::new(())).collect(),
             stripe_log: std::sync::RwLock::new(super::stripelog::StripeLog::none()),
             sealed: std::sync::atomic::AtomicBool::new(false),
+            refused: std::sync::OnceLock::new(),
             digest: std::sync::Mutex::new(None),
             seal_epoch: std::sync::atomic::AtomicU64::new(0),
             read_only: std::sync::atomic::AtomicBool::new(false),
@@ -691,6 +695,24 @@ impl ThinVolumeHandle {
         self.snap_gate.clone().write_owned().await
     }
 
+    /// Refuse this volume from now on (#159): its scheme is one this engine
+    /// does not read, so nothing it does with it could be right.
+    pub fn refuse(&self, why: String) {
+        let _ = self.refused.set(why);
+    }
+
+    /// Why this volume is refused, when it is.
+    pub fn refused(&self) -> Option<&str> {
+        self.refused.get().map(String::as_str)
+    }
+
+    fn refuse_if_unknown_scheme(&self) -> DriveResult<()> {
+        match self.refused.get() {
+            Some(why) => Err(DriveError::Other(anyhow::anyhow!("{why}"))),
+            None => Ok(()),
+        }
+    }
+
     fn refuse_if_sealed(&self) -> DriveResult<()> {
         if self.is_sealed() {
             return Err(DriveError::ReadOnly(VolumeError::Sealed(self.id).to_string()));
@@ -723,6 +745,9 @@ impl ThinVolumeHandle {
     /// Recompute and rewrite the parity of the given stripes — what a restart
     /// does with the stripes the log says were mid-write.
     pub async fn verify_stripes(&self, stripes: &[u64]) -> ResyncReport {
+        if let Some(why) = self.refused() {
+            return ResyncReport { errors: vec![why.to_string()], ..Default::default() };
+        }
         if let Err(e) = self.resident().await {
             tracing::error!("{e}");
         }
@@ -2346,6 +2371,9 @@ impl ThinVolumeHandle {
     /// written in place, so its legs are published together at the end, in
     /// one sweep of every map that names them.
     pub async fn resync_with(&self, opts: &ResyncOptions) -> ResyncReport {
+        if let Some(why) = self.refused() {
+            return ResyncReport { errors: vec![why.to_string()], ..Default::default() };
+        }
         if let Err(e) = self.resident().await {
             tracing::error!("{e}");
         }
@@ -3135,6 +3163,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        self.refuse_if_unknown_scheme()?;
         self.resident().await?;
         FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // What the node waits for, which a flow-over paces itself by (#410).
@@ -3162,6 +3191,7 @@ impl BlockDevice for ThinVolumeHandle {
     /// write of parity is the thing that must not interleave, and two
     /// writers in different stripes never touch the same parity slot.
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        self.refuse_if_unknown_scheme()?;
         self.resident().await?;
         self.refuse_if_sealed()?;
         let _finished = Finished(&self.completed);
@@ -3206,6 +3236,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn flush(&self) -> DriveResult<()> {
+        self.refuse_if_unknown_scheme()?;
         self.resident().await?;
         let _took = crate::fglat::Timer::new(crate::fglat::Class::Flush);
         // Nothing finished since a successful flush began: nothing to make
@@ -3272,6 +3303,7 @@ impl BlockDevice for ThinVolumeHandle {
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.refuse_if_unknown_scheme()?;
         self.resident().await?;
         self.refuse_if_sealed()?;
         let _finished = Finished(&self.completed);
@@ -3322,6 +3354,7 @@ impl BlockDevice for ThinVolumeHandle {
     /// zeros through the ordinary path (copy-on-write if it is shared), so
     /// the zeros are as durable as any other write once flushed.
     async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.refuse_if_unknown_scheme()?;
         self.resident().await?;
         self.refuse_if_sealed()?;
         let _finished = Finished(&self.completed);
