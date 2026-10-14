@@ -366,13 +366,16 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds a **kept** data half (the update path) | policy decides |
 | `STORMBLOCK_SLOT_CACHE_MB` | bound of each slab's cache of slot table pages; nothing else of the table is kept in memory (#155) | `16` |
 | `STORMBLOCK_FLOW_BOOT_GRACE_SECS` | the most a successor's flow-over waits for the node's boot: until volume I/O is still for 10 s (#278) | `90`; `0` starts at once |
-| `STORMBLOCK_FLOW_BATCH` | extents a flow-over moves per window, one persist per window (#331) | `64` |
-| `STORMBLOCK_FLOW_PARALLEL` | sources a flow-over reads at once, and moves at once for slots it cannot take in a window (#331) | `8` |
+| `STORMBLOCK_FLOW_WINDOW` | extents a flow-over window holds at most (and at most 64 MiB of them); the pacing shrinks it (#331, #410) | `64` |
+| `STORMBLOCK_FLOW_BATCH` | moves a flow-over makes between persists, across windows (#410; it was the window, one persist each, #331) | `256` |
+| `STORMBLOCK_FLOW_PERSIST_SECS` | the longest a flow-over goes without a persist while anything is unpersisted: what a cut can make it move again (#410) | `10` |
+| `STORMBLOCK_FLOW_PARALLEL` | sources a flow-over reads at once, and moves at once for slots it cannot take in a window (#331, #410) | `16` |
 | `STORMBLOCK_FLOW_RUN_MB` | the largest write a flow-over makes on its destination: neighbouring slots merged into one (#401) | `32` |
 | `STORMBLOCK_FLOW_COALESCE` | `0`: one write and read-back per extent, as before #401, for measuring | on |
-| `STORMBLOCK_FLOW_FLUSH_BOUND_MS` | the destination disk's flush time (p90, 30 s) above which a flow-over halves its window and pauses for one flush after each (#282) | `1000`; `0` off |
+| `STORMBLOCK_FLOW_FG_IO_MS`, `STORMBLOCK_FLOW_FG_FLUSH_MS`, `STORMBLOCK_FLOW_FG_RATIO` | the node's own read/write and flush p90 while a flow-over moves above which, and above that ratio of its p90 without it, the flow-over halves its window and pauses (#410; replaces `STORMBLOCK_FLOW_FLUSH_BOUND_MS`, #282) | `25`, `100`, `3` |
+| `STORMBLOCK_FLOW_PACE` | `0`: a flow-over never paces itself (#410) | on |
 | `STORMBLOCK_NVME_MAX_TRANSFER` | The most one NVMe/TCP command carries, in bytes (a power of two, 4096 to 32 MiB): what a target advertises as MDTS and maxh2cdata, and what the initiator sends at most (#407). 131072 is what every engine did before | `8388608` |
-| `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per path of an attached NVMe/TCP namespace (#331, #90) | `4` |
+| `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per path of an attached NVMe/TCP namespace, each one command at a time (#331, #90, #410) | `8` |
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
 | `STORMBLOCK_BOOT_TAG` | this machine's name for that claim; the initramfs exports the name it resolved (#259) | the firmware's `StormBootTag` EFI variable, else SMBIOS serial, else SMBIOS UUID (#249) |
@@ -583,7 +586,12 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   (the connection's path MTU, `IP_MTU`; 0 unknown), `jumbo` (≥ 9000) and
   `max_transfer` (the bytes one command carries: the target's MDTS, 8 MiB
   on an engine with #407, 128 KiB on an older one such as forge 13.7). The
-  flow-over also says it once per source on the console.
+  flow-over also says it once per source on the console. `persists` (one
+  for a batch of moves, #410) and `pace` (#410): `window`/`max_window`,
+  `state` (`full` or `backing_off`), `reason` (what it last went by),
+  `io_p90_ms`/`flush_p90_ms` (the node's own reads/writes and flushes while
+  it moves, last 5 s), `still_io_p90_ms`/`still_flush_p90_ms` (the same
+  without it), `pauses` and `paused_seconds`.
   Kept by the flow-over
   as it goes, so it is never missing for being busy; an abandoned flow-over
   leaves it above 0 (the node still runs from the appliance), and

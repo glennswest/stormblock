@@ -161,28 +161,37 @@ tests run on.
    the extent still names the source and carrying the source slot's share
    count as the slab has it then. Holding both for the copy queued every
    volume's I/O and every API call behind each move.
-   **Moves run in windows** (#331): up to 64 extents (`STORMBLOCK_FLOW_BATCH`,
-   and at most 64 MiB of them), each slot once, then one persist and then the
-   release of their source slots. Since #401 a window's slots whose fences are
-   free are moved together: sources read 8 at once (`STORMBLOCK_FLOW_PARALLEL`),
+   **Moves run in windows** (#331): up to 64 extents (`STORMBLOCK_FLOW_WINDOW`,
+   and at most 64 MiB of them), each slot once. Since #401 a window's slots
+   whose fences are free are moved together: sources read 16 at once
+   (`STORMBLOCK_FLOW_PARALLEL`, over the initiator's 8 connections),
    destination slots allocated together and written in slot order as merged
    runs, each run read back before any map names it, then one publish under
    the map and the registry with the same checks per extent. A fence is never
    waited for while others are held: a slot whose fence is taken moves on its
    own afterwards, as before. A source that reads all zeros is unmapped from
    every map naming it instead of copied, only where every reference is that
-   slot alone; its slot is owed like a moved one. A source slot stays
-   owed, never freed, until the map naming its copy is durable, so a cut
-   anywhere in a window leaves each extent on its source or on a copy that is
-   whole. The flow-over gives the disk back to foreground I/O for a quarter
-   of a window's time, at most 2 s, when a volume was read or written since
-   the last window.
-   It also paces itself to the destination disk (#282): when that disk's
-   flushes over the last 30 s take longer than `STORMBLOCK_FLOW_FLUSH_BOUND_MS`
-   (1000 ms; 0 = off) at p90, it halves its window and pauses for one flush
-   time (at most 10 s) after each, and doubles back once they are under. A
-   drive-managed SMR disk whose cache has filled is that disk; pacing changes
-   when moves happen, never the order above.
+   slot alone; its slot is owed like a moved one. **One persist for a batch
+   of moves** (#410): every 256 (`STORMBLOCK_FLOW_BATCH`), or 10 s after the
+   last while anything is unpersisted (`STORMBLOCK_FLOW_PERSIST_SECS`), at the
+   end, and before giving up; then the release of their source slots. A
+   source slot stays owed, never freed, until the map naming its copy is
+   durable, so a cut anywhere in a batch leaves each extent on its source or
+   on a copy that is whole, and the batch is moved again.
+   **Paced by the node's own I/O** (#410; before it, any foreground I/O at
+   all gave the disk back for a quarter of a window, #269, and the
+   destination's own flush time over 1 s halved the window and paused, #282,
+   which on a DRAM-less SSD flushing what the flow-over wrote held it to an
+   extent a flush, ~1 MB/s on server8). Every volume read, write and flush is
+   timed (`fglat`), apart while the flow-over moves and while it does not
+   (its pauses, the boot grace). Flat out while the node's p90 while moving
+   is under its floor (reads/writes `STORMBLOCK_FLOW_FG_IO_MS` 25, flushes
+   `STORMBLOCK_FLOW_FG_FLUSH_MS` 100) or under `STORMBLOCK_FLOW_FG_RATIO` (3)
+   times its p90 without; over both, the window halves and the flow-over
+   pauses about that long (0.25–5 s), which also measures the node without
+   it, and doubles back once under. A disk slow either way (an SMR disk, a
+   cheap SSD) is moved onto at full speed. `STORMBLOCK_FLOW_PACE=0` turns it
+   off. Pacing changes when moves happen, never the order above.
 11. **Nothing is written in place on a slab being emptied** (#239, reopened).
    Rule 9's fresh clone carries the *image's* bytes, not what the last boot
    wrote on its own clone, so a write left on the appliance side is lost the
