@@ -885,16 +885,10 @@ async fn a_restripe_or_create_whose_records_fail_frees_nothing_and_says_so() {
     }
 }
 
-/// #428 (forge, 2026-10-10 to 10-14): a format-1 slab whose record outgrew
-/// its copy. Every persist failed, the node went on in memory, and a restart
-/// lost 483 volumes; the migration to format 2 refused too, because it wrote
-/// the record into both v1 copies first. Now: once records cannot be
-/// written, nothing new is made (refused, with the reason); the migration
-/// takes the whole region when the record no longer fits a copy; the next
-/// create retries, migrates, clears the fault and goes on; and every volume,
-/// those made before the fault and after, is there after a restart.
-#[tokio::test]
-async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_cannot_be_written() {
+/// #428: a format-1 slab with a 1 MiB region, volumes of `extents` written
+/// extents made until its record no longer fits a copy. The names made,
+/// the slab, its device and the copy's capacity.
+async fn outgrow_format_1(extents: u64) -> (VolumeManager, Vec<String>, stormblock::drive::slab::SlabId, Arc<dyn BlockDevice>, u64) {
     stormblock::drive::slab::set_default_format(SLAB_VERSION);
     // Room for many more slots than the record can name: the record, not the
     // slab, runs out first, as on forge.
@@ -909,14 +903,12 @@ async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_ca
     let mut vm = VolumeManager::new(SLOT);
     vm.add_slab(s).await;
     vm.persist_to_slab(sid);
-
-    // Volumes until the record no longer fits a copy.
     let mut made = Vec::new();
     let mut n = 0u64;
     while vm.durability_fault().is_none() {
         let id = vm.create_volume_any(&format!("v{n}"), VOL).await.unwrap();
         let v = vm.get_volume(&id).unwrap();
-        for e in 0..8u64 {
+        for e in 0..extents {
             v.write(e * SLOT, &pattern((n % 251) as u8, e, 1))
                 .await
                 .unwrap_or_else(|err| panic!("v{n} extent {e}: {err} (fault {:?})", vm.durability_fault()));
@@ -929,20 +921,29 @@ async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_ca
     }
     let fault = vm.durability_fault().unwrap();
     assert!(fault.contains("reserves"), "{fault}");
-
-    // Nothing new while it cannot be written.
+    // Nothing new while it cannot be written: a volume, a clone.
     let e = vm.create_volume_any("refused", VOL).await.expect_err("refused while records are not written");
     assert!(e.to_string().contains("volume records cannot be written"), "{e}");
     let src = vm.find_volume("v0").await.unwrap();
     let e = vm.create_snapshot(src, "refused-clone").await.expect_err("a clone too");
     assert!(e.to_string().contains("volume records cannot be written"), "{e}");
+    (vm, made, sid, dev, capacity)
+}
 
-    // Format 2 the default, as it is: the next create retries, migrates the
-    // slab (the whole region, no v1 copy kept) and goes on.
+/// #428 (forge, 2026-10-10 to 10-14): a format-1 slab whose record outgrew
+/// its copy. Every persist failed, the node went on in memory, and a restart
+/// lost 483 volumes; the migration to format 2 refused too, because it wrote
+/// the record into both v1 copies first. Now nothing new is made while
+/// records cannot be written, and the migration takes the whole region when
+/// the record no longer fits a copy: the next create retries, migrates,
+/// clears the fault and goes on, and every volume is there after a restart.
+#[tokio::test]
+async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_cannot_be_written() {
+    // One extent a volume: the record is mostly volume headers, which v2
+    // holds in about the room v1 does.
+    let (mut vm, made, sid, dev, capacity) = outgrow_format_1(1).await;
     stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
-    let tried = vm.upgrade_slabs(Some(sid)).await;
-    eprintln!("#428: {n} volumes; v1 copy holds {capacity} bytes; migration: {tried:?}");
-    let after = vm.create_volume_any("after", VOL).await.expect("made once records are written again");
+    let after = vm.create_volume_any("after", VOL).await.expect("made once the slab migrated");
     assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
     assert_eq!(vm.registry().read().await.get(&sid).unwrap().format_version(), SLAB_VERSION_2);
     vm.get_volume(&after).unwrap().write(0, &pattern(9, 0, 9)).await.unwrap();
@@ -950,17 +951,57 @@ async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_ca
     vm.persist().await;
     for (name, u) in vm.metadata_v2_usage() {
         eprintln!(
-            "#428: {n} volumes; v1 copy holds {capacity} bytes; v2 store {name}: {} of {} pages, log {} of {}",
-            u.pages_used, u.pages_total, u.log_used, u.log_len
+            "#428: {} volumes of one extent; v1 copy holds {capacity} bytes; v2 {name}: {} of {} pages",
+            made.len(),
+            u.pages_used,
+            u.pages_total
         );
     }
     drop(vm);
-
     let vm = reopen(&[dev]).await;
     for name in made.iter().chain(std::iter::once(&"after".to_string())) {
         assert!(vm.find_volume(name).await.is_some(), "{name} after a restart");
     }
     let last = made.len() as u64 - 1;
-    assert_eq!(read_first(&vm, &format!("v{last}"), 7).await, pattern((last % 251) as u8, 7, 1), "the volume made as the record outgrew its copy");
+    assert_eq!(read_first(&vm, &format!("v{last}"), 0).await, pattern((last % 251) as u8, 0, 1), "the volume made as the record outgrew its copy");
+    assert_eq!(read_first(&vm, "after", 0).await, pattern(9, 0, 9));
+}
+
+/// #428, forge's shape: extent-heavy volumes, whose v2 entries (a 25-byte
+/// key each) take about twice v1's room, so the migration does not fit the
+/// region either. The fault stands and creates stay refused, with the
+/// reason; deletes still persist, and once they bring the record under the
+/// copy it is written, the fault clears and creates go on. After a restart
+/// what is left is there and what was deleted is not.
+#[tokio::test]
+async fn a_record_too_large_for_either_format_refuses_creates_until_deletes_make_room() {
+    let (mut vm, made, _sid, dev, _) = outgrow_format_1(8).await;
+    stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
+    let e = vm.create_volume_any("still", VOL).await.expect_err("v2 does not fit either");
+    assert!(e.to_string().contains("volume records cannot be written"), "{e}");
+    let tried = vm.upgrade_slabs(None).await;
+    assert!(tried.iter().all(|(_, r)| r.as_ref().is_err_and(|e| e.contains("region full"))), "{tried:?}");
+    let mut deleted = Vec::new();
+    for name in made.iter().rev() {
+        let id = vm.find_volume(name).await.unwrap();
+        vm.delete_volume(id).await.unwrap();
+        vm.persist().await;
+        deleted.push(name.clone());
+        if vm.durability_fault().is_none() {
+            break;
+        }
+    }
+    assert!(vm.durability_fault().is_none(), "deletes made room");
+    let after = vm.create_volume_any("after", VOL).await.expect("made once records are written again");
+    vm.get_volume(&after).unwrap().write(0, &pattern(9, 0, 9)).await.unwrap();
+    vm.get_volume(&after).unwrap().flush().await.unwrap();
+    vm.persist().await;
+    eprintln!("#428: {} volumes of 8 extents; {} deleted to make room", made.len(), deleted.len());
+    drop(vm);
+    let vm = reopen(&[dev]).await;
+    for name in &made {
+        assert_eq!(vm.find_volume(name).await.is_some(), !deleted.contains(name), "{name} after a restart");
+    }
+    assert_eq!(read_first(&vm, "v0", 7).await, pattern(0, 7, 1));
     assert_eq!(read_first(&vm, "after", 0).await, pattern(9, 0, 9));
 }
