@@ -474,6 +474,11 @@ async fn two_first_boot_claims_at_once_answer_in_seconds_on_a_slow_disk() {
             (host, status, body, t.elapsed())
         })
     };
+    // One machine alone first: what a first-boot claim costs on this disk
+    // (two clones, each stamped and flushed).
+    let (_, status, body, alone) = claim("pvetest0").await.unwrap();
+    assert_eq!(status, 201, "{body}");
+    println!("first boot alone: {alone:?}");
     for round in ["first boot", "second boot"] {
         let a = claim("pvetest1");
         let b = claim("pvetest2");
@@ -485,6 +490,34 @@ async fn two_first_boot_claims_at_once_answer_in_seconds_on_a_slow_disk() {
             slowest = slowest.max(took);
         }
         println!("{round}: the slower of two claims at once took {slowest:?}");
+        // One claim's lock for every machine made the second wait out the
+        // whole first (4.6 s here, 2 × alone): now they overlap.
+        assert!(
+            slowest < alone.mul_f64(1.6),
+            "{round}: two machines' claims queued behind each other: {slowest:?} against {alone:?} alone"
+        );
     }
+
+    // A machine that stops waiting (#424): the claim still finishes, and the
+    // clone it made is the one its host's record names.
+    let quick = reqwest::Client::builder().timeout(Duration::from_millis(300)).build().unwrap();
+    let gave_up = quick
+        .post(format!("{base}/api/v1/synonyms/boothost/pvetest3/claim"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await;
+    assert!(gave_up.is_err(), "the claim answered within 300 ms on a 500 ms disk");
+    let mut recorded = serde_json::Value::Null;
+    for _ in 0..100 {
+        let h: serde_json::Value = c.get(format!("{base}/api/v1/boothost/pvetest3")).send().await.unwrap().json().await.unwrap_or_default();
+        if !h["last_claim"]["clone"].is_null() {
+            recorded = h["last_claim"].clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let clone = recorded["clone"].as_str().unwrap_or_else(|| panic!("the abandoned claim never finished: {recorded}"));
+    let v = c.get(format!("{base}/api/v1/volumes/{clone}")).send().await.unwrap();
+    assert_eq!(v.status(), 200, "the clone the record names is there");
     server.abort();
 }

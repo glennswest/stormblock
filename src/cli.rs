@@ -8491,8 +8491,12 @@ async fn claim_boot_uri(
         .map(|t| t.to_string())
         .or_else(|| std::env::var("STORMBLOCK_API_TOKEN").ok())
         .filter(|t| !t.trim().is_empty());
+    // An attempt waits as long as the claim's whole budget (#424): a claim
+    // makes the machine's clones, seconds on a busy appliance's disk, and an
+    // attempt cut at 10 s sent a second claim to queue behind the first.
+    // What a slow answer gets instead is a line every 10 s saying so.
     let client = crate::http::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(timeout_secs.max(10)))
         .bearer(token)
         .build()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -8508,7 +8512,24 @@ async fn claim_boot_uri(
         let body = serde_json::json!({
             "agent": {"name": crate::mgmt::boot_override::INITRAMFS_AGENT, "version": env!("CARGO_PKG_VERSION")}
         });
-        match client.post(&url).json(&body).send().await {
+        let left = deadline.saturating_duration_since(std::time::Instant::now()).max(std::time::Duration::from_secs(10));
+        let sent = std::time::Instant::now();
+        let request = tokio::time::timeout(left, client.post(&url).json(&body).send());
+        tokio::pin!(request);
+        let mut tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(10),
+        );
+        let answer = loop {
+            tokio::select! {
+                a = &mut request => break a.unwrap_or_else(|_| Err(crate::http::Error::Timeout(left))),
+                _ = tick.tick() => eprintln!(
+                    "boot-claim: still waiting for {base} ({} s) - it is making this machine's clone",
+                    sent.elapsed().as_secs()
+                ),
+            }
+        };
+        match answer {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();

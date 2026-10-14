@@ -823,7 +823,23 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
             synonym::claim_extra("agent", req.agent.clone()),
             synonym::claim_extra("inventory", req.inventory.clone()),
         );
-        return claim_boothost(state, name, req.mac.as_deref(), req.serial.as_deref(), extra).await;
+        // On a task of its own (#424): a machine that stops waiting (the
+        // initramfs gives an attempt a bound) must not cut a claim off
+        // between its clone and its record, leaving a clone nobody names.
+        let vm = state.volume_manager.clone();
+        let (name, mac, serial) = (name.to_string(), req.mac.clone(), req.serial.clone());
+        let claimed = crate::lockwatch::spawn_owing(
+            async move { claim_boothost(state, &name, mac.as_deref(), serial.as_deref(), extra).await },
+            move || async move {
+                if let Err(e) = crate::volume::VolumeManager::persist_detached_checked(&vm).await {
+                    tracing::error!("boot claim: its clones were not written to the volume metadata: {e}");
+                }
+            },
+        );
+        return match claimed.await {
+            Ok(r) => r,
+            Err(e) => ApiError::internal(format!("the claim stopped: {e}")),
+        };
     }
     let found = state.synonyms.read().await.get(namespace, name).cloned();
     let Some(syn) = found else {
@@ -985,10 +1001,21 @@ async fn canonical(state: &AppState, namespace: &str, name: &str) -> String {
     state.synonyms.read().await.host_of(name).unwrap_or_else(|| name.to_string())
 }
 
-/// One boothost claim at a time. Claims are rare — two per boot of one
-/// machine — and serialising them is what keeps two claims for one tag from
-/// each minting a host golden.
+/// Which host a claim is for, one claim at a time: a name, MAC or serial
+/// resolves to a host (and a new one is made) here, and nowhere else.
 static BOOT_CLAIMS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// One claim at a time per host: two claims for one host must not each mint
+/// a host golden or release the clone the other just made. Claims for
+/// different machines run at once (#424): one lock for every claim made a
+/// machine wait for every other machine's clones, and two first boots on
+/// forge's disk took the second past the initramfs's wait.
+fn host_claim_lock(host: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: std::sync::Mutex<Option<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        std::sync::Mutex::new(None);
+    let mut locks = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    locks.get_or_insert_with(Default::default).entry(host.to_ascii_lowercase()).or_default().clone()
+}
 
 /// `POST /api/v1/synonyms/boothost/<tag>/claim` — what a machine boots, and
 /// the one thing on this API that needs no credential (#107).
@@ -1034,8 +1061,7 @@ async fn claim_boothost(
 ) -> Response {
     // Where a claim's time goes (#424), said once per claim.
     let mut timing = ClaimTiming::start();
-    let _one_at_a_time = BOOT_CLAIMS.lock().await;
-    timing.step("wait");
+    let resolving = BOOT_CLAIMS.lock().await;
     let by_default = claimed_as.eq_ignore_ascii_case(DEFAULT_HOST);
     let mut named_claim: Option<synonym::NamedClaim> = None;
     let (tag, mac, new_machine) = if by_default {
@@ -1086,6 +1112,10 @@ async fn claim_boothost(
         }
     };
     let tag = tag.as_str();
+    let this_host = host_claim_lock(tag);
+    drop(resolving);
+    let _one_at_a_time = this_host.lock().await;
+    timing.step("wait");
     // Every name this host has had: its clones and goldens carry the name
     // they were made under, and a rename must not strand them (#199).
     let mut host = state.synonyms.read().await.host(tag);
