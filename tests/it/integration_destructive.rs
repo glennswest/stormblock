@@ -830,7 +830,11 @@ async fn a_familys_bearer_keeps_to_its_namespace_and_its_quota() {
     assert_eq!(call(&n, M::GET, "/volumes/img?namespace=nana", Some(NANA), None).await, 200);
     assert_eq!(call(&n, M::GET, &format!("/volumes/{stormcos_img}"), Some(NANA), None).await, 403);
 
-    // A clone is in its source's namespace.
+    // A clone is in its source's namespace (a sealed source, as every clone's).
+    {
+        let mut vm = n.state.volume_manager.lock().await;
+        vm.seal_volume(stormblock::volume::VolumeId(nana_img.parse().unwrap()), None).await.unwrap();
+    }
     let cl = c.post(format!("{}/volumes/{nana_img}/clone", n.base)).bearer_auth(NANA)
         .json(&json!({"name": "img-clone"})).send().await.unwrap();
     assert_eq!(cl.status().as_u16(), 201, "{}", cl.text().await.unwrap());
