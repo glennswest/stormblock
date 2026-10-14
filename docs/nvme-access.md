@@ -129,6 +129,15 @@ as the initramfs. 12.25's did not: it presented
 clone serves one host: a host forge has never seen claims a clone of its own
 (through `boothost/default`), never another host's (#445).
 
+**One clone, one host** (owner, #445): a clone is claimed by exactly one host,
+and its subsystem admits only that host. A host forge has never seen is never
+refused; it gets a fresh clone of its own. A second host never gets access to
+another host's clone; it gets its own. A host's next claim releases its
+previous clone (after the #97 grace): out of the host's subsystem, its exports
+dropped, deleted, and its slots erased by the node's erase level before
+reuse (#286). The host keeps its subsystem and finds the new clone there. The
+release touches no other host's clone.
+
 On a node without the shared listener (no NVMe-oF target at startup), a claim
 is served from the volume's own subsystem, `<serve prefix>:vol-<uuid>` at
 NSID 1, with the same allowed hosts. It is a subsystem of the one `[serve]`

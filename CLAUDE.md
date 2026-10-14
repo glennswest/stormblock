@@ -474,6 +474,17 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       the engine stopped, GC off on the first start, .prev / snapshot
       rollback)
 
+### One clone, one host (2026-10-14, #445, P1, owner's model) — DONE (points 1–3 in #443's golden; 4 tested)
+
+- [x] 1–3 (a clone admits only its host; a new host gets its own clone; a
+      second host never reaches another's): #443 (5b2e16a), its test
+- [x] 4 (a released claim frees the clone): `release_superseded_clone`
+      (subsystem detach, exports, delete; erased before reuse, #286); the
+      #443 test extended past pvetest2's next boot (old clone deleted, its
+      namespace gone, new clone fresh, blade7's untouched); docs
+      (nvme-access.md), CHANGELOG
+- [x] check.sh; closed
+
 ### Nodes refused by forge: the claim URI names the host (2026-10-14, #443, P0) — DONE (golden-stormblock-b2adfbc04f9a, on forge)
 
 Owner's model (#445, replacing option A): one clone, one host; no change
