@@ -664,12 +664,15 @@ engine reading `Parity { parity: 3 }` would compute P+Q over it (silently
 wrong): a new scheme older engines refuse now, or #245's two steps.
 Recommended 1(a), 2(a), 3(b). Nothing built.
 
-### StormFS registration names its target (2026-10-11, #170, P3) — WAITING ON THE OWNER
+### StormFS registration names its target (2026-10-11, #170, P3) — BUILT on branch wip/170-registration (A); merges after 12.23
 
-The route is stormstorage's (#214, stormstorage#6, #77); the names say
-StormFS. Asked on #170 (needs-owner): A rename to `[registration] url`
-(old `[stormfs]` accepted with a warning), B leave it, C StormFS gets the
-route. Recommended A. Nothing built.
+Decision A (2026-10-13): `[stormfs] metadata_url` → `[registration] url`,
+`src/stormfs.rs` → `src/registration.rs`, log lines "stormstorage
+registration"; `[stormfs]` read as the old spelling with a warning
+(ignored when `[registration]` is given), `metadata_url` an alias of `url`.
+- [x] test `mgmt::config::registration_tests::…`; README, CHANGELOG
+- [x] check.sh on wip/170-registration at a87cfd8 ALL PASS (1214/1214)
+- [ ] after 12.23 passes: merge, check.sh, the next stage; close
 
 ### Dead code and empty features (2026-10-11, #169) — DONE
 
