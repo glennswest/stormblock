@@ -52,7 +52,7 @@ use crate::volume::VolumeId;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(list).post(create))
+        .route("/", get(list).post(create_recorded))
         .route("/{name}", get(resolve_one).put(repoint).delete(remove))
         .route("/{namespace}/{name}", get(resolve_two).put(repoint_two).delete(remove_two))
         .route("/{name}/rollback", post(rollback_one))
@@ -129,6 +129,13 @@ pub(super) async fn body(state: &AppState, s: &Synonym, changed: Option<bool>) -
     });
     if let Some(c) = changed {
         v["changed"] = json!(c);
+    }
+    // Who made it, and its labels (#422).
+    if let Some(c) = crate::mgmt::creators::of(state, &crate::mgmt::creators::synonym(&s.namespace, &s.name)) {
+        v["creator"] = json!(c.who);
+        if !c.labels.is_empty() {
+            v["labels"] = json!(c.labels);
+        }
     }
     // A machine's assignment says what it last booted (#177): when it
     // claimed, what it got, and the agent that asked.
@@ -219,6 +226,38 @@ async fn list(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>) ->
     }
     let count = items.len();
     Json(json!({ "items": items, "count": count })).into_response()
+}
+
+/// `POST /api/v1/synonyms`, with its caller recorded as the synonym's
+/// creator (#422). A `boothost/` synonym's creator is the host record's.
+async fn create_recorded(
+    State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::mgmt::auth::Caller>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: CreateRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return ApiError::bad_request(format!("the request: {e}")),
+    };
+    let st = state.clone();
+    let ns = req.namespace.clone().unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
+    let name = req.name.clone();
+    let resp = crate::mgmt::creators::recorded(
+        &state,
+        caller.as_deref(),
+        &body,
+        |v| Some(crate::mgmt::creators::synonym(v.get("namespace")?.as_str()?, v.get("name")?.as_str()?)),
+        || create(State(st), Json(req)),
+    )
+    .await;
+    // A `boothost/` synonym makes a host: its creator is the host's too, kept
+    // after the synonym is gone.
+    if resp.status().is_success() && ns == BOOTHOST_NS {
+        if let Some(c) = crate::mgmt::creators::of(&state, &crate::mgmt::creators::synonym(&ns, &name)) {
+            state.creators.lock().unwrap_or_else(|e| e.into_inner()).set(crate::mgmt::creators::host(&name), c);
+        }
+    }
+    resp
 }
 
 async fn create(
@@ -388,13 +427,16 @@ async fn do_remove(state: Arc<AppState>, namespace: &str, name: &str) -> Respons
     match store.remove(namespace, name) {
         // Dropping a name never touches the volume it named: the whole point
         // of keeping the binding out of the volume.
-        Ok(gone) => Json(json!({
+        Ok(gone) => {
+            crate::mgmt::creators::forget(&state, &crate::mgmt::creators::synonym(namespace, name));
+            Json(json!({
             "namespace": gone.namespace,
             "name": gone.name,
             "removed": true,
             "was": gone.target,
         }))
-        .into_response(),
+        .into_response()
+        }
         Err(e) => err(e),
     }
 }
@@ -1235,6 +1277,15 @@ async fn claim_boothost(
         Ok(c) => c,
         Err(e) => return super::fstemplates::err(e),
     };
+    // What a claim makes for a host somebody created is theirs too (#422):
+    // the boot clone, the host golden and its synonym, so they can remove
+    // them as they removed the host's assignment.
+    if let Some(owner) = crate::mgmt::creators::of(&state, &crate::mgmt::creators::host(tag)) {
+        let mut cr = state.creators.lock().unwrap_or_else(|e| e.into_inner());
+        cr.set(crate::mgmt::creators::volume(&c.volume_id.0), owner.clone());
+        cr.set(crate::mgmt::creators::volume(&golden.0), owner.clone());
+        cr.set(crate::mgmt::creators::synonym(HOSTGOLDEN_NS, tag), owner);
+    }
     // What a boot clone of this machine may descend from: any golden it has
     // had, and — for clones made before host goldens existed — any release it
     // was assigned.

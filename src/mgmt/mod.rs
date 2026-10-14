@@ -21,6 +21,7 @@ pub mod ana;
 pub mod forge;
 pub mod forge_trust;
 pub mod kernelopt;
+pub mod creators;
 #[cfg(feature = "ui")]
 pub mod ui;
 
@@ -346,6 +347,8 @@ pub struct AppState {
     pub rebuilds: Arc<crate::rebuild::Rebuilds>,
     /// Disk images being imported into goldens.
     pub imports: tokio::sync::RwLock<crate::image::import::Imports>,
+    /// Who made each volume, synonym and host record (#422).
+    pub creators: std::sync::Mutex<creators::Creators>,
     /// Latest pool-pressure sample, kept current by the watcher (#18).
     pub pool_pressure: Option<std::sync::Arc<tokio::sync::RwLock<Option<crate::volume::pressure::PressureStatus>>>>,
     pub config: StormBlockConfig,
@@ -576,6 +579,9 @@ impl AppState {
             rebalance: tokio::sync::Mutex::new(crate::rebalance::Rebalance::default()),
             rebuilds,
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
+            creators: std::sync::Mutex::new(creators::Creators::load(
+                config.management.data_dir.as_deref().map(std::path::Path::new),
+            )),
             serve: std::sync::OnceLock::new(),
             pool_pressure: None,
             kube_auth: kubeauth::KubeAuth::from_config(config.management.kubernetes.as_ref()).map(Arc::new),

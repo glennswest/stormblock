@@ -99,6 +99,12 @@ pub struct ImportSpec {
     /// with its enrolled certificate), never by a request.
     #[serde(skip)]
     pub tls: Option<ClientTls>,
+    /// Labels kept with who made it (#422): `storm.io/test-run`.
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// Who asked, recorded as the volume's creator (#422). Set by the engine.
+    #[serde(skip)]
+    pub creator: Option<String>,
     /// The logical block the golden and its clones are presented at: 512 or
     /// 4096 (#110). Absent means what the image was authored for: a GPT at
     /// the LBA its header is at, an MBR disk or an ISO 9660 image at 512,
@@ -586,6 +592,12 @@ async fn stream_raw(
             .map_err(|e| format!("create volume: {e}"))?
     };
     st.write().await.volume_id = Some(vol_id.0);
+    if let Some(who) = &spec.creator {
+        state.creators.lock().unwrap_or_else(|e| e.into_inner()).set(
+            crate::mgmt::creators::volume(&vol_id.0),
+            crate::mgmt::creators::Creator::new(who.clone(), spec.labels.clone()),
+        );
+    }
     let dev: Arc<dyn BlockDevice> = state
         .volume_manager
         .lock()
@@ -784,6 +796,12 @@ async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLoc
             .map_err(|e| format!("create volume: {e}"))?
     };
     st.write().await.volume_id = Some(vol_id.0);
+    if let Some(who) = &spec.creator {
+        state.creators.lock().unwrap_or_else(|e| e.into_inner()).set(
+            crate::mgmt::creators::volume(&vol_id.0),
+            crate::mgmt::creators::Creator::new(who.clone(), spec.labels.clone()),
+        );
+    }
     let dev: Arc<dyn BlockDevice> = state
         .volume_manager
         .lock()

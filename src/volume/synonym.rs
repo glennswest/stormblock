@@ -713,6 +713,35 @@ impl SynonymStore {
         Ok(gone)
     }
 
+    /// Remove a host (#416, #422): its record and its synonyms,
+    /// `boothost/<name>` and `hostgolden/<name>`, under every name it has
+    /// had. Its volumes (boot clones, host goldens) are the caller's to
+    /// delete. Answers the synonyms removed. `default` is not a host.
+    pub fn remove_host(&mut self, name: &str) -> Result<Vec<String>, SynonymError> {
+        if name == DEFAULT_HOST {
+            return Err(SynonymError::InvalidName(format!("{DEFAULT_HOST} is every new machine's assignment, not a host")));
+        }
+        let record = self.hosts.remove(name);
+        let mut names = vec![name.to_string()];
+        if let Some(h) = &record {
+            names.extend(h.former_names.iter().cloned());
+        }
+        let mut gone = Vec::new();
+        for n in &names {
+            for ns in [BOOTHOST_NS, HOSTGOLDEN_NS] {
+                let k = key(ns, n);
+                if self.synonyms.remove(&k).is_some() {
+                    gone.push(k);
+                }
+            }
+        }
+        if record.is_none() && gone.is_empty() {
+            return Err(SynonymError::NotFound(key(BOOTHOST_NS, name)));
+        }
+        self.persist();
+        Ok(gone)
+    }
+
     /// The host a name or alias belongs to: a host record's name or one of
     /// its aliases, or a `boothost/<name>` assignment's name. `None` for a
     /// machine nobody has heard of.

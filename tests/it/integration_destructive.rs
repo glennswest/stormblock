@@ -35,6 +35,9 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                         Some("stormcert-k8s") => Some(("system:serviceaccount:stormcert:stormcert", vec!["system:serviceaccounts"])),
                         Some("user-k8s") => Some(("system:serviceaccount:vmimages:vmimages", vec!["storage-users"])),
                         Some("viewer-k8s") => Some(("carol", vec!["storage-viewers"])),
+                        // storage-user once stormcos#557 adds `delete` (#422).
+                        Some("tester-k8s") => Some(("system:serviceaccount:stormbootx-test:runner", vec!["storage-users-delete"])),
+                        Some("other-tester-k8s") => Some(("system:serviceaccount:stormbootx-test:other", vec!["storage-users-delete"])),
                         _ => None,
                     };
                     Json(match user {
@@ -64,7 +67,9 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                     // storage-viewer get/list/watch.
                     let user = in_group("storage-users") && matches!(verb, "get" | "list" | "watch" | "create" | "update");
                     let viewer = in_group("storage-viewers") && matches!(verb, "get" | "list" | "watch");
-                    let ok = (in_group("storage-admins") || stormcert || user || viewer) && ra["group"] == "storage.storm.io";
+                    let deleter = in_group("storage-users-delete")
+                        && matches!(verb, "get" | "list" | "watch" | "create" | "update" | "delete");
+                    let ok = (in_group("storage-admins") || stormcert || user || viewer || deleter) && ra["group"] == "storage.storm.io";
                     Json(json!({ "status": { "allowed": ok, "reason": if ok { "storage-admin" } else { "no RBAC policy matched" } } }))
                 }
             }),
@@ -639,4 +644,106 @@ async fn the_web_ui_is_behind_the_token_and_its_forms_behind_the_admin_gate() {
     }
     assert!(n.state.volume_manager.lock().await.list_volumes().await.iter().all(|v| v.1 != "ui-made"), "nothing was made");
     assert_ne!(call_ui(reqwest::Method::POST, "/ui/volumes", Some(ADMIN)).await.unwrap().status(), 401, "the admin token gets through the gate");
+}
+
+/// #422 (the owner's option 1 on stormbootx-test#2): a storage-user (with
+/// `delete`, as stormcos#557 grants it) removes what it created itself and
+/// nothing else. It imports an image, adds `boothost/<mac>`, the machine
+/// claims (a host golden, its synonym and a boot clone, made for it), and
+/// then it detaches and deletes the clone, the synonyms, the golden, the
+/// image and the host record. Another storage-user gets 403 on each of
+/// those, and on the node's own (unrecorded) volumes the first does too.
+#[tokio::test]
+async fn a_storage_user_deletes_what_it_created_and_nothing_else() {
+    use reqwest::Method as M;
+    const ME: &str = "tester-k8s";
+    const THEM: &str = "other-tester-k8s";
+    const SA: &str = "kubernetes:system:serviceaccount:stormbootx-test:runner";
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let api = apiserver(asked.clone()).await;
+    let n = node(false, Some(api)).await;
+    let c = reqwest::Client::new();
+    let theirs = volume(&n, "node-scratch", false).await;
+    let theirs_sealed = volume(&n, "node-golden", true).await;
+
+    // Import an image, labelled with its run.
+    let image = n.dir.path().join("boot.raw");
+    std::fs::write(&image, vec![0x5Au8; (4 * MIB) as usize]).unwrap();
+    let r = c
+        .post(format!("{}/volumes/import", n.base))
+        .bearer_auth(ME)
+        .json(&json!({"name": "boot-image", "file": image.to_str().unwrap(), "format": "raw",
+                      "labels": {"storm.io/test-run": "run-1"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 202, "{}", r.text().await.unwrap());
+    let job: Value = r.json().await.unwrap();
+    let mut img = Value::Null;
+    for _ in 0..200 {
+        img = c.get(format!("{}/volumes/import/{}", n.base, job["id"].as_str().unwrap())).bearer_auth(ME).send().await.unwrap().json().await.unwrap();
+        if img["state"] == "done" || img["state"] == "failed" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(img["state"], "done", "{img}");
+    let v: Value = c.get(format!("{}/volumes/boot-image", n.base)).bearer_auth(ME).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["creator"], SA, "{v}");
+    assert_eq!(v["labels"]["storm.io/test-run"], "run-1");
+
+    // Its host, and the machine's claim.
+    let mac = "mac-0a0b0c0d0e0f";
+    assert_eq!(
+        call(&n, M::POST, "/synonyms", Some(ME), Some(json!({"namespace": "boothost", "name": mac, "volume": "boot-image"}))).await,
+        201
+    );
+    let claim: Value = c.post(format!("{}/synonyms/boothost/{mac}/claim", n.base)).json(&json!({})).send().await.unwrap().json().await.unwrap();
+    let clone = claim["volume"]["id"].as_str().map(str::to_string).unwrap_or_else(|| panic!("the claim names its clone: {claim}"));
+    let golden = claim["host_golden"]["volume"].as_str().map(str::to_string).unwrap_or_else(|| panic!("{claim}"));
+    let s: Value = c.get(format!("{}/synonyms/hostgolden/{mac}", n.base)).bearer_auth(ME).send().await.unwrap().json().await.unwrap();
+    assert_eq!(s["creator"], SA, "the claim's host golden synonym is the host's creator's: {s}");
+    let g: Value = c.get(format!("{}/volumes/{golden}", n.base)).bearer_auth(ME).send().await.unwrap().json().await.unwrap();
+    assert_eq!(g["creator"], SA, "the host golden too: {g}");
+    let host: Value = c.get(format!("{}/boothost/{mac}", n.base)).bearer_auth(ME).send().await.unwrap().json().await.unwrap();
+    assert_eq!(host["creator"], SA, "{host}");
+
+    // Somebody else's: 403 on every one.
+    for (m, path) in [
+        (M::DELETE, format!("/volumes/{clone}/attach")),
+        (M::DELETE, format!("/volumes/{clone}")),
+        (M::DELETE, format!("/synonyms/hostgolden/{mac}")),
+        (M::DELETE, format!("/synonyms/boothost/{mac}")),
+        (M::DELETE, format!("/volumes/{golden}")),
+        (M::DELETE, "/volumes/boot-image".to_string()),
+        (M::DELETE, format!("/boothost/{mac}")),
+    ] {
+        assert_eq!(call(&n, m, &path, Some(THEM), None).await, 403, "{path} by another storage-user");
+    }
+    // The node's own volumes (no record): never the storage-user's.
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{theirs}"), Some(ME), None).await, 403, "an unrecorded volume");
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{theirs}/attach"), Some(ME), None).await, 403);
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{theirs_sealed}"), Some(ME), None).await, 403);
+
+    // Its own: removed, in the test's order.
+    let detach = call(&n, M::DELETE, &format!("/volumes/{clone}/attach"), Some(ME), None).await;
+    assert!(detach != 401 && detach != 403, "its own clone's detach: {detach}");
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{clone}"), Some(ME), None).await, 204, "its boot clone");
+    assert_eq!(call(&n, M::DELETE, &format!("/synonyms/hostgolden/{mac}"), Some(ME), None).await, 200);
+    assert_eq!(call(&n, M::DELETE, &format!("/synonyms/boothost/{mac}"), Some(ME), None).await, 200);
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{golden}"), Some(ME), None).await, 204, "its host golden (sealed)");
+    assert_eq!(call(&n, M::DELETE, "/volumes/boot-image", Some(ME), None).await, 204, "its image (sealed)");
+    assert_eq!(call(&n, M::DELETE, &format!("/boothost/{mac}"), Some(ME), None).await, 200, "its host record");
+    assert_eq!(call(&n, M::GET, &format!("/boothost/{mac}"), Some(ME), None).await, 404, "gone");
+    let left: Value = c.get(format!("{}/volumes", n.base)).bearer_auth(ME).send().await.unwrap().json().await.unwrap();
+    let names: Vec<String> = left["volumes"].as_array().or(left.as_array()).unwrap().iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect();
+    assert!(!names.iter().any(|n| n.starts_with("boothost-") || n.starts_with("hostgolden-") || n == "boot-image"), "{names:?}");
+
+    // Reviewed as `delete`, said in the audit log; the node's are still `destroy`.
+    let a = audit(&n);
+    assert!(a.iter().any(|r| r["who"] == SA && r["verb"] == "delete" && r["decision"] == "allowed"
+        && r["reason"].as_str().is_some_and(|s| s.contains("its own"))), "{a:?}");
+    assert!(a.iter().any(|r| r["who"] == SA && r["verb"] == "destroy" && r["decision"] == "refused"), "{a:?}");
+    // The admin token's rules are unchanged.
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{theirs_sealed}"), Some(ADMIN), None).await, 204);
 }

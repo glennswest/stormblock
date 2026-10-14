@@ -12,6 +12,8 @@
 //! PUT  /api/v1/boothost/{name}/tpm        {tpm: required|none} — the machine's
 //!                                         TPM mark (#216); admin only
 //! DELETE /api/v1/boothost/{name}/tpm      clear it (reads as none); admin only
+//! DELETE /api/v1/boothost/{name}          the host record and its synonyms (#416);
+//!                                         its creator, or storage-admin (#422)
 //! GET  /api/v1/boothost/{name}/attestation the boot chain of its last claim
 //!                                         and its TPM mark, for stormcert
 //! ```
@@ -45,7 +47,7 @@ use crate::volume::VolumeId;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list))
-        .route("/{name}", get(get_one).put(set_aliases))
+        .route("/{name}", get(get_one).put(set_aliases).delete(remove_host))
         .route("/{name}/rename", post(rename))
         .route("/{name}/tpm", put(set_tpm).delete(clear_tpm))
         .route("/{name}/attestation", get(attestation))
@@ -142,6 +144,13 @@ async fn get_one(State(state): State<Arc<AppState>>, Path(key): Path<String>) ->
     let mut v = view(&state, &h).await;
     if h.name != key {
         v["resolved_from"] = json!(key);
+    }
+    // Who made it (its `boothost/` synonym's creator), and its labels (#422).
+    if let Some(c) = crate::mgmt::creators::of(&state, &crate::mgmt::creators::host(&h.name)) {
+        v["creator"] = json!(c.who);
+        if !c.labels.is_empty() {
+            v["labels"] = json!(c.labels);
+        }
     }
     Json(v).into_response()
 }
@@ -359,4 +368,24 @@ async fn attestation(State(state): State<Arc<AppState>>, Path(name): Path<String
         "problems": problems,
     }))
     .into_response()
+}
+
+/// `DELETE /api/v1/boothost/{name}` (#416, #422): the host record and its
+/// synonyms (`boothost/`, `hostgolden/`). Its volumes stay; deleting them is
+/// the caller's. A storage-user may remove a host it created (its
+/// `boothost/` synonym is its own); anything else needs storage-admin.
+async fn remove_host(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    let removed = state.synonyms.write().await.remove_host(&name);
+    match removed {
+        Ok(gone) => {
+            crate::mgmt::creators::forget(&state, &crate::mgmt::creators::host(&name));
+            for k in &gone {
+                let (ns, n) = crate::volume::synonym::split(k);
+                crate::mgmt::creators::forget(&state, &crate::mgmt::creators::synonym(&ns, &n));
+            }
+            Json(serde_json::json!({ "host": name, "synonyms_removed": gone })).into_response()
+        }
+        Err(crate::volume::synonym::SynonymError::NotFound(_)) => ApiError::not_found(format!("no host {name}")),
+        Err(e) => ApiError::bad_request(e.to_string()),
+    }
 }

@@ -518,6 +518,45 @@ fn one_array(p: &super::placement::Placement) -> Option<Uuid> {
     ids.all(|a| a == first).then_some(first)
 }
 
+/// `GET /api/v1/volumes/{id}` with who made it and its labels (#422).
+async fn get_volume_with_creator(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let resp = get_volume(State(state.clone()), Path(id)).await;
+    if !resp.status().is_success() {
+        return resp;
+    }
+    let (parts, b) = resp.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(b, 64 << 20).await else {
+        return ApiError::internal("reading the volume's reply");
+    };
+    let mut v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return Response::from_parts(parts, axum::body::Body::from(bytes)),
+    };
+    if let Some(c) = crate::mgmt::creators::volume_in(&v).and_then(|k| crate::mgmt::creators::of(&state, &k)) {
+        v["creator"] = serde_json::json!(c.who);
+        if !c.labels.is_empty() {
+            v["labels"] = serde_json::json!(c.labels);
+        }
+    }
+    (parts.status, Json(v)).into_response()
+}
+
+/// `DELETE /api/v1/volumes/{id}`, forgetting who made it once it is gone (#422).
+async fn delete_volume_forgetting(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    q: axum::extract::Query<DeleteQuery>,
+) -> Response {
+    let key = volume_key(&state, &id).await.ok();
+    let resp = delete_volume(State(state.clone()), Path(id), q).await;
+    if resp.status().is_success() {
+        if let Some(v) = key {
+            crate::mgmt::creators::forget(&state, &crate::mgmt::creators::volume(&v.0));
+        }
+    }
+    resp
+}
+
 async fn get_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -782,6 +821,42 @@ async fn compose_volume(
     };
     metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
     (axum::http::StatusCode::CREATED, Json(resp)).into_response()
+}
+
+/// `POST /api/v1/volumes`, with its caller recorded as the volume's creator
+/// and the body's `labels` kept (#422).
+async fn create_volume_recorded(
+    State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::mgmt::auth::Caller>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: CreateVolumeRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return ApiError::bad_request(format!("the request: {e}")),
+    };
+    let st = state.clone();
+    crate::mgmt::creators::recorded(&state, caller.as_deref(), &body, crate::mgmt::creators::volume_in, || {
+        create_volume(State(st), Json(req))
+    })
+    .await
+}
+
+/// `POST /api/v1/volumes/{id}/clone`, recorded as the create is (#422).
+async fn clone_volume_recorded(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    caller: Option<axum::Extension<crate::mgmt::auth::Caller>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let req: CloneRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return ApiError::bad_request(format!("the request: {e}")),
+    };
+    let st = state.clone();
+    crate::mgmt::creators::recorded(&state, caller.as_deref(), &body, crate::mgmt::creators::volume_in, || {
+        clone_volume(State(st), Path(id), Json(req))
+    })
+    .await
 }
 
 async fn create_volume(
@@ -2163,8 +2238,11 @@ async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Result<VolumeId, Re
 
 async fn start_import(
     State(state): State<Arc<AppState>>,
-    Json(spec): Json<crate::image::import::ImportSpec>,
+    caller: Option<axum::Extension<crate::mgmt::auth::Caller>>,
+    Json(mut spec): Json<crate::image::import::ImportSpec>,
 ) -> Response {
+    // The volume it makes is the caller's (#422).
+    spec.creator = Some(crate::mgmt::creators::who(caller.as_deref()));
     let started = state.imports.write().await.start(state.clone(), spec);
     match started {
         Ok(status) => {
@@ -3222,8 +3300,8 @@ async fn compose_slab(
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(list_volumes).post(create_volume))
-        .route("/{id}", get(get_volume).delete(delete_volume).patch(rename_volume))
+        .route("/", get(list_volumes).post(create_volume_recorded))
+        .route("/{id}", get(get_volume_with_creator).delete(delete_volume_forgetting).patch(rename_volume))
         .route("/{id}/resize", axum::routing::patch(resize_volume))
         .route("/{id}/health", get(volume_health))
         .route("/{id}/redundancy", axum::routing::put(set_redundancy))
@@ -3237,7 +3315,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/content", get(volume_content))
         .route("/{id}/legs", get(super::legs::volume_legs))
         .route("/{id}/access", get(get_access).put(set_access))
-        .route("/{id}/clone", axum::routing::post(clone_volume))
+        .route("/{id}/clone", axum::routing::post(clone_volume_recorded))
         .route("/{id}/lineage", get(volume_lineage))
         .route("/{id}/attach", get(get_attach).post(attach_volume).delete(detach_volume))
         .route("/{id}/ana", get(get_ana).put(set_ana))

@@ -274,6 +274,8 @@ pub async fn start(state: &Arc<AppState>, req: Request) -> Result<Vec<Status>, (
             keep_download: false,
             verify: true,
             tls: Some(tls.clone()),
+            labels: Default::default(),
+            creator: None,
             lba: None,
         };
         let job = match state.imports.write().await.start(state.clone(), spec) {

@@ -389,6 +389,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
             return true;
         }
     }
+    // A host record's removal (#416): its creator (#422, `mgmt::auth`) or
+    // the admin.
+    if *method == Method::DELETE && seg.len() == 5 && seg[1] == "api" && seg[2] == "v1" && seg[3] == "boothost" {
+        return true;
+    }
     // A machine's TPM mark (#216): `none` downgrades its attestation.
     if matches!(*method, Method::PUT | Method::DELETE) && seg.len() == 6 && seg[3] == "boothost" && seg[5] == "tpm" {
         return true;

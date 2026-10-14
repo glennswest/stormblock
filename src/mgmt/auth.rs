@@ -523,6 +523,17 @@ pub async fn require_token(
             return next.run(req).await;
         }
     }
+    // A Kubernetes bearer's delete, detach, synonym delete or host delete
+    // (#422): of an object it created, reviewed as `delete`; of anything
+    // else (every object with no record included), as `destroy`, which only
+    // storage-admin holds. Node and admin tokens are not touched by this.
+    let owned_key = if !is_admin && !is_node && presented.is_some() && method == axum::http::Method::DELETE {
+        owned_delete_key(&state, &path).await
+    } else {
+        None
+    };
+    let owned_creator =
+        owned_key.as_ref().and_then(|k| state.creators.lock().unwrap_or_else(|e| e.into_inner()).get(k).cloned());
     let destructive = match class {
         Class::Public => {
             // An open route answers anyone; one holding a token sees more
@@ -542,6 +553,7 @@ pub async fn require_token(
             return attestation_reader(&state, presented.as_deref(), &host, &path, req, next).await;
         }
     };
+    let destructive = destructive || owned_key.is_some();
 
     if !destructive {
         if is_admin || is_node {
@@ -636,6 +648,31 @@ pub async fn require_token(
             );
         };
         use super::kubeauth::Review;
+        // Its own object (#422): `delete` is enough.
+        let mut own = false;
+        if let Some(c) = owned_creator.as_ref() {
+            match kube.review(bearer, &resource, "delete", target.as_deref()).await {
+                Review::Allowed(u) if c.is(&u.username) => {
+                    rec.who = format!("kubernetes:{}", u.username);
+                    rec.verb = "delete".into();
+                    rec.decision = "allowed".into();
+                    rec.reason = Some(format!("its own: created by {} (#422)", c.who));
+                    own = true;
+                }
+                Review::Denied(u, why) if c.is(&u.username) => {
+                    rec.who = format!("kubernetes:{}", u.username);
+                    rec.verb = "delete".into();
+                    return refuse(
+                        rec,
+                        StatusCode::FORBIDDEN,
+                        format!("{} may not delete storage.storm.io {resource}: {why}", u.username),
+                    );
+                }
+                _ => {}
+            }
+        }
+        if own {
+        } else {
         match kube.review(bearer, &resource, &verb, target.as_deref()).await {
             Review::Allowed(u) => {
                 rec.who = format!("kubernetes:{}", u.username);
@@ -658,6 +695,7 @@ pub async fn require_token(
                 return refuse(rec, StatusCode::SERVICE_UNAVAILABLE, format!("cannot review the bearer with {}: {why}", kube.api_url()));
             }
         }
+        }
     } else {
         rec.who = "none".into();
         return refuse(rec, StatusCode::UNAUTHORIZED, crate::serve::api::MISSING_TOKEN.to_string());
@@ -669,6 +707,24 @@ pub async fn require_token(
     rec.status = Some(resp.status().as_u16());
     super::kubeauth::audit(state.audit_log.as_deref(), &rec);
     resp
+}
+
+/// The creator record a delete-like call is about (#422): a volume's delete
+/// or detach (by id or name), a synonym's delete, a host record's delete.
+async fn owned_delete_key(state: &Arc<AppState>, path: &str) -> Option<String> {
+    let seg: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+    match seg.as_slice() {
+        ["", "api", "v1", "volumes", id] | ["", "api", "v1", "volumes", id, "attach"] => {
+            let v = crate::mgmt::api::volumes::volume_key(state, id).await.ok()?;
+            Some(super::creators::volume(&v.0))
+        }
+        ["", "api", "v1", "synonyms", ns, name] => Some(super::creators::synonym(ns, name)),
+        ["", "api", "v1", "synonyms", name] => {
+            Some(super::creators::synonym(crate::volume::synonym::DEFAULT_NAMESPACE, name))
+        }
+        ["", "api", "v1", "boothost", name] => Some(super::creators::host(name)),
+        _ => None,
+    }
 }
 
 /// A boot-chain attestation read by something other than the node's own
