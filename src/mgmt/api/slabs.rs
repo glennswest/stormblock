@@ -500,6 +500,16 @@ pub async fn run_gc(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<GcQuery>,
 ) -> Response {
+    // Nothing freed while the volume records are not being written (#428).
+    if !q.dry_run {
+        if let Some(fault) = state.durability.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return ApiError::conflict(format!(
+                "the volume records are not being written ({fault}): a slot nothing maps may be a volume \
+                 whose record was lost, not a leak; nothing is freed until records persist (dry_run=true \
+                 to look)"
+            ));
+        }
+    }
     let report = crate::volume::gc::run_once(
         &state.gem,
         &state.slab_registry,

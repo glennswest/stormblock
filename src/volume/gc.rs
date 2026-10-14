@@ -385,6 +385,7 @@ pub fn spawn(
     gem: std::sync::Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
     registry: std::sync::Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     cfg: crate::mgmt::config::GcConfig,
+    durability: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 ) -> std::sync::Arc<tokio::sync::RwLock<Option<GcSummary>>> {
     let last = std::sync::Arc::new(tokio::sync::RwLock::new(None));
     let out = last.clone();
@@ -401,6 +402,16 @@ pub fn spawn(
         let mut prev: Option<HashSet<(SlabId, u64)>> = None;
         loop {
             ticker.tick().await;
+
+            // Never while the volume records are not being written (#428):
+            // a slot nothing maps is then as likely a volume whose record was
+            // never written as a leak, and a freed slot is erased. Paused, and
+            // the two-pass confirmation starts over once records persist.
+            if let Some(fault) = durability.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                tracing::warn!("extent gc: paused, the volume records are not being written ({fault})");
+                prev = None;
+                continue;
+            }
 
             let opts = GcOptions {
                 dry_run: cfg.dry_run,

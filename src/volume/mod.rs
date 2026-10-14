@@ -1266,6 +1266,7 @@ impl VolumeManager {
         virtual_size: u64,
         opts: CreateOptions,
     ) -> Result<VolumeId, VolumeError> {
+        self.refuse_if_undurable().await?;
         // The role is settled here, once, and written onto the handle: an
         // unspecified role means "wherever this node keeps volumes", which is
         // the system slabs on a node that has them and the data slabs on a
@@ -1645,6 +1646,7 @@ impl VolumeManager {
         declared_size: Option<u64>,
         placements: &[(VolumeId, u64)],
     ) -> Result<VolumeId, VolumeError> {
+        self.refuse_if_undurable().await?;
         let mut components = Vec::with_capacity(placements.len());
         let mut sizes: Vec<u64> = Vec::new();
         for (source, at) in placements {
@@ -1950,6 +1952,7 @@ impl VolumeManager {
         &mut self,
         sources: &[(VolumeId, String)],
     ) -> Result<Vec<VolumeId>, VolumeError> {
+        self.refuse_if_undurable().await?;
         let mut params = Vec::with_capacity(sources.len());
         for (source_id, name) in sources {
             let handle = self.volumes.get(source_id)
@@ -2155,6 +2158,7 @@ impl VolumeManager {
         source_id: VolumeId,
         name: &str,
     ) -> Result<VolumeId, VolumeError> {
+        self.refuse_if_undurable().await?;
         let source_handle = self.volumes.get(&source_id)
             .ok_or(VolumeError::VolumeNotFound(source_id))?
             .clone();
@@ -2693,6 +2697,32 @@ impl VolumeManager {
 
     /// Why the last persist failed, if it did. `None` while the record is
     /// being written.
+    /// Nothing new is made while the volume records cannot be written
+    /// (#428): a volume made then lives in memory only and is gone at the
+    /// next restart (forge, 2026-10-10 to 10-14: 483 of them). The write is
+    /// tried again first — the fault may be gone (a migration to format 2,
+    /// room made) — so this clears by itself once records persist.
+    pub async fn refuse_if_undurable(&self) -> Result<(), VolumeError> {
+        if self.durability.lock().unwrap().is_none() {
+            return Ok(());
+        }
+        let r = self.write_records_now().await;
+        Self::persisted(&self.durability, r);
+        match self.durability_fault() {
+            None => Ok(()),
+            Some(e) => Err(VolumeError::AllocatorError(format!(
+                "volume records cannot be written ({e}): nothing new is made until they can, or it \
+                 would not survive a restart (#428)"
+            ))),
+        }
+    }
+
+    /// The durability fault, shared: what health reads without the
+    /// manager's lock, and what the extent collector pauses on (#428).
+    pub fn durability_handle(&self) -> Arc<std::sync::Mutex<Option<String>>> {
+        self.durability.clone()
+    }
+
     pub fn durability_fault(&self) -> Option<String> {
         self.durability.lock().unwrap().clone()
     }

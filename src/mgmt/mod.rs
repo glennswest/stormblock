@@ -362,6 +362,10 @@ pub struct AppState {
     pub audit_log: Option<std::path::PathBuf>,
     /// Most recent extent-GC pass, when the background collector is running.
     pub last_gc: Option<Arc<tokio::sync::RwLock<Option<crate::volume::gc::GcSummary>>>>,
+    /// Why the volume records were last not written, while they are not
+    /// (#428): health reads it with no manager lock, the collector pauses on
+    /// it.
+    pub durability: Arc<std::sync::Mutex<Option<String>>>,
     #[cfg(feature = "iscsi")]
     pub iscsi_target: tokio::sync::RwLock<Option<Arc<IscsiTarget>>>,
     /// Live NVMe-oF target, so exports can add namespaces at runtime (#26).
@@ -489,6 +493,7 @@ impl AppState {
         }
         let holds = volume_manager.holds();
         let volume_presence = volume_manager.presence();
+        let durability = volume_manager.durability_handle();
         // The API's manager: its persists inside a request are made after
         // the request releases it (#364).
         volume_manager.mark_shared();
@@ -586,6 +591,7 @@ impl AppState {
             config,
             discovery: None,
             last_gc: None,
+            durability,
             #[cfg(feature = "iscsi")]
             iscsi_target: tokio::sync::RwLock::new(None),
             nvmeof_target: tokio::sync::RwLock::new(None),

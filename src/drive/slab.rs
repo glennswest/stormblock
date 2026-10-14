@@ -2233,10 +2233,28 @@ impl Slab {
         let Some((dev, off, size)) = self.metadata_region() else {
             return Err(DriveError::Other(anyhow::anyhow!("slab {} keeps no volume metadata", self.id.0)));
         };
-        self.write_metadata(record).await?;
-        self.write_metadata(record).await?;
+        // The v1 record into both copies, for an older engine after a
+        // rollback, and the v2 store in the first half beside copy B. A
+        // record that no longer fits a copy (#428: forge's hot slab, 107 MB
+        // against 104.8 MB reserved, its records unwritten since 10-10) has no
+        // v1 copy to keep: the v2 store takes the whole region instead, and an
+        // older engine cannot read this slab's records either way.
+        let fits = record.len() as u64 <= self.metadata_capacity();
+        if fits {
+            self.write_metadata(record).await?;
+            self.write_metadata(record).await?;
+        } else {
+            tracing::warn!(
+                "slab {}: the v1 record ({} bytes) does not fit a copy ({} bytes): migrating to format 2 \
+                 with no v1 copy kept (an older engine cannot read these records)",
+                self.id.0,
+                record.len(),
+                self.metadata_capacity()
+            );
+        }
         let other = |e: std::io::Error| DriveError::Other(anyhow::anyhow!("slab {}: {e}", self.id.0));
-        let mut store = crate::volume::metav2::MetaV2::format_within(dev, off, size, size / 2).await.map_err(other)?;
+        let within = if fits { size / 2 } else { size };
+        let mut store = crate::volume::metav2::MetaV2::format_within(dev, off, size, within).await.map_err(other)?;
         store.replace_all(entries).await.map_err(other)?;
         Ok(())
     }
@@ -2351,6 +2369,24 @@ impl MetadataWriter {
                  format the slab with a larger metadata region",
                 payload.len()
             )));
+        }
+        // Said long before it is full (#428): forge's record grew past its
+        // reserve unwarned and was not written for four days.
+        if payload.len() as u64 > capacity / 10 * 8 {
+            static SAID: std::sync::Mutex<Option<std::collections::HashMap<SlabId, std::time::Instant>>> =
+                std::sync::Mutex::new(None);
+            let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+            let m = said.get_or_insert_with(Default::default);
+            if m.get(&self.id).is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(600)) {
+                m.insert(self.id, std::time::Instant::now());
+                tracing::warn!(
+                    "slab {}: volume metadata is {} bytes, {}% of the {capacity} this slab reserves per copy; \
+                     past it nothing new is written (migrate to format 2: `stormblock slab upgrade`)",
+                    self.id.0,
+                    payload.len(),
+                    payload.len() as u64 * 100 / capacity.max(1)
+                );
+            }
         }
 
         let (a, b) = (self.meta_copy(0).await, self.meta_copy(1).await);

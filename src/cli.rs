@@ -1219,6 +1219,7 @@ pub async fn run() -> anyhow::Result<()> {
             state.gem.clone(),
             state.slab_registry.clone(),
             config.gc.clone(),
+            state.durability.clone(),
         );
         if let Some(s) = Arc::get_mut(&mut state) {
             s.last_gc = Some(last);

@@ -79,6 +79,12 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         service: &'static str,
         version: &'static str,
         auth: &'static str,
+        /// Why the volume records are not being written (#428): `status` is
+        /// then `degraded`, and nothing new is made until they are. forge ran
+        /// four days on records in memory only, health ok, and a restart lost
+        /// 483 volumes.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        durability: Option<String>,
         /// The worst of this node's RAID sets — `clean`, `rebuilding`,
         /// `degraded`, `failed` — when it has any (#252). Read without
         /// waiting: when the array table is busy, the last reading (#364).
@@ -164,8 +170,10 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         }
         Err(_) => RAID_SEEN.lock().unwrap_or_else(|e| e.into_inner()).flatten(),
     };
+    let durability = state.durability.lock().unwrap_or_else(|e| e.into_inner()).clone();
     Json(Health {
-        status: "ok",
+        status: if durability.is_some() { "degraded" } else { "ok" },
+        durability,
         service: "stormblock",
         version: env!("CARGO_PKG_VERSION"),
         auth: if state.auth_enforced() { "required" } else { "none" },
