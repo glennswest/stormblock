@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-14
+- **docs:** #412 closed: the post-flow-over validation (decision A) is in golden-stormblock-12891c0025b2. Its item 1, per-extent sha256 recorded at seal, is #444, gated on no node being able to roll back past golden-stormblock-47e88a267077.
 - **feat:** #402 (owner's A, 2026-10-13): **the system half on a drive of its own, the data staying on the HDD** (the X9 blades' SSD; server8's is 512 GB).
   - **Install** (`boot-local --system-disk`): the move (the HDD's data half kept in place, same partition and slab, every volume adopted; the node's volumes in the old system half carried into the data half; the HDD's system slab, ESP and boot pallets retired, since stormuefi scans every drive), an update of a split node (the SSD's system slab formatted again, its boot area kept), or a fresh pair (both laid). The SSD gets a boot area and one system slab, the drive less the GPT and 1 % (at least 64 MiB).
   - **Room for an update:** a stage copies N+1's goldens beside N under their own ids, so an update needs a full second system half. An install refuses a system slab under twice the release's system half (its distinct mapped slots) plus 5 %, or under 64 MiB, with the numbers, before either drive is touched. A first version retired the HDD's old system half before finding the SSD too small: fixed.

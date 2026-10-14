@@ -195,7 +195,7 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
       shipped; the rest of the list below still to comment/ship/close
 - [ ] when stormcentral#841 is live: `stormcentral component build stormblock`
       (stage of main's head) for 12.23; then shipped/close #428, #413,
-      #417, #412, #300, #383, #411, #415, #422/#416, #424, #384 and the merged
+      #417, #412 (closed 2026-10-14), #300, #383, #411, #415, #422/#416, #424, #384 and the merged
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
@@ -346,7 +346,7 @@ namespace for a bearer.
 - [ ] golden: held with #428/#410 until stormcentral#841 is live (master);
       proposed after it. Then shipped/close; stormcos_qa's known.toml entry
 
-### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — DONE here (decision A); golden waits on stormcentral#841
+### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — DONE (golden-stormblock-12891c0025b2), closed; item 1 is #444
 
 Master for the owner (2026-10-13): **A**. Each moved extent is checked
 against the still-attached forge clone's bytes (nothing new on disk, so a
@@ -372,7 +372,10 @@ frees them) until the check passes.
 - [x] docs (durability rule 17, README), CHANGELOG; stormcentral#844
       (settle waits for validation passed, corrupt fails)
 - [x] check.sh at 44a0fcf ALL PASS (1199/1199); commented
-- [ ] golden: held with #428/#410/#413/#417 until stormcentral#841 is live; proposed after it
+- [x] golden: in golden-stormblock-12891c0025b2 (12.23 stage, 4d79108) and
+      golden-stormblock-10eab8535dd2; check.sh again at ee1e77a (1237/1237);
+      closed 2026-10-14. Item 1 (per-extent hashes at seal) filed as #444
+      (gated on no rollback past golden-stormblock-47e88a267077); #436 told
 
 ### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — DONE (golden-stormblock-12891c0025b2), metal pending
 
