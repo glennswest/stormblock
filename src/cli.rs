@@ -3679,12 +3679,8 @@ pub async fn run() -> anyhow::Result<()> {
                              to finish it.",
                             missing.len()
                         );
-                        let mut uri = claim_boot_uri(&boothost, &tag, "boothost", 120, None).await?;
-                        if std::env::var("STORMBLOCK_HOST_NQN").is_err() && !uri.contains("hostnqn=") {
-                            uri.push_str(if uri.contains('?') { "&" } else { "?" });
-                            uri.push_str(&format!("hostnqn=nqn.2026-09.lo.storm:host-{tag}"));
-                        }
-                        Some(uri)
+                        // The URI names the host NQN the clone admits (#443).
+                        Some(claim_boot_uri(&boothost, &tag, "boothost", 120, None).await?)
                     }
                     _ => None,
                 };
@@ -8597,6 +8593,30 @@ async fn handle_boot_claim(
 }
 
 /// Claim this machine's image and answer the attach URI of the clone.
+/// A claim's attach URI with the host NQN this machine connects as (#443).
+///
+/// 12.25's nodes connected to their own clone as the generic
+/// `nqn.2024.io.stormblock:initiator` and forge refused them: the clone's
+/// subsystem admits the boot host's NQNs only, and the engine that adopted
+/// the boot had no `STORMBLOCK_HOST_NQN` in its environment. So the name goes
+/// in the URI, which travels with the slab path everywhere. Ours (`mine`)
+/// when the subsystem admits it (or names nobody), else the first it admits,
+/// else the boot host default for `tag`. A URI that already says is kept.
+fn claim_uri_with_host(uri: &str, admitted: &[String], mine: Option<&str>, tag: &str) -> String {
+    if uri.contains("hostnqn=") || !uri.starts_with("nvme-tcp://") {
+        return uri.to_string();
+    }
+    let mine = mine.map(str::trim).filter(|m| !m.is_empty());
+    let host = match mine {
+        Some(m) if admitted.is_empty() || admitted.iter().any(|a| a == m) => m.to_string(),
+        _ => admitted
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("nqn.2026-09.lo.storm:host-{tag}")),
+    };
+    format!("{uri}{}hostnqn={host}", if uri.contains('?') { '&' } else { '?' })
+}
+
 async fn claim_boot_uri(
     boothost: &str,
     tag: &str,
@@ -8676,6 +8696,16 @@ async fn claim_boot_uri(
                     if let Some(name) = v.get("volume").and_then(|x| x.get("name")).and_then(|x| x.as_str()) {
                         eprintln!("boot-claim: {tag} -> {name}");
                     }
+                    // The host NQN this machine connects as rides in the URI
+                    // (#443): every holder of it (boot-local, the handover
+                    // record, the engine after switch_root) presents the name
+                    // the clone's subsystem admits, never the generic default.
+                    let admitted: Vec<String> = v["attach"]["host_nqns"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                        .unwrap_or_default();
+                    let mine = std::env::var("STORMBLOCK_HOST_NQN").ok();
+                    let uri = claim_uri_with_host(uri, &admitted, mine.as_deref(), tag);
                     note_install_ticket(&base, &v);
                     note_host_secret(&base, &v);
                     note_boot_override(&v);
@@ -8685,7 +8715,7 @@ async fn claim_boot_uri(
                         Ok(_) => eprintln!("boot-claim: {base} hands out no forge trust"),
                         Err(e) => eprintln!("boot-claim: forge trust from {base} not written: {e}"),
                     }
-                    return Ok(uri.to_string());
+                    return Ok(uri);
                 }
                 // A tag nobody has decided for is a fleet decision that has
                 // not been made. Say which name was missing: it is the thing
@@ -13173,6 +13203,117 @@ mod forge_mode_tests {
         let mut back = vec![0u8; MIB as usize];
         dev.read(0, &mut back).await.unwrap();
         assert_eq!(back, image, "the clone reads as the release it was claimed from");
+    }
+
+    #[test]
+    fn a_claim_uri_carries_the_host_nqn_the_clone_admits() {
+        let u = "nvme-tcp://10.0.0.1:4420/nqn.f:stormcos:host:pvetest2?nsid=3";
+        let admitted = vec!["nqn.2026-09.lo.storm:host-pvetest2".to_string()];
+        assert_eq!(
+            super::claim_uri_with_host(u, &admitted, None, "pvetest2"),
+            format!("{u}&hostnqn=nqn.2026-09.lo.storm:host-pvetest2"),
+            "no name in the environment (12.25): the one the subsystem admits"
+        );
+        assert_eq!(
+            super::claim_uri_with_host(u, &admitted, Some("nqn.2026-09.lo.storm:host-pvetest2"), "pvetest2"),
+            format!("{u}&hostnqn=nqn.2026-09.lo.storm:host-pvetest2")
+        );
+        assert_eq!(
+            super::claim_uri_with_host(u, &admitted, Some("nqn.2024.io.stormblock:initiator"), "pvetest2"),
+            format!("{u}&hostnqn=nqn.2026-09.lo.storm:host-pvetest2"),
+            "a name the subsystem does not admit is not presented"
+        );
+        assert_eq!(
+            super::claim_uri_with_host("nvme-tcp://h:4420/n", &[], None, "x"),
+            "nvme-tcp://h:4420/n?hostnqn=nqn.2026-09.lo.storm:host-x",
+            "an older forge names no hosts: the boot host default"
+        );
+        let given = format!("{u}&hostnqn=nqn.other");
+        assert_eq!(super::claim_uri_with_host(&given, &admitted, None, "p"), given, "a URI that says is kept");
+        assert_eq!(super::claim_uri_with_host("/dev/sda", &admitted, None, "p"), "/dev/sda");
+    }
+
+    /// #443/#445: one clone, one host. A machine forge has never seen claims
+    /// through `boothost/default` and gets a clone of its own; the URI the
+    /// claim hands back connects as the host it was made for with nothing in
+    /// the environment (12.25's engine after switch_root); the generic name
+    /// is refused, and so is another host on this one's clone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn each_new_host_gets_its_own_clone_and_connects_to_it_by_the_claims_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut config = StormBlockConfig::default();
+        config.management.data_dir = Some(dir.path().to_string_lossy().to_string());
+        config.management.advertised_addr = Some("127.0.0.1".into());
+        config.nvmeof = Some(section(&format!("127.0.0.1:{port}")));
+
+        let mut vm = VolumeManager::new(MIB);
+        let array = RaidArrayId(uuid::Uuid::new_v4());
+        let dev = FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 128 * MIB)
+            .await
+            .unwrap();
+        vm.add_backing_device(array, Arc::new(dev)).await;
+        let golden = vm.create_volume("release-12.25", 8 * MIB, array).await.unwrap();
+        let image: Vec<u8> = (0..MIB as usize).map(|i| (i % 251) as u8).collect();
+        let g = vm.get_volume(&golden).unwrap();
+        g.write(0, &image).await.unwrap();
+        g.flush().await.unwrap();
+        vm.seal_volume(golden, None).await.unwrap();
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let state = Arc::new(AppState::new(config.clone(), vm, reg, gem));
+        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config).unwrap();
+        let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false }));
+        mgmt::forge::serve(&state, &reactor, Arc::new(target)).await.unwrap();
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = listener.local_addr().unwrap();
+        let router = mgmt::api::router(state.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let r = reqwest::Client::new()
+            .post(format!("http://{api}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": golden.0.to_string()}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "boothost/default: {}", r.status());
+
+        // Neither machine was ever seen; this process has no STORMBLOCK_HOST_NQN.
+        assert!(std::env::var("STORMBLOCK_HOST_NQN").is_err(), "the test runs as 12.25's engine did");
+        let base = format!("http://{api}");
+        let u1 = super::claim_boot_uri(&base, "pvetest2", "boothost", 30, None).await.expect("a new host is not refused");
+        let u2 = super::claim_boot_uri(&base, "blade7", "boothost", 30, None).await.expect("nor is a second");
+        let s1 = NvmeTcpSpec::parse(&u1).unwrap();
+        let s2 = NvmeTcpSpec::parse(&u2).unwrap();
+        assert_ne!(s1.nqn, s2.nqn, "each host its own subsystem: {u1} {u2}");
+        assert!(s1.host_nqn.as_deref().is_some_and(|h| h.ends_with("host-pvetest2")), "{u1}");
+
+        // Each connects to its own clone by the URI alone and reads the release.
+        for spec in [&s1, &s2] {
+            let dev = NvmeofDevice::connect(spec).await.expect("the claim's URI connects");
+            let mut back = vec![0u8; MIB as usize];
+            dev.read(0, &mut back).await.unwrap();
+            assert_eq!(back, image);
+        }
+        // The two are clones of their own: a write to one is not in the other.
+        let d1 = NvmeofDevice::connect(&s1).await.unwrap();
+        d1.write(0, &[0xEEu8; 4096]).await.unwrap();
+        d1.flush().await.unwrap();
+        let d2 = NvmeofDevice::connect(&s2).await.unwrap();
+        let mut b2 = vec![0u8; 4096];
+        d2.read(0, &mut b2).await.unwrap();
+        assert_eq!(&b2[..], &image[..4096], "blade7's clone is not pvetest2's");
+
+        // The generic name (12.25's bug) and another host are refused.
+        let generic = NvmeTcpSpec { host_nqn: Some("nqn.2024.io.stormblock:initiator".into()), ..s1.clone() };
+        assert!(NvmeofDevice::connect(&generic).await.is_err(), "the generic initiator name is not pvetest2");
+        let other = NvmeTcpSpec { host_nqn: s2.host_nqn.clone(), ..s1.clone() };
+        assert!(NvmeofDevice::connect(&other).await.is_err(), "blade7 does not reach pvetest2's clone");
     }
 
     /// A destination disk whose flushes take `delay` (#410: a DRAM-less SSD
