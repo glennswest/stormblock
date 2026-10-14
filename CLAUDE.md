@@ -212,10 +212,19 @@ id keeps it in memory (`adopt_slabs` skips known ids), but the disk's data
 slab keeps the old record, and restore takes the first record it meets.
 12.27 and 12.27-flowsdn tombstoned (owner) for this.
 - [x] reproduction `install_tests::a_data_half_cut_short_mid_flow_over_gets_
-      its_goldens_from_the_release` (b…): to run
-- [ ] fix: the release's golden from the release; the stale record gone
-      from the data half; a loud finding naming the missing slab
-- [ ] tests, docs (durability), CHANGELOG, check.sh, golden, close
+      its_goldens_from_the_release`: failed as server2 did (after the
+      handover the golden read the node's partial bytes)
+- [x] found while fixing: the record alone was not it. A moved slot's
+      generation is +1 (#277), so the data slab's slot table, still owning
+      the stale golden's slots, won the restore with no record naming them
+- [x] fix (`install::release_stale`, `metav2::drop_volumes`): before the
+      data half is adopted, a release golden the claim holds by id has its
+      data-half records dropped and its slots let go (freed, or handed to
+      the node's volume sharing them); `Report.relaid`; each missing slab
+      named once (`Install: FINDING: …`)
+- [x] the test with a PVC cloned from the stale golden (keeps every byte);
+      install_tests 30/30; docs/staging.md, CHANGELOG
+- [ ] check.sh; golden (the master: names at once, before 05:00Z); close
 
 ### server1 (X9) at the EFI shell after a 12.27 install (2026-10-14, #449, P0) — NOT stormblock's; waits on stormbootx#89 (v0.26.0 on server1's stick)
 
