@@ -5521,19 +5521,30 @@ pub async fn run() -> anyhow::Result<()> {
         }
     }
 
-    /// The bytes of the release's system half this manager holds: every
-    /// system volume's mapped extents (#402), what a stage copies again.
-    async fn release_system_bytes(mgr: &crate::volume::VolumeManager) -> u64 {
-        let mut total = 0u64;
-        for (id, ..) in mgr.list_volumes().await {
-            if mgr.volume_role(&id) != Some(crate::drive::slab::SlabRole::System) {
-                continue;
-            }
-            if let Some(h) = mgr.get_volume_handle(&id) {
-                total += h.mapped().await;
+    /// The bytes of the release's system half this manager holds (#402): the
+    /// distinct slots its system volumes map, once each (a clone shares its
+    /// golden's), at their slabs' slot size. What a stage copies again.
+    async fn release_system_bytes(mgr: &crate::volume::VolumeManager) -> anyhow::Result<u64> {
+        let sizes: std::collections::HashMap<crate::drive::slab::SlabId, u64> =
+            mgr.registry().read().await.iter().map(|(id, s)| (*id, s.slot_size())).collect();
+        let ids: Vec<crate::volume::VolumeId> = mgr
+            .list_volumes()
+            .await
+            .into_iter()
+            .map(|(id, ..)| id)
+            .filter(|id| mgr.volume_role(id) == Some(crate::drive::slab::SlabRole::System))
+            .collect();
+        let _pin = crate::volume::gem::pin_resident(mgr.gem()).await?;
+        let mut slots: std::collections::HashSet<(crate::drive::slab::SlabId, u64)> = Default::default();
+        {
+            let g = mgr.gem().read().await;
+            for id in &ids {
+                if let Some(m) = g.get_volume_map(id) {
+                    slots.extend(m.all_legs().map(|l| (l.slab_id, l.slot_idx)));
+                }
             }
         }
-        total
+        Ok(slots.iter().map(|(s, _)| sizes.get(s).copied().unwrap_or(0)).sum())
     }
 
     /// The system half on a drive of its own, the data half on `data_disk`
@@ -5594,7 +5605,9 @@ pub async fn run() -> anyhow::Result<()> {
         };
 
         // Room for the next release beside this one (#402, #122).
-        let release_bytes = release_system_bytes(mgr).await;
+        let release_bytes = release_system_bytes(mgr)
+            .await
+            .map_err(|e| anyhow::anyhow!("not installing: the release's extent maps do not load: {e}"))?;
         let slab_bytes = match sys_on_sys {
             Some(i) => {
                 let g = crate::pallet::gpt::Gpt::read(&sys_dev).await.map_err(|e| anyhow::anyhow!("reading {sys_disk}'s table: {e}"))?;
