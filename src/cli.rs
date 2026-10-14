@@ -13109,7 +13109,7 @@ mod forge_mode_tests {
         };
         let t = Instant::now();
         let held = super::FlowHeld::default();
-        let r = super::flow_slabs_held(&state.gem, &state.slab_registry, &[src], dest, persist, None, 0, Some(&held)).await;
+        let r = super::flow_slabs_held(&state.gem, &state.slab_registry, &[src], dest, &persist, None, 0, Some(&held)).await;
         let secs = t.elapsed().as_secs_f64();
         // The validation every flow-over ends with (#412), over the same path.
         let sealed: std::collections::HashSet<crate::volume::VolumeId> = {
@@ -13117,7 +13117,7 @@ mod forge_mode_tests {
             vm.volume_ids().into_iter().filter(|id| vm.is_sealed(id)).collect()
         };
         let tv = Instant::now();
-        let v = super::settle_flow(&state.gem, &state.slab_registry, &held, &sealed, "sda.bin", persist)
+        let v = super::settle_flow(&state.gem, &state.slab_registry, &held, &sealed, "sda.bin", &persist)
             .await
             .expect("the validation passes");
         let vsecs = tv.elapsed().as_secs_f64();
