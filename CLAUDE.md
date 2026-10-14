@@ -199,6 +199,21 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
+### server1 (X9) at the EFI shell after a 12.27 install (2026-10-14, #449, P0) — NOT stormblock's; waits on stormbootx#89 (v0.26.0 on server1's stick)
+
+The disk is laid and bootable: the shell's map shows `fs0` = sda's ESP
+(stormuefi as `\EFI\BOOT\BOOTX64.EFI`), boot pallets as partitions 6 and 7;
+`laid` reported (forge: `laid`, `booted_at: null`). On the X9, stormbootx
+is run by the EFI Shell's `startup.nsh` from the stick; its fall-through
+returned to that shell. The `Local boot: …` lines fell into SOL gaps in
+both runs (18:48:50–18:50:26Z, 19:39:59–19:41:37Z). At 12.21 forge served no
+intents, so server1 had never booted its own disk.
+- [x] stormbootx#145 (P0): fixed in v0.26.0 (starts the local ESP's
+      BOOTX64.EFI itself); not served yet (rustnic serial 1, v0.14.0)
+- [ ] the master promotes the canary to server1 (stormbootx#89), server1
+      reinstalls: `boot : starting \EFI\BOOT\BOOTX64.EFI from the local
+      disk`, forge's `booted_at` set; then close
+
 ### forge's NVMe/TCP target left a reader 30 s under two large writers (2026-10-14, #441, P1) — NOT REPRODUCED in the engine; closed
 
 cilium's import verify (15:02Z, forge on the engine of its 00:15Z upgrade,
