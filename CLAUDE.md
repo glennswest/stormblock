@@ -642,12 +642,14 @@ stopped. The feature, its 90 gates and the six without-it branches removed
 `cluster`, `ui`: 0 errors, 0 warnings; check.sh at c368973 ALL PASS
 (1150/1150). No golden (the default build is unchanged).
 
-### VFIO NVMe driver: build or delete the stub (2026-10-11, #167, P3) — WAITING ON THE OWNER
+### VFIO NVMe driver: build or delete the stub (2026-10-11, #167, P3) — BUILT on branch wip/167-remove-vfio (B); merges after 12.23
 
-`src/drive/nvme.rs` (298 lines) builds nothing outside itself; NVMe goes
-through the kernel, O_DIRECT + io_uring. Asked on #167 (needs-owner): A
-build VFIO, B delete the stub (and dma.rs's VFIO/hugepage parts; `DmaBuf`
-stays, direct.rs uses it), C keep it documented. Recommended B.
+Decision B (2026-10-13): delete. On **wip/167-remove-vfio**: `src/drive/
+nvme.rs` gone, `dma.rs`'s hugepage allocator and IOVA lookup gone (`DmaBuf`
+stays); README, deck, CHANGELOG. Also there: #424's claim test asserts the
+wait, not a total time (6.4 s vs 2.9 s once under full-suite load).
+- [x] check.sh on wip/167-remove-vfio at 7347203 ALL PASS (1213/1213)
+- [ ] after 12.23 passes: merge, check.sh, the next stage; close
 
 ### Non-redundant volumes: drive affinity (2026-10-11, #153, P3) — BUILT on branch wip/153-affinity (C); merges after 12.23
 
