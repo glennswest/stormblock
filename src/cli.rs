@@ -13260,7 +13260,11 @@ mod forge_mode_tests {
         g.flush().await.unwrap();
         vm.seal_volume(golden, None).await.unwrap();
         let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
-        let state = Arc::new(AppState::new(config.clone(), vm, reg, gem));
+        let mut st = AppState::new(config.clone(), vm, reg, gem);
+        // No grace (#97): the next claim of a host releases its last clone
+        // at once, as a boot minutes later does (#445's fourth point).
+        st.claim_grace = std::time::Duration::ZERO;
+        let state = Arc::new(st);
         let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config).unwrap();
         let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false }));
         mgmt::forge::serve(&state, &reactor, Arc::new(target)).await.unwrap();
@@ -13282,6 +13286,22 @@ mod forge_mode_tests {
             .await
             .unwrap();
         assert!(r.status().is_success(), "boothost/default: {}", r.status());
+        // The boot clones of a host, by their name (`boothost-<tag>`).
+        let clones_of = |tag: &'static str| {
+            let state = state.clone();
+            async move {
+                state
+                    .volume_manager
+                    .lock()
+                    .await
+                    .list_volumes()
+                    .await
+                    .into_iter()
+                    .filter(|(_, n, ..)| n == &format!("boothost-{tag}"))
+                    .map(|(id, ..)| id)
+                    .collect::<Vec<_>>()
+            }
+        };
 
         // Neither machine was ever seen; this process has no STORMBLOCK_HOST_NQN.
         assert!(std::env::var("STORMBLOCK_HOST_NQN").is_err(), "the test runs as 12.25's engine did");
@@ -13314,6 +13334,28 @@ mod forge_mode_tests {
         assert!(NvmeofDevice::connect(&generic).await.is_err(), "the generic initiator name is not pvetest2");
         let other = NvmeTcpSpec { host_nqn: s2.host_nqn.clone(), ..s1.clone() };
         assert!(NvmeofDevice::connect(&other).await.is_err(), "blade7 does not reach pvetest2's clone");
+        drop((d1, d2));
+
+        // A released claim frees its clone (#445): pvetest2 boots again, gets
+        // a new clone, and the old one is out of its subsystem and gone. One
+        // clone per host, before and after; blade7's is untouched.
+        let first = clones_of("pvetest2").await;
+        assert_eq!(first.len(), 1, "one clone for pvetest2: {first:?}");
+        let blade7 = clones_of("blade7").await;
+        let u1b = super::claim_boot_uri(&base, "pvetest2", "boothost", 30, None).await.expect("the next boot claims");
+        let again = clones_of("pvetest2").await;
+        assert_eq!(again.len(), 1, "still one clone for pvetest2: {again:?}");
+        assert_ne!(again, first, "a fresh clone for the new boot");
+        assert!(state.volume_manager.lock().await.get_volume(&first[0]).is_none(), "the released clone is deleted");
+        let old_ns = NvmeTcpSpec { nsid: s1.nsid, ..NvmeTcpSpec::parse(&u1b).unwrap() };
+        if old_ns.nsid != NvmeTcpSpec::parse(&u1b).unwrap().nsid {
+            assert!(NvmeofDevice::connect(&old_ns).await.is_err(), "the released clone's namespace is gone: {u1}");
+        }
+        let d1b = NvmeofDevice::connect(&NvmeTcpSpec::parse(&u1b).unwrap()).await.expect("the new clone connects");
+        let mut fresh = vec![0u8; 4096];
+        d1b.read(0, &mut fresh).await.unwrap();
+        assert_eq!(&fresh[..], &image[..4096], "the new boot starts from the release, not the last boot's writes");
+        assert_eq!(clones_of("blade7").await, blade7, "blade7's clone is untouched by pvetest2's boot");
     }
 
     /// A destination disk whose flushes take `delay` (#410: a DRAM-less SSD
