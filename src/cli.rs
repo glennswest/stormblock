@@ -9331,6 +9331,8 @@ file = "{logs}"
         // never comes back, and the move is dropped there. Windows of 4
         // (#331), so half way falls between two of them; the moves of a
         // window run at once as they do on a node.
+        // A persist a window (#410: a window and a batch are set apart).
+        std::env::set_var("STORMBLOCK_FLOW_WINDOW", "4");
         std::env::set_var("STORMBLOCK_FLOW_BATCH", "4");
         let n = (total / 2 / 4).max(1) as u64;
         let persists = std::sync::atomic::AtomicU64::new(0);
@@ -9655,6 +9657,7 @@ file = "{state}"
             // of a slot a golden shares with its stamped clone drops two
             // extents at once, so a window of 2 drops at most 4: it cannot
             // jump from above the target to none. Counting windows could.
+            std::env::set_var("STORMBLOCK_FLOW_WINDOW", "2");
             std::env::set_var("STORMBLOCK_FLOW_BATCH", "2");
             let target = (((sys_n + data_n) as f64 * (1.0 - at)).round() as usize).max(4);
             let cut = tokio::sync::Notify::new();
@@ -11013,6 +11016,10 @@ file = "{state}"
 
         const SLOT: u64 = 64 * 1024;
         const EXTENTS: u64 = 24;
+        // A persist for every extent, so each one's count is seen (#410: one
+        // persist a batch otherwise).
+        std::env::set_var("STORMBLOCK_FLOW_WINDOW", "1");
+        std::env::set_var("STORMBLOCK_FLOW_BATCH", "1");
         let dir = tempfile::tempdir().unwrap();
         let slab = |name: &str| {
             let path = dir.path().join(name).display().to_string();
