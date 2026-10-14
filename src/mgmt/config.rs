@@ -27,8 +27,13 @@ pub struct StormBlockConfig {
     #[cfg(feature = "cluster")]
     #[serde(default)]
     pub cluster: crate::cluster::config::ClusterConfig,
+    /// Registering this node's volumes with stormstorage (#170).
     #[serde(default)]
-    pub stormfs: crate::stormfs::StormFsConfig,
+    pub registration: crate::registration::RegistrationConfig,
+    /// `[stormfs]`: the old spelling of `[registration]` (#170), read when
+    /// `[registration]` is not given, with a warning. Never written.
+    #[serde(default, skip_serializing)]
+    pub stormfs: Option<crate::registration::RegistrationConfig>,
     #[serde(default)]
     pub gc: GcConfig,
     /// Grow the pool when it comes under physical pressure (#18).
@@ -426,7 +431,8 @@ impl Default for StormBlockConfig {
             reactor: ReactorCfg::default(),
             #[cfg(feature = "cluster")]
             cluster: crate::cluster::config::ClusterConfig::default(),
-            stormfs: crate::stormfs::StormFsConfig::default(),
+            registration: crate::registration::RegistrationConfig::default(),
+            stormfs: None,
             gc: GcConfig::default(),
             pressure: crate::volume::pressure::PressureConfig::default(),
             rebuild: crate::rebuild::RebuildConfig::default(),
@@ -1043,7 +1049,10 @@ impl StormBlockConfig {
             return Ok(Self::default());
         }
         let contents = std::fs::read_to_string(path)?;
-        let config: StormBlockConfig = toml::from_str(&contents)?;
+        let mut config: StormBlockConfig = toml::from_str(&contents)?;
+        if let Some(why) = config.adopt_old_registration(&contents) {
+            tracing::warn!("{path}: {why}");
+        }
         for key in retired_keys(&contents) {
             tracing::warn!("{path}: {key} is set and does nothing (#165)");
         }
@@ -1451,13 +1460,13 @@ impl StormBlockConfig {
             }
         }
 
-        // Validate StormFS config
-        if self.stormfs.enabled {
-            if self.stormfs.metadata_url.is_empty() {
-                anyhow::bail!("stormfs.metadata_url is required when stormfs.enabled = true");
+        // Registration with stormstorage (#170).
+        if self.registration.enabled {
+            if self.registration.url.is_empty() {
+                anyhow::bail!("[registration] url is required when [registration] enabled = true");
             }
-            if self.stormfs.advertise_addr.is_empty() {
-                anyhow::bail!("stormfs.advertise_addr is required when stormfs.enabled = true");
+            if self.registration.advertise_addr.is_empty() {
+                anyhow::bail!("[registration] advertise_addr is required when [registration] enabled = true");
             }
         }
 
@@ -1494,6 +1503,27 @@ pub struct LunConfig {
 /// `[cluster]`'s replication mode and factor (volumes are replicated across
 /// nodes by stormstorage's heads, #179, not by the engine). Read with a
 /// warning, never refused: a node with an older file still starts.
+impl StormBlockConfig {
+    /// `[stormfs]` is the old spelling of `[registration]` (#170): taken as
+    /// it when the file gives no `[registration]`, and ignored when it does.
+    /// Answers the warning to log either way.
+    pub fn adopt_old_registration(&mut self, contents: &str) -> Option<String> {
+        let old = self.stormfs.take()?;
+        let has_new = toml::from_str::<serde_json::Value>(contents).ok().is_some_and(|v| v.get("registration").is_some());
+        if has_new {
+            return Some(
+                "[stormfs] is the old spelling of [registration] and is ignored: [registration] is given (#170)".into(),
+            );
+        }
+        self.registration = old;
+        Some(
+            "[stormfs] is the old spelling of [registration] (the route is stormstorage's, #170); read as \
+             [registration] (url = metadata_url). Rename it."
+                .into(),
+        )
+    }
+}
+
 pub fn retired_keys(contents: &str) -> Vec<&'static str> {
     let Ok(v) = toml::from_str::<serde_json::Value>(contents) else { return Vec::new() };
     let mut out = Vec::new();
@@ -2075,5 +2105,45 @@ path = "nvme-tcp://10.0.0.7:4420/nqn.z?nsid=1"
         let mut cfg: StormBlockConfig = toml::from_str("[management]\ndata_dir = \"/from/file\"\n").unwrap();
         cfg.merge_cli(&[], None, 64, &[], None, None, None, None, None, None, 0, None);
         assert_eq!(cfg.management.data_dir.as_deref(), Some("/from/file"), "no flag: the file's");
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    /// #170: `[registration] url` is the section; `[stormfs] metadata_url`
+    /// (its old spelling) is still read, with a warning, and ignored when
+    /// `[registration]` is given.
+    #[test]
+    fn the_old_stormfs_spelling_is_read_as_registration() {
+        let new = "[registration]\nenabled = true\nurl = \"http://stormstorage:8500\"\nadvertise_addr = \"10.0.0.5:9090\"\n";
+        let mut c: StormBlockConfig = toml::from_str(new).unwrap();
+        assert!(c.adopt_old_registration(new).is_none(), "nothing to say");
+        assert_eq!(c.registration.url, "http://stormstorage:8500");
+        c.validate().unwrap();
+
+        let old = "[stormfs]\nenabled = true\nmetadata_url = \"http://stormstorage:8500\"\nadvertise_addr = \"10.0.0.5:9090\"\nheartbeat_secs = 45\n";
+        let mut c: StormBlockConfig = toml::from_str(old).unwrap();
+        assert!(!c.registration.enabled, "not yet");
+        let why = c.adopt_old_registration(old).expect("a warning");
+        assert!(why.contains("old spelling") && why.contains("Rename it"), "{why}");
+        assert!(c.registration.enabled);
+        assert_eq!(c.registration.url, "http://stormstorage:8500");
+        assert_eq!(c.registration.heartbeat_secs, 45);
+
+        let both = format!("{new}{}", old);
+        let mut c: StormBlockConfig = toml::from_str(&both).unwrap();
+        let why = c.adopt_old_registration(&both).expect("a warning");
+        assert!(why.contains("ignored"), "{why}");
+        assert_eq!(c.registration.heartbeat_secs, 30, "[registration] wins");
+
+        // metadata_url still spells url inside [registration] too.
+        let mixed: StormBlockConfig = toml::from_str("[registration]\nmetadata_url = \"http://x:1\"\n").unwrap();
+        assert_eq!(mixed.registration.url, "http://x:1");
+
+        let bad: StormBlockConfig = toml::from_str("[registration]\nenabled = true\nadvertise_addr = \"a:1\"\n").unwrap();
+        let e = bad.validate().unwrap_err().to_string();
+        assert!(e.contains("[registration] url"), "{e}");
     }
 }

@@ -1,8 +1,12 @@
-//! StormFS registration — announce volumes to StormFS metadata cluster.
+//! Registration with stormstorage: announce this node's volumes (#170).
 //!
-//! StormBlock nodes register their exported volumes with a StormFS metadata
-//! server so StormFS can consume them as backing storage for distributed files.
-//! Registration is periodic (heartbeat-style) so StormFS detects node departures.
+//! A node posts its exported volumes to `<[registration] url>/api/v1/storage/
+//! register` on a heartbeat, so stormstorage can build on them and sees a node
+//! leave (`/deregister` on shutdown). The route is stormstorage's (stormstorage
+//! #6, #77). It was called StormFS registration (`[stormfs] metadata_url`),
+//! after the consumer it was first meant for; StormFS's metadata server does
+//! not serve it. `[stormfs]` is still read, as the old spelling, with a
+//! warning.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,17 +15,19 @@ use serde::{Serialize, Deserialize};
 
 use crate::mgmt::AppState;
 
-/// Configuration for StormFS registration.
+/// `[registration]`: where this node registers its volumes (stormstorage).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct StormFsConfig {
-    /// Enable StormFS registration.
+pub struct RegistrationConfig {
+    /// Register this node's volumes.
     pub enabled: bool,
-    /// StormFS metadata server URL (e.g., "http://stormfs-meta:8500").
-    pub metadata_url: String,
+    /// stormstorage's URL (e.g. `http://stormstorage:8500`). `metadata_url`
+    /// is the old spelling, still read.
+    #[serde(alias = "metadata_url")]
+    pub url: String,
     /// Registration heartbeat interval in seconds.
     pub heartbeat_secs: u64,
-    /// This node's advertised address for StormFS to reach back.
+    /// This node's address, for stormstorage to reach back.
     pub advertise_addr: String,
     /// Sent as `Authorization: Bearer` on register and deregister (#214),
     /// so stormstorage can require a token on them (stormstorage#6). Absent:
@@ -32,7 +38,7 @@ pub struct StormFsConfig {
     pub token_file: Option<String>,
 }
 
-impl StormFsConfig {
+impl RegistrationConfig {
     /// The token to present, from `api_token` or `token_file`. A file that
     /// cannot be read is an error, not "no token": a node configured to
     /// authenticate must not quietly register without.
@@ -43,10 +49,10 @@ impl StormFsConfig {
         match &self.token_file {
             None => Ok(None),
             Some(f) => {
-                let s = std::fs::read_to_string(f).map_err(|e| anyhow::anyhow!("[stormfs] token_file {f}: {e}"))?;
+                let s = std::fs::read_to_string(f).map_err(|e| anyhow::anyhow!("[registration] token_file {f}: {e}"))?;
                 let t = s.lines().next().unwrap_or("").trim().to_string();
                 if t.is_empty() {
-                    anyhow::bail!("[stormfs] token_file {f} is empty");
+                    anyhow::bail!("[registration] token_file {f} is empty");
                 }
                 Ok(Some(t))
             }
@@ -54,11 +60,11 @@ impl StormFsConfig {
     }
 }
 
-impl Default for StormFsConfig {
+impl Default for RegistrationConfig {
     fn default() -> Self {
-        StormFsConfig {
+        RegistrationConfig {
             enabled: false,
-            metadata_url: String::new(),
+            url: String::new(),
             heartbeat_secs: 30,
             advertise_addr: String::new(),
             api_token: None,
@@ -67,7 +73,7 @@ impl Default for StormFsConfig {
     }
 }
 
-/// Volume announcement sent to StormFS metadata server.
+/// Volume announcement sent to stormstorage.
 #[derive(Debug, Serialize)]
 struct VolumeAnnouncement {
     node_addr: String,
@@ -85,7 +91,7 @@ struct VolumeInfo {
     protocols: Vec<String>,
 }
 
-/// Registration response from StormFS metadata server.
+/// Registration response from stormstorage.
 #[derive(Debug, Deserialize)]
 struct RegistrationResponse {
     #[serde(default)]
@@ -94,28 +100,28 @@ struct RegistrationResponse {
     message: String,
 }
 
-/// StormFS registration client.
-pub struct StormFsRegistration {
-    config: StormFsConfig,
+/// The registration client.
+pub struct Registration {
+    config: RegistrationConfig,
     client: crate::http::Client,
 }
 
-impl StormFsRegistration {
-    /// Create a new StormFS registration client.
-    pub fn new(config: StormFsConfig) -> Self {
-        Self::try_new(config).unwrap_or_else(|e| panic!("StormFS registration: {e}"))
+impl Registration {
+    /// Create a registration client.
+    pub fn new(config: RegistrationConfig) -> Self {
+        Self::try_new(config).unwrap_or_else(|e| panic!("stormstorage registration: {e}"))
     }
 
     /// [`new`](Self::new), with the token's file read here (#214): every
     /// register and deregister presents it.
-    pub fn try_new(config: StormFsConfig) -> anyhow::Result<Self> {
+    pub fn try_new(config: RegistrationConfig) -> anyhow::Result<Self> {
         let token = config.token()?;
         let client = crate::http::Client::builder()
             .timeout(Duration::from_secs(10))
             .bearer(token)
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
-        Ok(StormFsRegistration { config, client })
+        Ok(Registration { config, client })
     }
 
     /// Start the periodic registration loop.
@@ -124,14 +130,14 @@ impl StormFsRegistration {
         tokio::spawn(async move {
             loop {
                 if let Err(e) = self.register(&state).await {
-                    tracing::warn!("StormFS registration failed: {e}");
+                    tracing::warn!("stormstorage registration failed: {e}");
                 }
                 tokio::time::sleep(interval).await;
             }
         })
     }
 
-    /// Send a single registration announcement to StormFS.
+    /// Send one registration announcement to stormstorage.
     async fn register(&self, state: &Arc<AppState>) -> anyhow::Result<()> {
         let hostname = gethostname()
             .unwrap_or_else(|| "unknown".to_string());
@@ -164,7 +170,7 @@ impl StormFsRegistration {
             volumes,
         };
 
-        let url = format!("{}/api/v1/storage/register", self.config.metadata_url.trim_end_matches('/'));
+        let url = format!("{}/api/v1/storage/register", self.config.url.trim_end_matches('/'));
         // An announcement of what this node holds: the same one twice is
         // the same registration (#359).
         let resp = self.client
@@ -172,31 +178,31 @@ impl StormFsRegistration {
             .json(&announcement)
             .send_retried(crate::retry::Policy::NETWORK)
             .await
-            .map_err(|e| anyhow::anyhow!("StormFS metadata unreachable: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("stormstorage unreachable: {e}"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("StormFS registration rejected ({status}): {body}");
+            anyhow::bail!("stormstorage registration rejected ({status}): {body}");
         }
 
         let reg_resp: RegistrationResponse = resp.json().await
             .unwrap_or(RegistrationResponse { accepted: true, message: String::new() });
 
         if reg_resp.accepted {
-            tracing::debug!("StormFS registration accepted");
+            tracing::debug!("stormstorage registration accepted");
         } else {
-            tracing::warn!("StormFS registration not accepted: {}", reg_resp.message);
+            tracing::warn!("stormstorage registration not accepted: {}", reg_resp.message);
         }
 
         Ok(())
     }
 
-    /// Send a deregistration to StormFS on shutdown.
+    /// Send a deregistration to stormstorage on shutdown.
     pub async fn deregister(&self) -> anyhow::Result<()> {
         let url = format!(
             "{}/api/v1/storage/deregister",
-            self.config.metadata_url.trim_end_matches('/')
+            self.config.url.trim_end_matches('/')
         );
         let _ = self.client
             .post(&url)
@@ -206,7 +212,7 @@ impl StormFsRegistration {
             // At shutdown, briefly: deregistering twice is deregistering.
             .send_retried(crate::retry::Policy::QUICK)
             .await;
-        tracing::info!("StormFS deregistration sent");
+        tracing::info!("stormstorage deregistration sent");
         Ok(())
     }
 }
@@ -256,25 +262,25 @@ mod tests {
         let vm = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
         let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
         let state = Arc::new(AppState::new(crate::mgmt::config::StormBlockConfig::default(), vm, reg, gem));
-        let cfg = |token: Option<&str>, file: Option<String>| StormFsConfig {
+        let cfg = |token: Option<&str>, file: Option<String>| RegistrationConfig {
             enabled: true,
-            metadata_url: url.clone(),
+            url: url.clone(),
             advertise_addr: "10.0.0.5:9090".into(),
             api_token: token.map(|t| crate::mgmt::config::Secret(t.into())),
             token_file: file,
-            ..StormFsConfig::default()
+            ..RegistrationConfig::default()
         };
 
-        let with = StormFsRegistration::new(cfg(Some("s3cret"), None));
+        let with = Registration::new(cfg(Some("s3cret"), None));
         with.register(&state).await.unwrap();
         with.deregister().await.unwrap();
-        let without = StormFsRegistration::new(cfg(None, None));
+        let without = Registration::new(cfg(None, None));
         without.register(&state).await.unwrap();
         without.deregister().await.unwrap();
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("token");
         std::fs::write(&f, "from-file\n").unwrap();
-        let filed = StormFsRegistration::new(cfg(None, Some(f.to_string_lossy().into())));
+        let filed = Registration::new(cfg(None, Some(f.to_string_lossy().into())));
         filed.register(&state).await.unwrap();
 
         let got = seen.lock().unwrap().clone();
@@ -289,31 +295,31 @@ mod tests {
             ]
         );
         let missing = cfg(None, Some(dir.path().join("nope").to_string_lossy().into()));
-        assert!(StormFsRegistration::try_new(missing).is_err(), "an unreadable token file is an error");
+        assert!(Registration::try_new(missing).is_err(), "an unreadable token file is an error");
         assert!(!format!("{:?}", cfg(Some("s3cret"), None)).contains("s3cret"), "never shown");
     }
 
     #[test]
     fn default_config_disabled() {
-        let cfg = StormFsConfig::default();
+        let cfg = RegistrationConfig::default();
         assert!(!cfg.enabled);
-        assert!(cfg.metadata_url.is_empty());
+        assert!(cfg.url.is_empty());
         assert_eq!(cfg.heartbeat_secs, 30);
     }
 
     #[test]
     fn config_serde_roundtrip() {
-        let cfg = StormFsConfig {
+        let cfg = RegistrationConfig {
             enabled: true,
-            metadata_url: "http://stormfs:8500".to_string(),
+            url: "http://stormfs:8500".to_string(),
             heartbeat_secs: 60,
             advertise_addr: "10.0.0.1:9090".to_string(),
-            ..StormFsConfig::default()
+            ..RegistrationConfig::default()
         };
         let toml_str = toml::to_string(&cfg).unwrap();
-        let parsed: StormFsConfig = toml::from_str(&toml_str).unwrap();
+        let parsed: RegistrationConfig = toml::from_str(&toml_str).unwrap();
         assert!(parsed.enabled);
-        assert_eq!(parsed.metadata_url, "http://stormfs:8500");
+        assert_eq!(parsed.url, "http://stormfs:8500");
         assert_eq!(parsed.heartbeat_secs, 60);
     }
 }
