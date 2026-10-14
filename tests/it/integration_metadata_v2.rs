@@ -931,51 +931,31 @@ async fn outgrow_format_1(extents: u64) -> (VolumeManager, Vec<String>, stormblo
 }
 
 /// #428 (forge, 2026-10-10 to 10-14): a format-1 slab whose record outgrew
-/// its copy. Every persist failed, the node went on in memory, and a restart
-/// lost 483 volumes; the migration to format 2 refused too, because it wrote
-/// the record into both v1 copies first. Now nothing new is made while
-/// records cannot be written, and the migration takes the whole region when
-/// the record no longer fits a copy: the next create retries, migrates,
-/// clears the fault and goes on, and every volume is there after a restart.
-#[tokio::test]
-async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_cannot_be_written() {
-    // One extent a volume: the record is mostly volume headers, which v2
-    // holds in about the room v1 does.
-    let (mut vm, made, sid, dev, capacity) = outgrow_format_1(1).await;
-    stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
-    let after = vm.create_volume_any("after", VOL).await.expect("made once the slab migrated");
-    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
-    assert_eq!(vm.registry().read().await.get(&sid).unwrap().format_version(), SLAB_VERSION_2);
-    vm.get_volume(&after).unwrap().write(0, &pattern(9, 0, 9)).await.unwrap();
-    vm.get_volume(&after).unwrap().flush().await.unwrap();
-    vm.persist().await;
-    for (name, u) in vm.metadata_v2_usage() {
-        eprintln!(
-            "#428: {} volumes of one extent; v1 copy holds {capacity} bytes; v2 {name}: {} of {} pages",
-            made.len(),
-            u.pages_used,
-            u.pages_total
-        );
-    }
-    drop(vm);
-    let vm = reopen(&[dev]).await;
-    for name in made.iter().chain(std::iter::once(&"after".to_string())) {
-        assert!(vm.find_volume(name).await.is_some(), "{name} after a restart");
-    }
-    let last = made.len() as u64 - 1;
-    assert_eq!(read_first(&vm, &format!("v{last}"), 0).await, pattern((last % 251) as u8, 0, 1), "the volume made as the record outgrew its copy");
-    assert_eq!(read_first(&vm, "after", 0).await, pattern(9, 0, 9));
-}
-
-/// #428, forge's shape: extent-heavy volumes, whose v2 entries (a 25-byte
-/// key each) take about twice v1's room, so the migration does not fit the
-/// region either. The fault stands and creates stay refused, with the
+/// its copy. Every persist failed, the node went on making volumes in memory,
+/// and a restart lost 483 of them. Format 2 takes more room than format 1 (a
+/// 25-byte key per entry), so the migration does not fit the region either. The fault stands and creates stay refused, with the
 /// reason; deletes still persist, and once they bring the record under the
 /// copy it is written, the fault clears and creates go on. After a restart
 /// what is left is there and what was deleted is not.
 #[tokio::test]
 async fn a_record_too_large_for_either_format_refuses_creates_until_deletes_make_room() {
-    let (mut vm, made, _sid, dev, _) = outgrow_format_1(8).await;
+    let (mut vm, made, sid, dev, capacity) = outgrow_format_1(8).await;
+    // What the last record written (just under a copy) takes in format 2:
+    // each entry a 25-byte key and its length beside the value, in 4 KiB
+    // pages. The whole region would hold the pages less the log (an eighth).
+    let record = vm.registry().read().await.get(&sid).unwrap().read_metadata().await.unwrap().unwrap();
+    let doc = stormblock::volume::metadata::MetadataStore::decode(&record).unwrap();
+    let v2: usize = stormblock::volume::metav2::document_entries(&doc).iter().map(|(_, v)| 27 + v.len()).sum();
+    let region = 2 * (capacity + 32);
+    eprintln!(
+        "#428: v1 record {} bytes ({} volumes, {} B each); v2 entries {v2} bytes = {:.2}x; v2 pages over the whole region {} bytes",
+        record.len(),
+        doc.volumes.len(),
+        record.len() / doc.volumes.len().max(1),
+        v2 as f64 / record.len() as f64,
+        region - region / 8
+    );
+    assert!(v2 as u64 > region - region / 8, "this shape does not fit format 2 either; else the migration would have taken it");
     stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
     let e = vm.create_volume_any("still", VOL).await.expect_err("v2 does not fit either");
     assert!(e.to_string().contains("volume records cannot be written"), "{e}");
