@@ -15,6 +15,7 @@ pub mod filedev;
 pub mod freemap;
 pub mod flushgate;
 pub mod identity;
+pub mod designation;
 pub mod handover;
 pub mod httpdev;
 pub mod partition;

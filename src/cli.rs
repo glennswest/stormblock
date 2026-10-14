@@ -592,6 +592,24 @@ enum SlabAction {
         /// The image: a device path, a file or an nvme-tcp:// URI
         image: String,
     },
+    /// The drive stormdrive designates for the system half, on this machine
+    /// (#402): read from the `system-data` volume on the node's data half
+    /// (`/stormdrive/system-drives.json`), matched by WWN, else model and
+    /// serial. Prints the drive's path as the last line.
+    ///
+    /// Exit 0: found. Exit 1: none designated, or the designated drive is not
+    /// on this machine (said). Exit 2: the slabs or the file cannot be read.
+    Designated {
+        /// The node's data half: a drive, or a slab. Repeat for several.
+        #[arg(long = "slab", required = true)]
+        slabs: Vec<String>,
+        /// The sysfs root the drives are looked for under
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        /// Where device nodes are
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
     /// Copy a file out of a volume's filesystem, read-only, with nothing
     /// attached (#262)
     ///
@@ -1982,6 +2000,43 @@ pub async fn run() -> anyhow::Result<()> {
                         println!("{why}");
                         std::process::exit(code);
                     }
+                }
+            }
+            SlabAction::Designated { slabs, sys, dev } => {
+                use crate::drive::designation;
+                let bytes = match volume_file_on_slabs(&slabs, designation::VOLUME, designation::FILE).await {
+                    Ok(b) => b,
+                    Err((1, why)) => {
+                        println!("no system drive designated ({why})");
+                        std::process::exit(1);
+                    }
+                    Err((code, why)) => {
+                        println!("{why}");
+                        std::process::exit(code);
+                    }
+                };
+                let designated = match designation::parse(&bytes) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        println!("{e}");
+                        std::process::exit(2);
+                    }
+                };
+                if designated.is_empty() {
+                    println!("no system drive designated");
+                    std::process::exit(1);
+                }
+                let found = designation::find(&designated, std::path::Path::new(&sys));
+                for (d, at) in &found {
+                    let who = if d.wwn.is_empty() { format!("{} {}", d.model, d.serial) } else { d.wwn.clone() };
+                    match at {
+                        Some(n) => println!("designated {who}: {dev}/{n}"),
+                        None => println!("designated {who} (last seen as {}): not on this machine", d.path),
+                    }
+                }
+                match found.iter().find_map(|(_, at)| at.clone()) {
+                    Some(n) => println!("{dev}/{n}"),
+                    None => std::process::exit(1),
                 }
             }
             SlabAction::Holds { local, image } => {
