@@ -66,10 +66,11 @@ done | awk '!seen[$0]++' | while read -r ko; do
     echo "$base" >> "$I/lib/mods/order"
 done
 echo "  modules: $(tr '\n' ' ' < "$I/lib/mods/order")"
+WAIT=$(sed -n '/# --- BEGIN netdev wait/,/# --- END netdev wait/p' "$GEN")
 SEL=$(sed -n '/# --- BEGIN uplink selection/,/# --- END uplink selection/p' "$GEN")
 BR=$(sed -n '/# --- BEGIN bridge bring-up/,/# --- END bridge bring-up/p' "$GEN")
 NIC=$(sed -n '/# --- BEGIN boot nic/,/# --- END boot nic/p' "$GEN")
-[ -n "$SEL" ] && [ -n "$BR" ] && [ -n "$NIC" ] || { echo "FAIL: could not extract the network blocks"; exit 1; }
+[ -n "$WAIT" ] && [ -n "$SEL" ] && [ -n "$BR" ] && [ -n "$NIC" ] || { echo "FAIL: could not extract the network blocks"; exit 1; }
 
 {
     cat <<'EOF'
@@ -101,6 +102,11 @@ domain = "example.lo"
 mtu = 1400
 TOML
 EOF
+    # The netdev wait (#414) against virtio-pci's real layout: the
+    # interface is under virtio0/, one level below the PCI function.
+    echo 'STORM_NETDEV_WAIT=5'
+    printf '%s\n' "$WAIT"
+    echo 'echo "MARK netdev waited $nd_waited missing <$MISSING_NET>"'
     printf '%s\n' "$SEL" "$BR" "$NIC"
     cat <<EOF
 PORT=$PORT
@@ -143,6 +149,9 @@ mark() { sed -n "s/^MARK $2 //p" "$W/$1.txt" | head -1; }
 
 say "boot 1: [network] static on eth0, ip=dhcp on the command line"
 boot eth0 one
+[ "$(mark one netdev)" = "waited 0 missing <>" ] && ok "a virtio NIC's interface is found at once: no wait (#414)" \
+    || fail "the netdev wait said '$(mark one netdev)'"
+grep -q "no network interface after" "$W/one.txt" && fail "the netdev wait warned (#414)" || ok "and no warning"
 [ "$(mark one addr)" = "10.0.2.15/24" ] && ok "10.0.2.15/24 on stormbr0" || fail "stormbr0 has '$(mark one addr)'"
 [ "$(mark one master)" = "stormbr0" ] && ok "eth0 is a port of stormbr0" || fail "eth0's master is '$(mark one master)'"
 [ "$(mark one mtu)" = "1400" ] && ok "eth0 mtu 1400" || fail "eth0 mtu '$(mark one mtu)'"
