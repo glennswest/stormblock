@@ -198,3 +198,63 @@ async fn a_node_with_several_drives_places_fails_rebuilds_and_grows() {
     let (s, e) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "m3b", "size": "16M", "redundancy": "mirror:3@shelf" }))).await;
     assert!(s == 200 || s == 201, "{e}");
 }
+
+/// #160: a scrub asked for over the API reads every leg; on `mirror:3` the
+/// two copies that agree repair a spoiled third, and the volume's report and
+/// the node's list say so. A single-copy volume has nothing to compare.
+#[tokio::test]
+async fn a_scrub_repairs_a_three_way_mirror_and_reports_it() {
+    let dir = TempDir::new().unwrap();
+    let (state, api, c) = start(&dir).await;
+    for (i, shelf) in ["A", "B", "C"].iter().enumerate() {
+        add_drive(&c, &api, &dir, &format!("d{i}.img"), shelf).await;
+    }
+    state.start_scrub();
+    let (s, m) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "m3", "size": "8M", "redundancy": "mirror:3" }))).await;
+    assert!(s == 200 || s == 201, "{m}");
+    let m = VolumeId(m["id"].as_str().unwrap().parse().unwrap());
+    fill(&state, m, 2, 70).await;
+
+    // One leg of extent 1 spoiled on its drive.
+    let leg = state.gem.read().await.lookup(m, 1).unwrap().legs().nth(2).unwrap();
+    {
+        let reg = state.slab_registry.read().await;
+        let slab = reg.get(&leg.slab_id).unwrap();
+        slab.write_slot(leg.slot_idx, 0, &[0xFFu8; 4096]).await.unwrap();
+        slab.device().flush().await.unwrap();
+    }
+
+    let (s, r) = call(&c, reqwest::Method::POST, format!("{api}/volumes/{}/scrub", m.0), None).await;
+    assert_eq!(s, 202, "{r}");
+    let mut last = Value::Null;
+    for _ in 0..200 {
+        let (_, v) = call(&c, reqwest::Method::GET, format!("{api}/volumes/{}/scrub", m.0), None).await;
+        if !v["last"].is_null() {
+            last = v["last"].clone();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let report = &last["report"];
+    assert_eq!(report["extents"], 2, "{last}");
+    assert_eq!(report["mirror_mismatches"], 1, "{last}");
+    assert_eq!(report["mirror_repaired"], 1, "{last}");
+    assert_eq!(report["findings"][0]["extent"], 1);
+
+    // Every leg is the data again.
+    let mut b = vec![0u8; 4096];
+    let reg = state.slab_registry.read().await;
+    reg.get(&leg.slab_id).unwrap().read_slot(leg.slot_idx, 0, &mut b).await.unwrap();
+    assert!(b.iter().all(|x| *x == 71), "the spoiled leg holds the majority's copy");
+    drop(reg);
+
+    let (_, all) = call(&c, reqwest::Method::GET, format!("{api}/scrub"), None).await;
+    assert_eq!(all["settings"]["period_days"], 7);
+    assert_eq!(all["settings"]["duty_percent"], 10);
+    assert_eq!(all["volumes"][0]["mirror_repaired"], 1, "{all}");
+
+    let (s, one) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "single", "size": "4M" }))).await;
+    assert!(s == 200 || s == 201, "{one}");
+    let (s, _) = call(&c, reqwest::Method::POST, format!("{api}/volumes/{}/scrub", one["id"].as_str().unwrap()), None).await;
+    assert_eq!(s, 409, "one copy: nothing to compare");
+}

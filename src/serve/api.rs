@@ -1792,6 +1792,19 @@ mod tests {
     /// The boot claim is the only write that needs no token, and only in its
     /// exact shape: the re-point beside it, other namespaces and other verbs
     /// on the same path all stay guarded (#107).
+    /// #160: a scrub and its reads are ordinary; the repairs an operator
+    /// asks for (a chosen leg written over the others, parity rewritten)
+    /// are destructive.
+    #[test]
+    fn a_scrubs_repairs_are_destructive_and_the_scrub_is_not() {
+        let v = "/api/v1/volumes/0e6b3c1a-1111-4222-8333-444455556666";
+        assert_eq!(classify(&Method::POST, &format!("{v}/scrub/repair"), None), Class::Destructive);
+        assert_eq!(classify(&Method::POST, &format!("{v}/scrub/repair-parity"), None), Class::Destructive);
+        assert_eq!(classify(&Method::POST, &format!("{v}/scrub"), None), Class::Ordinary);
+        assert_eq!(classify(&Method::GET, &format!("{v}/scrub"), None), Class::Ordinary);
+        assert_eq!(classify(&Method::GET, "/api/v1/scrub", None), Class::Ordinary);
+    }
+
     #[test]
     fn only_the_boot_claim_is_an_open_write() {
         let auth = AuthConfig { api_token: Some("t".into()), admin_token: None, audit_only: false };

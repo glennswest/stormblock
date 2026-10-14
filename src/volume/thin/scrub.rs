@@ -336,3 +336,168 @@ impl ThinVolumeHandle {
         Ok(wrote)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::Slab;
+    use crate::placement::topology::StorageTier;
+
+    type Shared<T> = Arc<crate::lockwatch::TrackedRwLock<T>>;
+    const SLOT: u64 = 16 * 1024;
+
+    async fn slabs(n: usize, dir: &tempfile::TempDir) -> (Shared<GlobalExtentMap>, Shared<SlabRegistry>) {
+        let mut registry = SlabRegistry::new();
+        for i in 0..n {
+            let path = dir.path().join(format!("slab-{i}.bin")).to_string_lossy().to_string();
+            let dev = FileDevice::open_with_capacity(&path, 8 * 1024 * 1024).await.unwrap();
+            registry.add(Slab::format(Arc::new(dev), SLOT, StorageTier::Hot).await.unwrap());
+        }
+        (
+            Arc::new(crate::lockwatch::TrackedRwLock::new(GlobalExtentMap::new())),
+            Arc::new(crate::lockwatch::TrackedRwLock::new(registry)),
+        )
+    }
+
+    fn volume(gem: &Shared<GlobalExtentMap>, reg: &Shared<SlabRegistry>, policy: &str) -> Arc<ThinVolumeHandle> {
+        Arc::new(ThinVolumeHandle::with_redundancy(
+            ThinVolume::new("v".into(), 64 * 1024 * 1024, SLOT),
+            gem.clone(),
+            reg.clone(),
+            PlacementPolicy::default(),
+            RedundancyPolicy::parse(policy).unwrap(),
+        ))
+    }
+
+    fn pattern(seed: u8) -> Vec<u8> {
+        (0..SLOT as usize).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
+    }
+
+    async fn leg_bytes(reg: &Shared<SlabRegistry>, leg: Leg) -> Vec<u8> {
+        let mut b = vec![0u8; SLOT as usize];
+        reg.read().await.get(&leg.slab_id).unwrap().read_slot(leg.slot_idx, 0, &mut b).await.unwrap();
+        b
+    }
+
+    async fn spoil(reg: &Shared<SlabRegistry>, leg: Leg, seed: u8) {
+        let reg = reg.read().await;
+        let s = reg.get(&leg.slab_id).unwrap();
+        s.write_slot(leg.slot_idx, 4096, &vec![seed; 512]).await.unwrap();
+        s.device().flush().await.unwrap();
+    }
+
+    async fn legs_of(gem: &Shared<GlobalExtentMap>, v: &ThinVolumeHandle, vext: u64) -> Vec<Leg> {
+        gem.read().await.lookup(v.volume_id(), vext).unwrap().legs().collect()
+    }
+
+    async fn scrub(v: &ThinVolumeHandle, repair_parity: bool) -> ScrubReport {
+        v.scrub(&ScrubOptions { repair_parity, ..Default::default() }, || false, |_, _| {}).await
+    }
+
+    /// #160 (c): three copies, one spoiled — the two that agree are written
+    /// over it, and the next pass is clean.
+    #[tokio::test]
+    async fn at_mirror_3_the_copies_that_agree_repair_the_odd_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gem, reg) = slabs(3, &dir).await;
+        let v = volume(&gem, &reg, "mirror:3");
+        let data = pattern(7);
+        v.write(0, &data).await.unwrap();
+        v.write(SLOT * 2, &pattern(9)).await.unwrap();
+        let legs = legs_of(&gem, &v, 0).await;
+        assert_eq!(legs.len(), 3);
+        spoil(&reg, legs[1], 0xEE).await;
+
+        let r = scrub(&v, false).await;
+        assert_eq!((r.extents, r.mirror_mismatches, r.mirror_repaired, r.mirror_reported), (2, 1, 1, 0), "{r:?}");
+        assert_eq!(r.findings[0].extent, Some(0));
+        assert!(r.findings[0].action.starts_with("repaired: 2 of 3"), "{:?}", r.findings);
+        for leg in &legs {
+            assert_eq!(leg_bytes(&reg, *leg).await, data, "every leg is the majority's copy");
+        }
+        assert!(scrub(&v, false).await.clean(), "the next pass is clean");
+    }
+
+    /// #160 (a): two copies that disagree are reported and nothing is
+    /// written; an operator's repair from a chosen leg settles it.
+    #[tokio::test]
+    async fn at_mirror_2_a_mismatch_is_reported_and_repaired_only_from_a_chosen_leg() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gem, reg) = slabs(2, &dir).await;
+        let v = volume(&gem, &reg, "mirror:2");
+        let data = pattern(3);
+        v.write(0, &data).await.unwrap();
+        let legs = legs_of(&gem, &v, 0).await;
+        spoil(&reg, legs[1], 0x55).await;
+        let spoiled = leg_bytes(&reg, legs[1]).await;
+
+        let r = scrub(&v, false).await;
+        assert_eq!((r.mirror_mismatches, r.mirror_repaired, r.mirror_reported), (1, 0, 1), "{r:?}");
+        assert!(r.findings[0].action.starts_with("reported"), "{:?}", r.findings);
+        assert_eq!(leg_bytes(&reg, legs[0]).await, data, "nothing written on a guess");
+        assert_eq!(leg_bytes(&reg, legs[1]).await, spoiled, "nothing written on a guess");
+
+        assert_eq!(v.repair_extent_from(0, legs[0].slab_id).await.unwrap(), 1);
+        assert_eq!(leg_bytes(&reg, legs[1]).await, data, "the chosen leg's copy");
+        assert!(scrub(&v, false).await.clean());
+        assert!(v.repair_extent_from(0, SlabId(uuid::Uuid::new_v4())).await.is_err(), "a slab the extent has no leg on");
+    }
+
+    /// Three copies in three versions: no majority, so reported.
+    #[tokio::test]
+    async fn three_copies_with_no_majority_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gem, reg) = slabs(3, &dir).await;
+        let v = volume(&gem, &reg, "mirror:3");
+        v.write(0, &pattern(1)).await.unwrap();
+        let legs = legs_of(&gem, &v, 0).await;
+        spoil(&reg, legs[1], 0x11).await;
+        spoil(&reg, legs[2], 0x22).await;
+        let r = scrub(&v, false).await;
+        assert_eq!((r.mirror_mismatches, r.mirror_repaired, r.mirror_reported), (1, 0, 1), "{r:?}");
+        assert_eq!(r.findings[0].legs.len(), 3, "three versions, one leg each");
+    }
+
+    /// #160: parity is reported, and rewritten from the data only when asked.
+    #[tokio::test]
+    async fn parity_is_reported_and_rewritten_only_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gem, reg) = slabs(3, &dir).await;
+        let v = volume(&gem, &reg, "raid5:2+1");
+        let (a, b) = (pattern(5), pattern(6));
+        v.write(0, &a).await.unwrap();
+        v.write(SLOT, &b).await.unwrap();
+        let p = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().legs[0];
+        spoil(&reg, p, 0x99).await;
+        let spoiled = leg_bytes(&reg, p).await;
+
+        let r = scrub(&v, false).await;
+        assert_eq!((r.stripes, r.parity_mismatches, r.parity_rewritten), (1, 1, 0), "{r:?}");
+        assert_eq!(leg_bytes(&reg, p).await, spoiled, "reported, not rewritten");
+
+        let r = scrub(&v, true).await;
+        assert_eq!((r.parity_mismatches, r.parity_rewritten), (1, 1), "{r:?}");
+        let want: Vec<u8> = a.iter().zip(&b).map(|(x, y)| x ^ y).collect();
+        assert_eq!(leg_bytes(&reg, p).await, want, "P is the data's XOR again");
+        assert!(scrub(&v, false).await.clean());
+        // The data reads as written throughout.
+        let mut back = vec![0u8; SLOT as usize];
+        v.read(SLOT, &mut back).await.unwrap();
+        assert_eq!(back, b);
+    }
+
+    /// A scrub waits while paused and stops when cancelled.
+    #[tokio::test]
+    async fn a_scrub_stops_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gem, reg) = slabs(2, &dir).await;
+        let v = volume(&gem, &reg, "mirror:2");
+        v.write(0, &pattern(1)).await.unwrap();
+        let opts = ScrubOptions::default();
+        opts.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        let r = v.scrub(&opts, || true, |_, _| {}).await;
+        assert!(r.cancelled);
+        assert_eq!(r.extents, 0);
+    }
+}
