@@ -1044,6 +1044,20 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
+### Flow-over: hot first, skip local, peers, NVMe/TCP tuning (2026-10-14, #411, P2) — IN PROGRESS
+
+- [x] 1. hot extents first: `flowhot` counts reads of slots on a flow-over's
+      sources; each pass moves them first (re-ordered at most once a second);
+      the initramfs engine hands its counts to the successor in
+      `/run/stormblock/hot-extents.json`; health `flow_over.hot_moved`; test
+- [x] 4. tuning checked: digests off (initiator asks none), TCP_NODELAY both
+      sides, 8 queues (#410), MTU from DHCP (#425), socket buffers left to
+      autotuning (SO_RCVBUF would turn it off); docs/nvme-access.md
+- [x] 2. split to #436 (needs #384's recorded hashes; off until the owner's
+      suite): proposed after #384
+- [x] 3. split to #437 (design across components): asked, A measure first
+- [ ] check.sh; golden (held for stormcentral#841); close #411
+
 ### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — DONE here; golden waits on stormcentral#841
 
 Master for the owner (2026-10-13): **1B** the release's manifest lists its
