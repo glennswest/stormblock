@@ -1574,6 +1574,51 @@ mod tests {
         }
     }
 
+    /// #159: a scheme rides after the digest; it reads back with the digest
+    /// before it, and a reader of #384 (the digest only) still finds its
+    /// digest where it looks.
+    #[test]
+    fn a_scheme_rides_after_the_digest() {
+        use crate::volume::metadata::{Origin, SchemeExt, SealDigest, Verdict};
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let sc = SchemeExt { code: SchemeExt::ERASURE, data: 8, parity: 3 };
+        let digest = SealDigest { sha256: [7; 32], verdict: Verdict::Intact, checked_at: 9 };
+        for d in [None, Some(digest)] {
+            let rec = VolumeRecord {
+                id,
+                name: "ec".into(),
+                virtual_size: 1 << 20,
+                array_id: None,
+                extents: Default::default(),
+                retention: Default::default(),
+                redundancy: Default::default(),
+                parity: Default::default(),
+                failed_slabs: Vec::new(),
+                parent: None,
+                sealed: false,
+                template: false,
+                access: Default::default(),
+                fs: None,
+                owner: None,
+                lba: 4096,
+                extent_size: 0,
+                origin: Origin::Unmarked,
+                tier: None,
+                digest: d,
+                scheme: Some(sc),
+            };
+            let bytes = header_bytes(&rec, 1 << 20);
+            let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
+            assert_eq!((back.scheme, back.digest), (Some(sc), d));
+            // #384's reader: the digest right after the tier, or none.
+            let (_, used): (Header, _) = bincode::serde::decode_from_slice(&bytes[4..], bincode::config::standard()).unwrap();
+            let after_tier = &bytes[4 + used + 6..];
+            assert_eq!(after_tier[0] == DIGEST_TAG, d.is_some(), "the digest first, where #384 reads it");
+        }
+        assert_eq!(sc.spelling(), "ec:8+3");
+        assert!(!sc.known(), "no engine reads it yet (step 1)");
+    }
+
     /// #349: a volume's origin rides after its header; a reader that knows
     /// only the header (every v2 engine before) decodes it as before.
     #[test]

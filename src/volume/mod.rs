@@ -26,6 +26,8 @@ pub mod gc;
 pub mod extable;
 pub mod erase;
 pub mod digest;
+#[cfg(test)]
+mod scheme_tests;
 pub mod holds;
 pub mod pressure;
 pub mod relocate;
@@ -748,6 +750,19 @@ impl VolumeManager {
         match self.volumes.get(id).and_then(|h| h.refused().map(str::to_string)) {
             Some(why) => Err(VolumeError::Busy(why)),
             None => Ok(()),
+        }
+    }
+
+    /// Record a scheme beside a volume's record (#159): what an engine that
+    /// writes erasure-coded volumes says of one. The caller persists.
+    pub fn set_scheme_ext(&mut self, id: VolumeId, sc: Option<crate::volume::metadata::SchemeExt>) {
+        match sc {
+            Some(sc) => {
+                self.schemes.insert(id, sc);
+            }
+            None => {
+                self.schemes.remove(&id);
+            }
         }
     }
 
