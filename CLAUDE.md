@@ -314,19 +314,33 @@ namespace for a bearer.
 - [ ] golden: held with #428/#410 until stormcentral#841 is live (master);
       proposed after it. Then shipped/close; stormcos_qa's known.toml entry
 
-### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — WAITING ON THE OWNER
+### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — IN PROGRESS (decision A)
 
-Owner: always on, every flow-over; a node goes local only through it. Item 1
-(per-extent sha256 recorded at seal) is a new v2 key kind on the slab, which
-#245's decision allows only once no node can roll back past step 1
-(golden-stormblock-47e88a267077); X9's last-known-good is 11.88 (9cbe6ca,
-before it). Asked on #412 (needs-owner): **A** validate each moved extent
-against the still-attached forge clone's bytes now, record per-extent hashes
-via #384 when the gate opens (recommended); **B** the slab key now (breaks
-rollback to 11.88); **C** forge-served hashes outside the slab. Nothing
-built; the rest of the issue (O_DIRECT read-back, keep forge until it
-passes, repair → `FlowOverCorrupt`, health, pacing, tests) is the same in
-all three.
+Master for the owner (2026-10-13): **A**. Each moved extent is checked
+against the still-attached forge clone's bytes (nothing new on disk, so a
+rollback is safe); per-extent hashes recorded at seal come with #384 once no
+node can roll back past golden-stormblock-47e88a267077. Always on, every
+flow-over. Found: a freed slot is discarded, and over NVMe/TCP that unmaps
+the clone's extent on forge, so the flow-over holds its source slots (never
+frees them) until the check passes.
+- [ ] `flow_slabs` records (source leg → destination leg) and the zeroed
+      sources; with a hold it persists but frees no source slot
+- [ ] `validate_flow`: every destination slot a sealed volume names, read
+      from the local device (O_DIRECT there) and from its source, sha256
+      compared; a mismatch is written again from the source, flushed, read
+      back (3 tries); still wrong = FlowOverCorrupt: maps pointed back at the
+      source (correct, on forge), persisted, health/console, no local boot,
+      sources kept, install not reported. Writable-only slots skipped
+      (written since: not comparable), counted. Paced as #410, 16 at once
+- [ ] then: free the held sources, local boot, retire sources, install report
+- [ ] health `flow_over.validation` {state, validated, skipped, mismatched,
+      repaired, unrepaired, bytes, seconds, mb_per_s}
+- [ ] tests: a flipped byte repaired; a drive that keeps reading wrong →
+      corrupt, maps back on the source, reads correct; writable skipped
+- [ ] a power cut during validation: a later step (needs a durable
+      "validation owed" mark the initramfs reads, system-data, and the
+      resume claim attached for it)
+- [ ] docs, CHANGELOG, check.sh, golden
 
 ### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — DONE here; golden waits on stormcentral#841
 
