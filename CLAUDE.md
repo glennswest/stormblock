@@ -180,28 +180,22 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
-### Stage freeze for 12.23 (master, 2026-10-14) — WAITING ON stormcentral#841
+### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
-The next stormblock stage is **e6eca7e's code, exactly**. Stage mode builds
-main's head and refuses `--commit` (stormcentral goldens.rs:1357), so **no
-code reaches main until 12.23 has passed pve and the Dell**: docs-only
-commits on main are fine, new code goes on a branch (e.g. `wip/436-…`).
-When the master says stormcentral#841 is live: `stormcentral component build
-stormblock --url http://stormcentral.g8.lo`, once (confirm it picks
-golden-stormd-fe3f126b72c8 and that `git diff e6eca7e origin/main -- . ':!*.md'`
-is empty first). 12.23, the owner's Dell release, boots on it. It carries 14
-changes: #428, #410, #413, #417, #412, #300, #383, #411, #415, #422/#416,
-#424, #384. Then comment, `stormcentral shipped` and close each. #436 and
-on go into the next stage.
-Status (master, 2026-10-14): #841's fix is sealed in
-golden-stormcentral-ba98171c345a; live once the owner turns multipath off on
-the stormcentral VM (root, the owner's). Then the stage of e6eca7e and a
-from-scratch 12.23. A red `two_first_boot_claims_at_once…` on e6eca7e is
-load, not a fault (fixed on wip/167-remove-vfio). **Six branches held** until
-the master says 12.23 passed pve: wip/160-scrub, wip/154-drive-offer,
-wip/170-registration, wip/159-refuse-unknown-scheme, wip/153-affinity,
-wip/167-remove-vfio (merge conflicts: CHANGELOG; #159/#153 both extend the
-header-extension walk in metav2.rs).
+The 12.23 freeze is off. Merged to main, each after a green check.sh: the
+#424 test's assertion (the wait, not a total time) and the six held
+branches (#167, #170, #160, #154, #159 step 1, #153), plus #333's lost
+wake-up in the NVMe-oF accept loop (the port race behind a red
+`integration_forge` on the #170 merge) and the build's warnings (#398 part).
+The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
+- [x] ad33637 (#167 + #424 test) check.sh ALL PASS, main fast-forwarded
+- [ ] check.sh twice on the final head (8e10cc0), then main fast-forwarded,
+      the head commit to the master
+- [ ] when stormcentral#841 is live: `stormcentral component build stormblock`
+      (stage of main's head) for 12.23; then shipped/close #428, #410, #413,
+      #417, #412, #300, #383, #411, #415, #422/#416, #424, #384 and the merged
+      #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
+- Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
 ### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — DONE (golden-stormblock-195314cf5831), metal pending
 
@@ -289,7 +283,7 @@ manager whenever the catalog was stale.
 - Found: the build VMs' clippy (1.95) fails the crate with ~100 old lints
   (none in the lines changed here): #398
 
-### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — PAUSED for P0 #418; WIP on branch wip/408-namespaces
+### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — PAUSED for the merge to main; WIP on branch wip/408-namespaces-v2 (model done, compiles)
 
 Forge holds more than stormcos (nana builds goldens there): a namespace per
 family, a Kubernetes namespace on forge's apiserver. Branch
