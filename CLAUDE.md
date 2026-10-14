@@ -180,6 +180,17 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Stage freeze for 12.23 (master, 2026-10-14) — WAITING ON stormcentral#841
+
+The next stormblock stage is **e6eca7e, exactly**: `stormcentral component
+build stormblock --commit e6eca7e --url http://stormcentral.g8.lo`, once,
+when the master says stormcentral#841 is live (confirm it picks
+golden-stormd-fe3f126b72c8). 12.23, the owner's Dell release, boots on it.
+It carries 14 changes: #428, #410, #413, #417, #412, #300, #383, #411, #415,
+#422/#416, #424, #384. Then comment, `stormcentral shipped` and close each.
+Anything new (#436 and on) is NOT in it: it goes into the next stage, after
+12.23 has passed pve and the Dell. Never stage main's head while this holds.
+
 ### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — DONE (golden-stormblock-195314cf5831), metal pending
 
 Found: a cut-short sda (`slab holds` 3) booted with the clone as resume
