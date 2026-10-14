@@ -193,6 +193,15 @@ is empty first). 12.23, the owner's Dell release, boots on it. It carries 14
 changes: #428, #410, #413, #417, #412, #300, #383, #411, #415, #422/#416,
 #424, #384. Then comment, `stormcentral shipped` and close each. #436 and
 on go into the next stage.
+Status (master, 2026-10-14): #841's fix is sealed in
+golden-stormcentral-ba98171c345a; live once the owner turns multipath off on
+the stormcentral VM (root, the owner's). Then the stage of e6eca7e and a
+from-scratch 12.23. A red `two_first_boot_claims_at_once…` on e6eca7e is
+load, not a fault (fixed on wip/167-remove-vfio). **Six branches held** until
+the master says 12.23 passed pve: wip/160-scrub, wip/154-drive-offer,
+wip/170-registration, wip/159-refuse-unknown-scheme, wip/153-affinity,
+wip/167-remove-vfio (merge conflicts: CHANGELOG; #159/#153 both extend the
+header-extension walk in metav2.rs).
 
 ### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — DONE (golden-stormblock-195314cf5831), metal pending
 
