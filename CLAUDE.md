@@ -1253,7 +1253,7 @@ Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).
 - [x] check.sh at 87343f8 ALL PASS (1203/1203); closed. Initramfs only:
       ships with the next stormcos release built from ≥ 87343f8
 
-### Flow-over: hot first, skip local, peers, NVMe/TCP tuning (2026-10-14, #411, P2) — DONE here; golden waits on stormcentral#841
+### Flow-over: hot first, skip local, peers, NVMe/TCP tuning (2026-10-14, #411, P2) — DONE (golden-stormblock-12891c0025b2), closed; 2 is #436, 3 is #437
 
 - [x] 1. hot extents first: `flowhot` counts reads of slots on a flow-over's
       sources; each pass moves them first (re-ordered at most once a second);
@@ -1266,7 +1266,9 @@ Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).
       suite): proposed after #384
 - [x] 3. split to #437 (design across components): asked, A measure first
 - [x] check.sh at fc3333a ALL PASS (1203/1203); commented
-- [ ] golden: held until stormcentral#841 is live; proposed after it; then close #411
+- [x] in golden-stormblock-12891c0025b2 (4d79108 ⊇ 32eaeb8); pvetest1 12.27
+      (2026-10-14): `795 hot extent(s) left for the flow-over` at the
+      initramfs engine's stand-down; tests pass on main. Closed
 
 ### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — DONE (golden-stormblock-12891c0025b2), closed; end to end waits on stormcentral#845, stormcos#571, stormupdate#24
 
