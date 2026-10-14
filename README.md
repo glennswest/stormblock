@@ -1992,6 +1992,9 @@ after the walk has stopped (#250). So, after discovery:
   to 15 s for every network-class PCI function with a driver bound to have a
   netdev, walking the auxiliary bus's modaliases each second. It names any
   function that never gets one (a ConnectX-3 port set to InfiniBand is one).
+  The netdev is looked for under the function (`net/eth0`) and one level down
+  (`virtio0/net/eth0`, virtio-pci's), so a pve VM's virtio NIC is found at
+  once (#414: every pve boot waited the full 15 s and warned).
 
 - **A controller with no driver is given a second chance, then named**
   (#89). On every boot, whether or not the network is configured, each PCI

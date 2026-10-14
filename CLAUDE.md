@@ -1044,6 +1044,14 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
+### The netdev wait never saw a virtio NIC (2026-10-14, #414) — IN PROGRESS
+
+- [x] `netdev_missing` looks under `<fn>/net` and `<fn>/*/net` (virtio0)
+- [x] tests/initramfs-netdev.sh +3 (sh and busybox sh); ci-boot-nic-verify.sh
+      with a real virtio-net in QEMU: waited 0, no warning; README, CHANGELOG
+- [ ] check.sh; close (initramfs only: ships with the next stormcos release
+      built from ≥ this commit; no engine golden)
+
 ### Flow-over: hot first, skip local, peers, NVMe/TCP tuning (2026-10-14, #411, P2) — DONE here; golden waits on stormcentral#841
 
 - [x] 1. hot extents first: `flowhot` counts reads of slots on a flow-over's
