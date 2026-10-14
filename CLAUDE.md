@@ -337,14 +337,17 @@ namespace for a bearer.
 - [x] check.sh at 84fda2b ALL PASS (1196/1196); commented
 - [ ] golden: held with #428/#410/#413 until stormcentral#841 is live; proposed after it
 
-### A node's engine answers 500 to /api/v1/discovery and /metrics (2026-10-13, #413) — DONE here; golden waits on stormcentral#841
+### A node's engine answers 500 to /api/v1/discovery and /metrics (2026-10-13, #413) — DONE (golden-stormblock-12891c0025b2), closed
 
 - [x] `keeps_metrics`: the daemon and the node modes install the recorder
 - [x] discovery not running: 404 (GET and the cluster verbs)
 - [x] tests (2), targeted 28/28; README, CHANGELOG
 - [x] check.sh at d7ef756 ALL PASS (1195/1195); commented
-- [ ] golden: held with #428/#410 until stormcentral#841 is live (master);
-      proposed after it. Then shipped/close; stormcos_qa's known.toml entry
+- [x] in golden-stormblock-12891c0025b2 (12.23, 4d79108); on pvetest2
+      (12.27, 2026-10-14) the node's log has no 500 / "metrics not
+      initialized" lines. Left: an unauthenticated `/metrics` scraper (401,
+      one summary WARN a minute); its caller needs the node token. Closed;
+      stormcos_qa's known.toml entry can go
 
 ### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — DONE (golden-stormblock-12891c0025b2), closed; item 1 is #444
 
