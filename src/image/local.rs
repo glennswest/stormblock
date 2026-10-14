@@ -214,6 +214,8 @@ const ALIGN: u64 = 1024 * 1024;
 /// How far the data slab can grow in place, as a multiple of its laid size.
 const DATA_GROWTH: u64 = 4;
 const GPT_OVERHEAD: u64 = 2 * ALIGN;
+/// The smallest system slab a drive of its own is laid with (#402).
+pub const SYSTEM_SLAB_MIN: u64 = 64 * ALIGN;
 
 fn align_down(v: u64, a: u64) -> u64 {
     v / a * a
@@ -426,6 +428,13 @@ async fn recorded_volumes_and_slabs(
 
 /// Does `local` hold the release on `image`? See [`ReleaseHeld`].
 pub async fn release_held(local: &Arc<dyn BlockDevice>, image: &Arc<dyn BlockDevice>) -> ReleaseHeld {
+    release_held_on(std::slice::from_ref(local), image).await
+}
+
+/// Do the node's `locals` together hold the release on `image`? A node whose
+/// halves are on two drives (#402) holds a release on both: its data-role
+/// goldens on the data drive, the rest on the system drive.
+pub async fn release_held_on(locals: &[Arc<dyn BlockDevice>], image: &Arc<dyn BlockDevice>) -> ReleaseHeld {
     let Some(image_vols) = recorded_volumes(image).await else {
         return ReleaseHeld::CannotSay("the image keeps no volume records".into());
     };
@@ -434,9 +443,15 @@ pub async fn release_held(local: &Arc<dyn BlockDevice>, image: &Arc<dyn BlockDev
     if goldens.is_empty() {
         return ReleaseHeld::CannotSay("the image holds no sealed volume".into());
     }
-    let Some((local_vols, here)) = recorded_volumes_and_slabs(local).await else {
-        return ReleaseHeld::CannotSay("the local drive keeps no volume records".into());
-    };
+    let mut local_vols = Vec::new();
+    let mut here = std::collections::HashSet::new();
+    for local in locals {
+        let Some((v, h)) = recorded_volumes_and_slabs(local).await else {
+            return ReleaseHeld::CannotSay("the local drive keeps no volume records".into());
+        };
+        local_vols.extend(v);
+        here.extend(h);
+    }
     // Sealed here too: a golden a stage is still copying in (#122) has the
     // release's id and is sealed only once it is whole, so a stage cut short
     // never reads as holding the release.
@@ -820,7 +835,7 @@ pub async fn lay_system_drive(device: Arc<dyn BlockDevice>, opts: &LocalLayout) 
     let lba = opts.lba.unwrap_or_else(|| device.block_size());
     let boot_bytes = align_down(opts.boot_bytes, ALIGN);
     let system_bytes = system_drive_slab_bytes(capacity, boot_bytes);
-    if system_bytes < 64 * ALIGN {
+    if system_bytes < SYSTEM_SLAB_MIN {
         return Err(ImageError::Spec(format!(
             "a {capacity} byte drive leaves {system_bytes} bytes for a system slab"
         )));

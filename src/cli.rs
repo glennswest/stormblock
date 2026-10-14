@@ -591,6 +591,33 @@ enum SlabAction {
         local: String,
         /// The image: a device path, a file or an nvme-tcp:// URI
         image: String,
+        /// The drive holding the node's other half (#402, `slab partner`):
+        /// the release is asked of both together
+        #[arg(long = "with")]
+        with: Vec<String>,
+    },
+    /// The drive holding this node's other half, on this machine (#402).
+    ///
+    /// A system slab laid on a drive of its own records its data slab's id;
+    /// from either drive the other is found among the machine's drives by
+    /// that id, never by path or role. Prints the partner's path as the last
+    /// line.
+    ///
+    /// Exit 0: found. Exit 1: the drive is paired with no drive here (one
+    /// drive carries the node, or the partner is missing: said). Exit 2: the
+    /// drive carries no slab, or more than one drive claims the pairing.
+    Partner {
+        /// The drive (or slab) named
+        disk: String,
+        /// Drives to look among; the machine's disks when none is given
+        #[arg(long = "among")]
+        among: Vec<String>,
+        /// The sysfs root the machine's disks are listed under
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        /// Where device nodes are
+        #[arg(long, default_value = "/dev")]
+        dev: String,
     },
     /// The drive stormdrive designates for the system half, on this machine
     /// (#402): read from the `system-data` volume on the node's data half
@@ -2023,6 +2050,50 @@ pub async fn run() -> anyhow::Result<()> {
                     }
                 }
             }
+            SlabAction::Partner { disk, among, sys, dev } => {
+                use crate::image::partner;
+                let d = match inspect_storage(&disk).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        println!("{disk}: cannot open ({e})");
+                        std::process::exit(2);
+                    }
+                };
+                let own = partner::seen_on(&d).await;
+                drop(d);
+                if own.is_empty() {
+                    println!("{disk}: no slab");
+                    std::process::exit(2);
+                }
+                let candidates: Vec<String> = if among.is_empty() {
+                    crate::drive::designation::disks_in(std::path::Path::new(&sys))
+                        .into_iter()
+                        .map(|n| format!("{dev}/{n}"))
+                        .collect()
+                } else {
+                    among
+                };
+                let found = partner::find_among(&own, &candidates, &disk).await;
+                let names = own.iter().filter_map(|s| s.partner).map(|p| p.to_string()).collect::<Vec<_>>();
+                match found.as_slice() {
+                    [] if names.is_empty() => {
+                        println!("{disk}: paired with no drive here");
+                        std::process::exit(1);
+                    }
+                    [] => {
+                        println!("{disk}: its partner (slab {}) is on no drive here", names.join(", "));
+                        std::process::exit(1);
+                    }
+                    [one] => {
+                        println!("{disk}: paired with {one}");
+                        println!("{one}");
+                    }
+                    many => {
+                        println!("{disk}: more than one drive claims the pairing: {}", many.join(", "));
+                        std::process::exit(2);
+                    }
+                }
+            }
             SlabAction::Designated { slabs, sys, dev } => {
                 use crate::drive::designation;
                 let bytes = match volume_file_on_slabs(&slabs, designation::VOLUME, designation::FILE).await {
@@ -2060,8 +2131,8 @@ pub async fn run() -> anyhow::Result<()> {
                     None => std::process::exit(1),
                 }
             }
-            SlabAction::Holds { local, image } => {
-                use crate::image::local::{release_held, ReleaseHeld};
+            SlabAction::Holds { local, image, with } => {
+                use crate::image::local::{release_held_on, ReleaseHeld};
                 let open = |p: String| async move {
                     inspect_storage(&p).await.map_err(|e| anyhow::anyhow!("cannot open {p}: {e}"))
                 };
@@ -2072,7 +2143,17 @@ pub async fn run() -> anyhow::Result<()> {
                         std::process::exit(2);
                     }
                 };
-                match release_held(&l, &i).await {
+                let mut locals = vec![l];
+                for w in with {
+                    match open(w).await {
+                        Ok(d) => locals.push(d),
+                        Err(e) => {
+                            println!("cannot say: {e}");
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                match release_held_on(&locals, &i).await {
                     ReleaseHeld::Held { goldens } => {
                         println!("{local} holds the release on {image}: all {goldens} golden(s)");
                     }
@@ -5703,10 +5784,13 @@ pub async fn run() -> anyhow::Result<()> {
             }
             None => local::system_drive_slab_bytes(sys_dev.capacity_bytes(), sys_layout.boot_bytes),
         };
-        let need = local::update_room_needed(release_bytes);
+        // Never under the smallest system slab, which a lay refuses: asked
+        // here, before anything on either drive is retired or laid.
+        let need = local::update_room_needed(release_bytes).max(local::SYSTEM_SLAB_MIN);
         if slab_bytes < need {
             let why = format!(
-                "{sys_disk} has room for a {} system slab, and an update needs {} (this release's system half is {},                  and the next is staged beside it): not installing onto it",
+                "{sys_disk} has room for a {} system slab, and an update needs {} (this release's system half is {}, \
+                 and the next is staged beside it): not installing onto it",
                 crate::mgmt::config::human_size(slab_bytes),
                 crate::mgmt::config::human_size(need),
                 crate::mgmt::config::human_size(release_bytes),
@@ -5819,6 +5903,14 @@ pub async fn run() -> anyhow::Result<()> {
             }
             (data_id, bulk_id, None)
         };
+        // The pairing, on the system slab's header: either drive finds the
+        // other by id at the next boot, whichever enumerates as sda (#402).
+        // A format-1 slab has no room for it: said, not refused.
+        if let Some(s) = mgr.registry().write().await.get_mut(&system_id) {
+            if let Err(e) = s.set_partner(Some(data_id)).await {
+                println!("Install: WARNING: {sys_disk} does not record its data slab {data_id}: {e}");
+            }
+        }
         let mut first = vec![data_id, system_id];
         first.extend(bulk_id);
         mgr.keep_metadata_in_first(&first);
@@ -10872,7 +10964,6 @@ file = "{state}"
     /// is sized to it and holds N+1; after the flow-over and from the two
     /// drives alone. Then N again over the split node: the system drive's
     /// slab laid again, the data kept.
-    #[ignore = "#402 in progress (paused for #428): the split install is not finished"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_system_half_moves_to_a_drive_of_its_own_and_the_data_stays_where_it_was() {
         use crate::drive::slab::SlabRole;
@@ -10945,7 +11036,14 @@ file = "{state}"
         let laid = g.entries[ss.unwrap()].size_bytes(g.block_size);
         assert_eq!(laid, crate::image::local::system_drive_slab_bytes(ssd_dev.capacity_bytes(),
             crate::image::local::LocalLayout::for_drive(ssd_dev.capacity_bytes()).boot_bytes));
+        // Paired on the disk: each drive finds the other by id (#402).
+        let seen = crate::image::partner::seen_on(&ssd_dev).await;
+        assert_eq!(seen.iter().filter_map(|s| s.partner).collect::<Vec<_>>(), vec![data_id], "the SSD names the HDD's data slab");
         drop(ssd_dev);
+        let among = vec![hdd.clone(), ssd.clone(), image_n.clone()];
+        let hdd_seen = crate::image::partner::seen_on(&super::open_storage(&hdd).await.unwrap()).await;
+        assert_eq!(crate::image::partner::find_among(&hdd_seen, &among, &hdd).await, vec![ssd.clone()], "from the HDD");
+        assert_eq!(crate::image::partner::find_among(&seen, &among, &ssd).await, vec![hdd.clone()], "from the SSD");
 
         flow_into(&claim, &flow).await;
         let check = |when: &'static str| {
@@ -10963,9 +11061,12 @@ file = "{state}"
         check("from the two drives after the flow-over").await;
         let i = super::open_storage(&image_n1).await.unwrap();
         let l = super::open_storage(&ssd).await.unwrap();
+        let d = super::open_storage(&hdd).await.unwrap();
+        let h = crate::image::local::release_held_on(&[l.clone(), d.clone()], &i).await;
+        assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "N+1 held on the two drives: {h:?}");
         let h = crate::image::local::release_held(&l, &i).await;
-        assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "N+1 held on the system drive: {h:?}");
-        drop((i, l));
+        assert!(matches!(h, crate::image::local::ReleaseHeld::NotHeld { .. }), "the system drive alone is half of it: {h:?}");
+        drop((i, l, d));
 
         // N again, over the split node: the system drive laid again in place.
         let claim_n = dir.path().join("claim-11.90.raw").display().to_string();
@@ -10985,7 +11086,6 @@ file = "{state}"
     /// #402: a system drive with no room to stage the next release beside
     /// this one is refused, with the numbers, and nothing is written to
     /// either drive.
-    #[ignore = "#402 in progress (paused for #428): the split install is not finished"]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_system_drive_without_room_for_an_update_is_refused_and_nothing_written() {
         let Some(mkfs) = mkfs_ext4() else {
@@ -10996,7 +11096,8 @@ file = "{state}"
         let (hdd, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
         // Nothing written: any write moves a file's modification time.
         let mtime = |p: &str| std::fs::metadata(p).unwrap().modified().unwrap();
-        // Room for one system half, not two: the release's is ~24 MiB.
+        // Room for one system half, not two, and under the smallest system
+        // slab a drive is laid with: refused before either drive is touched.
         let ssd = dir.path().join("small-ssd.raw").display().to_string();
         std::fs::File::create(&ssd).unwrap().set_len(96 * MIB).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));

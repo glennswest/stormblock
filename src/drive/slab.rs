@@ -341,6 +341,12 @@ struct SlabHeader {
     /// older engine reads) is the part whose entries are zeroed. Format 2
     /// only, at bytes 144..152 (0 = `total_slots`).
     span: u64,
+    /// The slab this one is paired with (#402): on a system slab laid on a
+    /// drive of its own, the node's data slab on the other drive, so either
+    /// drive finds the other by id. Format 2 only, at bytes 152..168 (nil =
+    /// none); covered by the v2 checksum, which an older engine computes over
+    /// the same bytes and otherwise ignores.
+    partner: Uuid,
     #[allow(dead_code)]
     checksum: u32,
     /// [`SLAB_VERSION`] or [`SLAB_VERSION_2`].
@@ -378,6 +384,7 @@ impl SlabHeader {
             buf[136..144].copy_from_slice(&room.to_le_bytes());
             let span = if self.span > self.total_slots { self.span } else { 0 };
             buf[144..152].copy_from_slice(&span.to_le_bytes());
+            buf[152..168].copy_from_slice(self.partner.as_bytes());
             let crc = Self::crc_v2(&buf);
             buf[124..128].copy_from_slice(&crc.to_le_bytes());
             return buf;
@@ -458,6 +465,11 @@ impl SlabHeader {
         } else {
             (table_capacity, total_slots)
         };
+        let partner = if version == SLAB_VERSION_2 {
+            Uuid::from_slice(&data[152..168]).unwrap_or_default()
+        } else {
+            Uuid::nil()
+        };
 
         Ok(SlabHeader {
             slab_uuid,
@@ -477,6 +489,7 @@ impl SlabHeader {
             table_capacity,
             table_room,
             span,
+            partner,
             checksum: stored_crc,
             version,
         })
@@ -1123,6 +1136,7 @@ impl Slab {
             table_capacity: table_capacity.max(total_slots),
             table_room: table_capacity.max(total_slots),
             span: total_slots,
+            partner: Uuid::nil(),
             checksum: 0,
             version: if opts.version == SLAB_VERSION_2 { SLAB_VERSION_2 } else { SLAB_VERSION },
         };
@@ -1944,6 +1958,32 @@ impl Slab {
         self.header.flags & FLAG_DEDICATED != 0
     }
 
+    /// The slab this one is paired with (#402): on a system slab with a
+    /// drive of its own, the node's data slab on the other drive.
+    pub fn partner(&self) -> Option<SlabId> {
+        (!self.header.partner.is_nil()).then_some(SlabId(self.header.partner))
+    }
+
+    /// Record the slab this one is paired with (#402), in the header (a
+    /// format-2 slab only: a format-1 header has no room for it, and says
+    /// so). The header is the only write.
+    pub async fn set_partner(&mut self, partner: Option<SlabId>) -> DriveResult<()> {
+        if self.header.version != SLAB_VERSION_2 {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "slab {} is format 1: its header has no room for a partner",
+                self.id
+            )));
+        }
+        // With the step lock: a step writes the header too (#363).
+        let _g = self.commit.lock.lock().await;
+        let mut h = self.header_now();
+        h.partner = partner.map(|p| p.0).unwrap_or_default();
+        self.device.write(0, &h.to_bytes()).await?;
+        self.device.flush().await?;
+        self.header = h;
+        Ok(())
+    }
+
     /// Whether this slab holds identity and state rather than goldens, and so
     /// must survive every reimage and every flow-over (#88).
     pub fn is_data(&self) -> bool {
@@ -2587,7 +2627,7 @@ mod tests {
             slab_uuid: Uuid::new_v4(), device_uuid: Uuid::new_v4(), slot_size: 1 << 20,
             total_slots: 100, free_slots: 100, data_offset: 1 << 20, table_offset: 4096,
             create_time: 1, update_time: 1, tier: StorageTier::Hot, flags: 0,
-            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, table_room: 100, span: 100, checksum: 0, version: 1,
+            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, table_room: 100, span: 100, partner: Uuid::nil(), checksum: 0, version: 1,
         };
         let b = h.to_bytes();
         assert_eq!(&b[120..124], &[0, 0, 0, 0], "no room beyond total_slots writes zero");
@@ -3523,7 +3563,7 @@ mod tests {
             total_slots: 5_000_000_000, free_slots: 5_000_000_000, data_offset: 1 << 40, table_offset: 4096,
             create_time: 1, update_time: 1, tier: StorageTier::Cold, flags: 0,
             role: SlabRole::Data, meta_offset: 4096, meta_size: 1 << 30, table_capacity: 9_000_000_000,
-            table_room: 9_000_000_000, span: 5_000_000_000, checksum: 0, version: SLAB_VERSION_2,
+            table_room: 9_000_000_000, span: 5_000_000_000, partner: Uuid::from_u128(0x402), checksum: 0, version: SLAB_VERSION_2,
         };
         let mut b = h.to_bytes();
         assert_eq!(u32::from_le_bytes(b[8..12].try_into().unwrap()), 2);
@@ -3531,6 +3571,10 @@ mod tests {
         assert_eq!(back.version, SLAB_VERSION_2);
         assert_eq!(back.table_capacity, 9_000_000_000);
         assert_eq!(back.total_slots, 5_000_000_000);
+        assert_eq!(back.partner, Uuid::from_u128(0x402), "the partner (#402) round-trips");
+        b[160] ^= 1;
+        assert!(SlabHeader::from_bytes(&b).is_err(), "the partner is checksummed");
+        b[160] ^= 1;
         b[130] ^= 1;
         assert!(SlabHeader::from_bytes(&b).is_err(), "the extended header is checksummed");
     }
@@ -3614,6 +3658,7 @@ mod tests {
             table_capacity: 0,
             table_room: 0,
             span: 0,
+            partner: Uuid::nil(),
             checksum: 0,
             version: 1,
         };
@@ -3652,6 +3697,7 @@ mod tests {
             table_capacity: 0,
             table_room: 0,
             span: 0,
+            partner: Uuid::nil(),
             checksum: 0,
             version: 1,
         };
