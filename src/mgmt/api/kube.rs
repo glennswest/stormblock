@@ -140,6 +140,9 @@ async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: 
     labels.insert("storm.io/name".to_string(), name.clone());
     labels.insert("storm.io/node".to_string(), state.v1.lock().await.local_node.clone());
     labels.insert("storm.io/slab-role".to_string(), handle.placement_role().to_string());
+    // The volume's namespace (#408). A label, not `metadata.namespace`: the
+    // resource stays cluster-scoped, as discovery says.
+    labels.insert("storm.io/namespace".to_string(), vm.namespace(&id).to_string());
     if let Some(p) = vm.parent(&id) {
         labels.insert("storm.io/parent".to_string(), p.0.to_string());
     }
@@ -162,6 +165,7 @@ async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: 
             "role": handle.placement_role().to_string(),
             "retention": vm.retention(&id).as_str(),
             "fs": fs.map(|f| f.json()),
+            "namespace": vm.namespace(&id),
         }),
         json!({
             "health": health.state.to_string(),

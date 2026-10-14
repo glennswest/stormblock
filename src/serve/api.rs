@@ -399,6 +399,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if *method == Method::DELETE && seg.len() == 5 && seg[1] == "api" && seg[2] == "v1" && seg[3] == "boothost" {
         return true;
     }
+    // A namespace's quota (#408): what a family may make on this node.
+    if *method == Method::PUT && seg.len() == 6 && seg[3] == "namespaces" && seg[5] == "quota" {
+        return true;
+    }
     // A machine's TPM mark (#216): `none` downgrades its attestation.
     if matches!(*method, Method::PUT | Method::DELETE) && seg.len() == 6 && seg[3] == "boothost" && seg[5] == "tpm" {
         return true;

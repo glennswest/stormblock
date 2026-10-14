@@ -1120,8 +1120,10 @@ impl VolumeManager {
         if name.is_empty() {
             return Err(VolumeError::AllocatorError("a volume needs a name".into()));
         }
+        // Unique within the volume's namespace (#408).
+        let ns = self.namespace(&id).to_string();
         for (other, h) in &self.volumes {
-            if *other != id && h.name().await == name {
+            if *other != id && self.namespace(other) == ns && h.name().await == name {
                 return Err(VolumeError::AllocatorError(format!("volume {other} is already called {name}")));
             }
         }

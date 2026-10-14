@@ -255,6 +255,11 @@ pub struct CreateVolumeRequest {
     /// a redundant volume spreads whatever this says.
     #[serde(default)]
     pub placement: Option<String>,
+    /// The namespace the volume belongs to (#408): a family's (`stormcos`,
+    /// the default; `nana`, …). A name is unique within a namespace other
+    /// than the default; a namespace's quota is kept (`/api/v1/namespaces`).
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
@@ -344,6 +349,10 @@ pub struct ListVolumesQuery {
     /// caller may list.
     #[serde(default)]
     pub namespace: Option<String>,
+    /// The namespaces a Kubernetes bearer may list in, when it may not list
+    /// cluster-wide (#408): set by the auth layer, never by the query.
+    #[serde(skip)]
+    pub only: Option<Vec<String>>,
 }
 
 /// The listing, with the node's volume `generation` beside it (#136).
@@ -433,9 +442,11 @@ async fn listing_generation(state: &AppState, vm: &impl crate::volume::catalog::
 
 async fn list_volumes(
     State(state): State<Arc<AppState>>,
-    axum::extract::Query(q): axum::extract::Query<ListVolumesQuery>,
+    axum::extract::Query(mut q): axum::extract::Query<ListVolumesQuery>,
+    only: Option<axum::Extension<crate::mgmt::auth::ListNamespaces>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    q.only = only.map(|o| o.0 .0);
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "list").increment(1);
     // What is served, gathered before anything else (#138).
     let ctx = super::usage::Context::gather(&state).await;
@@ -492,6 +503,9 @@ async fn list_from(
             continue;
         }
         if q.namespace.as_deref().is_some_and(|n| n != vm.namespace(id)) {
+            continue;
+        }
+        if q.only.as_ref().is_some_and(|o| !o.iter().any(|n| n == vm.namespace(id))) {
             continue;
         }
         let d = describe(vm, id).await;
@@ -897,6 +911,9 @@ async fn create_volume(
     Json(req): Json<CreateVolumeRequest>,
 ) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "create").increment(1);
+    if let Err(r) = crate::mgmt::namespaces::asked(req.namespace.as_deref()) {
+        return r;
+    }
 
     let size = match super::fstemplates::resolve_size(&req.size, None) {
         Ok(s) => s,
@@ -943,6 +960,9 @@ async fn create_volume(
         };
         // Pool admission (#152), before anyone is told it exists.
         if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, vol_id).await {
+            return r;
+        }
+        if let Some(r) = crate::mgmt::namespaces::settle_new_volume(&state, vol_id, req.namespace.as_deref()).await {
             return r;
         }
         let mut vm = state.volume_manager.lock().await;
@@ -1086,6 +1106,9 @@ async fn create_volume(
             // Pool admission (#152): counted with the claim, no lock held.
             drop(vm);
             if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, vol_id).await {
+                return r;
+            }
+            if let Some(r) = crate::mgmt::namespaces::settle_new_volume(&state, vol_id, req.namespace.as_deref()).await {
                 return r;
             }
             let mut vm = state.volume_manager.lock().await;
@@ -1383,7 +1406,11 @@ async fn volume_digest(
 #[derive(Debug, Deserialize)]
 pub struct RenameRequest {
     /// The new name.
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The namespace to move the volume to (#408); an unsealed volume only.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Rename a sealed volume too: a golden is found by its name (clones of
     /// it, `from_template`, compose members, a release's reuse), so this is
     /// refused without it.
@@ -1391,14 +1418,15 @@ pub struct RenameRequest {
     pub force: bool,
 }
 
-/// `PATCH /api/v1/volumes/{id} {name, force?}` (#219): rename a volume.
+/// `PATCH /api/v1/volumes/{id} {name?, namespace?, force?}` (#219, #408):
+/// rename a volume, or move it to another namespace.
 ///
 /// A volume's identity is its id: attachments, exports, synonyms, templates
 /// and lineage name it by id, so they follow. What goes by name is a person
 /// or a tool, which is the point (a PVC still called `standby-…` from before
 /// #137). Destructive (#274): the admin token, or a reviewed bearer. A name
-/// another volume has is refused (409), and so is a sealed volume unless
-/// `force`.
+/// another volume of its namespace has is refused (409), and so is a sealed
+/// volume unless `force`; a sealed volume never changes namespace.
 async fn rename_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1408,30 +1436,63 @@ async fn rename_volume(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let name = req.name.trim().to_string();
-    if name.is_empty() || name.contains('/') || name.chars().any(|c| c.is_control()) || name.len() > 255 {
-        return ApiError::bad_request("a volume's name is 1–255 characters, with no '/' or control characters");
+    if req.name.is_none() && req.namespace.is_none() {
+        return ApiError::bad_request("name or namespace: what to change");
+    }
+    let ns = match crate::mgmt::namespaces::asked(req.namespace.as_deref()) {
+        Ok(n) => n,
+        Err(r) => return r,
+    };
+    let name = req.name.as_deref().map(|n| n.trim().to_string());
+    if let Some(name) = &name {
+        if name.is_empty() || name.contains('/') || name.chars().any(|c| c.is_control()) || name.len() > 255 {
+            return ApiError::bad_request("a volume's name is 1–255 characters, with no '/' or control characters");
+        }
     }
     let mut vm = state.volume_manager.lock().await;
     let Some(h) = vm.get_volume_handle(&vol_id) else {
         return ApiError::not_found(format!("volume {} not found", vol_id.0));
     };
     let previous = h.name().await;
-    if previous == name {
-        return Json(serde_json::json!({ "id": vol_id.0, "name": name, "previous": previous, "renamed": false })).into_response();
+    let previous_ns = vm.namespace(&vol_id).to_string();
+    let name = name.unwrap_or_else(|| previous.clone());
+    let to_ns = ns.unwrap_or(&previous_ns).to_string();
+    if previous == name && previous_ns == to_ns {
+        return Json(serde_json::json!({ "id": vol_id.0, "name": name, "previous": previous, "namespace": to_ns, "renamed": false })).into_response();
     }
-    if h.is_sealed() && !req.force {
+    if h.is_sealed() && previous_ns != to_ns {
+        return ApiError::conflict(format!("{previous} is sealed: its namespace ({previous_ns}) does not change"));
+    }
+    if h.is_sealed() && previous != name && !req.force {
         return ApiError::conflict(format!(
             "{previous} is sealed: a golden is found by its name (its clones, from_template, compose, a \
              release), so renaming it is refused without force"
         ));
     }
-    if let Err(e) = vm.rename_volume(vol_id, &name).await {
-        return ApiError::conflict(format!("rename {previous} to {name}: {e}"));
+    if previous_ns != to_ns {
+        let clash = vm.named_in(&to_ns, &name, Some(vol_id)).await;
+        if let Some(other) = clash.first() {
+            return ApiError::conflict(format!("namespace '{to_ns}' already has a volume named '{name}' ({})", other.0));
+        }
+        if let Err(e) = vm.set_namespace(vol_id, &to_ns) {
+            return ApiError::conflict(format!("{previous}: {e}"));
+        }
+    }
+    if previous != name {
+        if let Err(e) = vm.rename_volume(vol_id, &name).await {
+            if previous_ns != to_ns {
+                let _ = vm.set_namespace(vol_id, &previous_ns);
+            }
+            return ApiError::conflict(format!("rename {previous} to {name}: {e}"));
+        }
     }
     vm.persist().await;
-    tracing::info!("volume {} renamed: {previous} -> {name}", vol_id.0);
-    Json(serde_json::json!({ "id": vol_id.0, "name": name, "previous": previous, "renamed": true })).into_response()
+    tracing::info!("volume {} renamed: {previous_ns}/{previous} -> {to_ns}/{name}", vol_id.0);
+    Json(serde_json::json!({
+        "id": vol_id.0, "name": name, "previous": previous,
+        "namespace": to_ns, "previous_namespace": previous_ns, "renamed": true
+    }))
+    .into_response()
 }
 
 /// A pallet volume's superblock (a composed pallet, #378).
@@ -1658,6 +1719,9 @@ pub struct CloneRequest {
     /// container root claim to belong to the image it came from.
     #[serde(default)]
     pub owner: Option<crate::volume::metadata::Owner>,
+    /// The clone's namespace (#408). Absent: its source's.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -1679,6 +1743,9 @@ async fn clone_volume(
     // name, and nobody carries the uuid around. The volume manager has always
     // resolved either; this door did not, so cloning a golden by the only
     // handle its consumers have came back as "invalid UUID".
+    if let Err(r) = crate::mgmt::namespaces::asked(req.namespace.as_deref()) {
+        return r;
+    }
     let uuid = match resolve_volume(&state, &id).await {
         Ok(u) => u.0,
         Err(r) => return r,
@@ -1704,6 +1771,9 @@ async fn clone_volume(
     match crate::fs::template::clone_volume(&state.volume_manager, VolumeId(uuid), &spec).await {
         Ok(c) => {
             if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, c.volume_id).await {
+                return r;
+            }
+            if let Some(r) = crate::mgmt::namespaces::settle_new_volume(&state, c.volume_id, req.namespace.as_deref()).await {
                 return r;
             }
             let mut vm = state.volume_manager.lock().await;
@@ -2234,9 +2304,12 @@ async fn set_ana(
 /// volume: a name means what it has always meant, and a synonym is only
 /// consulted for names nothing else answers to.
 /// The volumes called `name`, from a view (#112).
-async fn volumes_named(vm: &impl VolumeView, name: &str) -> Vec<VolumeId> {
+async fn volumes_named(vm: &impl VolumeView, name: &str, namespace: Option<&str>) -> Vec<VolumeId> {
     let mut out = Vec::new();
     for id in vm.volume_ids() {
+        if namespace.is_some_and(|n| n != vm.namespace(&id)) {
+            continue;
+        }
         if let Some(h) = vm.get_volume_handle(&id) {
             if h.name().await == name {
                 out.push(id);
@@ -2255,10 +2328,12 @@ pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<Volum
     if let Ok(u) = key.parse::<Uuid>() {
         return Ok(VolumeId(u));
     }
-    // The published catalog when it is current (#364), else the manager.
+    // The published catalog when it is current (#364), else the manager;
+    // within `?namespace=` when the request names one (#408).
+    let ns = request_namespace();
     let named = match state.volume_catalog.latest() {
-        Some(c) if crate::volume::catalog::is_current(&c, &state.volume_presence) => volumes_named(&c, key).await,
-        _ => volumes_named(&*state.volume_manager.lock().await, key).await,
+        Some(c) if crate::volume::catalog::is_current(&c, &state.volume_presence) => volumes_named(&c, key, ns.as_deref()).await,
+        _ => volumes_named(&*state.volume_manager.lock().await, key, ns.as_deref()).await,
     };
     match named.as_slice() {
         [one] => Ok(*one),
@@ -2267,7 +2342,7 @@ pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<Volum
             None => Err(ApiError::not_found(format!("no volume {key}"))),
         },
         many => Err(ApiError::conflict(format!(
-            "{} volumes are called {key}: {}; name one by its id",
+            "{} volumes are called {key}: {}; name one by its id (or its namespace, ?namespace=)",
             many.len(),
             many.iter().map(|v| v.0.to_string()).collect::<Vec<_>>().join(", ")
         ))),
@@ -3387,5 +3462,27 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/compose/pallet", axum::routing::post(compose_pallet))
         .route("/compose/disk", axum::routing::post(compose_disk))
         .route("/compose/slab", axum::routing::post(compose_slab))
+        .layer(axum::middleware::from_fn(namespace_scope))
         .with_state(state)
+}
+
+tokio::task_local! {
+    /// The namespace a request's `?namespace=` names (#408): a `{id}` that is
+    /// a name is looked for there.
+    static REQUEST_NAMESPACE: Option<String>;
+}
+
+/// Carries `?namespace=` to [`volume_key`] for every route under
+/// `/api/v1/volumes` (#408).
+async fn namespace_scope(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let ns = req
+        .uri()
+        .query()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("namespace=").map(str::to_string)))
+        .filter(|n| !n.is_empty());
+    REQUEST_NAMESPACE.scope(ns, next.run(req)).await
+}
+
+fn request_namespace() -> Option<String> {
+    REQUEST_NAMESPACE.try_with(|n| n.clone()).ok().flatten()
 }

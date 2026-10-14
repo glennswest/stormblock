@@ -76,6 +76,15 @@ pub struct GoldenRecord {
     /// Where an import pulled it from (no ticket).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+    /// Its namespace (#408), when not the default (`stormcos`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+impl GoldenRecord {
+    pub fn namespace(&self) -> &str {
+        self.namespace.as_deref().unwrap_or(crate::volume::metadata::DEFAULT_NAMESPACE)
+    }
 }
 
 fn file(state: &AppState) -> Option<PathBuf> {
@@ -98,7 +107,7 @@ fn store_lock() -> &'static tokio::sync::Mutex<()> {
 pub async fn record(state: &AppState, r: GoldenRecord) -> Result<(), String> {
     let _g = store_lock().lock().await;
     let mut all = load(state);
-    all.retain(|x| x.name != r.name);
+    all.retain(|x| x.name != r.name || x.namespace() != r.namespace());
     all.push(r);
     all.sort_by(|a, b| a.name.cmp(&b.name));
     let p = file(state).ok_or("this node keeps no data directory")?;
@@ -106,9 +115,19 @@ pub async fn record(state: &AppState, r: GoldenRecord) -> Result<(), String> {
     crate::serve::wiring::write_atomic(&p, &bytes).map_err(|e| e.to_string())
 }
 
-/// The golden of that name, when its volume is still here.
-pub async fn find(state: &AppState, name: &str) -> Option<GoldenRecord> {
-    let r = load(state).into_iter().find(|r| r.name == name)?;
+/// The golden of that name (in `namespace`, when given; else the default
+/// namespace's, else the one of that name, #408), when its volume is still
+/// here.
+pub async fn find(state: &AppState, name: &str, namespace: Option<&str>) -> Option<GoldenRecord> {
+    let named: Vec<GoldenRecord> = load(state).into_iter().filter(|r| r.name == name).collect();
+    let r = match namespace {
+        Some(ns) => named.into_iter().find(|r| r.namespace() == ns)?,
+        None => match named.iter().position(|r| r.namespace() == crate::volume::metadata::DEFAULT_NAMESPACE) {
+            Some(i) => named.into_iter().nth(i)?,
+            None if named.len() == 1 => named.into_iter().next()?,
+            None => return None,
+        },
+    };
     state.volume_manager.lock().await.get_volume_handle(&VolumeId(r.volume_id))?;
     Some(r)
 }
@@ -167,7 +186,9 @@ pub struct MakeRequest {
     pub force: bool,
     /// How long the reply's ticket lives (default an hour, at most a day).
     #[serde(default)]
-    pub ticket_secs: Option<u64>,
+    pub ticket_secs: Option<u64>,    /// The golden's namespace (#408); absent: its source's.
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 /// Why a make failed, as an HTTP status and a sentence.
@@ -224,6 +245,12 @@ pub async fn make(
         .create_snapshot(source, &pending)
         .await
         .map_err(|e| MakeError(500, format!("snapshot: {e}")))?;
+    // Its namespace (#408), set while it is unsealed: the request's, else
+    // its source's (the snapshot already has that); the quota kept.
+    if let Err(r) = crate::mgmt::namespaces::settle(state, snap, req.namespace.as_deref()).await {
+        return Err(MakeError(r.status.as_u16(), r.message));
+    }
+    let ns = state.volume_manager.lock().await.namespace(&snap).to_string();
     let pending_name: &str = &pending;
     let undo = |why: MakeError| async move {
         if let Err(e) = state.volume_manager.lock().await.delete_volume(snap).await {
@@ -246,7 +273,7 @@ pub async fn make(
     let name = golden_name(&req.name, &sha);
 
     // Never over another volume; the same content again is the golden here.
-    let taken = state.volume_manager.lock().await.find_volume(&name).await;
+    let taken = state.volume_manager.lock().await.named_in(&ns, &name, Some(snap)).await.first().copied();
     if let Some(other) = taken {
         let same = load(state).into_iter().find(|r| r.name == name && r.volume_id == other.0 && r.sha256 == sha);
         let _ = undo(MakeError(0, String::new())).await;
@@ -272,6 +299,7 @@ pub async fn make(
         provenance: req.provenance.clone(),
         made_by,
         from: None,
+        namespace: (ns != crate::volume::metadata::DEFAULT_NAMESPACE).then_some(ns),
     };
     if let Err(e) = record(state, r.clone()).await {
         tracing::warn!("golden {}: made, but not recorded: {e}", r.name);

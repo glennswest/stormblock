@@ -23,6 +23,7 @@ pub mod forge;
 pub mod forge_trust;
 pub mod kernelopt;
 pub mod creators;
+pub mod namespaces;
 #[cfg(feature = "ui")]
 pub mod ui;
 
@@ -350,6 +351,8 @@ pub struct AppState {
     pub imports: tokio::sync::RwLock<crate::image::import::Imports>,
     /// Who made each volume, synonym and host record (#422).
     pub creators: std::sync::Mutex<creators::Creators>,
+    /// What each namespace may hold (#408), `quotas.json`.
+    pub quotas: std::sync::Mutex<namespaces::Quotas>,
     /// What each drive opened on this node held when it was opened (#154),
     /// by path: ours (adopted), blank or foreign (offered).
     pub drive_offers: std::sync::Mutex<HashMap<String, drive_offer::Offer>>,
@@ -613,6 +616,9 @@ impl AppState {
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
             drive_offers: std::sync::Mutex::new(HashMap::new()),
             creators: std::sync::Mutex::new(creators::Creators::load(
+                config.management.data_dir.as_deref().map(std::path::Path::new),
+            )),
+            quotas: std::sync::Mutex::new(namespaces::Quotas::load(
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),
             serve: std::sync::OnceLock::new(),

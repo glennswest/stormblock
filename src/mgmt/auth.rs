@@ -567,13 +567,40 @@ pub async fn require_token(
             let (resource, verb, target) =
                 crate::serve::api::ordinary_review_attributes(&method, &path, req.uri().query());
             use super::kubeauth::Review;
-            return match kube.review(bearer, &resource, &verb, target.as_deref()).await {
+            // In the volume's namespace (#408).
+            let (req, ns) = review_namespace(&state, req, &method, &path).await;
+            let mut review = kube.review_in(bearer, &resource, &verb, target.as_deref(), ns.as_deref()).await;
+            // A list of every namespace a bearer may not list cluster-wide:
+            // the namespaces it may list, each asked (#408).
+            let mut only = None;
+            if let (Review::Denied(..), true) = (&review, resource == "volumes" && ns.is_none() && verb != "watch") {
+                let names: Vec<String> = match super::namespaces::current_view(&state).await {
+                    Some(v) => super::namespaces::usage(&*v).await.into_keys().collect(),
+                    None => Vec::new(),
+                };
+                let mut may = Vec::new();
+                let mut first = None;
+                for n in names {
+                    if let Review::Allowed(u) = kube.review_in(bearer, &resource, &verb, None, Some(&n)).await {
+                        first.get_or_insert(u);
+                        may.push(n);
+                    }
+                }
+                if let Some(u) = first {
+                    review = Review::Allowed(u);
+                    only = Some(ListNamespaces(may));
+                }
+            }
+            return match review {
                 Review::Allowed(u) => {
                     if let Some(s) = &slot {
                         s.set("kubernetes");
                     }
                     let mut req = req;
                     req.extensions_mut().insert(Caller(format!("kubernetes:{}", u.username)));
+                    if let Some(o) = only {
+                        req.extensions_mut().insert(o);
+                    }
                     next.run(req).await
                 }
                 Review::Denied(u, why) => {
@@ -625,6 +652,12 @@ pub async fn require_token(
         (None, false) => String::new(),
     };
     let other_bearer = presented.is_some() && !is_admin && presented.as_deref() != Some(api_token);
+    // The namespace a bearer's review is in (#408).
+    let (req, review_ns) = if other_bearer && state.kube_auth.is_some() {
+        review_namespace(&state, req, &method, &path).await
+    } else {
+        (req, None)
+    };
     if is_admin {
         rec.who = match (&cert_admin, &cert) {
             (Some(name), Some(c)) => format!("client-cert-admin:{name}:{}", c.fingerprint),
@@ -651,7 +684,7 @@ pub async fn require_token(
         // Its own object (#422): `delete` is enough.
         let mut own = false;
         if let Some(c) = owned_creator.as_ref() {
-            match kube.review(bearer, &resource, "delete", target.as_deref()).await {
+            match kube.review_in(bearer, &resource, "delete", target.as_deref(), review_ns.as_deref()).await {
                 Review::Allowed(u) if c.is(&u.username) => {
                     rec.who = format!("kubernetes:{}", u.username);
                     rec.verb = "delete".into();
@@ -673,7 +706,7 @@ pub async fn require_token(
         }
         if own {
         } else {
-        match kube.review(bearer, &resource, &verb, target.as_deref()).await {
+        match kube.review_in(bearer, &resource, &verb, target.as_deref(), review_ns.as_deref()).await {
             Review::Allowed(u) => {
                 rec.who = format!("kubernetes:{}", u.username);
                 rec.decision = "allowed".into();
@@ -707,6 +740,40 @@ pub async fn require_token(
     rec.status = Some(resp.status().as_u16());
     super::kubeauth::audit(state.audit_log.as_deref(), &rec);
     resp
+}
+
+/// The namespaces a Kubernetes bearer's volume listing is narrowed to
+/// (#408): it may not list volumes cluster-wide, and may in these.
+#[derive(Debug, Clone)]
+pub struct ListNamespaces(pub Vec<String>);
+
+/// The namespace a bearer's request is reviewed in (#408), with the request
+/// back: a create's, clone's or import's JSON body is read for its
+/// `namespace` when it says its length and that is at most 1 MiB, and handed
+/// on as it was.
+async fn review_namespace(
+    state: &AppState,
+    req: Request,
+    method: &axum::http::Method,
+    path: &str,
+) -> (Request, Option<String>) {
+    if !path.starts_with("/api/v1/volumes") {
+        return (req, None);
+    }
+    let len = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    let query = req.uri().query().map(str::to_string);
+    if *method == axum::http::Method::POST && len.is_some_and(|l| l <= 1 << 20) {
+        let (parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap_or_default();
+        let ns = super::namespaces::for_review(state, path, query.as_deref(), Some(&bytes)).await;
+        return (Request::from_parts(parts, axum::body::Body::from(bytes)), ns);
+    }
+    let ns = super::namespaces::for_review(state, path, query.as_deref(), None).await;
+    (req, ns)
 }
 
 /// The creator record a delete-like call is about (#422): a volume's delete
