@@ -1268,7 +1268,7 @@ Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).
 - [x] check.sh at fc3333a ALL PASS (1203/1203); commented
 - [ ] golden: held until stormcentral#841 is live; proposed after it; then close #411
 
-### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — DONE here; golden waits on stormcentral#841
+### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — DONE (golden-stormblock-12891c0025b2), closed; end to end waits on stormcentral#845, stormcos#571, stormupdate#24
 
 Master for the owner (2026-10-13): **1B** the release's manifest lists its
 kernel set's optional goldens (`optional: true`, the image, the kernel), so a
@@ -1289,7 +1289,8 @@ the content route and the mTLS check now; enrollment's wiring is stormcos's.
       limits); README, auth.md, CHANGELOG; stormcentral#845 (manifest rows),
       stormupdate#24 (A/B), stormcos#571 (the ask, forge's TLS)
 - [x] check.sh at 552996d ALL PASS (1201/1201); commented
-- [ ] golden: held until stormcentral#841 is live; proposed after it
+- [x] in golden-stormblock-12891c0025b2 (12.23 stage, 4d79108 ⊇ 552996d);
+      the test and the kernel-match unit pass on main (2026-10-14). Closed
 
 ### A reviewed Kubernetes bearer for ordinary verbs (2026-10-10, #382, P2) — DONE (golden-stormblock-d56a8225b161)
 
