@@ -1001,7 +1001,7 @@ map) per move.
       `flow_over`. golden-stormblock-5f8bc680a12b
       (staged for #300) carries f991f31, unchecked: stormcos#467 told
 
-### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — DONE here; golden waits on stormcentral#841
+### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — DONE (golden-stormblock-12891c0025b2), closed
 
 Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
 - [x] pins: mkfs-ext4 v4.1.0 + fio-ext4 v1.8.0, Cargo.lock by hand (same
@@ -1033,7 +1033,8 @@ Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
       258 s + check 382 s clean, peak 1056 MiB; template (format + seal)
       1016 s, peak 1579 MiB, 4.7 GiB stored. README, CHANGELOG
 - [x] check.sh at a1c99f5 ALL PASS (1199/1199); commented
-- [ ] golden: held with #428/#410/#413/#417/#412 until stormcentral#841 is live; proposed after it
+- [x] in golden-stormblock-12891c0025b2 (12.23 stage, 4d79108 ⊇ a1c99f5);
+      check.sh at 1171474 ALL PASS (1240/1240) with the same pins. Closed
 
 ### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — DONE (golden-stormblock-041d379caced)
 
