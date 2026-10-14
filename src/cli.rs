@@ -12014,6 +12014,63 @@ mod forge_mode_tests {
         assert_eq!(back, image, "the clone reads as the release it was claimed from");
     }
 
+    /// A destination disk whose flushes take `delay` (#410: a DRAM-less SSD
+    /// such as server8's Patriot P210 writing back what it was handed). Its
+    /// flushes are recorded under the disk's own name, as `flushgate::recent`
+    /// reads them.
+    struct SlowFlush {
+        inner: Arc<dyn BlockDevice>,
+        delay: std::time::Duration,
+        gate: crate::drive::flushgate::FlushGate,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for SlowFlush {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.inner.id()
+        }
+        fn drive_id(&self) -> crate::drive::DeviceId {
+            self.inner.drive_id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.inner.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.inner.optimal_io_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            self.inner.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            let (inner, delay) = (self.inner.clone(), self.delay);
+            let label = self.inner.drive_id().path;
+            self.gate
+                .flush(&label, || async move {
+                    tokio::time::sleep(delay).await;
+                    inner.flush().await
+                })
+                .await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+        fn discard_granularity(&self) -> u32 {
+            self.inner.discard_granularity()
+        }
+        fn smart_status(&self) -> crate::drive::DriveResult<crate::drive::SmartData> {
+            self.inner.smart_status()
+        }
+    }
+
     /// #331: the flow-over's rate, modelled on a netbooted install. An
     /// appliance engine serves a release slab (goldens, and clones of them
     /// that wrote an extent each) as a sealed volume over NVMe/TCP; the node
@@ -12021,7 +12078,8 @@ mod forge_mode_tests {
     /// system slab and runs the flow-over with the persist `spawn_flow_over`
     /// uses, while a foreground writer runs. Prints the rate and where the
     /// time went (`FlowSpent`). Knobs: FLOW_MODEL_EXTENTS (1500),
-    /// FLOW_MODEL_GOLDENS (30), FLOW_MODEL_FOREGROUND (1).
+    /// FLOW_MODEL_GOLDENS (30), FLOW_MODEL_FOREGROUND (1),
+    /// FLOW_MODEL_DEST_FLUSH_MS (0: the destination's flushes take this, #410).
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     #[ignore]
     async fn flow_over_rate_model() {
@@ -12124,13 +12182,22 @@ mod forge_mode_tests {
         // The node: the clone over NVMe/TCP, and its own system slab.
         let (mut node, _, _) = super::open_slabs_with_disks(&[uri], None, false).await.unwrap();
         let src = *node.registry().read().await.iter().next().unwrap().0;
-        let local = FileDevice::open_with_capacity(dir.path().join("sda.bin").to_str().unwrap(), release_bytes)
-            .await
-            .unwrap();
+        let local = Arc::new(
+            FileDevice::open_with_capacity(dir.path().join("sda.bin").to_str().unwrap(), release_bytes)
+                .await
+                .unwrap(),
+        ) as Arc<dyn BlockDevice>;
+        let dest_flush = env("FLOW_MODEL_DEST_FLUSH_MS", 0);
+        let local = if dest_flush > 0 {
+            Arc::new(SlowFlush { inner: local, delay: Duration::from_millis(dest_flush), gate: Default::default() })
+                as Arc<dyn BlockDevice>
+        } else {
+            local
+        };
         let fmt = crate::drive::slab::SlabFormat::new(MIB, StorageTier::Hot)
             .with_role(SlabRole::System)
             .with_auto_metadata(release_bytes);
-        let dest_slab = Slab::format_with(Arc::new(local), fmt).await.unwrap();
+        let dest_slab = Slab::format_with(local, fmt).await.unwrap();
         let dest = dest_slab.slab_id();
         node.add_slab(dest_slab).await;
         node.keep_metadata_in_first(&[dest]);
@@ -12174,7 +12241,7 @@ mod forge_mode_tests {
             serde_json::json!({
                 "extents_on_source": left, "moved": moved, "failed": failed, "secs": secs,
                 "extents_per_hour": moved as f64 * 3600.0 / secs, "mb_per_s": moved as f64 / secs,
-                "foreground": foreground, "built_secs": built.as_secs_f64(),
+                "foreground": foreground, "built_secs": built.as_secs_f64(), "dest_flush_ms": dest_flush,
             })
         );
         assert_eq!(failed, 0);
