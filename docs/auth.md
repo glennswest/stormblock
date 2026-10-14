@@ -65,6 +65,8 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
   snapshots, which a CSI controller deletes as Kubernetes objects go.
 
 **Destructive:**
+- formatting a drive that was offered (#154): `POST
+  /api/v1/drives/{id}/format`;
 - slabs: `POST /api/v1/slabs` (format), `DELETE`, and a GC that is not a dry
   run;
 - arrays: create, delete, and members added, failed or replaced;
