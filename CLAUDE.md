@@ -1044,6 +1044,19 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
+### A boot claim timed out at 10 s and was sent again (2026-10-14, #424, P2) — DONE here; golden waits on stormcentral#841
+
+pvetest1 12.21 (forge on 13.7.0): pvetest2's claim ~9 s, pvetest1's queued
+behind it (one lock for every claim) past the initramfs's 10 s attempt.
+Today: 2 clones per first boot (stamp + flush each), 2.3 s at 500 ms flushes.
+- [x] lock per host (resolution keeps the global one); claim on its own task
+      (`spawn_owing`); timing log + `timing` in the reply
+- [x] initramfs: one attempt for the whole budget, `still waiting` every 10 s
+- [x] tests: `integration_locks::two_first_boot_claims_at_once_…` (wait 0,
+      abandoned claim finishes), `cli::boot_claim_wait_tests::…` (12 s claim,
+      one request); README, auth.md, CHANGELOG
+- [ ] check.sh; golden (held for stormcentral#841); stormcos_qa known.toml
+
 ### A storage-user deletes what it created (2026-10-14, #422 + #416, P2) — DONE here; golden waits on stormcentral#841
 
 Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).

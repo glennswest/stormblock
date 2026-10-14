@@ -321,7 +321,11 @@ overlay, so the image is not modified even within a boot.
 
 The claim answers with `host` (`name`, `claimed_as`, `aliases`),
 `host_golden` (`volume`, `minted`, `collected`) and `claimed_from.release`
-beside the usual `volume` and `attach`.
+beside the usual `volume` and `attach`, and `timing` (`total_ms`,
+`steps_ms`: `wait`, `host_golden` or `host_golden_made`, `boot_clone`,
+`released`, `attach`; #424), which the appliance also logs once per claim.
+Claims for different machines run at once; two for one host take turns. A
+claim runs to its end even when the machine stopped waiting for it.
 
 The claim also answers `intent` (below).
 
