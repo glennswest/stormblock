@@ -6855,6 +6855,44 @@ pub async fn run() -> anyhow::Result<()> {
         n
     }
 
+    /// After a flow-over (#412): validate what it moved, and let go of the
+    /// appliance's slots only once that passes. `Err` is FlowOverCorrupt:
+    /// the extents that would not read back are read from the appliance
+    /// again (persisted), and the caller does not lay local boot, retire the
+    /// sources or report the install. Cut anywhere (a power cut), nothing
+    /// has been let go and nothing reported: the next boot moves and checks
+    /// again (the install intent stays `install`, #220).
+    pub(crate) async fn settle_flow<P, F>(
+        gem: &crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>,
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        held: &FlowHeld,
+        sealed: &std::collections::HashSet<crate::volume::VolumeId>,
+        disk: &str,
+        persist: P,
+    ) -> Result<Validation, String>
+    where
+        P: Fn() -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        let checked = validate_flow(gem, registry, held, sealed).await;
+        if !checked.unrepaired.is_empty() {
+            let n = checked.unrepaired.len();
+            let reverted = revert_to_sources(gem, &checked.unrepaired).await;
+            persist().await;
+            let why = format!(
+                "FlowOverCorrupt: {n} extent(s) on {disk} do not read back what was written, after \
+                 {VALIDATE_TRIES} rewrites each: the drive or its path is faulty. Those extents are read \
+                 from the appliance again ({reverted} reference(s)); the node does not go local"
+            );
+            tracing::error!("flow-over: {why}");
+            println!("ERROR: {why}");
+            return Err(why);
+        }
+        let freed = free_held(registry, held).await;
+        tracing::info!("flow-over: validated; {freed} source slot(s) on the appliance let go");
+        Ok(checked)
+    }
+
     /// Free the source slots a flow-over held (#412), once its validation
     /// passed and the map naming their copies is durable.
     pub(crate) async fn free_held(
@@ -7347,24 +7385,10 @@ pub async fn run() -> anyhow::Result<()> {
                     }
                     None => return,
                 };
-                let checked = validate_flow(&gem_arc, &reg_arc, &held, &sealed).await;
-                if !checked.unrepaired.is_empty() {
-                    let n = checked.unrepaired.len();
-                    let reverted = revert_to_sources(&gem_arc, &checked.unrepaired).await;
-                    persist().await;
-                    let why = format!(
-                        "FlowOverCorrupt: {n} extent(s) on {} do not read back what was written, after {} \
-                         rewrites each: the drive or its path is faulty. Those extents are read from the \
-                         appliance again ({reverted} reference(s)); the node does not go local",
-                        flow.disk, VALIDATE_TRIES
-                    );
-                    tracing::error!("flow-over: {why}");
-                    println!("ERROR: {why}");
+                if let Err(why) = settle_flow(&gem_arc, &reg_arc, &held, &sealed, &flow.disk, persist).await {
                     *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
                     return;
                 }
-                let freed = free_held(&reg_arc, &held).await;
-                tracing::info!("flow-over: validated; {freed} source slot(s) on the appliance let go");
                 local_boot(then_local_boot).await;
                 retire_sources(retire).await;
             } else {
@@ -11728,6 +11752,8 @@ file = "{state}"
     struct Flipping {
         inner: Arc<dyn BlockDevice>,
         bad: std::sync::atomic::AtomicU64,
+        /// Every read takes this long (a far appliance).
+        delay_ms: std::sync::atomic::AtomicU64,
     }
 
     #[async_trait::async_trait]
@@ -11751,6 +11777,10 @@ file = "{state}"
             self.inner.device_type()
         }
         async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            let d = self.delay_ms.load(std::sync::atomic::Ordering::Relaxed);
+            if d > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(d)).await;
+            }
             let n = self.inner.read(offset, buf).await?;
             let bad = self.bad.load(std::sync::atomic::Ordering::Relaxed);
             if bad != u64::MAX && bad >= offset && bad < offset + buf.len() as u64 {
@@ -11792,7 +11822,8 @@ file = "{state}"
         };
         let fmt = || SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System);
         let mut mgr = VolumeManager::new(SLOT);
-        let source = Slab::format_with(open("appliance.slab").await, fmt()).await.unwrap();
+        let src_dev = Arc::new(Flipping { inner: open("appliance.slab").await, bad: u64::MAX.into(), delay_ms: 0.into() });
+        let source = Slab::format_with(src_dev.clone() as Arc<dyn BlockDevice>, fmt()).await.unwrap();
         let source_id = source.slab_id();
         mgr.add_slab(source).await;
         let golden = mgr.create_volume_any("golden", EXTENTS * SLOT).await.unwrap();
@@ -11805,7 +11836,7 @@ file = "{state}"
         let c = mgr.get_volume(&clone).unwrap();
         c.write(0, &[7u8; 4096]).await.unwrap();
         c.flush().await.unwrap();
-        let dev = Arc::new(Flipping { inner: open("local.slab").await, bad: u64::MAX.into() });
+        let dev = Arc::new(Flipping { inner: open("local.slab").await, bad: u64::MAX.into(), delay_ms: 0.into() });
         let local = Slab::format_with(dev.clone() as Arc<dyn BlockDevice>, fmt()).await.unwrap();
         let local_id = local.slab_id();
         mgr.add_slab(local).await;
@@ -11828,8 +11859,12 @@ file = "{state}"
         let used = mgr.registry().read().await.get(&source_id).unwrap().allocated_slots();
         assert_eq!(used, EXTENTS + 1, "the source slots are kept until the validation passes");
         let _ = flipping;
+        *SOURCE_DEV.lock().unwrap() = Some(src_dev);
         (mgr, held, local_id, dev, golden)
     }
+
+    /// The appliance's drive of the last [`flowed_for_validation`], to slow.
+    static SOURCE_DEV: std::sync::Mutex<Option<Arc<Flipping>>> = std::sync::Mutex::new(None);
 
     fn sealed_of(mgr: &VolumeManager) -> std::collections::HashSet<crate::volume::VolumeId> {
         mgr.volume_ids().into_iter().filter(|id| mgr.is_sealed(id)).collect()
@@ -11875,6 +11910,44 @@ file = "{state}"
         // Then the sources go.
         let freed = super::free_held(mgr.registry(), &held).await;
         assert_eq!(freed, 17);
+    }
+
+    /// #412: a power cut during the validation lets go of nothing: the
+    /// appliance's slots are all still held and the validation is not
+    /// passed, so nothing that follows it (local boot, the install report)
+    /// has happened. Run again (the next boot's), it passes, and only then
+    /// are the sources freed.
+    #[tokio::test]
+    async fn a_cut_during_the_validation_lets_go_of_nothing() {
+        std::env::set_var("STORMBLOCK_FLOW_WINDOW", "2");
+        std::env::set_var("STORMBLOCK_FLOW_PARALLEL", "1");
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, held, _local_id, _dev, _golden) = flowed_for_validation(dir.path(), false).await;
+        let source_id = held.moved.lock().unwrap()[0].0.slab_id;
+        let src_dev = SOURCE_DEV.lock().unwrap().clone().unwrap();
+        src_dev.delay_ms.store(40, std::sync::atomic::Ordering::Relaxed);
+        let sealed = sealed_of(&mgr);
+        let cut = tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            super::settle_flow(mgr.gem(), mgr.registry(), &held, &sealed, "local.slab", || mgr.persist()),
+        )
+        .await;
+        assert!(cut.is_err(), "cut part-way");
+        let report = crate::flowprogress::FLOW.snapshot().unwrap().validation.unwrap();
+        assert_eq!(report.state, "running", "not passed: {report:?}");
+        assert!(report.validated > 0 && report.validated < report.total, "part-way: {report:?}");
+        assert_eq!(
+            mgr.registry().read().await.get(&source_id).unwrap().allocated_slots(),
+            17,
+            "every source slot still held"
+        );
+        src_dev.delay_ms.store(0, std::sync::atomic::Ordering::Relaxed);
+        let v = super::settle_flow(mgr.gem(), mgr.registry(), &held, &sealed, "local.slab", || mgr.persist())
+            .await
+            .expect("it passes when run again");
+        assert_eq!(v.validated, 16);
+        assert_eq!(crate::flowprogress::FLOW.snapshot().unwrap().validation.unwrap().state, "passed");
+        assert_eq!(mgr.registry().read().await.get(&source_id).unwrap().allocated_slots(), 0, "let go once passed");
     }
 
     /// #412: a drive that keeps reading back a wrong byte is FlowOverCorrupt:
