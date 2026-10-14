@@ -2018,7 +2018,7 @@ disk fails loudly and names the drive.
 - Not on metal: the Dell installing a release with this initramfs (it then
   takes sda with no `rd.stormblock.slab=`), or naming why it cannot
 
-### /v1: promote and expiry tear down the data path; expiry on time (2026-10-08, #195) — IN PROGRESS
+### /v1: promote and expiry tear down the data path; expiry on time (2026-10-08, #195) — DONE (golden-stormblock-12891c0025b2), closed
 
 Promote and a dual-attach window's auto-abort dropped attachment records and
 left the ublk device / namespace; expiry ran only inside some calls.
@@ -2028,10 +2028,11 @@ left the ublk device / namespace; expiry ran only inside some calls.
       (`expiry_loop`, ends with the state); windows still open at a restart
       expire on the timer
 - [x] docs (migration.md), CHANGELOG
-- [ ] test `integration_ana_epoch::promote_and_an_expired_window_take_the_
+- [x] test `integration_ana_epoch::promote_and_an_expired_window_take_the_
       data_path_with_the_record`: first run failed on its own assertion (an
-      empty `attachments` is left out of the reply); fixed, to run again.
-      PAUSED for P0 #344
+      empty `attachments` is left out of the reply); fixed (7c1c865);
+      passes alone (2026-10-14, 3/3 ANA/epoch tests) and in every check.sh
+      since (1171474: 1240/1240). In golden-stormblock-12891c0025b2. Closed
 
 ### tests-runtime/ has a gate (2026-10-08, #222) — DONE (check.sh, 6381f35 ALL PASS)
 
