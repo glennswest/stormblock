@@ -1539,6 +1539,76 @@ mod tests {
         assert_eq!(image_ids.len(), 3);
     }
 
+    /// #384: `slab holds` reads the verdicts. A golden whose copy read as a
+    /// mismatch, or that this drive records with another digest than the
+    /// image's, is not held (exit 1: the system half is laid again); no
+    /// verdict, or an intact one, is today's answer.
+    #[tokio::test]
+    async fn a_golden_that_does_not_read_as_sealed_is_not_held() {
+        use crate::raid::RaidArrayId;
+        use crate::volume::metadata::{SealDigest, Verdict};
+        use crate::volume::VolumeManager;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut layout = LocalLayout::for_drive(CAP);
+        layout.slot_size = 1024 * 1024;
+        let p = |n: &str| dir.path().join(n).to_string_lossy().to_string();
+        let sealed_with = SealDigest::new([0x42; 32]);
+
+        // The image: one golden, sealed on its forge with a digest.
+        let golden = {
+            let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open_with_capacity(&p("image"), CAP).await.unwrap());
+            let laid = lay_node_slabs(dev.clone(), &layout).await.unwrap();
+            let sid = laid.system.slab_id();
+            let mut mgr = VolumeManager::new(layout.slot_size);
+            mgr.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), laid.system).await.unwrap();
+            mgr.persist_to_slab(sid);
+            let id = mgr.create_volume_any("stormpump", 4 * 1024 * 1024).await.unwrap();
+            mgr.set_seal_digest(id, Some(sealed_with));
+            mgr.seal_volume(id, None).await.unwrap();
+            mgr.persist().await;
+            id
+        };
+        let image: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&p("image")).await.unwrap());
+
+        // The node's drive holds the same release (a copy of the image), and
+        // its verdict on the golden is set as a check would leave it.
+        std::fs::copy(p("image"), p("local")).unwrap();
+        let local: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&p("local")).await.unwrap());
+        let verdict = |d: Option<SealDigest>| {
+            let local = local.clone();
+            async move {
+                let found = crate::drive::discover::slabs_in_partitions(&local).await;
+                let sys = found.iter().find(|f| !f.slab.is_data()).map(|f| f.slab.slab_id()).unwrap();
+                let mut mgr = VolumeManager::new(1024 * 1024);
+                mgr.adopt_slabs(found).await.unwrap();
+                mgr.persist_to_slab(sys);
+                mgr.set_seal_digest(golden, d);
+                mgr.persist().await;
+            }
+        };
+        assert_eq!(release_held(&local, &image).await, ReleaseHeld::Held { goldens: 1 }, "unchecked: held, as today");
+
+        verdict(Some(SealDigest { verdict: Verdict::Mismatch, checked_at: 1, ..sealed_with })).await;
+        assert_eq!(
+            release_held(&local, &image).await,
+            ReleaseHeld::Corrupt { goldens: 1, corrupt: vec!["stormpump".into()] },
+            "a copy that read as a mismatch is not held"
+        );
+
+        verdict(Some(SealDigest { sha256: [0x43; 32], verdict: Verdict::Intact, checked_at: 1 })).await;
+        assert!(
+            matches!(release_held(&local, &image).await, ReleaseHeld::Corrupt { .. }),
+            "recorded with another digest than the image's: not held"
+        );
+
+        verdict(Some(SealDigest { verdict: Verdict::Intact, checked_at: 1, ..sealed_with })).await;
+        assert_eq!(release_held(&local, &image).await, ReleaseHeld::Held { goldens: 1 }, "intact: held");
+
+        verdict(None).await;
+        assert_eq!(release_held(&local, &image).await, ReleaseHeld::Held { goldens: 1 }, "no digest: today's answer");
+    }
+
     /// The wipe is bounded by the drive, so a small one is not asked for more
     /// than it has — and still comes out with both halves.
     #[tokio::test]

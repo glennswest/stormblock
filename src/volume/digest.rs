@@ -224,3 +224,142 @@ pub fn spawn(vm: Arc<TrackedMutex<VolumeManager>>, check: Arc<tokio::sync::Notif
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::{Slab, SlabFormat};
+    use crate::placement::topology::StorageTier;
+    use crate::raid::RaidArrayId;
+
+    const SLOT: u64 = 1024 * 1024;
+
+    /// A manager over one file slab whose records live on it (format 2).
+    async fn manager(dir: &tempfile::TempDir) -> (Arc<TrackedMutex<VolumeManager>>, Arc<dyn BlockDevice>) {
+        let path = dir.path().join("slab.bin").to_string_lossy().to_string();
+        let dev: Arc<dyn BlockDevice> = Arc::new(FileDevice::open_with_capacity(&path, 256 * SLOT).await.unwrap());
+        let slab = Slab::format_with(dev.clone(), SlabFormat::new(SLOT, StorageTier::Hot).with_metadata(16 * SLOT).with_version(2))
+            .await
+            .unwrap();
+        let sid = slab.slab_id();
+        let mut m = VolumeManager::new(SLOT);
+        m.attach_slab(RaidArrayId(uuid::Uuid::new_v4()), slab).await.unwrap();
+        m.persist_to_slab(sid);
+        (Arc::new(TrackedMutex::new(m)), dev)
+    }
+
+    /// The scheme, written out independently of `compute`.
+    fn expected(chunks: &[(u64, Vec<u8>)]) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(b"sb-seal-1\n");
+        for (off, bytes) in chunks {
+            for (i, c) in bytes.chunks(CHUNK as usize).enumerate() {
+                if c.iter().all(|b| *b == 0) {
+                    continue;
+                }
+                h.update((off + i as u64 * CHUNK).to_le_bytes());
+                h.update(c);
+            }
+        }
+        h.finalize().into()
+    }
+
+    async fn write(vm: &TrackedMutex<VolumeManager>, id: VolumeId, off: u64, bytes: &[u8]) {
+        let dev = vm.lock().await.get_volume(&id).unwrap();
+        dev.write(off, bytes).await.unwrap();
+        dev.flush().await.unwrap();
+    }
+
+    /// #384: a seal takes the digest of what was sealed (its non-zero 64 KiB
+    /// chunks with their offsets), the same whether an all-zero extent is
+    /// mapped or not; it is on the slab's records; an unseal forgets it; and
+    /// a release's volume is never digested here.
+    #[tokio::test]
+    async fn a_seal_takes_the_digest_of_what_was_sealed_and_an_unseal_forgets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vm, dev) = manager(&dir).await;
+        let mut content = vec![0u8; 3 * SLOT as usize];
+        content[..4096].fill(0x11);
+        content[2 * SLOT as usize + 70_000..2 * SLOT as usize + 80_000].fill(0x22);
+        let (a, b) = {
+            let mut m = vm.lock().await;
+            (m.create_volume_any("a", 8 * SLOT).await.unwrap(), m.create_volume_any("b", 8 * SLOT).await.unwrap())
+        };
+        // `a` maps extents 0 and 2; `b` the same bytes and extent 5 written
+        // with zeros (mapped, as a flow-over before #401 left one).
+        write(&vm, a, 0, &content[..SLOT as usize]).await;
+        write(&vm, a, 2 * SLOT, &content[2 * SLOT as usize..]).await;
+        write(&vm, b, 0, &content[..SLOT as usize]).await;
+        write(&vm, b, 2 * SLOT, &content[2 * SLOT as usize..]).await;
+        write(&vm, b, 5 * SLOT, &vec![0u8; SLOT as usize]).await;
+        for id in [a, b] {
+            vm.lock().await.seal_volume(id, None).await.unwrap();
+        }
+        assert_eq!(vm.lock().await.digests_waiting(), 2, "both sealed volumes wait for a digest");
+        assert_eq!(digest_sealed(&vm).await, 2);
+        let want = expected(&[(0, content[..SLOT as usize].to_vec()), (2 * SLOT, content[2 * SLOT as usize..].to_vec())]);
+        let da = vm.lock().await.seal_digest(&a).unwrap();
+        let db = vm.lock().await.seal_digest(&b).unwrap();
+        assert_eq!(da.sha256, want, "the digest is the scheme's");
+        assert_eq!(db.sha256, want, "an all-zero extent, mapped or not, hashes the same");
+        assert_eq!(da.verdict, Verdict::Intact, "taken of this copy: intact here");
+
+        // On the slab's own records, read offline as `slab holds` reads them.
+        let slab = Slab::open(dev.clone()).await.unwrap();
+        let doc = crate::volume::metav2::read_slab(&slab).await.unwrap().unwrap();
+        let rec = doc.volumes.iter().find(|v| v.id == a).unwrap();
+        assert_eq!(rec.digest, Some(da), "the digest is in the volume's header on the slab");
+
+        // Unsealed: it says nothing any more, on the slab too.
+        vm.lock().await.unseal_volume(a).await.unwrap();
+        assert!(vm.lock().await.seal_digest(&a).is_none());
+        let doc = crate::volume::metav2::read_slab(&Slab::open(dev.clone()).await.unwrap()).await.unwrap().unwrap();
+        assert!(doc.volumes.iter().find(|v| v.id == a).unwrap().digest.is_none());
+
+        // A release's volume keeps what it came with: none is taken here.
+        let r = vm.lock().await.create_volume_any("release", 4 * SLOT).await.unwrap();
+        write(&vm, r, 0, &[7u8; 4096]).await;
+        vm.lock().await.set_origin(r, crate::volume::metadata::Origin::Release);
+        vm.lock().await.seal_volume(r, None).await.unwrap();
+        assert_eq!(vm.lock().await.digests_waiting(), 0, "a release's volume is not digested from its own copy");
+    }
+
+    /// #384: a copy that came with a digest is read against it: intact when
+    /// it is what was sealed, a mismatch when a byte under it changed.
+    #[tokio::test]
+    async fn a_copy_is_checked_against_the_digest_it_came_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vm, dev) = manager(&dir).await;
+        let id = vm.lock().await.create_volume_any("golden", 4 * SLOT).await.unwrap();
+        write(&vm, id, 0, &vec![0x5Au8; SLOT as usize]).await;
+        write(&vm, id, 3 * SLOT, &vec![0xA5u8; 8192]).await;
+        vm.lock().await.seal_volume(id, None).await.unwrap();
+        digest_sealed(&vm).await;
+        let sealed = vm.lock().await.seal_digest(&id).unwrap();
+
+        // As a compose or a stage carries it: unchecked.
+        vm.lock().await.set_seal_digest(id, Some(sealed.unchecked()));
+        assert_eq!(check_unchecked(&vm).await, Checked { intact: 1, mismatch: 0, unreadable: 0 });
+        let d = vm.lock().await.seal_digest(&id).unwrap();
+        assert_eq!((d.verdict, d.sha256), (Verdict::Intact, sealed.sha256));
+        assert!(d.checked_at > 0);
+        assert_eq!(check_unchecked(&vm).await, Checked::default(), "an intact copy is not read again");
+
+        // A byte under the golden changes on the drive.
+        let (slot, slab_off) = {
+            let m = vm.lock().await;
+            let loc = m.gem().read().await.lookup(id, 0).unwrap();
+            let reg = m.registry().read().await;
+            (loc.slot_idx, reg.get(&loc.slab_id).unwrap().data_offset())
+        };
+        dev.write(slab_off + slot * SLOT + 4096, &[0u8; 512]).await.unwrap();
+        dev.flush().await.unwrap();
+        vm.lock().await.set_seal_digest(id, Some(sealed.unchecked()));
+        assert_eq!(check_unchecked(&vm).await, Checked { intact: 0, mismatch: 1, unreadable: 0 });
+        assert_eq!(vm.lock().await.seal_digest(&id).unwrap().verdict, Verdict::Mismatch);
+        let s = summary(&vm).await.unwrap();
+        assert_eq!(s["mismatch"], 1);
+        assert_eq!(s["mismatched"][0], id.0.to_string());
+    }
+}

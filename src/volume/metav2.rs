@@ -1491,6 +1491,65 @@ mod tests {
         assert!(back.volumes[0].sealed);
     }
 
+    /// #384: a sealed volume's digest rides after the tier; it reads back,
+    /// and the readers before it (the header alone, then origin and tier)
+    /// read the record as they always did.
+    #[test]
+    fn a_digest_rides_after_the_tier_and_older_readers_skip_it() {
+        use crate::volume::metadata::{Origin, SealDigest, Verdict};
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let digest = SealDigest { sha256: [0xAB; 32], verdict: Verdict::Mismatch, checked_at: 1_792_000_000 };
+        for (origin, tier) in [
+            (Origin::Unmarked, None),
+            (Origin::Release, None),
+            (Origin::Node, Some(crate::placement::topology::StorageTier::Warm)),
+        ] {
+            let rec = VolumeRecord {
+                id,
+                name: "pvc-ext4j-64m.golden".into(),
+                virtual_size: 64 << 20,
+                array_id: None,
+                extents: Default::default(),
+                retention: Default::default(),
+                redundancy: Default::default(),
+                parity: Default::default(),
+                failed_slabs: Vec::new(),
+                parent: None,
+                sealed: true,
+                template: false,
+                access: Default::default(),
+                fs: None,
+                owner: None,
+                lba: 4096,
+                extent_size: 0,
+                origin,
+                tier,
+                digest: Some(digest),
+            };
+            let bytes = header_bytes(&rec, 1 << 20);
+            let back = document_of(header_entries(id, &bytes)).unwrap();
+            let v = &back.volumes[0];
+            assert_eq!((v.origin, v.tier, v.digest), (origin, tier, Some(digest)), "{origin:?} {tier:?}");
+
+            // Every v2 reader before #349: the header alone.
+            let (h, used): (Header, _) =
+                bincode::serde::decode_from_slice(&bytes[4..], bincode::config::standard()).unwrap();
+            assert_eq!((h.record.name.as_str(), h.record.sealed), ("pvc-ext4j-64m.golden", true));
+            // The readers of #349 and #151: the origin, then the tier byte,
+            // the rest ignored.
+            let rest = &bytes[4 + used..];
+            assert_eq!(&rest[..4], HEADER_EXT_TAG);
+            assert_eq!(Origin::from_code(rest[4]), origin);
+            let old_tier = match rest[5] {
+                1 => Some(crate::placement::topology::StorageTier::Warm),
+                2 => Some(crate::placement::topology::StorageTier::Cool),
+                3 => Some(crate::placement::topology::StorageTier::Cold),
+                _ => None,
+            };
+            assert_eq!(old_tier, tier, "the tier byte reads as it did, hot as hot");
+        }
+    }
+
     /// #349: a volume's origin rides after its header; a reader that knows
     /// only the header (every v2 engine before) decodes it as before.
     #[test]

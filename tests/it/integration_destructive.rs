@@ -747,3 +747,35 @@ async fn a_storage_user_deletes_what_it_created_and_nothing_else() {
     // The admin token's rules are unchanged.
     assert_eq!(call(&n, M::DELETE, &format!("/volumes/{theirs_sealed}"), Some(ADMIN), None).await, 204);
 }
+
+/// #384: a volume sealed on this node is digested in the background (no
+/// request waits for it), and `GET …/digest` and health say so.
+#[tokio::test]
+async fn a_sealed_volumes_seal_digest_is_taken_in_the_background_and_reported() {
+    let n = node(false, None).await;
+    n.state.start_digests();
+    let c = reqwest::Client::new();
+    let id = volume(&n, "golden-d", false).await;
+    let vid = stormblock::volume::VolumeId(id.parse().unwrap());
+    let dev = n.state.volume_manager.lock().await.get_volume(&vid).unwrap();
+    dev.write(0, &vec![0x3Cu8; (4 * MIB) as usize]).await.unwrap();
+    dev.flush().await.unwrap();
+    n.state.volume_manager.lock().await.seal_volume(vid, None).await.unwrap();
+
+    let mut seal = Value::Null;
+    for _ in 0..100 {
+        let r = c.get(format!("{}/volumes/{id}/digest", n.base)).bearer_auth(NODE).send().await.unwrap();
+        let v: Value = r.json().await.unwrap();
+        if !v["seal"].is_null() {
+            seal = v["seal"].clone();
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(seal["scheme"], "sb-seal-1", "the seal digest arrived: {seal}");
+    assert_eq!(seal["verdict"], "intact");
+    assert_eq!(seal["sha256"].as_str().unwrap().len(), 64);
+    let h: Value = c.get(format!("{}/health", n.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["digests"]["intact"], 1, "{h}");
+    assert_eq!(h["digests"]["mismatch"], 0);
+}
