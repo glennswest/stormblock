@@ -81,6 +81,7 @@ A boot whose claim is another release than the disk holds is an install: it lays
 - **After activate:** N+1's goldens are on the disk under their own ids, and stormupdate has re-pointed the assignment to N+1. The boot claims N+1, the disk holds it, and the node boots its disk with N+1's names.
 - **After a rollback:** N's goldens are still there, so a claim of N is held too (#265).
 - **During a stage cut short:** the goldens are unsealed until whole. `slab holds` counts only sealed ones, so a half-staged release never reads as held.
+- **Over an install cut short** (#451): a power-off during an install's flow-over leaves the data half recording the release's data goldens half-moved, with their other extents on that boot's appliance clone, which no later boot attaches. An unchanged golden has the same id in the next release (forge composes it in by id). The next install then drops the data half's record of it before adopting the data half, and takes the golden whole from its claim, so the stale record can never win a restore. It lists them as `relaid` and names each missing slab once (`Install: FINDING: …`). A volume of the node's (not the release's) with extents on a missing slab still stops the install: its data was never moved.
 
 ## Not done here
 
