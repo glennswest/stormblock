@@ -296,13 +296,14 @@ namespace for a bearer.
       it may list. Node/admin tokens stay node-wide; boot claims unchanged
 - [ ] tests, docs, CHANGELOG; stormcentral#642 told
 
-### A node's engine answers 500 to /api/v1/discovery and /metrics (2026-10-13, #413) — IN PROGRESS
+### A node's engine answers 500 to /api/v1/discovery and /metrics (2026-10-13, #413) — DONE here; golden waits on stormcentral#841
 
 - [x] `keeps_metrics`: the daemon and the node modes install the recorder
 - [x] discovery not running: 404 (GET and the cluster verbs)
 - [x] tests (2), targeted 28/28; README, CHANGELOG
-- [ ] check.sh; golden (waits on stormcentral#841 like #428/#410); close;
-      stormcos_qa's known.toml entry can go
+- [x] check.sh at d7ef756 ALL PASS (1195/1195); commented
+- [ ] golden: held with #428/#410 until stormcentral#841 is live (master);
+      proposed after it. Then shipped/close; stormcos_qa's known.toml entry
 
 ### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — WAITING ON THE OWNER
 
