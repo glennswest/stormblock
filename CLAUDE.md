@@ -199,6 +199,19 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
+### Attach a peer's volume over NVMe/TCP, return a device (2026-10-14, #328, P3, stormvm#46) — WAITING ON THE OWNER
+
+Read against main e1b720b: stormvm attaches and clones through its own
+node's engine, which holds only volumes backed here (it already answers
+ublk for those). A volume on a peer is unknown to it (404): adopt-ublk has
+no peer list, no discovery and no credential for another node's API.
+Asked on #328 (needs-owner): 1 where the node finds the volume (a peer
+list in config / the caller names it / a directory), 2 how it talks to the
+peer (node certificate over mTLS / a shared token), 3 what device it
+returns (kernel `/dev/nvmeXnY` / the engine's initiator through ublk).
+Recommended 1(a) 2(a) 3(b). The answer goes under `device_hint` (owner's
+amendment). Nothing built.
+
 ### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — DONE (golden-stormblock-195314cf5831), metal pending
 
 Found: a cut-short sda (`slab holds` 3) booted with the clone as resume
