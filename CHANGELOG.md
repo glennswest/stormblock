@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-14
+- **feat:** #153, decision 1 (option C, 2026-10-13): a single-copy volume keeps to one drive.
+  - **The default:** a `redundancy: none` volume is **affine**. Its extents go to the slab its extents are on while that slab has room; the first extent, and a spill once it is full, to the most-free slab of its role. It is lost with one drive, not with any of the pool's (16 extents now land on one drive of four).
+  - **Spread on request:** `"placement": "spread"` on create gives the old behaviour, for a scratch volume that wants bandwidth. Redundant volumes spread whatever it says (their rebuild is parallel because they do, #146).
+  - **Kept:** the layout is kept with the volume (a format-2 header carries `L` for spread, after the digest; affine writes nothing) and inherited by clones; volume responses say `layout`. At a restart an affine volume's affinity is the slab most of it is on.
+  - **Moves keep it whole:** the rebalance (#154) leaves an affine volume (moved whole or not at all, counted in `left`), and a drain moves its extents onto one destination while that has room.
+  - **Tests:** `integration_multidrive` (the default lands on one drive, `spread` over the emptier three, a bad `placement` 400, affine still on one drive after the failure, rebuild and drain), `integration_rebalance::an_affine_volume_is_left_on_its_drive` (nothing moved, new extents on its own slab), `drain::tests::an_affine_volume_is_drained_onto_one_drive`, `metav2::tests::a_spread_layout_rides_after_the_digest`.
 - **docs:** #193 closed as covered (option C, decided 2026-10-13): the boot clone stays read-write. The sealed golden is never written; a node with a disk writes nothing in place on its clone (#239); the boot ladder and diskless nodes write a clone the next claim discards. docs/auth.md no longer lists a read-only overlay as still to come.
 - **feat:** #384 (#245 step 2, the owner's decision A): a sealed volume's digest, checked in the background; `slab holds` reads the verdicts.
   - **The digest:** taken when a volume is sealed on the node that made it (forge, for a release's goldens), in the background with no lock held. It is the sha256 of the volume's content as 64 KiB chunks: each non-zero chunk inside a mapped extent, in offset order, as its byte offset and its bytes, after the prefix `sb-seal-1`. So it costs what the volume holds and does not depend on extent size or placement: a composed image's golden and a flowed-over copy (zeros unmapped, #401) hash as their source does. An unseal forgets it.
