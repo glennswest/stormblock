@@ -1229,6 +1229,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     let tier = record.tier;
     let digest = record.digest;
     let scheme = record.scheme;
+    let spread = record.layout == crate::volume::thin::Layout::Spread;
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
@@ -1246,12 +1247,14 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // opens the disk as before. The tier byte is written whenever a digest
     // follows (0 for hot, which every reader reads as hot).
     let tier = tier.filter(|t| *t != crate::placement::topology::StorageTier::Hot);
-    // Then a scheme the record does not say (#159): `S`, the code, K, M.
-    // After the digest, so a reader of #384 finds its digest where it looks.
-    if origin != super::metadata::Origin::Unmarked || tier.is_some() || digest.is_some() || scheme.is_some() {
+    // Then a scheme the record does not say (#159): `S`, the code, K, M;
+    // then a single-copy volume's spread layout (#153): `L`, 1 (affine, the
+    // default, writes nothing). After the digest, so a reader of #384 finds
+    // its digest where it looks.
+    if origin != super::metadata::Origin::Unmarked || tier.is_some() || digest.is_some() || scheme.is_some() || spread {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
-        if tier.is_some() || digest.is_some() || scheme.is_some() {
+        if tier.is_some() || digest.is_some() || scheme.is_some() || spread {
             out.push(tier.map(|t| t as u8).unwrap_or(0));
         }
         if let Some(d) = digest {
@@ -1264,6 +1267,9 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
             out.push(SCHEME_TAG);
             out.extend_from_slice(&[sc.code, sc.data, sc.parity]);
         }
+        if spread {
+            out.extend_from_slice(&[LAYOUT_TAG, 1]);
+        }
     }
     out
 }
@@ -1272,6 +1278,10 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
 const SCHEME_TAG: u8 = b'S';
 /// The tag, the code, K, M.
 const SCHEME_LEN: usize = 4;
+/// A single-copy volume's layout in a header's extension (#153).
+const LAYOUT_TAG: u8 = b'L';
+/// The tag and the layout (1 = spread).
+const LAYOUT_LEN: usize = 2;
 
 /// The digest's place in a header's extension (#384): after the tier.
 const DIGEST_TAG: u8 = b'D';
@@ -1308,6 +1318,11 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
             } else if d.len() >= SCHEME_LEN && d[0] == SCHEME_TAG {
                 rec.scheme = Some(super::metadata::SchemeExt { code: d[1], data: d[2], parity: d[3] });
                 d = &d[SCHEME_LEN..];
+            } else if d.len() >= LAYOUT_LEN && d[0] == LAYOUT_TAG {
+                if d[1] == 1 {
+                    rec.layout = crate::volume::thin::Layout::Spread;
+                }
+                d = &d[LAYOUT_LEN..];
             } else {
                 break;
             }
@@ -1501,6 +1516,7 @@ mod tests {
             tier: None,
             digest: None,
             scheme: None,
+            layout: Default::default(),
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1549,6 +1565,7 @@ mod tests {
                 tier,
                 digest: Some(digest),
                 scheme: None,
+                layout: Default::default(),
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = document_of(header_entries(id, &bytes)).unwrap();
@@ -1606,6 +1623,7 @@ mod tests {
                 tier: None,
                 digest: d,
                 scheme: Some(sc),
+                layout: Default::default(),
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1617,6 +1635,51 @@ mod tests {
         }
         assert_eq!(sc.spelling(), "ec:8+3");
         assert!(!sc.known(), "no engine reads it yet (step 1)");
+    }
+
+    /// #153: a spread layout rides after the digest (affine writes nothing),
+    /// and #384's reader still finds its digest first.
+    #[test]
+    fn a_spread_layout_rides_after_the_digest() {
+        use crate::volume::metadata::{Origin, SealDigest, Verdict};
+        use crate::volume::thin::Layout;
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let digest = SealDigest { sha256: [3; 32], verdict: Verdict::Unchecked, checked_at: 0 };
+        for (layout, d) in [(Layout::Spread, None), (Layout::Spread, Some(digest)), (Layout::Affine, None)] {
+            let rec = VolumeRecord {
+                id,
+                name: "scratch".into(),
+                virtual_size: 1 << 20,
+                array_id: None,
+                extents: Default::default(),
+                retention: Default::default(),
+                redundancy: Default::default(),
+                parity: Default::default(),
+                failed_slabs: Vec::new(),
+                parent: None,
+                sealed: false,
+                template: false,
+                access: Default::default(),
+                fs: None,
+                owner: None,
+                lba: 4096,
+                extent_size: 0,
+                origin: Origin::Unmarked,
+                tier: None,
+                digest: d,
+                scheme: None,
+                layout,
+            };
+            let bytes = header_bytes(&rec, 1 << 20);
+            let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
+            assert_eq!((back.layout, back.digest), (layout, d));
+            let (_, used): (Header, _) = bincode::serde::decode_from_slice(&bytes[4..], bincode::config::standard()).unwrap();
+            if layout == Layout::Affine {
+                assert_eq!(used + 4, bytes.len(), "affine and unmarked: the header as it always was");
+            } else {
+                assert_eq!(bytes[4 + used + 6] == DIGEST_TAG, d.is_some(), "the digest first");
+            }
+        }
     }
 
     /// #349: a volume's origin rides after its header; a reader that knows
@@ -1647,6 +1710,7 @@ mod tests {
             tier: None,
             digest: None,
             scheme: None,
+            layout: Default::default(),
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -1906,6 +1970,7 @@ mod tests {
             tier: None,
             digest: None,
             scheme: None,
+            layout: Default::default(),
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -1943,6 +2008,7 @@ mod tests {
             tier: None,
             digest: None,
             scheme: None,
+            layout: Default::default(),
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

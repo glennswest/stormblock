@@ -181,6 +181,8 @@ async fn run(
     // Legs that failed to move: skipped so one bad extent does not stall
     // everything behind it.
     let mut stuck: HashSet<Leg> = HashSet::new();
+    // Where each affine volume's extents are going (#153).
+    let mut destination: std::collections::HashMap<crate::volume::VolumeId, SlabId> = std::collections::HashMap::new();
 
     {
         let mut reg = registry.write().await;
@@ -212,13 +214,19 @@ async fn run(
         // `mirror:2@shelf` leg in the *other* shelf, not merely on another
         // drive. Read before the map and registry are locked: the volume
         // manager is taken before them everywhere else, never after.
-        let spread: std::collections::HashMap<crate::volume::VolumeId, String> = {
+        let (spread, affine): (
+            std::collections::HashMap<crate::volume::VolumeId, String>,
+            HashSet<crate::volume::VolumeId>,
+        ) = {
             let vm = volumes.lock().await;
             let ids: Vec<crate::volume::VolumeId> =
                 vm.list_volumes().await.into_iter().map(|(id, ..)| id).collect();
-            ids.into_iter()
-                .filter_map(|id| vm.redundancy(&id).map(|p| (id, p.spread.clone())))
-                .collect()
+            (
+                ids.iter().filter_map(|id| vm.redundancy(id).map(|p| (*id, p.spread.clone()))).collect(),
+                // Kept on one drive (#153): its extents leave this one
+                // together, onto one destination while it has room.
+                ids.iter().copied().filter(|id| vm.is_affine(id)).collect(),
+            )
         };
 
         // Pick a leg under the map's read lock, wait for the slot's fence with
@@ -271,13 +279,25 @@ async fn run(
                         (Some(loc), Some(tier)) => {
                             let others: Vec<crate::placement::domain::FailureDomain> =
                                 loc.legs().filter(|l| *l != leg).map(|l| r.domain_of(&l.slab_id)).collect();
-                            engine.best_slab_apart_at(&r, tier, slab, &others, rung)
+                            let size = r.get(&slab).map(|x| x.slot_size()).unwrap_or(0);
+                            let kept = affine
+                                .contains(&vol)
+                                .then(|| destination.get(&vol).copied())
+                                .flatten()
+                                .filter(|d| !slabs.contains(d) && r.takes(d, r.role_of(&slab), size));
+                            match kept {
+                                Some(d) => Ok(d),
+                                None => engine.best_slab_apart_at(&r, tier, slab, &others, rung),
+                            }
                         }
                         (None, _) => Err(crate::placement::PlacementError::ExtentNotFound { volume_id: vol, vext_idx: idx }),
                         (_, None) => Err(crate::placement::PlacementError::SlabNotFound(slab)),
                     }
                 };
                 let fence = crate::volume::fence::exclusive(leg).await;
+                if let (Ok(d), true) = (&dest, affine.contains(&vol)) {
+                    destination.insert(vol, *d);
+                }
                 let res = match dest {
                     Ok(d) => engine.migrate_leg_unlocked(&gem, &registry, vol, idx, leg, d, &fence).await,
                     Err(e) => Err(e),
@@ -373,6 +393,51 @@ mod tests {
         let path = dir.join(name);
         let dev = FileDevice::open_with_capacity(path.to_str().unwrap(), 8 * 1024 * 1024).await.unwrap();
         Slab::format(std::sync::Arc::new(dev), slot, StorageTier::Hot).await.unwrap()
+    }
+
+    /// #153: an affine single-copy volume leaves a drained drive onto one
+    /// destination, not spread over the pool by most-free.
+    #[tokio::test]
+    async fn an_affine_volume_is_drained_onto_one_drive() {
+        let dir = std::env::temp_dir().join(format!("stormblock-drain-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let slot = 4096u64;
+        let mut vm = VolumeManager::new(slot);
+        let a = slab(&dir, "a.bin", slot).await;
+        let ida = a.slab_id();
+        vm.add_slab(a).await;
+        let plain = vm.create_volume_any("plain", 1 << 20).await.unwrap();
+        let pv = vm.get_volume(&plain).unwrap();
+        for i in 0..12u64 {
+            pv.write(i * slot, &vec![0x20 + i as u8; slot as usize]).await.unwrap();
+        }
+        // Two empty drives arrive; spread by most-free, 12 extents would
+        // land on both.
+        vm.add_slab(slab(&dir, "b.bin", slot).await).await;
+        vm.add_slab(slab(&dir, "c.bin", slot).await).await;
+        let gem = vm.gem().clone();
+        let registry = vm.registry().clone();
+        let volumes = Arc::new(crate::lockwatch::TrackedMutex::new(vm));
+        let mut drains = Drains::default();
+        let status = drains.start("a.bin".into(), vec![ida], gem.clone(), registry.clone(), volumes.clone());
+        for _ in 0..500 {
+            if status.read().await.state != DrainState::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(status.read().await.state, DrainState::Empty);
+        let g = gem.read().await;
+        let on: std::collections::HashSet<_> = (0..12u64).map(|i| g.lookup(plain, i).unwrap().slab_id).collect();
+        assert_eq!(on.len(), 1, "every extent on one drive: {on:?}");
+        assert!(!on.contains(&ida));
+        drop(g);
+        for i in 0..12u64 {
+            let mut buf = vec![0u8; slot as usize];
+            pv.read(i * slot, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|&x| x == 0x20 + i as u8));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A drive is drained one extent at a time; when nothing of any volume is

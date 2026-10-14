@@ -110,7 +110,8 @@ DELETE /api/v1/arrays/{id} → 409 while any volume is on it; otherwise removes 
 
 | volume | how each new extent is placed |
 |---|---|
-| `redundancy: none` | the **most-free** slab of its role, preferring its tier. A volume's extents **spread across every drive in the pool** (16 extents over 4 drives landed on all 4). |
+| `redundancy: none` (`placement: affine`, the default, #153) | the slab its extents are already on, while it has room; the first extent, and a spill once that slab is full, to the **most-free** slab of its role, preferring its tier. **16 extents on one drive** of four. |
+| `redundancy: none`, `placement: spread` | each extent on the **most-free** slab of its role: a scratch volume that wants the pool's bandwidth and knows it is lost with any of its drives |
 | `mirror:N[@rung]` | each leg on the most-free slab whose domain differs, at the volume's rung, from the extent's other legs; refused (`InsufficientDomains`) at create when the node cannot promise N distinct domains |
 | `raid5:D+1`, `raid6:D+2` | data legs and P/Q legs likewise, every member of a stripe on its own domain |
 
@@ -145,24 +146,28 @@ it: the volume read *healthy* with both copies of an extent in shelf B.
 `drain` now moves with the volume's own rung and never moves a leg into a slab
 of the other role (#88).
 
-### How claims spread — proposed
+### How claims spread — decided (#153)
 
 The two kinds of volume want opposite things:
 
-* **A redundant volume should spread.** Its extents are on many drives, so
-  when one drive fails, the volumes with a member there are many, each missing
-  a little, and **each rebuilds onto different drives in parallel**. That is
-  the whole point at 160 drives a shelf (#146). This is what the engine does
-  today.
-* **A non-redundant volume should not.** Spreading it over every drive in the
-  pool means it is lost when **any** of those drives fails: on a 4-drive node,
-  four times the loss rate of keeping it on one drive, and nothing gained but
-  bandwidth. **Proposed:** a `none` volume keeps **drive affinity**. Its
-  extents go to the drive its first extent went to, while that drive has
-  room, and spill to the next most-free drive only when it does not.
-
-*(Owner decision 1: drive affinity for non-redundant volumes. Proposed, not
-built.)*
+* **A redundant volume spreads.** Its extents are on many drives, so when one
+  drive fails, the volumes with a member there are many, each missing a
+  little, and **each rebuilds onto different drives in parallel**. That is the
+  whole point at 160 drives a shelf (#146).
+* **A non-redundant volume keeps drive affinity** (owner decision 1, option C,
+  2026-10-13). Spreading it over every drive in the pool made it lost when
+  **any** of them failed: on a 4-drive node, four times the loss rate of
+  keeping it on one drive, for bandwidth nobody asked for. A `none` volume's
+  extents go to the slab its extents are on while that slab has room, and
+  spill to the next most-free one only when it is full (and stay there). At a
+  restart the affinity is the slab most of the volume is on. A volume that
+  wants bandwidth over safety asks for it on create: `"placement": "spread"`.
+  The layout is kept with the volume (a format-2 header carries `spread`) and
+  inherited by its clones, and volume responses say `layout`.
+* **Moves keep it whole.** The rebalance (#154) leaves an affine volume where
+  it is (it is moved whole or not at all, and is counted in the plan's
+  `left`). A drain moves its extents onto one destination while that has
+  room, not by most-free one at a time.
 
 ## 3. Policy: what a claim asks for
 

@@ -51,6 +51,10 @@ pub struct VolumeResponse {
     pub fs_uuid: Option<Uuid>,
     /// How the volume is protected: `none`, `mirror:2`, `raid5:4+1`, …
     pub redundancy: String,
+    /// A single-copy volume's layout (#153): `affine` (one drive while it
+    /// has room, the default) or `spread`. Absent for a redundant volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<&'static str>,
     /// `healthy`, `degraded` or `failed` — what the policy asks for versus
     /// what is on trusted slabs.
     pub health: String,
@@ -114,6 +118,7 @@ pub struct VolumeResponse {
 struct Described {
     shared_bytes: u64,
     redundancy: String,
+    layout: Option<&'static str>,
     health: String,
     physical_bytes: u64,
     parent: Option<Uuid>,
@@ -137,6 +142,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
             Described {
                 shared_bytes: handle.shared().await,
                 redundancy: h.redundancy,
+                layout: handle.redundancy().is_none().then(|| handle.layout().as_str()),
                 health: h.state.to_string(),
                 physical_bytes: handle.physical().await,
                 parent: vm.parent(id).map(|p| p.0),
@@ -155,6 +161,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
         None => Described {
             shared_bytes: 0,
             redundancy: "none".into(),
+            layout: None,
             health: "healthy".into(),
             physical_bytes: 0,
             parent: None,
@@ -235,6 +242,13 @@ pub struct CreateVolumeRequest {
     /// its clones.
     #[serde(default)]
     pub tier: Option<String>,
+    /// A single-copy volume's layout (#153): `affine` (the default: its
+    /// extents on one drive while it has room, so it is lost with one
+    /// drive, not with any of the pool's) or `spread` (each extent on the
+    /// emptiest slab, for bandwidth). Kept with the volume and its clones;
+    /// a redundant volume spreads whatever this says.
+    #[serde(default)]
+    pub placement: Option<String>,
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
@@ -482,6 +496,7 @@ async fn list_from(
             array_id: None,
             fs_uuid: d.fs_uuid,
             redundancy: d.redundancy,
+            layout: d.layout,
             health: d.health,
             physical_bytes: d.physical_bytes,
             parent: d.parent,
@@ -614,6 +629,7 @@ async fn get_from(
                 shared_human: human_size(d.shared_bytes),
                 fs_uuid: d.fs_uuid,
                 redundancy: d.redundancy,
+            layout: d.layout,
                 health: d.health,
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
@@ -799,6 +815,7 @@ async fn compose_volume(
         array_id: None,
         fs_uuid: None,
         redundancy: vm.redundancy(&id).map(|r| r.spelling()).unwrap_or_else(|| "none".into()),
+        layout: vm.get_volume_handle(&id).filter(|h| h.redundancy().is_none()).map(|h| h.layout().as_str()),
         health: "healthy".into(),
         physical_bytes: allocated,
         parent: placements.first().map(|(p, _)| p.0),
@@ -936,6 +953,7 @@ async fn create_volume(
             array_id: None,
             fs_uuid: fs_uuid.or(d.fs_uuid),
             redundancy: d.redundancy,
+            layout: d.layout,
             health: d.health,
             physical_bytes: d.physical_bytes,
             parent: d.parent,
@@ -1023,6 +1041,11 @@ async fn create_volume(
             return ApiError::bad_request(format!("array {} is {slab_role} storage, not {r}", a.0));
         }
     }
+    let layout = match req.placement.as_deref().map(crate::volume::thin::Layout::parse) {
+        None => crate::volume::thin::Layout::default(),
+        Some(Ok(l)) => l,
+        Some(Err(e)) => return ApiError::bad_request(e),
+    };
     let extent_size = match req.extent_size.as_deref().map(parse_size) {
         None => None,
         Some(Ok(n)) => Some(n),
@@ -1032,7 +1055,7 @@ async fn create_volume(
         Some(a) => vm.create_volume(&req.name, size, a).await,
         _ => {
             let mut opts = crate::volume::CreateOptions {
-                placement: crate::volume::PlacementPolicy::preferring(tier),
+                placement: crate::volume::PlacementPolicy { layout, ..crate::volume::PlacementPolicy::preferring(tier) },
                 ..crate::volume::CreateOptions::redundant(redundancy.clone())
             }
             .in_role_opt(role)
@@ -1071,6 +1094,7 @@ async fn create_volume(
                 array_id: array_id.map(|a| a.0),
                 fs_uuid: None,
                 redundancy: redundancy.spelling(),
+                layout: redundancy.is_none().then(|| layout.as_str()),
                 health: "healthy".into(),
                 physical_bytes: 0,
                 parent: None,
@@ -1688,6 +1712,7 @@ async fn clone_volume(
                 array_id: None,
                 fs_uuid: c.fs_uuid.or(d.fs_uuid),
                 redundancy: d.redundancy,
+            layout: d.layout,
                 health: d.health,
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
@@ -2511,6 +2536,7 @@ async fn create_snapshot(
                 array_id: None,
                 fs_uuid: d.fs_uuid,
                 redundancy: d.redundancy,
+            layout: d.layout,
                 health: d.health,
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
@@ -2593,6 +2619,7 @@ async fn resize_volume(
                 array_id: None,
                 fs_uuid: d.fs_uuid,
                 redundancy: d.redundancy,
+            layout: d.layout,
                 health: d.health,
                 physical_bytes: d.physical_bytes,
                 parent: d.parent,
@@ -3047,6 +3074,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
         array_id: None,
         fs_uuid: d.fs_uuid,
         redundancy: d.redundancy,
+            layout: d.layout,
         health: d.health,
         physical_bytes: d.physical_bytes,
         parent: d.parent,
