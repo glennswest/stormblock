@@ -296,7 +296,7 @@ namespace for a bearer.
       it may list. Node/admin tokens stay node-wide; boot claims unchanged
 - [ ] tests, docs, CHANGELOG; stormcentral#642 told
 
-### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — IN PROGRESS
+### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — PAUSED for P0 #428 (engine half built, b9j6oila5 run pending; /init half not started)
 
 Owner/master on #402 (2026-10-13): **A** — a drive designated `system` in
 stormdrive (`<system-data>/stormdrive/system-drives.json`, matched by WWN,
