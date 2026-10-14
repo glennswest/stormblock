@@ -1055,7 +1055,8 @@ Today: 2 clones per first boot (stamp + flush each), 2.3 s at 500 ms flushes.
 - [x] tests: `integration_locks::two_first_boot_claims_at_once_…` (wait 0,
       abandoned claim finishes), `cli::boot_claim_wait_tests::…` (12 s claim,
       one request); README, auth.md, CHANGELOG
-- [ ] check.sh; golden (held for stormcentral#841); stormcos_qa known.toml
+- [x] check.sh at 99a13ac ALL PASS (1208/1208); commented
+- [ ] golden: held until stormcentral#841 is live; proposed after it; then close
 
 ### A storage-user deletes what it created (2026-10-14, #422 + #416, P2) — DONE here; golden waits on stormcentral#841
 
