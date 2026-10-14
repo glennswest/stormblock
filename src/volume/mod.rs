@@ -1214,7 +1214,9 @@ impl VolumeManager {
             }
             f.retain(|(_, sources)| !sources.is_empty());
         }
-        self.persist().await;
+        // The caller persists once it has let go of the manager
+        // (`persist_detached`): a persist here ran under its lock, across
+        // the device flushes (#364, #415).
         Ok(true)
     }
 

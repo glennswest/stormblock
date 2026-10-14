@@ -7284,15 +7284,25 @@ pub async fn run() -> anyhow::Result<()> {
                 let state_for_persist = state_for_persist.clone();
                 move |retire: Vec<SlabId>| async move {
                     let Some(state) = state_for_persist.upgrade() else { return };
+                    let mut retired = 0;
                     for id in retire {
-                        match state.volume_manager.lock().await.retire_drained_slab(id).await {
-                            Ok(true) => println!(
-                                "Flow-over: slab {} (the appliance's) is no longer used; persists no longer flush it (#358)",
-                                id.0
-                            ),
+                        // Only the bookkeeping under the manager; the persist
+                        // after, with it let go (#364, #415).
+                        let r = state.volume_manager.lock().await.retire_drained_slab(id).await;
+                        match r {
+                            Ok(true) => {
+                                retired += 1;
+                                println!(
+                                    "Flow-over: slab {} (the appliance's) is no longer used; persists no longer flush it (#358)",
+                                    id.0
+                                )
+                            }
                             Ok(false) => tracing::info!("flow-over: slab {} still holds something; kept", id.0),
                             Err(e) => tracing::warn!("flow-over: slab {}: {e}", id.0),
                         }
+                    }
+                    if retired > 0 {
+                        crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
                     }
                 }
             };

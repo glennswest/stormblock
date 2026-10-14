@@ -339,7 +339,24 @@ impl Imports {
         }));
         let st = status.clone();
         tokio::spawn(async move {
-            let outcome = run(&state, &spec, &st).await;
+            // Its creates, seal and deletes owe their persist, made once the
+            // import has let go of the volume manager (#364, #415: a plain
+            // spawn persisted under it, across the device flushes). Done is
+            // said only after that persist, so a caller that sees it sees a
+            // record that is written.
+            let vm = state.volume_manager.clone();
+            let work = {
+                let (state, st) = (state.clone(), st.clone());
+                crate::lockwatch::spawn_owing(async move { run(&state, &spec, &st).await }, move || async move {
+                    if let Err(e) = crate::volume::VolumeManager::persist_detached_checked(&vm).await {
+                        tracing::error!("import: its changes were not written to the volume metadata: {e}");
+                    }
+                })
+            };
+            let outcome = match work.await {
+                Ok(o) => o,
+                Err(e) => Err(Fail::new(Phase::Write, format!("the import task: {e}"))),
+            };
             let mut s = st.write().await;
             s.finished_at = Some(now());
             match outcome {

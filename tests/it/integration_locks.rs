@@ -342,3 +342,48 @@ async fn health_and_listings_answer_while_composes_exports_clones_and_seals_run(
     }
     server.abort();
 }
+
+/// #415: an import runs in the background, and its create, seal and record
+/// persisted under the volume manager, across the slabs' flushes (seen on
+/// 12.21 as `held by task …` when sbregistry imported its fedora media). With
+/// the rule enforced it finishes, done, and its golden is there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_import_never_flushes_with_the_volume_manager_held() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    let router = stormblock::mgmt::api::router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    common::wait_for_listener(addr).await;
+    let c = reqwest::Client::new();
+    let image = dir.path().join("media.raw");
+    let data: Vec<u8> = (0..(6u64 << 20)).map(|i| (i % 251) as u8 + 1).collect();
+    std::fs::write(&image, &data).unwrap();
+    std::env::set_var("STORMBLOCK_LOCK_ASSERT", "1");
+
+    let r = c
+        .post(format!("{base}/api/v1/volumes/import"))
+        .json(&serde_json::json!({"name": "media-fedora-44", "file": image.to_str().unwrap(), "format": "raw"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let job: serde_json::Value = r.json().await.unwrap();
+    let id = job["id"].as_str().unwrap().to_string();
+    let mut last = serde_json::Value::Null;
+    for _ in 0..600 {
+        last = c.get(format!("{base}/api/v1/volumes/import/{id}")).send().await.unwrap().json().await.unwrap();
+        if last["state"] == "done" || last["state"] == "failed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(last["state"], "done", "{last}");
+    let vm = state.volume_manager.lock().await;
+    let id = vm.find_volume("media-fedora-44").await.expect("the golden");
+    assert!(vm.is_sealed(&id));
+    drop(vm);
+    server.abort();
+}

@@ -329,7 +329,24 @@ async fn finish(state: &Arc<AppState>, s: &mut Status, golden: crate::volume::Vo
     s.state = "cloning".into();
     set(s.clone());
     let spec = crate::fs::template::CloneSpec::new(s.image.clone());
-    match crate::fs::template::clone_volume(&state.volume_manager, golden, &spec).await {
+    // The clone owes its persist, made once it has let go of the volume
+    // manager (#364, #415).
+    let vm = state.volume_manager.clone();
+    let cloned = crate::lockwatch::spawn_owing(
+        {
+            let vm = vm.clone();
+            async move { crate::fs::template::clone_volume(&vm, golden, &spec).await }
+        },
+        move || async move {
+            if let Err(e) = crate::volume::VolumeManager::persist_detached_checked(&vm).await {
+                tracing::error!("kernel optional: the clone was not written to the volume metadata: {e}");
+            }
+        },
+    )
+    .await
+    .map_err(|e| format!("the clone task: {e}"))
+    .and_then(|r| r.map_err(|e| e.to_string()));
+    match cloned {
         Ok(_) => {
             s.state = "ready".into();
             s.clone = Some(s.image.clone());
