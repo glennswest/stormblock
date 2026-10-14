@@ -61,8 +61,10 @@ async fn view(State(state): State<Arc<AppState>>) -> Response {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "discovery", "method" => "list")
         .increment(1);
 
+    // Not a fault: a node's engine (`adopt-ublk`) runs no discovery (#413).
+    // 404, which a caller reads as "none here", not a 500 a poll repeats.
     let Some(disc) = state.discovery.as_ref() else {
-        return ApiError::internal("discovery is not running");
+        return ApiError::not_found("discovery is not running on this engine");
     };
 
     let ident = disc.identity().await;
@@ -107,7 +109,7 @@ async fn create_cluster(
         .increment(1);
 
     let Some(disc) = state.discovery.as_ref() else {
-        return ApiError::internal("discovery is not running");
+        return ApiError::not_found("discovery is not running on this engine");
     };
     if req.name.trim().is_empty() {
         return ApiError::bad_request("cluster name must not be empty");
@@ -130,7 +132,7 @@ async fn join_cluster(
         .increment(1);
 
     let Some(disc) = state.discovery.as_ref() else {
-        return ApiError::internal("discovery is not running");
+        return ApiError::not_found("discovery is not running on this engine");
     };
     if disc.identity().await.is_clustered() {
         return ApiError::conflict(
@@ -168,7 +170,7 @@ async fn leave_cluster(State(state): State<Arc<AppState>>) -> Response {
         .increment(1);
 
     let Some(disc) = state.discovery.as_ref() else {
-        return ApiError::internal("discovery is not running");
+        return ApiError::not_found("discovery is not running on this engine");
     };
     disc.leave_cluster().await;
     Json(ClusterIdentity::default()).into_response()

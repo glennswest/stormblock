@@ -141,6 +141,35 @@ async fn health_reports_what_the_flow_over_has_left() {
     server.abort();
 }
 
+/// #413: an engine with no discovery (a node's `adopt-ublk`) answers 404,
+/// which a poller reads as "none here", not a 500 logged as a WARN on the
+/// node's console every 15 s; and /metrics answers once the recorder is in.
+#[tokio::test]
+async fn no_discovery_is_a_404_and_metrics_answer() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with(&dir, config_with_token("sekrit")).await;
+    assert!(state.discovery.is_none());
+    let (base, server) = serve(state).await;
+    let c = reqwest::Client::new();
+    let r = c.get(format!("{base}/api/v1/discovery")).bearer_auth("sekrit").send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 404);
+    assert!(r.text().await.unwrap().contains("discovery is not running"));
+    let r = c
+        .post(format!("{base}/api/v1/discovery/cluster"))
+        .bearer_auth("sekrit")
+        .json(&serde_json::json!({"name": "c"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().as_u16() < 500, "{}", r.status());
+    stormblock::mgmt::metrics::init_metrics();
+    stormblock::mgmt::metrics::register_metrics();
+    let r = c.get(format!("{base}/metrics")).bearer_auth("sekrit").send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(r.text().await.unwrap().contains("stormblock_"));
+    server.abort();
+}
+
 /// #337: health names a ublk request unanswered for 30 s, open (no token),
 /// so a consumer whose fsync never returns can see it is below it.
 #[tokio::test]

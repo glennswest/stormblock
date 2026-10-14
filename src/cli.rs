@@ -981,6 +981,18 @@ fn parse_raid_level(s: &str) -> Result<RaidLevel, String> {
 /// The `stormblock` command: parse the command line and run it. `main.rs`
 /// is a wrapper around this, so the CLI is compiled and unit-tested once, as
 /// part of the library (#209), not a second time as a separate binary.
+/// The engines that serve the API and so keep metrics (#413): the daemon
+/// and a node's (`adopt-ublk`, `boot-local`, `boot-iscsi`). Every other
+/// subcommand is a tool that records nothing.
+fn keeps_metrics(cmd: &Option<SubCommand>) -> bool {
+    match cmd {
+        None | Some(SubCommand::BootLocal { .. } | SubCommand::AdoptUblk { .. }) => true,
+        #[cfg(feature = "iscsi")]
+        Some(SubCommand::BootIscsi { .. }) => true,
+        _ => false,
+    }
+}
+
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // RUST_LOG controls verbosity (e.g. RUST_LOG=stormblock=debug for
@@ -1003,6 +1015,13 @@ pub async fn run() -> anyhow::Result<()> {
         Some(SubCommand::BootLocal { .. }) => crate::logging::abort_on_panic("boot-local"),
         None => crate::logging::abort_on_panic("daemon"),
         _ => {}
+    }
+    // Every engine that serves the API keeps metrics, the node's too
+    // (#413: `adopt-ublk` answered 500 to every scrape of /metrics, a WARN
+    // line on the console each time). The CLI tools record nothing.
+    if keeps_metrics(&cli.command) {
+        mgmt::metrics::init_metrics();
+        mgmt::metrics::register_metrics();
     }
     // Test hook (#368): a panic in a spawned task after N ms, the way the
     // Dell's worker died, so a test can see the process end.
@@ -1128,10 +1147,6 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
     }
-
-    // Initialize metrics
-    mgmt::metrics::init_metrics();
-    mgmt::metrics::register_metrics();
 
     // Build shared state
     // One data directory (#163): merge_cli put `--data-dir` there.
@@ -8862,6 +8877,18 @@ async fn handle_migrate_boot(
 #[cfg(test)]
 mod tests {
     use super::note_no_intent;
+
+    /// #413: the engines that serve the API keep metrics, the node's
+    /// `adopt-ublk` among them (it answered 500 to every scrape); the tools
+    /// do not.
+    #[test]
+    fn every_engine_that_serves_keeps_metrics() {
+        use clap::Parser;
+        let parse = |args: &[&str]| super::Cli::try_parse_from(args).unwrap().command;
+        assert!(super::keeps_metrics(&parse(&["stormblock"])), "the daemon");
+        assert!(super::keeps_metrics(&parse(&["stormblock", "adopt-ublk"])), "a node's engine");
+        assert!(!super::keeps_metrics(&parse(&["stormblock", "slab", "list", "x"])), "a tool");
+    }
 
     /// #355: `system-data` is made in a local data half, as ext4, once; and
     /// not at all when the only data half is on its way out (an appliance's,
