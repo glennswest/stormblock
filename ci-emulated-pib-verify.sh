@@ -7,7 +7,7 @@ mkdir -p tmp && export TMPDIR=$PWD/tmp
 bin=$(cargo test --locked --release --test it --no-run --message-format=json 2>/dev/null | grep -o '"executable":"[^"]*"' | tail -1 | cut -d'"' -f4)
 [ -x "$bin" ] || { echo "no test binary"; cargo test --locked --release --test it --no-run 2>&1 | tail -20; exit 1; }
 start=$(date +%s)
-"$bin" "$1" --exact --ignored --nocapture > tmp/out.log 2>&1 &
+"$bin" "$1" --ignored --nocapture > tmp/out.log 2>&1 &
 pid=$!
 peak=0
 while kill -0 $pid 2>/dev/null; do
