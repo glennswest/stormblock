@@ -360,7 +360,7 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if matches!(p, "/api/v1/pallets/gpt" | "/api/v1/pallets/convert" | "/api/v1/pallets/prune" | "/api/v1/pallets/adopt") {
             return true;
         }
-        if seg.len() == 6 && seg[3] == "drives" && seg[5] == "emulate" {
+        if seg.len() == 6 && seg[3] == "drives" && matches!(seg[5], "emulate" | "format") {
             return true;
         }
         // A metadata migration (#158): older engines cannot open it after.

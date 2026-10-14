@@ -215,7 +215,7 @@ async fn get_slab(
     }
 }
 
-async fn format_slab(
+pub(crate) async fn format_slab(
     State(state): State<Arc<AppState>>,
     Json(req): Json<FormatSlabRequest>,
 ) -> Response {
