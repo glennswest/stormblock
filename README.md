@@ -395,7 +395,7 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 | `listen_addr` | `0.0.0.0:9090` | API address (an IP, not a hostname) |
 | `tls_cert`, `tls_key` | — | HTTPS; both or neither |
 | `tls_client_ca` | — | the node CA: a client certificate it issued is a credential at the node token's tier (#203, [docs/auth.md](docs/auth.md#tls)); asked for, not required; needs `tls_cert`/`tls_key`. The pair and the CA are re-read when renewed |
-| `tls_admin_ca` | — | forge's CA (#379, stormcentral#416): a client certificate it issued to a name in `tls_admin_names`, not revoked by `tls_admin_crl`, is the admin token's tier. Any other certificate it issued (every enrolled node has one) is no credential here. Re-read on change |
+| `tls_admin_ca` | — | forge's CA (#379, stormcentral#416): a client certificate it issued to a name in `tls_admin_names`, not revoked by `tls_admin_crl`, is the admin token's tier. Any other certificate it issued and has not revoked (every enrolled node has one) may read a sealed volume's content and a release's manifest, nothing else (#383). Re-read on change |
 | `tls_admin_crl` | — | forge's CRL, PEM or DER (stormcert#61); unset, a revoked certificate stays admin (said at start) |
 | `tls_admin_names` | `[]` | the identities (SAN DNS names) a forge-issued certificate is admin for; none, nobody |
 | `data_dir` | — | durable state (see *Files* below); also the default serve directory and token-file location |
@@ -1613,6 +1613,37 @@ the records.
 
 A new ticket for an existing golden: `POST /api/v1/goldens/{name}/ticket
 {ticket_secs?}`. The registry catalog entry is stormblock-registry#43's.
+
+### An optional kernel image from forge on day 2 (#383)
+
+A node takes its kernel set's optional module images (`gpu`, `misc`, ~268 MB
+each) only when asked (stormcos#276: the node manifest's `[kernel] optional`).
+`POST /api/v1/kernel/optional {images: ["gpu"], release?, kernel?, forge?}`:
+1. **Which golden.** The release's manifest on forge (`GET
+   /api/v1/releases/{release}/manifest`) lists the kernel set's optional
+   goldens as entries with `optional: true`, `image` and `kernel`. The node
+   takes the one for its image and the kernel it runs (`uname -r`; a
+   manifest kernel without the architecture matches too). The release is
+   the node's current generation (#122) unless named.
+2. **From forge, with the node's enrolled certificate.** `[kernel]`:
+   `forge_url` (else the host of the forge the node booted from, port
+   9090), `client_cert`/`client_key` (default
+   `/data/stormcert/forge-node.{crt,key}.pem`, stormcert enrolment) and
+   `forge_ca` (default `/run/stormblock/forge/ca.crt`, #381). Forge lets
+   that certificate read only sealed content and manifests (docs/auth.md).
+3. **Pulled as an import** of `GET /api/v1/volumes/{golden}/content`
+   (sealed volumes only, by Range): streamed with resume, zeros not written,
+   its sha256 checked against the manifest's, sealed, and deleted on any
+   failure. Then cloned under the image's name (`gpu`), the volume stormcos
+   mounts.
+
+It answers at once: `present` (both there: nothing happens), `pulling` (202;
+`GET /api/v1/kernel/optional/{image}` for `cloning`, `ready` or `failed`, and
+the import's progress), 422 when the manifest has no such image for that
+kernel, 502 when forge is not reachable, 409 with no forge or no enrolled
+certificate. Nothing is made unless it is whole. `GET /api/v1/kernel/optional`
+lists them and what the node holds (`<data_dir>/kernel-optional.json`). On an
+A/B switch, stormupdate asks the same with the next release and its kernel.
 
 ### Releases: available, or archived
 

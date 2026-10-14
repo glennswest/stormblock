@@ -474,7 +474,8 @@ for a certificate and verifies it against that CA:
 |---|---|
 | a certificate the node CA issued | the **node token's tier**: every ordinary verb and attestation reads, with no token on the wire. A destructive verb still needs the admin token or a reviewed Kubernetes bearer (#274); with `admin_gate = audit` it is allowed and recorded. The audit log names it `client-cert:sha256:<16 hex>`. |
 | a certificate forge's CA (`tls_admin_ca`) issued, valid for a name in `tls_admin_names`, not revoked by `tls_admin_crl` (#379) | the **admin token's tier**: every verb, destructive ones included. The audit log names it `client-cert-admin:<name>:sha256:<16 hex>`. |
-| a certificate forge's CA issued to any other name, or one its CRL revokes | **no credential**: every enrolled node holds one, and none of them is anything here (401, as with no certificate) |
+| a certificate forge's CA issued to any other name (an enrolled node's, stormcert#78) | **a forge node** (#383): it may read a sealed volume's content (`GET /api/v1/volumes/{id}/content`) and a release's manifest (`GET /api/v1/releases/{v}/manifest`), nothing else (401). What a node pulls its kernel's optional images with. The request log names it `forge-node:sha256:<16 hex>` |
+| a certificate forge's CRL revokes | **no credential** (401, as with no certificate) |
 | a certificate from any other CA | refused in the handshake; no HTTP answer at all |
 | no certificate | as before: the token, or a public probe (`/api/v1/health`) |
 
