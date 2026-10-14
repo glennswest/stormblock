@@ -6728,17 +6728,16 @@ pub async fn run() -> anyhow::Result<()> {
                     None
                 }
             };
+            // Every sealed volume's own map: a slot a golden shares with its
+            // clones is listed once by `slab_extents`, under whichever map it
+            // meets first.
             let dests: std::collections::HashSet<_> = moved.iter().map(|(_, d)| d.slab_id).collect();
             let g = gem.read().await;
-            dests
-                .into_iter()
-                .flat_map(|d| {
-                    g.slab_extents(d)
-                        .into_iter()
-                        .filter(|(vol, _, _)| sealed.contains(vol))
-                        .filter_map(move |(_, _, loc)| loc.leg_on(d))
-                        .collect::<Vec<_>>()
-                })
+            sealed
+                .iter()
+                .filter_map(|vol| g.volume_extents(vol))
+                .flat_map(|it| it.flat_map(|(_, loc)| loc.legs().collect::<Vec<_>>()))
+                .filter(|leg| dests.contains(&leg.slab_id))
                 .collect()
         };
         let mut seen = std::collections::HashSet::new();
