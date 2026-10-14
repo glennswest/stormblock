@@ -1094,6 +1094,7 @@ async fn create_volume(
                 array_id: array_id.map(|a| a.0),
                 fs_uuid: None,
                 redundancy: redundancy.spelling(),
+                layout: redundancy.is_none().then(|| layout.as_str()),
                 health: "healthy".into(),
                 physical_bytes: 0,
                 parent: None,
