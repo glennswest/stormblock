@@ -395,6 +395,51 @@ mod tests {
         Slab::format(std::sync::Arc::new(dev), slot, StorageTier::Hot).await.unwrap()
     }
 
+    /// #153: an affine single-copy volume leaves a drained drive onto one
+    /// destination, not spread over the pool by most-free.
+    #[tokio::test]
+    async fn an_affine_volume_is_drained_onto_one_drive() {
+        let dir = std::env::temp_dir().join(format!("stormblock-drain-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let slot = 4096u64;
+        let mut vm = VolumeManager::new(slot);
+        let a = slab(&dir, "a.bin", slot).await;
+        let ida = a.slab_id();
+        vm.add_slab(a).await;
+        let plain = vm.create_volume_any("plain", 1 << 20).await.unwrap();
+        let pv = vm.get_volume(&plain).unwrap();
+        for i in 0..12u64 {
+            pv.write(i * slot, &vec![0x20 + i as u8; slot as usize]).await.unwrap();
+        }
+        // Two empty drives arrive; spread by most-free, 12 extents would
+        // land on both.
+        vm.add_slab(slab(&dir, "b.bin", slot).await).await;
+        vm.add_slab(slab(&dir, "c.bin", slot).await).await;
+        let gem = vm.gem().clone();
+        let registry = vm.registry().clone();
+        let volumes = Arc::new(crate::lockwatch::TrackedMutex::new(vm));
+        let mut drains = Drains::default();
+        let status = drains.start("a.bin".into(), vec![ida], gem.clone(), registry.clone(), volumes.clone());
+        for _ in 0..500 {
+            if status.read().await.state != DrainState::Running {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(status.read().await.state, DrainState::Empty);
+        let g = gem.read().await;
+        let on: std::collections::HashSet<_> = (0..12u64).map(|i| g.lookup(plain, i).unwrap().slab_id).collect();
+        assert_eq!(on.len(), 1, "every extent on one drive: {on:?}");
+        assert!(!on.contains(&ida));
+        drop(g);
+        for i in 0..12u64 {
+            let mut buf = vec![0u8; slot as usize];
+            pv.read(i * slot, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|&x| x == 0x20 + i as u8));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A drive is drained one extent at a time; when nothing of any volume is
     /// left on it the drain says `empty`, the data still reads, and the slab
     /// takes allocations again only if it was not the one being retired.
