@@ -61,6 +61,14 @@ pub struct DriveResponse {
     /// through this API, never (409).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub system: bool,
+    /// What it held when it was opened here (#154): `ours` (adopted),
+    /// `blank` or `foreign` (offered: only a person formats it, with
+    /// `POST …/format` and `confirm`). Absent for a drive opened at start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offer: Option<crate::mgmt::drive_offer::Offer>,
+    /// What `confirm` has to say to format it: its serial, else its path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
 }
 
 fn response_of(d: &DriveInfo, system: bool) -> DriveResponse {
@@ -79,7 +87,19 @@ fn response_of(d: &DriveInfo, system: bool) -> DriveResponse {
         emulated: emulated_state(d.device.as_ref()),
         dhchap: d.dhchap,
         system,
+        offer: None,
+        confirm: None,
     }
+}
+
+/// [`response_of`], with what the drive held when opened (#154).
+fn response_with_offer(state: &AppState, d: &DriveInfo, system: bool) -> DriveResponse {
+    let mut r = response_of(d, system);
+    r.offer = state.drive_offers.lock().unwrap_or_else(|e| e.into_inner()).get(&d.path).cloned();
+    if matches!(r.offer, Some(crate::mgmt::drive_offer::Offer::Blank | crate::mgmt::drive_offer::Offer::Foreign { .. })) {
+        r.confirm = Some(crate::mgmt::drive_offer::confirmation_of(&r.path, &r.serial));
+    }
+    r
 }
 
 /// A system disk is not changed through the drive API (#133).
@@ -126,7 +146,7 @@ async fn list_drives(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "drives", "method" => "list")
         .increment(1);
     let items: Vec<DriveResponse> =
-        state.listed_drives().await.iter().map(|(d, system)| response_of(d, *system)).collect();
+        state.listed_drives().await.iter().map(|(d, system)| response_with_offer(&state, d, *system)).collect();
     let count = items.len();
     Json(ListResponse { items, count })
 }
@@ -141,7 +161,7 @@ async fn get_drive(State(state): State<Arc<AppState>>, Path(id): Path<String>) -
 
     let drives = state.listed_drives().await;
     match drives.iter().find(|(d, _)| d.device.id().uuid == uuid) {
-        Some((d, system)) => Json(response_of(d, *system)).into_response(),
+        Some((d, system)) => Json(response_with_offer(&state, d, *system)).into_response(),
         None => ApiError::not_found(format!("drive {uuid} not found")),
     }
 }
@@ -293,6 +313,25 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
         dev.device_type(),
         if given { ", DH-HMAC-CHAP" } else { "" }
     );
+    // What it holds (#154): ours is adopted, anything else is offered and
+    // never formatted on its own.
+    let offer = offer_of(&state, &dev, &req.path).await;
+    let confirm = match &offer {
+        crate::mgmt::drive_offer::Offer::Ours { .. } => None,
+        other => {
+            tracing::info!(
+                drive = %req.path,
+                "drive {} is {}; offered, not formatted: only a person formats it (POST /api/v1/drives/{}/format)",
+                req.path,
+                match other {
+                    crate::mgmt::drive_offer::Offer::Blank => "blank".to_string(),
+                    o => format!("someone's: {}", o.destroys()),
+                },
+                id.uuid
+            );
+            Some(crate::mgmt::drive_offer::confirmation_of(&req.path, &id.serial))
+        }
+    };
     (
         axum::http::StatusCode::CREATED,
         Json(DriveResponse {
@@ -309,9 +348,35 @@ async fn open_drive(State(state): State<Arc<AppState>>, Json(req): Json<OpenRequ
             emulated: emulated_state(dev.as_ref()),
             dhchap: given,
             system: false,
+            offer: Some(offer),
+            confirm,
         }),
     )
         .into_response()
+}
+
+/// Survey a drive just opened (#154): a slab of ours on it is adopted with
+/// what it holds; anything else is recorded as an offer.
+async fn offer_of(state: &AppState, dev: &Arc<dyn crate::drive::BlockDevice>, path: &str) -> crate::mgmt::drive_offer::Offer {
+    use crate::mgmt::drive_offer::{survey, Offer};
+    let slabs = crate::drive::discover::slabs_in_partitions(dev).await;
+    let offer = if slabs.is_empty() {
+        survey(dev).await
+    } else {
+        let n = slabs.len();
+        match state.volume_manager.lock().await.adopt_slabs(slabs).await {
+            Ok(report) => {
+                tracing::info!(drive = %path, slabs = n, volumes = report.volumes.len(), "drive carries our slab format: adopted with what it holds");
+                Offer::Ours { slabs: n, volumes: report.volumes.len() + report.already_known }
+            }
+            Err(e) => {
+                tracing::warn!(drive = %path, "drive carries our slab format but did not adopt: {e}");
+                Offer::Foreign { holds: format!("{n} slab(s) of ours that would not adopt ({e})") }
+            }
+        }
+    };
+    state.drive_offers.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_string(), offer.clone());
+    offer
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -398,6 +463,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/smart", get(get_drive_smart))
         .route("/{id}/slabs", get(drive_slabs))
         .route("/{id}/adopt", axum::routing::post(adopt_drive))
+        .route("/{id}/format", axum::routing::post(format_drive))
         .route("/{id}/labels", axum::routing::put(set_labels))
         .route("/{id}/drain", get(drain_status).post(start_drain).delete(cancel_drain))
         .route("/{id}/health", axum::routing::post(drive_health))
@@ -884,4 +950,79 @@ async fn emulate(
         return ApiError::conflict(format!("{path} is not an emulated drive"));
     }
     Json(serde_json::json!({ "drive": path, "emulated": emulated_state(dev.as_ref()) })).into_response()
+}
+
+
+#[derive(Debug, Deserialize, Default)]
+pub struct FormatDriveRequest {
+    /// The drive's serial (its path when it has none): said by a person,
+    /// for this drive, in this request.
+    #[serde(default)]
+    pub confirm: Option<String>,
+    /// `data` (the default here: a drive added to grow the pool) or `system`.
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub slot_size: Option<u64>,
+}
+
+/// One drive formatted at a time (#154).
+static FORMATTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `POST /api/v1/drives/{id}/format {confirm, role?, tier?, slot_size?}`
+/// (#154): a person formats an offered drive as a slab. Destructive (#274).
+/// Without `confirm` naming the drive the answer is 412 and names the risk;
+/// a drive that carries our format is not formatted (409: it is adopted).
+async fn format_drive(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<FormatDriveRequest>>,
+) -> Response {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    if let Some(r) = refuse_system_disk(&state, &id, "formatted").await {
+        return r;
+    }
+    let found = {
+        let drives = state.drives.read().await;
+        drives.iter().find(|d| d.path == id || d.device.id().uuid.to_string() == id).map(|d| (d.device.clone(), d.path.clone()))
+    };
+    let Some((dev, path)) = found else {
+        return ApiError::not_found(format!("no open drive {id}"));
+    };
+    let Ok(_one) = FORMATTING.try_lock() else {
+        return ApiError::conflict("another drive is being formatted: one at a time".to_string());
+    };
+    // What it holds now, not when it was opened.
+    let offer = offer_of(&state, &dev, &path).await;
+    if let crate::mgmt::drive_offer::Offer::Ours { slabs, volumes } = offer {
+        return ApiError::conflict(format!(
+            "{path} carries our slab format ({slabs} slab(s), {volumes} volume(s)): it is adopted, not formatted"
+        ));
+    }
+    let id_ = dev.id();
+    let want = crate::mgmt::drive_offer::confirmation_of(&path, &id_.serial);
+    if req.confirm.as_deref().map(str::trim) != Some(want.as_str()) {
+        let why = crate::mgmt::drive_offer::risk(&path, &id_.model, &id_.serial, dev.capacity_bytes(), &offer);
+        return (
+            axum::http::StatusCode::PRECONDITION_FAILED,
+            Json(serde_json::json!({ "error": why, "code": 412, "confirm": want, "holds": offer })),
+        )
+            .into_response();
+    }
+    tracing::warn!(drive = %path, holds = %offer.destroys(), "a person formats a drive (#154)");
+    let fmt = super::slabs::FormatSlabRequest {
+        device_path: path.clone(),
+        tier: req.tier.unwrap_or_else(|| "hot".into()),
+        slot_size: req.slot_size,
+        domain: None,
+        role: Some(req.role.unwrap_or_else(|| "data".into())),
+        metadata_bytes: None,
+    };
+    let resp = super::slabs::format_slab(State(state.clone()), Json(fmt)).await;
+    if resp.status().is_success() {
+        offer_of(&state, &dev, &path).await;
+    }
+    resp
 }

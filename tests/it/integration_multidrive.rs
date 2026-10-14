@@ -258,3 +258,92 @@ async fn a_scrub_repairs_a_three_way_mirror_and_reports_it() {
     let (s, _) = call(&c, reqwest::Method::POST, format!("{api}/volumes/{}/scrub", one["id"].as_str().unwrap()), None).await;
     assert_eq!(s, 409, "one copy: nothing to compare");
 }
+
+/// #154, decision 3 (the owner: "on auto format, no"): a drive opened on a
+/// running node is surveyed. One carrying our slab format is adopted with
+/// what it holds; a blank or a foreign one is offered and never formatted on
+/// its own. Only a request naming the drive (`confirm` = its serial, or its
+/// path) formats it; without it the answer names the risk.
+#[tokio::test]
+async fn a_drive_that_appears_is_offered_and_only_a_person_formats_it() {
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::drive::BlockDevice;
+    let dir = TempDir::new().unwrap();
+    let (state, api, c) = start(&dir).await;
+    let slabs = |state: &Arc<AppState>| {
+        let state = state.clone();
+        async move { state.slab_registry.read().await.iter().count() }
+    };
+
+    // A blank drive: offered, nothing formatted.
+    let blank = dir.path().join("blank.img").to_string_lossy().to_string();
+    let (s, d) = call(&c, reqwest::Method::POST, format!("{api}/drives"), Some(json!({ "path": blank, "size_bytes": 64 * MIB }))).await;
+    assert_eq!(s, 201, "{d}");
+    assert_eq!(d["offer"]["state"], "blank", "{d}");
+    let confirm = d["confirm"].as_str().unwrap().to_string();
+    let id = d["uuid"].as_str().unwrap().to_string();
+    assert_eq!(slabs(&state).await, 0, "nothing formats a drive on its own");
+    let (_, listed) = call(&c, reqwest::Method::GET, format!("{api}/drives/{id}"), None).await;
+    assert_eq!(listed["offer"]["state"], "blank");
+
+    // Asked to format it without naming it: 412, the risk named.
+    let (s, e) = call(&c, reqwest::Method::POST, format!("{api}/drives/{id}/format"), Some(json!({}))).await;
+    assert_eq!(s, 412, "{e}");
+    let why = e["error"].as_str().unwrap();
+    assert!(why.contains("erases") && why.contains("power cut") && why.contains(&confirm), "{why}");
+    let (s, _) = call(&c, reqwest::Method::POST, format!("{api}/drives/{id}/format"), Some(json!({ "confirm": "another-drive" }))).await;
+    assert_eq!(s, 412, "the wrong drive named");
+    assert_eq!(slabs(&state).await, 0);
+
+    // Named: formatted, a data slab, and from then on ours.
+    let (s, f) = call(&c, reqwest::Method::POST, format!("{api}/drives/{id}/format"), Some(json!({ "confirm": confirm }))).await;
+    assert!(s == 200 || s == 201, "{f}");
+    assert_eq!(slabs(&state).await, 1);
+    assert_eq!(state.slab_registry.read().await.iter().next().unwrap().1.role(), SlabRole::Data);
+    let (_, listed) = call(&c, reqwest::Method::GET, format!("{api}/drives/{id}"), None).await;
+    assert_eq!(listed["offer"]["state"], "ours", "{listed}");
+    let (s, _) = call(&c, reqwest::Method::POST, format!("{api}/drives/{id}/format"), Some(json!({ "confirm": confirm }))).await;
+    assert_eq!(s, 409, "ours is adopted, never formatted again");
+
+    // Someone's filesystem: offered, with what it holds named.
+    let foreign = dir.path().join("foreign.img").to_string_lossy().to_string();
+    {
+        let f = std::fs::File::create(&foreign).unwrap();
+        f.set_len(64 * MIB).unwrap();
+        use std::os::unix::fs::FileExt;
+        f.write_at(&[0x53, 0xEF], 1024 + 56).unwrap();
+    }
+    let (s, d) = call(&c, reqwest::Method::POST, format!("{api}/drives"), Some(json!({ "path": foreign }))).await;
+    assert_eq!(s, 201, "{d}");
+    assert_eq!(d["offer"]["state"], "foreign");
+    assert_eq!(d["offer"]["holds"], "an ext2/3/4 filesystem");
+    assert_eq!(slabs(&state).await, 1, "a foreign drive is not taken");
+
+    // A drive carrying our format (from another node): adopted with its
+    // volume, nothing formatted.
+    let ours = dir.path().join("ours.img").to_string_lossy().to_string();
+    let vol = {
+        let dev: Arc<dyn BlockDevice> = Arc::new(stormblock::drive::filedev::FileDevice::open_with_capacity(&ours, 64 * MIB).await.unwrap());
+        let slab = Slab::format_with(dev, SlabFormat::new(MIB, stormblock::placement::topology::StorageTier::Hot).with_role(SlabRole::Data).with_metadata(4 * MIB))
+            .await
+            .unwrap();
+        let sid = slab.slab_id();
+        let mut vm = VolumeManager::new(MIB);
+        vm.add_slab(slab).await;
+        vm.persist_to_slab(sid);
+        let v = vm.create_volume_any("carried", 4 * MIB).await.unwrap();
+        vm.get_volume(&v).unwrap().write(0, &[0x77u8; 4096]).await.unwrap();
+        vm.persist().await;
+        v
+    };
+    let (s, d) = call(&c, reqwest::Method::POST, format!("{api}/drives"), Some(json!({ "path": ours }))).await;
+    assert_eq!(s, 201, "{d}");
+    assert_eq!(d["offer"]["state"], "ours", "{d}");
+    assert_eq!(d["offer"]["slabs"], 1);
+    assert!(d["confirm"].is_null(), "nothing to confirm: it is not offered for a format");
+    assert_eq!(slabs(&state).await, 2, "its slab adopted");
+    let dev = state.volume_manager.lock().await.get_volume(&vol).expect("its volume came with it");
+    let mut b = vec![0u8; 4096];
+    dev.read(0, &mut b).await.unwrap();
+    assert!(b.iter().all(|x| *x == 0x77), "with its data");
+}

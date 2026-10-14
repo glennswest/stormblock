@@ -1,6 +1,7 @@
 //! Management plane — REST API (axum), Prometheus metrics, config.
 
 pub mod api;
+pub mod drive_offer;
 pub mod auth;
 pub mod kubeauth;
 pub mod capacity;
@@ -349,6 +350,9 @@ pub struct AppState {
     pub imports: tokio::sync::RwLock<crate::image::import::Imports>,
     /// Who made each volume, synonym and host record (#422).
     pub creators: std::sync::Mutex<creators::Creators>,
+    /// What each drive opened on this node held when it was opened (#154),
+    /// by path: ours (adopted), blank or foreign (offered).
+    pub drive_offers: std::sync::Mutex<HashMap<String, drive_offer::Offer>>,
     /// Latest pool-pressure sample, kept current by the watcher (#18).
     pub pool_pressure: Option<std::sync::Arc<tokio::sync::RwLock<Option<crate::volume::pressure::PressureStatus>>>>,
     pub config: StormBlockConfig,
@@ -607,6 +611,7 @@ impl AppState {
             rebalance: tokio::sync::Mutex::new(crate::rebalance::Rebalance::default()),
             rebuilds,
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
+            drive_offers: std::sync::Mutex::new(HashMap::new()),
             creators: std::sync::Mutex::new(creators::Creators::load(
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),

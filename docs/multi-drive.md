@@ -216,7 +216,7 @@ today, or `mirror` on a node that can hold two drives' worth.)*
 
 | event | today | wanted |
 |---|---|---|
-| **added** | `POST /api/v1/drives` opens and labels it; a slab is a second, manual call (`POST /api/v1/slabs`, or `…/adopt` for one that already carries one). Boot adopts the slabs it finds. | A new blank drive gets a data slab by policy (the same `assimilate` policy the boot uses: `off`, `blank`, `any`), and the pool grows by it. A drive carrying a slab is adopted with its data, never reformatted. Then the pool is **rebalanced** onto it (below). *(Owner decision 3: automatic, or on an operator's word.)* |
+| **added** | `POST /api/v1/drives` opens and labels it, and reads what it holds (#154). **Ours** (it carries our slab format): adopted at once with its volumes, never reformatted. **Blank** (first and last MiB zeros) or **foreign** (a partition table, a filesystem, a RAID member, named): reported as an offer (`offer`, and `confirm`, the word a format needs), and **never formatted on its own**. A person formats it: `POST /api/v1/drives/{id}/format {confirm: <its serial, else its path>, role?}` (destructive; one drive at a time; a data slab by default); without `confirm` the answer is 412 and names the drive, what formatting erases, and that a power cut while it formats leaves the drive unusable. Boot adopts the slabs it finds. | Owner's decision 3 (2026-10-13): **no automatic format, ever** — "we may be doing a test, and a power off could destroy a drive". The rebalance onto a new drive is the operator's too (below). |
 | **drained** | `POST /api/v1/drives/{id}/drain`: quarantine, then move every leg off, one extent at a time, with I/O flowing. Ends `empty`, `stuck` or `cancelled`. Now respects each volume's rung and role. | Rate-limited against live I/O. A drive is **removed** only when it is `empty` (`DELETE /api/v1/drives/{id}`). |
 | **failing / failed** | `POST /api/v1/drives/{id}/health` (from stormdrive): quarantine, and every redundant volume with a leg there stops trusting it (degraded). **Rebuilt automatically (#146):** the volumes with a member on the drive, most endangered first (`margin`), several at once and several extents of each at once, onto drives of their own choosing, under one node-wide byte budget; `/api/v1/rebuilds` shows and steers it. `failed` then drains what has no redundancy. | Scrub (#160); erasure coding wider than P+Q (#159). |
 | **gone** (pulled, not answering) | reported `missing`: as failed | as failed |
@@ -241,7 +241,8 @@ moves then run in the background, each holding only its slot's fence, yielding
 to live I/O, with `max_bytes_per_sec`; `GET` reports and `DELETE` stops. The
 drain's copies hold only the fence too (they held the map and the registry for
 each, #269's shape), and it yields to live I/O. Whether a pass runs by itself
-after a drive is added is decision 3, asked on #154.
+after a drive is added: no, decided with decision 3 (#154): an operator runs it
+once the drive is formatted (`POST /api/v1/slabs/rebalance`, a dry run first).
 
 ## 5. Capacity and overcommit
 
@@ -320,7 +321,7 @@ above ran on files.
 | redundancy / spread / tier as StorageClass parameters, end to end — **engine done** (#151) | rustkube-node #71, stormblock-csi #21 |
 | overcommit per drive → pool admission and headroom | stormblock #152, stormdrive #13, rustkube-node #62 |
 | drive affinity for non-redundant volumes *(decision 1)* | stormblock #153 |
-| a new drive: slab by policy, then rebalance onto it *(decision 3)*; `POST /slabs/rebalance`; drain rate limit | stormblock #154 |
+| a new drive: offered, formatted only by a person (`…/format` with `confirm`), adopted when it is ours; `POST /slabs/rebalance`; drain against live I/O — **done** *(decision 3: no automatic format)* | stormblock #154 |
 | Drives and Pools pages | stormconsole #29 (#32, 160 drives, is closed) |
 | drive-level RAID failure states — only for whole-device legs now | stormblock #69 |
 | shelf RAID sets with hot spares, rebuild, scrub, reassembly — **done** ([raid-sets.md](raid-sets.md)) | stormblock #252, #168 |
