@@ -709,25 +709,23 @@ recovery (`UblkServer` is non-recoverable by default).
 - [x] migrate/boot_iscsi 24/24, clippy clean; check.sh at c71b637 ALL PASS (1150/1150)
 - [x] golden golden-stormblock-3b051585c805 (fa68d3e); closed
 
-### A drive added grows the pool and is used (2026-10-11, #154, P3) — PARTLY BUILT; DECISION 3 WAITS ON THE OWNER
+### A drive added grows the pool and is used (2026-10-11, #154, P3) — DECISION 3 BUILT on branch wip/154-drive-offer; merges after 12.23
 
-Decision 3 (automatic, or on an operator's word) asked on #154 (A/B/C, C
-recommended: format and rebalance on the operator's word by default, adopt
-a slab-carrying drive automatically, a switch for hands-off growth).
-Built meanwhile, the operator's tools either way:
-- [x] `POST /api/v1/slabs/rebalance {dry_run (default true), pool?,
-      max_moves?, max_bytes_per_sec?}`; `GET` status, `DELETE` cancel
-      (`src/rebalance.rs`): planned read-only per pool (role + slot size),
-      sources past target + 1% of their slots, destinations below target,
-      legs apart at the volume's rung and planned placements tracked (two
-      legs never planned onto one slab), parity volumes left; moved with
-      only each slot's fence, yielding to live I/O, persisted every 64
-- [x] the drain: data legs copied with only the fence (it held both write
-      locks per copy, #269's shape), yielding to live I/O
-- [x] tests `integration_rebalance` (2); rebalance/drain/placement/
-      multidrive 38/38; check.sh at 6688e90 ALL PASS (1150/1150), 0 warnings
-- [x] golden golden-stormblock-d9d2dc698e70 (cd6c46e)
-- [ ] the automatic part per the owner's answer
+Shipped earlier (golden-stormblock-d9d2dc698e70): `POST /api/v1/slabs/
+rebalance` (dry run first, fence-only moves) and the drain off the global
+locks, yielding to live I/O. Decision 3 (owner, 2026-10-13): **no automatic
+format, ever**; a drive that appears is reported and offered, only a person
+formats it, one at a time, risk named; adopting our format is fine.
+Built on **wip/154-drive-offer** (the 12.23 freeze):
+- [x] `mgmt::drive_offer` (survey: ours / blank / foreign, signatures named;
+      the risk text; `confirm` = serial else path); open adopts ours and
+      records the offer; `offer`/`confirm` on drive responses
+- [x] `POST /api/v1/drives/{id}/format {confirm, role?}` (destructive, one at
+      a time, 412 naming the risk, 409 for ours)
+- [x] tests (multidrive HTTP, units, auth); multi-drive.md, README, auth.md,
+      CHANGELOG; stormconsole#153 (the UI)
+- [x] check.sh on wip/154-drive-offer at 9f5df4b ALL PASS (1217/1217)
+- [ ] after 12.23 passes: merge, check.sh, the next stage; close
 
 ### image build: `clones = [...]` made (2026-10-11, #124) — DONE (golden-stormblock-17aefc2dba61)
 
