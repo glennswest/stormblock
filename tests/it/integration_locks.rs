@@ -524,3 +524,96 @@ async fn two_first_boot_claims_at_once_answer_in_seconds_on_a_slow_disk() {
     assert_eq!(v.status(), 200, "the clone the record names is there");
     server.abort();
 }
+
+/// #441: forge's NVMe/TCP target stopped answering a reader for 30 s while
+/// two imports wrote large volumes at once (`nvme: reading PDU header: no
+/// answer in 30s`, a one-block read of the golden just sealed). The same
+/// shape on the same slow disk: one target on one reactor core (every
+/// connection shares it, as several do on a node's cores), two initiators
+/// writing 96 MiB each into fresh volumes with a flush every 16 MiB, and a
+/// third reading 4 KiB blocks of a sealed golden throughout. Every read is
+/// answered in a few seconds at worst, never near the initiator's 30 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reader_is_answered_while_two_large_writers_fill_their_volumes() {
+    use stormblock::target::nvmeof::{NvmeofConfig, NvmeofTarget};
+    use stormblock::target::reactor::{ReactorConfig, ReactorPool};
+    const MIB: u64 = 1 << 20;
+    const WRITTEN: u64 = 96 * MIB;
+
+    let dir = TempDir::new().unwrap();
+    let state = setup_with(&dir, 2).await;
+    let (golden, writers) = {
+        let mut vm = state.volume_manager.lock().await;
+        let g = vm.create_volume_any("cilium.golden", 32 * MIB).await.unwrap();
+        let a = vm.create_volume_any("cilium", WRITTEN).await.unwrap();
+        let b = vm.create_volume_any("cilium-operator", WRITTEN).await.unwrap();
+        (g, [a, b])
+    };
+    {
+        let dev = state.volume_manager.lock().await.get_volume(&golden).unwrap();
+        for m in 0..32u64 {
+            dev.write(m * MIB, &vec![m as u8 + 1; MIB as usize]).await.unwrap();
+        }
+        dev.flush().await.unwrap();
+        state.volume_manager.lock().await.seal_volume(golden, None).await.unwrap();
+    }
+
+    let nqn = "nqn.2026-10.lo.storm:test-441";
+    let mut target = NvmeofTarget::new(NvmeofConfig { listen_addr: "127.0.0.1:0".parse().unwrap(), nqn: nqn.into(), ..Default::default() });
+    {
+        let vm = state.volume_manager.lock().await;
+        target.add_namespace(1, vm.get_volume(&golden).unwrap());
+        target.add_namespace(2, vm.get_volume(&writers[0]).unwrap());
+        target.add_namespace(3, vm.get_volume(&writers[1]).unwrap());
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let target = Arc::new(target);
+    let reactor = ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false });
+    let server = tokio::spawn(async move {
+        let _ = target.run_with_listener(listener, &reactor).await;
+    });
+    common::wait_for_listener(addr).await;
+    let open = |nsid: u32| {
+        let uri = format!("nvme-tcp://{addr}/{nqn}?nsid={nsid}");
+        async move { Arc::<dyn BlockDevice>::from(stormblock::drive::open_one_drive(&uri).await.expect("attach")) }
+    };
+    let reader = open(1).await;
+
+    let started = Instant::now();
+    let mut work = Vec::new();
+    for (i, nsid) in [2u32, 3].into_iter().enumerate() {
+        let dev = open(nsid).await;
+        work.push(tokio::spawn(async move {
+            for m in 0..WRITTEN / MIB {
+                dev.write(m * MIB, &vec![(i as u8) * 100 + m as u8; MIB as usize]).await.expect("a writer's write");
+                if m % 16 == 15 {
+                    dev.flush().await.expect("a writer's flush");
+                }
+            }
+            dev.flush().await.expect("a writer's last flush");
+        }));
+    }
+
+    let (mut reads, mut slowest) = (0u64, Duration::ZERO);
+    let mut buf = vec![0u8; 4096];
+    let mut at = 0u64;
+    while work.iter().any(|w| !w.is_finished()) && started.elapsed() < Duration::from_secs(300) {
+        at = (at + 7 * 4096 + 513 * 4096) % (32 * MIB);
+        let t = Instant::now();
+        reader.read(at, &mut buf).await.expect("the reader's read");
+        let took = t.elapsed();
+        slowest = slowest.max(took);
+        assert!(buf.iter().all(|b| *b == (at / MIB) as u8 + 1), "the golden reads back what was sealed at {at}");
+        reads += 1;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let busy = started.elapsed();
+    for w in work {
+        w.await.unwrap();
+    }
+    println!("#441: {reads} reads while two writers wrote {} MiB each in {busy:?}; slowest read {slowest:?}", WRITTEN / MIB);
+    assert!(reads >= 10, "the writers finished before the reader ran beside them ({busy:?})");
+    assert!(slowest < Duration::from_secs(5), "a one-block read waited {slowest:?} behind the writers");
+    server.abort();
+}
