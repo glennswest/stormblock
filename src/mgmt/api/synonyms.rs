@@ -1451,6 +1451,8 @@ async fn claim_boothost(
         "attach": attach,
     });
     timing.done(tag, claimed_as);
+    let mut out = out;
+    out["timing"] = timing.json();
     (StatusCode::CREATED, Json(out)).into_response()
 }
 
@@ -1473,6 +1475,15 @@ impl ClaimTiming {
         let now = std::time::Instant::now();
         self.steps.push((what, now - self.last));
         self.last = now;
+    }
+
+    /// In the reply: what the machine waited for, step by step (ms).
+    fn json(&self) -> serde_json::Value {
+        let mut steps = serde_json::Map::new();
+        for (w, d) in &self.steps {
+            steps.insert(w.replace(' ', "_"), json!(d.as_millis() as u64));
+        }
+        json!({"total_ms": self.started.elapsed().as_millis() as u64, "steps_ms": steps})
     }
 
     fn done(&self, host: &str, claimed_as: &str) {

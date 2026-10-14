@@ -486,16 +486,18 @@ async fn two_first_boot_claims_at_once_answer_in_seconds_on_a_slow_disk() {
         for j in [a, b] {
             let (host, status, body, took) = j.await.unwrap();
             assert_eq!(status, 201, "{round} {host}: {body}");
-            println!("{round}: {host} claimed in {took:?}");
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            println!("{round}: {host} claimed in {took:?}: {}", v["timing"]);
+            // One lock for every machine's claim made the second wait out the
+            // whole first (2.3 s here): another machine's claim is no wait.
+            let waited = v["timing"]["steps_ms"]["wait"].as_u64().unwrap();
+            assert!(waited < 300, "{round}: {host} waited {waited} ms for another machine's claim");
             slowest = slowest.max(took);
         }
-        println!("{round}: the slower of two claims at once took {slowest:?}");
-        // One claim's lock for every machine made the second wait out the
-        // whole first (4.6 s here, 2 × alone): now they overlap.
-        assert!(
-            slowest < alone.mul_f64(1.6),
-            "{round}: two machines' claims queued behind each other: {slowest:?} against {alone:?} alone"
-        );
+        // What is left between them is the disk's: two clones' flushes on
+        // one slab take turns.
+        println!("{round}: the slower of two claims at once took {slowest:?} ({alone:?} alone)");
+        assert!(slowest < alone * 2, "{round}: {slowest:?} against {alone:?} alone");
     }
 
     // A machine that stops waiting (#424): the claim still finishes, and the
