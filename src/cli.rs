@@ -1465,19 +1465,19 @@ pub async fn run() -> anyhow::Result<()> {
         }
     }
 
-    // StormFS registration (announce volumes to StormFS metadata cluster)
-    let _stormfs_handle = if config.stormfs.enabled {
+    // Registration with stormstorage (#170): this node's volumes, announced.
+    let _registration = if config.registration.enabled {
         tracing::info!(
-            "StormFS registration enabled — metadata: {}, interval: {}s",
-            config.stormfs.metadata_url,
-            config.stormfs.heartbeat_secs,
+            "stormstorage registration enabled - {}, every {}s",
+            config.registration.url,
+            config.registration.heartbeat_secs,
         );
-        match crate::stormfs::StormFsRegistration::try_new(config.stormfs.clone()) {
+        match crate::registration::Registration::try_new(config.registration.clone()) {
             Ok(reg) => Some(reg.start(state.clone())),
             // A token the config names and that cannot be read: not
             // registered at all, rather than registered without it (#214).
             Err(e) => {
-                tracing::error!("StormFS registration not started: {e}");
+                tracing::error!("stormstorage registration not started: {e}");
                 None
             }
         }

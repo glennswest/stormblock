@@ -6,7 +6,7 @@ pub mod fs;
 pub mod target;
 pub mod mgmt;
 pub mod serve;
-pub mod stormfs;
+pub mod registration;
 pub mod boot;
 #[cfg(feature = "iscsi")]
 pub mod boot_iscsi;
