@@ -736,6 +736,11 @@ impl VolumeManager {
         Ok(())
     }
 
+    /// Whether a volume keeps to one drive (#153).
+    pub fn is_affine(&self, id: &VolumeId) -> bool {
+        self.volumes.get(id).is_some_and(|h| h.affine())
+    }
+
     /// A sealed volume's digest and verdict (#384).
     pub fn seal_digest(&self, id: &VolumeId) -> Option<crate::volume::metadata::SealDigest> {
         self.digests.get(id).copied()
@@ -1569,11 +1574,14 @@ impl VolumeManager {
                 PlacementPolicy {
                     role,
                     pinned: vrec.array_id.and_then(|a| self.array_slabs.get(&a).copied()),
+                    layout: vrec.layout,
                     ..PlacementPolicy::preferring(vrec.tier.unwrap_or(StorageTier::Hot))
                 },
                 vrec.redundancy.clone(),
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
+            // An affine volume keeps to the slab most of it is on (#153).
+            handle.set_affinity(affinity_of(&vrec));
             handle.set_sealed(vrec.sealed);
             handle.set_lba(vrec.lba);
             if vrec.template {
@@ -2455,9 +2463,9 @@ impl VolumeManager {
     /// data volume that copied-on-write into a *system* slab would put half
     /// of the node's identity in the half an install replaces (#88).
     fn inherit_handle(&self, vol: ThinVolume, source_id: &VolumeId) -> ThinVolumeHandle {
-        let (policy, failed, role, pinned, lba, tier) = match self.volumes.get(source_id) {
-            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role(), src.pinned_slab(), src.lba(), src.preferred_tier()),
-            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System, None, thin::Lba::DEFAULT, StorageTier::Hot),
+        let (policy, failed, role, pinned, lba, tier, layout) = match self.volumes.get(source_id) {
+            Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role(), src.pinned_slab(), src.lba(), src.preferred_tier(), src.layout()),
+            None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System, None, thin::Lba::DEFAULT, StorageTier::Hot, thin::Layout::default()),
         };
         // A clone of a pinned volume shares its slots on that slab, and its
         // copy-on-writes stay there with them (#150).
@@ -2465,7 +2473,7 @@ impl VolumeManager {
             vol,
             self.gem.clone(),
             self.registry.clone(),
-            PlacementPolicy { role, pinned, ..PlacementPolicy::preferring(tier) },
+            PlacementPolicy { role, pinned, layout, ..PlacementPolicy::preferring(tier) },
             policy,
         );
         handle.set_failed_slabs(failed);
@@ -3472,6 +3480,7 @@ impl VolumeManager {
                 origin: self.origins.get(id).copied().unwrap_or_default(),
                 tier: Some(handle.preferred_tier()).filter(|t| *t != StorageTier::Hot),
                 digest: self.digests.get(id).copied(),
+                layout: handle.layout(),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -3536,6 +3545,7 @@ impl VolumeManager {
                 origin: self.origins.get(&id).copied().unwrap_or_default(),
                 tier: self.volumes.get(&id).map(|h| h.preferred_tier()).filter(|t| *t != StorageTier::Hot),
                 digest: self.digests.get(&id).copied(),
+                layout: self.volumes.get(&id).map(|h| h.layout()).unwrap_or_default(),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -3746,11 +3756,14 @@ impl VolumeManager {
                 PlacementPolicy {
                     role,
                     pinned: vrec.array_id.and_then(|a| self.array_slabs.get(&a).copied()),
+                    layout: vrec.layout,
                     ..PlacementPolicy::preferring(vrec.tier.unwrap_or(StorageTier::Hot))
                 },
                 vrec.redundancy.clone(),
             ));
             handle.set_failed_slabs(vrec.failed_slabs.iter().copied());
+            // An affine volume keeps to the slab most of it is on (#153).
+            handle.set_affinity(affinity_of(&vrec));
             handle.set_sealed(vrec.sealed);
             handle.set_lba(vrec.lba);
             if vrec.template {
@@ -3981,6 +3994,16 @@ async fn mapped_extents(
     let g = map.read().await;
     let extents = g.volume_extents(&id).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default();
     Ok((pin, extents))
+}
+
+/// The slab most of a volume's extents are on (#153): where an affine
+/// volume's next extent goes after a restart.
+fn affinity_of(vrec: &metadata::VolumeRecord) -> Option<SlabId> {
+    let mut count: HashMap<SlabId, u64> = HashMap::new();
+    for loc in vrec.extents.values() {
+        *count.entry(loc.slab_id).or_default() += 1;
+    }
+    count.into_iter().max_by_key(|(s, n)| (*n, s.0)).map(|(s, _)| s)
 }
 
 fn restored_extent_size(

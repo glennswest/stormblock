@@ -83,6 +83,42 @@ pub struct PlacementPolicy {
     /// dedicated flag do not apply to a pinned volume's own slab; it is
     /// refused rather than spilled when the slab is full.
     pub pinned: Option<SlabId>,
+    /// Where a single-copy volume's extents go (#153): on one drive while it
+    /// has room (`Affine`, the default), or each on the emptiest
+    /// (`Spread`). A redundant volume spreads whatever this says.
+    pub layout: Layout,
+}
+
+/// A single-copy volume's layout (#153, the owner's C).
+///
+/// `Affine` keeps a `redundancy: none` volume on the drive its extents
+/// went to, spilling to the next emptiest only when that one is full, so
+/// it is lost with one drive, as "no redundancy" leads people to expect,
+/// not with any of the pool's. `Spread` puts each new extent on the
+/// emptiest slab, for a scratch volume that wants the pool's bandwidth
+/// and knows what it risks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    #[default]
+    Affine,
+    Spread,
+}
+
+impl Layout {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "affine" => Ok(Layout::Affine),
+            "spread" => Ok(Layout::Spread),
+            other => Err(format!("placement {other:?}: affine (one drive while it has room) or spread")),
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Layout::Affine => "affine",
+            Layout::Spread => "spread",
+        }
+    }
 }
 
 impl PlacementPolicy {
@@ -104,6 +140,7 @@ impl Default for PlacementPolicy {
             tier_fallback: vec![StorageTier::Warm, StorageTier::Cool, StorageTier::Cold],
             role: SlabRole::System,
             pinned: None,
+            layout: Layout::Affine,
         }
     }
 }
@@ -470,6 +507,8 @@ pub struct ThinVolumeHandle {
     stripe_log: std::sync::RwLock<super::stripelog::StripeLog>,
     /// Sealed: refuses writes, discards and shrinks (#76).
     sealed: std::sync::atomic::AtomicBool,
+    /// The slab an affine single-copy volume's next extent goes to (#153).
+    affinity: std::sync::Mutex<Option<SlabId>>,
     /// The sha256 of every byte, once computed for this seal (#271): a
     /// sealed volume takes no writes, so it cannot go stale; a change of the
     /// sealed flag either way forgets it, and a deleted volume's handle goes.
@@ -577,6 +616,7 @@ impl ThinVolumeHandle {
             shards: (0..SHARDS).map(|_| tokio::sync::Mutex::new(())).collect(),
             stripe_log: std::sync::RwLock::new(super::stripelog::StripeLog::none()),
             sealed: std::sync::atomic::AtomicBool::new(false),
+            affinity: std::sync::Mutex::new(None),
             digest: std::sync::Mutex::new(None),
             seal_epoch: std::sync::atomic::AtomicU64::new(0),
             read_only: std::sync::atomic::AtomicBool::new(false),
@@ -619,6 +659,28 @@ impl ThinVolumeHandle {
     /// The slab every extent of this volume lives on, when it is pinned (#150).
     pub fn pinned_slab(&self) -> Option<SlabId> {
         self.placement.pinned
+    }
+
+    /// The layout asked for at creation (#153).
+    pub fn layout(&self) -> Layout {
+        self.placement.layout
+    }
+
+    /// Whether new extents keep to one drive: a single-copy, unpinned,
+    /// affine volume (#153). A redundant volume spreads on purpose (#146).
+    pub fn affine(&self) -> bool {
+        self.placement.layout == Layout::Affine && self.placement.pinned.is_none() && self.redundancy().is_none()
+    }
+
+    /// Where the next extent goes, for an affine volume.
+    pub fn affinity(&self) -> Option<SlabId> {
+        *self.affinity.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keep new extents on `slab` (the one most of the volume is on, at a
+    /// restart).
+    pub fn set_affinity(&self, slab: Option<SlabId>) {
+        *self.affinity.lock().unwrap_or_else(|e| e.into_inner()) = slab;
     }
 
     pub fn is_sealed(&self) -> bool {
@@ -1182,7 +1244,25 @@ impl ThinVolumeHandle {
         vext_idx: u64,
         generation: u64,
     ) -> DriveResult<(SlabId, u64)> {
+        // Affine (#153): the volume's own slab while it takes the extent.
+        if self.affine() {
+            if let Some(a) = self.affinity() {
+                if !self.is_failed(a) && registry.takes(&a, self.placement.role, self.slot_size) {
+                    if let Some(slab) = registry.get_mut(&a) {
+                        if let Ok(slot_idx) = slab.allocate_deferred(self.id, vext_idx, generation).await {
+                            registry.reserve(a, slot_idx);
+                            return Ok((a, slot_idx));
+                        }
+                    }
+                }
+            }
+        }
         let leg = self.allocate_apart(registry, vext_idx, &[], "drive", generation).await?;
+        // The first extent, or a spill once the slab was full: from here on
+        // the volume keeps to where this one went.
+        if self.affine() {
+            self.set_affinity(Some(leg.slab_id));
+        }
         Ok((leg.slab_id, leg.slot_idx))
     }
 

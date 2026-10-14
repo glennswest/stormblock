@@ -183,6 +183,13 @@ impl SlabRegistry {
         self.allocatable_pinned(id)
     }
 
+    /// Whether a slab takes a new extent of a volume of `role` with
+    /// `size`-byte extents (#153): allocatable (not full, quarantined or
+    /// dedicated), of that role and slot size.
+    pub fn takes(&self, id: &SlabId, role: crate::drive::slab::SlabRole, size: u64) -> bool {
+        self.allocatable(id).is_some() && self.role_of(id) == role && self.size_ok(id, size)
+    }
+
     /// Free slots on a slab for a volume pinned to it: quarantine still
     /// applies, dedication does not.
     pub fn allocatable_pinned(&self, id: &SlabId) -> Option<u64> {

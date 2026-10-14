@@ -1228,6 +1228,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     let origin = record.origin;
     let tier = record.tier;
     let digest = record.digest;
+    let spread = record.layout == crate::volume::thin::Layout::Spread;
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
@@ -1245,10 +1246,13 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // opens the disk as before. The tier byte is written whenever a digest
     // follows (0 for hot, which every reader reads as hot).
     let tier = tier.filter(|t| *t != crate::placement::topology::StorageTier::Hot);
-    if origin != super::metadata::Origin::Unmarked || tier.is_some() || digest.is_some() {
+    // Then a single-copy volume's spread layout (#153): `L`, 1. After the
+    // digest, so #384's reader finds its digest where it looks; affine
+    // (the default) writes nothing.
+    if origin != super::metadata::Origin::Unmarked || tier.is_some() || digest.is_some() || spread {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
-        if tier.is_some() || digest.is_some() {
+        if tier.is_some() || digest.is_some() || spread {
             out.push(tier.map(|t| t as u8).unwrap_or(0));
         }
         if let Some(d) = digest {
@@ -1257,9 +1261,17 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
             out.push(d.verdict.code());
             out.extend_from_slice(&d.checked_at.to_le_bytes());
         }
+        if spread {
+            out.extend_from_slice(&[LAYOUT_TAG, 1]);
+        }
     }
     out
 }
+
+/// A single-copy volume's layout in a header's extension (#153).
+const LAYOUT_TAG: u8 = b'L';
+/// The tag and the layout (1 = spread).
+const LAYOUT_LEN: usize = 2;
 
 /// The digest's place in a header's extension (#384): after the tier.
 const DIGEST_TAG: u8 = b'D';
@@ -1282,13 +1294,25 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
                 _ => None,
             };
         }
-        let d = &rest[rest.len().min(6)..];
-        if d.len() >= DIGEST_LEN && d[0] == DIGEST_TAG {
-            rec.digest = Some(super::metadata::SealDigest {
-                sha256: d[1..33].try_into().unwrap(),
-                verdict: super::metadata::Verdict::from_code(d[33]),
-                checked_at: u64::from_le_bytes(d[34..42].try_into().unwrap()),
-            });
+        // Tagged blocks after the tier, in order; a tag not known here ends
+        // the walk (its length is not known).
+        let mut d = &rest[rest.len().min(6)..];
+        loop {
+            if d.len() >= DIGEST_LEN && d[0] == DIGEST_TAG {
+                rec.digest = Some(super::metadata::SealDigest {
+                    sha256: d[1..33].try_into().unwrap(),
+                    verdict: super::metadata::Verdict::from_code(d[33]),
+                    checked_at: u64::from_le_bytes(d[34..42].try_into().unwrap()),
+                });
+                d = &d[DIGEST_LEN..];
+            } else if d.len() >= LAYOUT_LEN && d[0] == LAYOUT_TAG {
+                if d[1] == 1 {
+                    rec.layout = crate::volume::thin::Layout::Spread;
+                }
+                d = &d[LAYOUT_LEN..];
+            } else {
+                break;
+            }
         }
     }
 }
@@ -1478,6 +1502,7 @@ mod tests {
             origin: Origin::Node,
             tier: None,
             digest: None,
+            layout: Default::default(),
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1525,6 +1550,7 @@ mod tests {
                 origin,
                 tier,
                 digest: Some(digest),
+                layout: Default::default(),
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = document_of(header_entries(id, &bytes)).unwrap();
@@ -1577,6 +1603,7 @@ mod tests {
             origin: Origin::Node,
             tier: None,
             digest: None,
+            layout: Default::default(),
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -1835,6 +1862,7 @@ mod tests {
             origin: Default::default(),
             tier: None,
             digest: None,
+            layout: Default::default(),
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -1871,6 +1899,7 @@ mod tests {
             origin: Default::default(),
             tier: None,
             digest: None,
+            layout: Default::default(),
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));
