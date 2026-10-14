@@ -209,6 +209,24 @@ more); a flow-over from a remote source reports both in health
 (`flow_over.source_path`). `STORMBLOCK_NVME_MAX_TRANSFER` (bytes) sets both
 sides, for measuring.
 
+## Tuning on the storage LAN (#411)
+
+What #411 asked for, and where each stands:
+- **Header and data digests:** off. The engine's initiator asks for neither
+  in its ICReq, and the target uses what the initiator asks (the Linux
+  initiator too, unless given `--hdr-digest`/`--data-digest`). No CRC per PDU.
+- **TCP_NODELAY:** set on every initiator connection and every connection the
+  target accepts.
+- **I/O queues:** 8 connections per path (`STORMBLOCK_NVME_TCP_QUEUES`,
+  #410). Each carries one command at a time; several on one connection is
+  #433.
+- **Jumbo frames:** the link's MTU, which the initramfs takes from DHCP
+  (#425); health's `flow_over.source_path` says the path MTU (#407).
+- **Socket buffers:** left to the kernel. Linux grows a TCP socket's buffers
+  with the connection (up to `net.ipv4.tcp_rmem`/`tcp_wmem`); setting
+  `SO_RCVBUF`/`SO_SNDBUF` fixes the size and turns that off. A node that
+  wants more raises those sysctls, which is the node network's (stormpump).
+
 ## Files
 
 `<data_dir>/nvme_hosts.json` (mode 0600 — it holds the secrets): every host

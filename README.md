@@ -591,7 +591,10 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   `state` (`full` or `backing_off`), `reason` (what it last went by),
   `io_p90_ms`/`flush_p90_ms` (the node's own reads/writes and flushes while
   it moves, last 5 s), `still_io_p90_ms`/`still_flush_p90_ms` (the same
-  without it), `pauses` and `paused_seconds`. And `validation` (#412): the
+  without it), `pauses` and `paused_seconds`. `hot_moved` (#411): extents
+  moved ahead of the rest because the node read them from the appliance (the
+  boot's reads included, handed over in `/run/stormblock/hot-extents.json`).
+  And `validation` (#412): the
   check every flow-over ends with, each moved extent a sealed volume names
   read back from the local drive and compared by sha256 with the
   appliance's: `state` (`running`, `passed`, `corrupt`), `total`,

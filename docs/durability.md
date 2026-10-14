@@ -178,6 +178,12 @@ tests run on.
    source slot stays owed, never freed, until the map naming its copy is
    durable, so a cut anywhere in a batch leaves each extent on its source or
    on a copy that is whole, and the batch is moved again.
+   **What the node reads goes first** (#411): every read of a slot still on
+   a source is counted (`flowhot`; the initramfs engine leaves its counts in
+   `/run/stormblock/hot-extents.json` for its successor), and each pass moves
+   the counted slots first, hottest first, the rest in disk order; reads
+   during the pass move theirs up, at most once a second. Order changes when
+   a slot moves, never how.
    **Paced by the node's own I/O** (#410; before it, any foreground I/O at
    all gave the disk back for a quarter of a window, #269, and the
    destination's own flush time over 1 s halved the window and paused, #282,
