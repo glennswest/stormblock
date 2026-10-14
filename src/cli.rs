@@ -10341,11 +10341,13 @@ file = "{state}"
         };
         let dir = tempfile::tempdir().unwrap();
         let (hdd, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
-        let hdd_before = std::fs::read(&hdd).unwrap();
+        // Nothing written: any write moves a file's modification time.
+        let mtime = |p: &str| std::fs::metadata(p).unwrap().modified().unwrap();
         // Room for one system half, not two: the release's is ~24 MiB.
         let ssd = dir.path().join("small-ssd.raw").display().to_string();
         std::fs::File::create(&ssd).unwrap().set_len(96 * MIB).unwrap();
-        let ssd_before = std::fs::read(&ssd).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (hdd_before, ssd_before) = (mtime(&hdd), mtime(&ssd));
         let claim = dir.path().join("claim-11.91.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
         let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
@@ -10354,8 +10356,8 @@ file = "{state}"
             .expect_err("no room for an update");
         let e = e.to_string();
         assert!(e.contains("an update needs"), "{e}");
-        assert_eq!(std::fs::read(&hdd).unwrap(), hdd_before, "the HDD untouched");
-        assert_eq!(std::fs::read(&ssd).unwrap(), ssd_before, "the SSD untouched");
+        assert_eq!(mtime(&hdd), hdd_before, "the HDD untouched");
+        assert_eq!(mtime(&ssd), ssd_before, "the SSD untouched");
     }
 
     async fn install_over(dir: &tempfile::TempDir, disk: &str, image: &str, tag: &str) -> crate::image::install::Report {

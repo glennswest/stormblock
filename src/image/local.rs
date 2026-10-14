@@ -441,9 +441,15 @@ pub async fn release_held(local: &Arc<dyn BlockDevice>, image: &Arc<dyn BlockDev
         return ReleaseHeld::NotHeld { goldens: goldens.len(), missing };
     }
     // Complete, not only recorded: nothing still placed on a slab that is
-    // not on this drive.
+    // not on this drive. Asked of the release's goldens and of whatever has a
+    // leg here: a data volume wholly on another drive of this node (the data
+    // half's own drive, #402) is that drive's, not unfinished here.
     let elsewhere: std::collections::HashSet<_> = local_vols
         .iter()
+        .filter(|v| {
+            goldens.contains(&v.id.0)
+                || v.extents.values().any(|l| l.legs().any(|leg| here.contains(&leg.slab_id)))
+        })
         .flat_map(|v| {
             v.extents
                 .values()
