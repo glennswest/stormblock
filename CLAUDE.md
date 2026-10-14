@@ -861,7 +861,7 @@ map) per move.
       `flow_over`. golden-stormblock-5f8bc680a12b
       (staged for #300) carries f991f31, unchecked: stormcos#467 told
 
-### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — WAITS ON fio.ext4.rs#13 (1 PiB seal)
+### Emulated directory backing; mkfs-ext4 off v3.0.0 (2026-10-10, #300, P2) — IN PROGRESS (fio.ext4.rs#13 done)
 
 Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
 - [x] pins: mkfs-ext4 v4.1.0 + fio-ext4 v1.8.0, Cargo.lock by hand (same
@@ -887,9 +887,10 @@ Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
       (a release pinning v4.1.1). The ~10× format overhead in the engine: #403
 - [x] docs, CHANGELOG corrected (1 PiB not yet)
 - [x] check.sh at 500ae70 ALL PASS (1137/1137)
-- [ ] golden; #300 proposed after fio.ext4.rs#13 (then: move both
-      pins, run the 1P test). Found: `--all-targets` fails on benches/*.rs
-      (autobenches), noted on #211
+- [x] fio.ext4.rs#13 done (2026-10-13): fio-ext4 v1.8.1 pins mkfs-ext4
+      v4.1.1; both pins moved, Cargo.lock by hand (versions and tags only)
+- [ ] the 1P tests on a large build VM (straight format + check; the
+      template, format + seal); check.sh; golden (held for stormcentral#841)
 
 ### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — DONE (golden-stormblock-041d379caced)
 
