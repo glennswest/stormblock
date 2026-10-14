@@ -115,8 +115,8 @@ of its own. TLS is rustls (no OpenSSL) on `ring` only since #209 — not C-free:
 | appliance / forge | the daemon | serves goldens, host clones and boot claims |
 | RouterOS container | not shipping (owner, 2026-09-28); was the daemon, `mikrotik,nvmeof` profile | O_DIRECT on the block device, `pread`/`pwrite` on the blocking pool where io_uring is unavailable; never file I/O (#140) |
 
-Drives are opened by the kernel and `O_DIRECT` everywhere; the VFIO NVMe
-driver is a stub (#167). **RouterOS specifics:** container on RouterOS 7+ (or
+Drives are opened by the kernel and `O_DIRECT` everywhere; there is no
+userspace (VFIO) NVMe driver (#167: the stub was removed). **RouterOS specifics:** container on RouterOS 7+ (or
 CHR); no PCIe passthrough; 256 MB–1 GB of memory; NVMe-TCP is the transport
 (`/disk add type=nvme-tcp`, confirmed taking writes 2026-08-13, #39); RAID 1 is
 the relevant level; the binary must be small.
@@ -127,7 +127,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 (stormblock-csi, `/v1`) is for third-party drivers only.
 
 ## Architecture (bottom-up)
-- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slottable.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171; the table read through a bounded page cache, no per-slot record in memory, #155), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART; `nvme.rs` is a VFIO stub (#167); `vhost_user_blk.rs` (a VMM's virtqueues served directly, #82; `mgmt/vhost_export.rs`); `uring_server.rs` is not started by anything (#169; #82 did not use it)
+- `src/drive/` — `BlockDevice`; `sas.rs` + `direct.rs` (O_DIRECT block devices: io_uring on its own thread, or the blocking pool), `nvmeof_dev.rs` and `iscsi_dev.rs` (initiators), `filedev.rs` (tests/dev only), `partition.rs`, `slab.rs` + `freemap.rs` + `slottable.rs` + `slab_registry.rs` (slot entries published after their data by `Slab::sync`, #171; the table read through a bounded page cache, no per-slot record in memory, #155), `discover.rs`, `ublk.rs`, `handover.rs` (`take_over`: stand down, then restore), `identity.rs`, `crashdev.rs` (a volatile write cache for power-cut tests), SMART (the VFIO stub `nvme.rs` was removed, #167); `vhost_user_blk.rs` (a VMM's virtqueues served directly, #82; `mgmt/vhost_export.rs`); `uring_server.rs` is not started by anything (#169; #82 did not use it)
 - `src/raid/` — drive-level RAID 1/5/6/10 sets (#252): `layout.rs` (P/Q rotation, RAID-10 pairs), `superblock.rs` (v2: slot table, events, name, pool), `bitmap.rs` (on-disk write-intent bitmap), `spares.rs` (hot spares by pool), `rebuild.rs` (progress, rates); `mod.rs`: stripe locks, degraded I/O, assembly, rebuild onto a spare, scrub. `src/mgmt/raid_sets.rs` joins them to slabs and the API (`docs/raid-sets.md`)
 - `src/volume/` — thin volumes (`thin.rs`), the compact extent table (`extable.rs`, #155), the slot fence (`fence.rs`: I/O shared, a move exclusive, #239), GEM (`gem.rs`), per-volume redundancy (`redundancy.rs`, `stripe.rs`, `stripelog.rs`), snapshots/clones, metadata (`metadata.rs`, V9; V8 written when every volume is 4096), synonyms, StormFS chunks/versions, GC, pressure, relocation, composition, `throttle.rs`
 - `src/fs/` — templates (`template.rs`), ext4 (`ext4.rs`) and XFS (`xfs.rs`) seams, disk identity (`disk.rs`), files, image survey (`survey.rs`)

@@ -1,8 +1,8 @@
-//! DMA buffer management — page-aligned buffers for O_DIRECT I/O.
+//! Page-aligned buffers for O_DIRECT I/O (4096-byte aligned).
 //!
-//! Two modes:
-//! - **Page-aligned** (default): 4096-byte aligned via posix_memalign. Works everywhere.
-//! - **Hugepage** (future, NVMe VFIO only): mmap with MAP_HUGETLB + VFIO DMA mapping.
+//! Drives are opened by the kernel and read with O_DIRECT and io_uring
+//! (#140). The hugepage allocator and IOVA lookup a userspace VFIO NVMe
+//! driver would have needed went with that driver's stub (#167, decision B).
 
 use std::alloc::{self, Layout};
 use std::ops::{Deref, DerefMut};
@@ -11,22 +11,11 @@ use std::ptr::NonNull;
 /// Default alignment for DMA buffers (4096 = one page, required for O_DIRECT).
 pub const DMA_ALIGNMENT: usize = 4096;
 
-/// A DMA-capable buffer with guaranteed alignment.
-///
-/// For SAS (io_uring) and file I/O: page-aligned allocation.
-/// For NVMe (VFIO, future): hugepage-backed with IOVA for IOMMU.
+/// A buffer with guaranteed page alignment, for O_DIRECT I/O.
 pub struct DmaBuf {
     ptr: NonNull<u8>,
     len: usize,
     capacity: usize,
-    source: BufSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BufSource {
-    PageAligned,
-    #[cfg(target_os = "linux")]
-    Hugepage,
 }
 
 // Safety: DmaBuf is a unique owner of its allocation, safe to send/share.
@@ -48,7 +37,6 @@ impl DmaBuf {
             ptr,
             len: size,
             capacity,
-            source: BufSource::PageAligned,
         }
     }
 
@@ -101,96 +89,15 @@ impl DerefMut for DmaBuf {
 
 impl Drop for DmaBuf {
     fn drop(&mut self) {
-        match self.source {
-            BufSource::PageAligned => {
-                let layout = Layout::from_size_align(self.capacity, DMA_ALIGNMENT)
-                    .expect("invalid layout in DmaBuf drop");
-                // Safety: ptr was allocated with this layout.
-                unsafe { alloc::dealloc(self.ptr.as_ptr(), layout); }
-            }
-            #[cfg(target_os = "linux")]
-            BufSource::Hugepage => {
-                // Safety: ptr was mmap'd with this capacity.
-                unsafe { libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.capacity); }
-            }
-        }
+        let layout = Layout::from_size_align(self.capacity, DMA_ALIGNMENT).expect("invalid layout in DmaBuf drop");
+        // Safety: ptr was allocated with this layout.
+        unsafe { alloc::dealloc(self.ptr.as_ptr(), layout) }
     }
 }
 
 impl std::fmt::Debug for DmaBuf {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DmaBuf")
-            .field("len", &self.len)
-            .field("capacity", &self.capacity)
-            .field("source", &self.source)
-            .finish()
-    }
-}
-
-/// Hugepage size (2 MB — standard x86_64 hugepage).
-#[cfg(target_os = "linux")]
-pub const HUGEPAGE_SIZE: usize = 2 * 1024 * 1024;
-
-#[cfg(target_os = "linux")]
-impl DmaBuf {
-    /// Allocate a hugepage-backed buffer for VFIO NVMe DMA.
-    ///
-    /// Uses mmap with MAP_HUGETLB. Falls back to regular page-aligned
-    /// allocation if hugepages are not available.
-    pub fn alloc_hugepage(size: usize) -> Self {
-        let capacity = align_up(size, HUGEPAGE_SIZE);
-        // Safety: mmap with MAP_ANONYMOUS | MAP_PRIVATE | MAP_HUGETLB
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                capacity,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_HUGETLB,
-                -1,
-                0,
-            )
-        };
-
-        if ptr == libc::MAP_FAILED {
-            // Fallback to regular page-aligned allocation
-            tracing::debug!("hugepage mmap failed, falling back to page-aligned");
-            return Self::alloc(size);
-        }
-
-        let ptr = NonNull::new(ptr as *mut u8).expect("hugepage mmap returned null");
-        // Zero the memory
-        unsafe { std::ptr::write_bytes(ptr.as_ptr(), 0, capacity); }
-
-        DmaBuf {
-            ptr,
-            len: size,
-            capacity,
-            source: BufSource::Hugepage,
-        }
-    }
-
-    /// Get the physical IOVA for VFIO DMA mapping.
-    /// On Linux, reads from /proc/self/pagemap to translate virtual → physical address.
-    pub fn iova(&self) -> Option<u64> {
-        let vaddr = self.ptr.as_ptr() as u64;
-        let page_size = DMA_ALIGNMENT as u64;
-        let vpn = vaddr / page_size;
-
-        let pagemap = std::fs::File::open("/proc/self/pagemap").ok()?;
-        use std::io::{Read, Seek, SeekFrom};
-        let mut pagemap = std::io::BufReader::new(pagemap);
-        pagemap.seek(SeekFrom::Start(vpn * 8)).ok()?;
-        let mut entry = [0u8; 8];
-        pagemap.read_exact(&mut entry).ok()?;
-
-        let pme = u64::from_le_bytes(entry);
-        // Check present bit (bit 63)
-        if pme & (1 << 63) == 0 {
-            return None;
-        }
-        // Physical frame number is bits 0..54
-        let pfn = pme & ((1u64 << 55) - 1);
-        Some(pfn * page_size)
+        f.debug_struct("DmaBuf").field("len", &self.len).field("capacity", &self.capacity).finish()
     }
 }
 
