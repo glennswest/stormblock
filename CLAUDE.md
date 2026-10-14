@@ -311,8 +311,11 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       refuses_creates_until_deletes_make_room`; docs (durability rule 16,
       README), CHANGELOG; check.sh at fe5e339 ALL PASS (1190/1190; #402's
       two split tests ignored while it is paused)
-- [ ] golden: the stage failed on forge (404 for b1682c21, a volume the
-      cleanup removed?); master told. Then master puts it on forge; close
+- [ ] golden: the stage failed on forge (404 for b1682c21 =
+      golden-stormd-13e688ca601e, lost in the 00:15Z restart). Waits on
+      stormcentral#841 + `component build stormd --force` (master will say);
+      proposed after stormcentral#841. Then build, tell master (puts it on
+      forge), shipped, close
 
 ### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — PAUSED for P0 #428 (engine half built, b9j6oila5 run pending; /init half not started)
 
