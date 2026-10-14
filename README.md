@@ -684,7 +684,10 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
   listening, exports wired), else 503 with the blockers.
-- `GET /metrics` — Prometheus text, **needs the token**. Slab and drive gauges
+- `GET /metrics` — Prometheus text, **needs the token**, on the daemon and on a
+  node's engine (`adopt-ublk`, `boot-local`, `boot-iscsi`; it answered 500 there
+  before #413). `GET /api/v1/discovery` (and its `cluster` verbs) answers 404 on
+  an engine that runs no discovery, as a node's does (#413). Slab and drive gauges
   are refreshed at scrape time: `stormblock_slab_{capacity,allocated,free}_bytes{slab,tier}`
   and their `_total`s, `stormblock_drive_{capacity_bytes,healthy,media_errors,temperature_celsius,available_spare_pct,power_on_hours}{drive,serial}`;
   plus `stormblock_api_requests_total{endpoint,method}`, `stormblock_volumes_total`,
