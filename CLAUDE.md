@@ -194,7 +194,7 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
 - [x] the 12.23 stage: golden-stormblock-12891c0025b2 (4d79108). #428
       shipped; the rest of the list below still to comment/ship/close
 - [ ] when stormcentral#841 is live: `stormcentral component build stormblock`
-      (stage of main's head) for 12.23; then shipped/close #428, #410, #413,
+      (stage of main's head) for 12.23; then shipped/close #428, #413,
       #417, #412, #300, #383, #411, #415, #422/#416, #424, #384 and the merged
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
@@ -361,7 +361,7 @@ frees them) until the check passes.
 - [x] check.sh at 44a0fcf ALL PASS (1199/1199); commented
 - [ ] golden: held with #428/#410/#413/#417 until stormcentral#841 is live; proposed after it
 
-### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — DONE here; golden waits on stormcentral#841
+### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — DONE (golden-stormblock-12891c0025b2), metal pending
 
 No metal data reachable (no node syslog in stormcentral, server8's /metrics
 down), so by reading. Since #331/#401/#282: windows of 64, 8 reads at once,
@@ -388,10 +388,10 @@ initiator carries one command per connection (4), forge 13.7 128 KiB each.
       182.8; 800 ms flushes + writer 4.5 → 34.7, idle 5.3 → 57.4. Docs
       (durability rule 10, README), CHANGELOG
 - [x] check.sh at 73ad55b ALL PASS (1193/1193); commented on #410
-- [ ] golden: the stage's stormd input is gone from forge (404 on
-      golden-stormd-1fe5353b5402 too); proposed after stormcentral#841,
-      master told. Then golden, shipped, close. Metal (server8, an X9, a pve
-      VM) needs a release: health `flow_over.mb_per_s` and `pace`
+- [x] golden golden-stormblock-12891c0025b2 (12.23 stage, 4d79108);
+      stormcentral#841 closed; commented, closed, shipped (2026-10-14).
+      Metal (server8, an X9, a pve VM) needs a release: health
+      `flow_over.mb_per_s` and `pace`
 
 ### Forge lost 483 volumes: records unwritten since 10-10 (2026-10-13, #428, P0) — DONE (golden-stormblock-12891c0025b2), shipped; forge needs the engine
 
