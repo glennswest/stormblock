@@ -419,17 +419,23 @@ async fn an_import_never_flushes_with_the_volume_manager_held() {
 /// measured; then their second boots.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_first_boot_claims_at_once_answer_in_seconds_on_a_slow_disk() {
+    let _ = tracing_subscriber::fmt().with_env_filter("stormblock::mgmt::api::synonyms=info").with_test_writer().try_init();
     let dir = TempDir::new().unwrap();
     let state = setup(&dir).await;
     let release = {
         let mut vm = state.volume_manager.lock().await;
         let id = vm.create_volume_any("release-12.21", 256 << 20).await.unwrap();
         let dev = vm.get_volume(&id).unwrap();
-        for e in 0..32u64 {
+        // A release is a disk with a GPT: every clone of it gets a fresh disk
+        // GUID stamped, a write and a flush on the claim's path.
+        for e in 1..32u64 {
             dev.write(e * DEFAULT_EXTENT_SIZE, &vec![e as u8 + 1; 4096]).await.unwrap();
         }
+        let gpt = stormblock::pallet::gpt::Gpt::create_for(dev.block_size(), 256 << 20);
+        let (head, tail) = gpt.render();
+        dev.write(0, &head).await.unwrap();
+        dev.write(gpt.tail_offset(), &tail).await.unwrap();
         dev.flush().await.unwrap();
-        vm.seal_volume(id, None).await.unwrap();
         id
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -439,6 +445,11 @@ async fn two_first_boot_claims_at_once_answer_in_seconds_on_a_slow_disk() {
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     common::wait_for_listener(addr).await;
     let c = reqwest::Client::new();
+    let r = c.post(format!("{base}/api/v1/volumes/{release}/seal")).send().await.unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let r = c.get(format!("{base}/api/v1/volumes/{release}")).send().await.unwrap();
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["fs"]["kind"], "gpt", "{v}");
     let r = c
         .post(format!("{base}/api/v1/synonyms"))
         .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": release.to_string()}))
