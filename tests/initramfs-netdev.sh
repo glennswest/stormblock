@@ -128,6 +128,19 @@ check "a port that never appears is waited for, bounded, and named" \
 check "the aux bus is walked every second of the wait" "2" \
     "$(grep -c 'auxiliary:mlx4_core.eth' "$t/log")"
 
+# A pve VM (#414): virtio-pci binds the function and the interface is one
+# level down, under its virtio device. Not waited for, not warned about.
+t=$(make_sys virtio 0000:06:12.0/0x020000/virtio-pci)
+mkdir -p "$t/pci/0000:06:12.0/virtio0/net/eth0"
+check "a virtio NIC's interface under virtio0/ counts: no wait" "||" "$(run "$t")"
+check "and no warning" "0" "$(grep -c 'WARNING\|waiting for' "$t/out")"
+# A virtio function whose interface is not there yet is still waited for.
+t=$(make_sys virtio_late 0000:06:12.0/0x020000/virtio-pci)
+mkdir -p "$t/pci/0000:06:12.0/virtio0"
+out=$(run "$t" 2)
+check "a virtio function with no interface yet is waited for and named" \
+    "    0000:06:12.0 driver virtio-pci pci:v0000XXXX" "${out##*|}"
+
 # Functions that are not NICs, or that no driver took, are not waited for.
 t=$(make_sys other 0000:00:1f.2/0x010601/ahci 0000:06:00.0/0x020000/-)
 check "a non-network or driverless function is not waited for" "||" "$(run "$t")"

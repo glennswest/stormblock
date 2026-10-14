@@ -1356,7 +1356,14 @@ netdev_missing() {
     for _d in "$PCI_SYSFS"/*; do
         case "$(cat "$_d/class" 2>/dev/null)" in 0x02*) ;; *) continue ;; esac
         [ -e "$_d/driver" ] || continue
-        [ -n "$(ls "$_d/net" 2>/dev/null)" ] && continue
+        # Its interface is under the function (`net/eth0`), or one level
+        # down for a driver that makes a device of its own: virtio-pci's
+        # `virtio0/net/eth0` (#414: every pve boot waited 15 s for it).
+        _has=""
+        for _n in "$_d"/net "$_d"/*/net; do
+            [ -n "$(ls "$_n" 2>/dev/null)" ] && _has=1 && break
+        done
+        [ -n "$_has" ] && continue
         printf '%s ' "$(basename "$_d")"
     done
 }
