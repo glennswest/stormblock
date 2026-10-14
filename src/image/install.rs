@@ -473,14 +473,14 @@ pub async fn adopt(
         .filter(|(id, _)| mgr.get_volume(id).is_some())
         .map(|(id, _)| *id)
         .collect();
-    let mut stale_held = 0;
-    for slab in std::iter::once(&data).chain(bulk.as_ref()) {
-        stale_held += crate::volume::metav2::drop_volumes(slab, &stale)
-            .await
-            .map_err(|e| anyhow::anyhow!("dropping the data half's stale records of the release's goldens: {e}"))?;
-    }
-    if stale_held > 0 {
-        tracing::info!("install: {stale_held} stale record(s) of the release's own goldens dropped from the data half (#451)");
+    let mut data = data;
+    let mut bulk = bulk;
+    if !stale.is_empty() {
+        let (records, slots) = release_stale(&mut data, bulk.as_mut(), &stale).await?;
+        tracing::info!(
+            "install: {records} stale record(s) of the release's own goldens dropped from the data half, \
+             {slots} of their slot(s) let go there (#451)"
+        );
     }
 
     let mut found = vec![crate::drive::discover::FoundSlab { label: "data".into(), slab: data }];
@@ -553,6 +553,67 @@ pub async fn adopt(
     }
     mgr.persist().await;
     Ok(report)
+}
+
+/// Take the release's stale goldens out of the data half (#451): their
+/// records, and the slots the slot tables still give them. A moved slot's
+/// generation is one higher than its source's (#277), so a slot left owned by
+/// the stale golden looks newer than the claim's own copy, and the restore
+/// takes it from the slot table even with no record naming it. A slot that
+/// only the stale golden used is freed. One a volume of the node's shares (a
+/// clone of that golden) is handed to that volume, which keeps every byte.
+/// Returns the records dropped and the slots let go.
+async fn release_stale(data: &mut Slab, bulk: Option<&mut Slab>, stale: &[VolumeId]) -> anyhow::Result<(usize, usize)> {
+    use crate::volume::metav2;
+    // Who else maps each slot of the data half, from the records as they are
+    // before the stale ones go.
+    let mut users: HashMap<(SlabId, u64), (VolumeId, u64)> = HashMap::new();
+    let mut parity: HashSet<(SlabId, u64)> = HashSet::new();
+    let mut slabs: Vec<&mut Slab> = vec![data];
+    if let Some(b) = bulk {
+        slabs.push(b);
+    }
+    for slab in slabs.iter() {
+        let Some(doc) = metav2::read_slab(slab).await.map_err(|e| anyhow::anyhow!("reading slab {}'s records: {e}", slab.slab_id()))? else {
+            continue;
+        };
+        for v in doc.volumes.iter().filter(|v| !stale.contains(&v.id)) {
+            for (vext, loc) in &v.extents {
+                for l in loc.legs() {
+                    users.entry((l.slab_id, l.slot_idx)).or_insert((v.id, *vext));
+                }
+            }
+            for g in v.parity.values() {
+                for l in &g.legs {
+                    parity.insert((l.slab_id, l.slot_idx));
+                }
+            }
+        }
+    }
+    let mut records = 0;
+    let mut slots = 0;
+    for slab in slabs.iter_mut() {
+        records += metav2::drop_volumes(slab, stale)
+            .await
+            .map_err(|e| anyhow::anyhow!("dropping the data half's stale records of the release's goldens: {e}"))?;
+        let id = slab.slab_id();
+        let in_use = slab.slots_in_use().await.map_err(|e| anyhow::anyhow!("reading slab {id}'s slot table: {e}"))?;
+        for (idx, slot) in in_use {
+            if !stale.contains(&slot.volume_id) {
+                continue;
+            }
+            if let Some((vol, vext)) = users.get(&(id, idx)) {
+                slab.reassign_slot(idx, *vol, *vext).await.map_err(|e| anyhow::anyhow!("slab {id} slot {idx}: {e}"))?;
+            } else if parity.contains(&(id, idx)) {
+                continue;
+            } else {
+                slab.free(idx).await.map_err(|e| anyhow::anyhow!("slab {id} slot {idx}: {e}"))?;
+            }
+            slots += 1;
+        }
+        slab.sync().await.map_err(|e| anyhow::anyhow!("slab {id}: {e}"))?;
+    }
+    Ok((records, slots))
 }
 
 /// `VERSION_ID` from an os-release file's bytes.
