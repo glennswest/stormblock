@@ -339,7 +339,8 @@ frees them) until the check passes.
       1.7–2.6 s (600–900 MB/s), clones' own extents skipped
 - [x] docs (durability rule 17, README), CHANGELOG; stormcentral#844
       (settle waits for validation passed, corrupt fails)
-- [ ] check.sh; golden (held with #428/#410/#413/#417 for stormcentral#841)
+- [x] check.sh at 44a0fcf ALL PASS (1199/1199); commented
+- [ ] golden: held with #428/#410/#413/#417 until stormcentral#841 is live; proposed after it
 
 ### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — DONE here; golden waits on stormcentral#841
 
