@@ -179,7 +179,6 @@ only the slot it touches.
 - **Claim policy**: redundancy / spread / tier from the StorageClass (#151),
   overcommit admission (#152), drive affinity (#153), new drives joining the
   pool (#154).
-- **NVMe VFIO driver** — a stub today (#167: build or delete).
 - Wiring the drive-level RAID extras: on-disk journal, scrub, reassembly (#168).
 
 ---
@@ -206,7 +205,8 @@ clock). Full suite green on dev apart from a timing test on a loaded box (#134).
   iSCSI target runs open (#164).
 - **Correctness**: `boot-iscsi` formats its target every run, and a unit runs
   it every boot (#162); `--data-dir` reaches only the volume manager (#163).
-- **Decisions waiting**: VFIO (#167), the StormFS registration target (#170),
-  scrub without checksums (#160).
+- **Decided**: no userspace (VFIO) NVMe driver: drives go through the kernel,
+  O_DIRECT and io_uring (#167); the registration target (#170); scrub without
+  checksums (#160).
 
 The README is the reference; `docs/` has the design behind each part.

@@ -1,7 +1,6 @@
 //! Drive layer — unified BlockDevice trait over NVMe (VFIO), SAS (io_uring), and file (tokio).
 
 #[cfg(target_os = "linux")]
-pub mod nvme;
 #[cfg(target_os = "linux")]
 pub mod sas;
 pub mod backing;

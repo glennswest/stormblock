@@ -2190,8 +2190,6 @@ every unit there and fails one at or below the budget.
 
 What earlier docs described and the code does not do, each with its issue:
 
-- **NVMe userspace (VFIO) driver** — a stub; NVMe drives are served through
-  the kernel, opened `O_DIRECT` (#167).
 - **RAID sets** (`docs/raid-sets.md` "Not here"): no reshape or growth of a
   parity set (#387); bay LEDs are
   stormdrive's (stormdrive#44).
