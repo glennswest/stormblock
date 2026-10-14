@@ -16,6 +16,7 @@ pub static FLOW: FlowProgress = FlowProgress {
     source: Mutex::new(None),
     persists: AtomicU64::new(0),
     pace: Mutex::new(None),
+    validation: Mutex::new(None),
 };
 
 pub struct FlowProgress {
@@ -29,6 +30,29 @@ pub struct FlowProgress {
     persists: AtomicU64,
     /// How it is paced, and why (#410).
     pace: Mutex<Option<Pace>>,
+    /// Its validation (#412).
+    validation: Mutex<Option<ValidationReport>>,
+}
+
+/// A flow-over's validation by sha256 (#412): each moved extent read back
+/// from the local disk and compared with the appliance's.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ValidationReport {
+    /// `running`, `passed` or `corrupt` (FlowOverCorrupt: a drive that does
+    /// not read back what it was given; those extents are read from the
+    /// appliance, and the node does not go local).
+    pub state: &'static str,
+    /// Extents to check, and checked equal (repaired ones included).
+    pub total: u64,
+    pub validated: u64,
+    /// Written since the move by a writable volume: not comparable.
+    pub skipped: u64,
+    pub mismatched: u64,
+    pub repaired: u64,
+    pub unrepaired: u64,
+    pub bytes: u64,
+    pub seconds: f64,
+    pub mb_per_s: f64,
 }
 
 /// How a flow-over is paced, and why (#410): flat out unless the node's own
@@ -81,6 +105,9 @@ pub struct Snapshot {
     /// How it is paced, and why (#410).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pace: Option<Pace>,
+    /// Its validation (#412).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation: Option<ValidationReport>,
 }
 
 impl FlowProgress {
@@ -108,6 +135,10 @@ impl FlowProgress {
         self.persists.fetch_add(1, Relaxed);
     }
 
+    pub fn validation(&self, v: ValidationReport) {
+        *self.validation.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+    }
+
     pub fn pace(&self, p: Pace) {
         *self.pace.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
     }
@@ -128,6 +159,7 @@ impl FlowProgress {
             source_path: *self.source.lock().unwrap_or_else(|e| e.into_inner()),
             persists: self.persists.load(Relaxed),
             pace: self.pace.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            validation: self.validation.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         })
     }
 
@@ -152,6 +184,7 @@ mod tests {
             source: Mutex::new(None),
             persists: AtomicU64::new(0),
             pace: Mutex::new(None),
+            validation: Mutex::new(None),
         };
         assert!(p.snapshot().is_none());
         p.begin();

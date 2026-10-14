@@ -6263,6 +6263,17 @@ pub async fn run() -> anyhow::Result<()> {
             .sum()
     }
 
+    /// What a flow-over moved and has not let go of (#412): each source slot
+    /// with the destination slot it was copied to, and the sources that read
+    /// all zeros (unmapped, not copied). None of them is freed while held:
+    /// a freed slot is discarded, and over NVMe/TCP that unmaps the clone's
+    /// extent on forge, which the validation reads.
+    #[derive(Default)]
+    pub(crate) struct FlowHeld {
+        pub moved: std::sync::Mutex<Vec<(crate::volume::gem::Leg, crate::volume::gem::Leg)>>,
+        pub zeroed: std::sync::Mutex<Vec<crate::volume::gem::Leg>>,
+    }
+
     /// [`flow_system_half`] for any half: `sources` into `dest`, with `extra`
     /// extents still to come after this run counted in `remaining` (#285: the
     /// data half after the system half, so the count never dips to 0 between).
@@ -6275,6 +6286,26 @@ pub async fn run() -> anyhow::Result<()> {
         persist: P,
         remaining: Option<&std::sync::atomic::AtomicI64>,
         extra: usize,
+    ) -> Option<(u64, u64)>
+    where
+        P: Fn() -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        flow_slabs_held(gem, registry, sources, dest, persist, remaining, extra, None).await
+    }
+
+    /// [`flow_slabs`], keeping what it moved in `hold` (#412): its source
+    /// slots are persisted away from but never freed, for the validation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn flow_slabs_held<P, F>(
+        gem: &Arc<crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>>,
+        registry: &Arc<crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>>,
+        sources: &[crate::drive::slab::SlabId],
+        dest: crate::drive::slab::SlabId,
+        persist: P,
+        remaining: Option<&std::sync::atomic::AtomicI64>,
+        extra: usize,
+        hold: Option<&FlowHeld>,
     ) -> Option<(u64, u64)>
     where
         P: Fn() -> F,
@@ -6388,7 +6419,7 @@ pub async fn run() -> anyhow::Result<()> {
                             tracing::error!("flow-over: extents on {source:?} keep changing under the move");
                             if failed > 16 {
                                 if unpersisted > 0 {
-                                    flow_persist(&engine, registry, &persist, &mut spent).await;
+                                    flow_persist(&engine, registry, &persist, &mut spent, hold.is_none()).await;
                                 }
                                 give_up().await;
                                 return None;
@@ -6453,10 +6484,19 @@ pub async fn run() -> anyhow::Result<()> {
                             let res = match res {
                                 Ok(crate::placement::WindowMove::Zeroed) => {
                                     crate::flowprogress::FLOW.zeroed(1);
+                                    if let Some(h) = hold {
+                                        h.zeroed.lock().unwrap_or_else(|e| e.into_inner()).push(leg);
+                                    }
                                     Ok(())
                                 }
-                                Ok(crate::placement::WindowMove::Moved { .. }) => {
+                                Ok(crate::placement::WindowMove::Moved { dest_slot }) => {
                                     crate::flowprogress::FLOW.moved(1, slot_bytes(registry, leg).await);
+                                    if let Some(h) = hold {
+                                        h.moved
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .push((leg, crate::volume::gem::Leg::new(dest, dest_slot)));
+                                    }
                                     Ok(())
                                 }
                                 Err(e) => Err(e),
@@ -6471,8 +6511,14 @@ pub async fn run() -> anyhow::Result<()> {
                             let waited = t.elapsed();
                             let res = engine.migrate_leg_unlocked(gem, registry, vol, vext, leg, dest, &fence).await;
                             drop(fence);
-                            if res.is_ok() {
+                            if let Ok(r) = &res {
                                 crate::flowprogress::FLOW.moved(1, slot_bytes(registry, leg).await);
+                                if let Some(h) = hold {
+                                    h.moved
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .push((leg, crate::volume::gem::Leg::new(r.dest_slab, r.dest_slot)));
+                                }
                             }
                             (vol, vext, res.map(|_| ()), waited)
                         })
@@ -6515,7 +6561,7 @@ pub async fn run() -> anyhow::Result<()> {
                 if unpersisted > 0
                     && (unpersisted >= flow_batch() || last_persist.elapsed() >= flow_persist_every() || give_up_now)
                 {
-                    flow_persist(&engine, registry, &persist, &mut spent).await;
+                    flow_persist(&engine, registry, &persist, &mut spent, hold.is_none()).await;
                     (unpersisted, last_persist) = (0, std::time::Instant::now());
                 }
                 // A handful of bad extents is a disk worth giving up on, and
@@ -6552,7 +6598,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
         if unpersisted > 0 {
-            flow_persist(&engine, registry, &persist, &mut spent).await;
+            flow_persist(&engine, registry, &persist, &mut spent, hold.is_none()).await;
         }
         spent.say(moved);
         report(0);
@@ -6566,6 +6612,7 @@ pub async fn run() -> anyhow::Result<()> {
         registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
         persist: &P,
         spent: &mut FlowSpent,
+        release: bool,
     ) where
         P: Fn() -> F,
         F: std::future::Future<Output = ()>,
@@ -6575,11 +6622,260 @@ pub async fn run() -> anyhow::Result<()> {
         spent.persist += t.elapsed();
         spent.persists += 1;
         crate::flowprogress::FLOW.persisted();
+        if !release {
+            // Held for the validation (#412): freed once it passes.
+            return;
+        }
         let t = std::time::Instant::now();
         let mut r = registry.write().await;
         engine.release_owed(&mut r).await;
         drop(r);
         spent.release += t.elapsed();
+    }
+
+    /// Tries at writing a mismatched extent again before it counts as a
+    /// drive that does not keep what it is given (#412).
+    const VALIDATE_TRIES: u32 = 3;
+
+    /// What a flow-over's validation found (#412).
+    #[derive(Debug, Default)]
+    pub(crate) struct Validation {
+        /// Destination slots read back and found equal to their source.
+        pub validated: u64,
+        /// Destination slots only writable volumes name: written since the
+        /// move, so not comparable (their golden's slots are checked).
+        pub skipped: u64,
+        /// Read back different from the source, at first.
+        pub mismatched: u64,
+        /// Of those, written again and then equal.
+        pub repaired: u64,
+        /// Still different after every try, or unreadable: (source, destination).
+        pub unrepaired: Vec<(crate::volume::gem::Leg, crate::volume::gem::Leg, String)>,
+        pub bytes: u64,
+    }
+
+    /// A slot's device, where its bytes start and how many: read and written
+    /// with no lock held (#364).
+    async fn slot_place(
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        leg: crate::volume::gem::Leg,
+    ) -> Option<(Arc<dyn BlockDevice>, u64, u64)> {
+        let r = registry.read().await;
+        let s = r.get(&leg.slab_id)?;
+        Some((s.device().clone(), s.data_offset() + leg.slot_idx * s.slot_size(), s.slot_size()))
+    }
+
+    /// One moved slot checked (#412): the destination read back from its
+    /// device (O_DIRECT on a real drive: what the disk holds, not a cache)
+    /// and the source read from forge's clone, sha256 against sha256. A
+    /// mismatch is written again from the source, flushed and read back, up
+    /// to [`VALIDATE_TRIES`] times. `Ok(tries)`: equal after that many
+    /// rewrites (0 = equal as moved).
+    async fn validate_slot(
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        src: crate::volume::gem::Leg,
+        dest: crate::volume::gem::Leg,
+    ) -> Result<u32, String> {
+        use sha2::{Digest, Sha256};
+        let (sdev, soff, slen) = slot_place(registry, src).await.ok_or("the source slab is gone")?;
+        let (ddev, doff, dlen) = slot_place(registry, dest).await.ok_or("the destination slab is gone")?;
+        if slen != dlen {
+            return Err(format!("slot sizes differ: {slen} on the source, {dlen} here"));
+        }
+        let mut want = vec![0u8; slen as usize];
+        sdev.read(soff, &mut want).await.map_err(|e| format!("reading the source: {e}"))?;
+        let want_hash = Sha256::digest(&want);
+        let mut got = vec![0u8; dlen as usize];
+        for tries in 0..=VALIDATE_TRIES {
+            ddev.read(doff, &mut got).await.map_err(|e| format!("reading it back: {e}"))?;
+            if Sha256::digest(&got) == want_hash {
+                return Ok(tries);
+            }
+            if tries == VALIDATE_TRIES {
+                break;
+            }
+            // Written again from the source, under the slot's fence: nothing
+            // else reads or moves it meanwhile.
+            let _fence = crate::volume::fence::exclusive(dest).await;
+            ddev.write(doff, &want).await.map_err(|e| format!("writing it again: {e}"))?;
+            ddev.flush().await.map_err(|e| format!("flushing it: {e}"))?;
+        }
+        Err(format!("reads back differently after {VALIDATE_TRIES} rewrites"))
+    }
+
+    /// Check what a flow-over moved before the node stops depending on forge
+    /// (#412, the owner: "a post-flow-over validation via sha", on every
+    /// flow-over). Every destination slot a sealed volume names is compared
+    /// with its source; a slot only writable volumes name has been written
+    /// since and is counted as skipped (its golden's slots are what is
+    /// checked). Paced like the flow-over (#410). Reported in health.
+    pub(crate) async fn validate_flow(
+        gem: &crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>,
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        held: &FlowHeld,
+        sealed: &std::collections::HashSet<crate::volume::VolumeId>,
+    ) -> Validation {
+        use futures_util::StreamExt;
+        let moved: Vec<_> = held.moved.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut out = Validation::default();
+        let began = std::time::Instant::now();
+        // Which destination slots a sealed volume names now.
+        let named: std::collections::HashSet<crate::volume::gem::Leg> = {
+            let _pin = match crate::volume::gem::pin_resident(gem).await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::error!("flow-over validation: loading extent maps: {e}");
+                    None
+                }
+            };
+            let dests: std::collections::HashSet<_> = moved.iter().map(|(_, d)| d.slab_id).collect();
+            let g = gem.read().await;
+            dests
+                .into_iter()
+                .flat_map(|d| {
+                    g.slab_extents(d)
+                        .into_iter()
+                        .filter(|(vol, _, _)| sealed.contains(vol))
+                        .filter_map(move |(_, _, loc)| loc.leg_on(d))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        for (src, dest) in moved {
+            if !seen.insert(dest) {
+                continue;
+            }
+            if named.contains(&dest) {
+                items.push((src, dest));
+            } else {
+                out.skipped += 1;
+            }
+        }
+        let total = items.len() as u64;
+        let report = |out: &Validation, state: &'static str| {
+            let secs = began.elapsed().as_secs_f64();
+            crate::flowprogress::FLOW.validation(crate::flowprogress::ValidationReport {
+                state,
+                total,
+                validated: out.validated,
+                skipped: out.skipped,
+                mismatched: out.mismatched,
+                repaired: out.repaired,
+                unrepaired: out.unrepaired.len() as u64,
+                bytes: out.bytes,
+                seconds: secs,
+                mb_per_s: if secs > 0.0 { out.bytes as f64 / 1e6 / secs } else { 0.0 },
+            });
+        };
+        report(&out, "running");
+        let line = format!("Flow-over: validating {total} extent(s) against the appliance by sha256 (#412)");
+        println!("{line}");
+        tracing::info!("{line}");
+        let mut pace = FlowPace::new(flow_window(), FlowPace::from_env());
+        let mut items = std::collections::VecDeque::from(items);
+        while !items.is_empty() {
+            let n = pace.window.min(items.len());
+            let window: Vec<_> = items.drain(..n).collect();
+            crate::fglat::set_moving(true);
+            let results: Vec<_> = futures_util::stream::iter(window)
+                .map(|(src, dest)| async move { (src, dest, validate_slot(registry, src, dest).await) })
+                .buffer_unordered(flow_parallel())
+                .collect()
+                .await;
+            for (src, dest, r) in results {
+                let len = slot_bytes(registry, dest).await;
+                match r {
+                    Ok(0) => {
+                        out.validated += 1;
+                        out.bytes += len;
+                    }
+                    Ok(tries) => {
+                        out.validated += 1;
+                        out.mismatched += 1;
+                        out.repaired += 1;
+                        out.bytes += len;
+                        tracing::warn!(
+                            "flow-over validation: slot {} of {} read back differently from the appliance's; \
+                             written again, equal after {tries} rewrite(s)",
+                            dest.slot_idx,
+                            dest.slab_id
+                        );
+                    }
+                    Err(why) => {
+                        out.mismatched += 1;
+                        tracing::error!(
+                            "flow-over validation: slot {} of {} (from slot {} of {}): {why}",
+                            dest.slot_idx,
+                            dest.slab_id,
+                            src.slot_idx,
+                            src.slab_id
+                        );
+                        out.unrepaired.push((src, dest, why));
+                    }
+                }
+            }
+            report(&out, "running");
+            let pause = pace.after(FlowPace::signal());
+            if !pause.is_zero() {
+                crate::fglat::set_moving(false);
+                tokio::time::sleep(pause).await;
+            }
+        }
+        crate::fglat::set_moving(false);
+        report(&out, if out.unrepaired.is_empty() { "passed" } else { "corrupt" });
+        let line = format!(
+            "Flow-over: validated {} extent(s) in {:.1}s ({} repaired, {} not, {} written since and skipped)",
+            out.validated,
+            began.elapsed().as_secs_f64(),
+            out.repaired,
+            out.unrepaired.len(),
+            out.skipped
+        );
+        println!("{line}");
+        tracing::info!("{line}");
+        out
+    }
+
+    /// Point every map that names a destination slot that would not read back
+    /// right at its source again (#412): the node reads those extents from
+    /// forge, correctly, rather than from a disk that does not keep them.
+    /// The caller persists.
+    pub(crate) async fn revert_to_sources(
+        gem: &crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>,
+        pairs: &[(crate::volume::gem::Leg, crate::volume::gem::Leg, String)],
+    ) -> usize {
+        let mut fences = Vec::with_capacity(pairs.len());
+        for (_, dest, _) in pairs {
+            fences.push(crate::volume::fence::exclusive(*dest).await);
+        }
+        let moves: std::collections::HashMap<_, _> = pairs.iter().map(|(src, dest, _)| (*dest, *src)).collect();
+        let n = gem.write().await.rewrite_legs(&moves);
+        drop(fences);
+        n
+    }
+
+    /// Free the source slots a flow-over held (#412), once its validation
+    /// passed and the map naming their copies is durable.
+    pub(crate) async fn free_held(
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        held: &FlowHeld,
+    ) -> usize {
+        let mut legs: Vec<crate::volume::gem::Leg> =
+            held.moved.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(s, _)| *s).collect();
+        legs.extend(held.zeroed.lock().unwrap_or_else(|e| e.into_inner()).iter().copied());
+        let mut r = registry.write().await;
+        let mut freed = 0;
+        for leg in legs {
+            if let Some(slab) = r.get_mut(&leg.slab_id) {
+                match slab.free(leg.slot_idx).await {
+                    Ok(_) => freed += 1,
+                    Err(e) => tracing::warn!("flow-over: freeing slot {} of {}: {e}", leg.slot_idx, leg.slab_id),
+                }
+            }
+        }
+        freed
     }
 
     /// The longest pause the pacing takes between two windows.
@@ -6979,9 +7275,20 @@ pub async fn run() -> anyhow::Result<()> {
                 }
             };
             let (mut moved, mut failed) = (0u64, 0u64);
+            // What it moved, its sources held until the validation (#412).
+            let held = FlowHeld::default();
             if !sources.is_empty() {
-                let Some((m, f)) =
-                    flow_slabs(&gem_arc, &reg_arc, &sources, dest, persist, Some(&*flow_remaining), data_left).await
+                let Some((m, f)) = flow_slabs_held(
+                    &gem_arc,
+                    &reg_arc,
+                    &sources,
+                    dest,
+                    persist,
+                    Some(&*flow_remaining),
+                    data_left,
+                    Some(&held),
+                )
+                .await
                 else {
                     let why = flow_stall_reason(&reg_arc, dest, "system").await;
                     tracing::error!(
@@ -6998,8 +7305,17 @@ pub async fn run() -> anyhow::Result<()> {
             }
             if let Some((data_dest, data_sources)) = data.filter(|(_, d)| !d.is_empty()) {
                 let started = std::time::Instant::now();
-                let Some((m, f)) =
-                    flow_slabs(&gem_arc, &reg_arc, &data_sources, data_dest, persist, Some(&*flow_remaining), 0).await
+                let Some((m, f)) = flow_slabs_held(
+                    &gem_arc,
+                    &reg_arc,
+                    &data_sources,
+                    data_dest,
+                    persist,
+                    Some(&*flow_remaining),
+                    0,
+                    Some(&held),
+                )
+                .await
                 else {
                     let why = flow_stall_reason(&reg_arc, data_dest, "data").await;
                     tracing::error!(
@@ -7022,6 +7338,34 @@ pub async fn run() -> anyhow::Result<()> {
             tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
             println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
             if failed == 0 {
+                // Proven before the node stops depending on forge (#412):
+                // every moved extent a sealed volume names, read back from
+                // the disk and compared with the appliance's.
+                let sealed: std::collections::HashSet<crate::volume::VolumeId> = match state_for_persist.upgrade() {
+                    Some(st) => {
+                        let vm = st.volume_manager.lock().await;
+                        vm.volume_ids().into_iter().filter(|id| vm.is_sealed(id)).collect()
+                    }
+                    None => return,
+                };
+                let checked = validate_flow(&gem_arc, &reg_arc, &held, &sealed).await;
+                if !checked.unrepaired.is_empty() {
+                    let n = checked.unrepaired.len();
+                    let reverted = revert_to_sources(&gem_arc, &checked.unrepaired).await;
+                    persist().await;
+                    let why = format!(
+                        "FlowOverCorrupt: {n} extent(s) on {} do not read back what was written, after {} \
+                         rewrites each: the drive or its path is faulty. Those extents are read from the \
+                         appliance again ({reverted} reference(s)); the node does not go local",
+                        flow.disk, VALIDATE_TRIES
+                    );
+                    tracing::error!("flow-over: {why}");
+                    println!("ERROR: {why}");
+                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+                    return;
+                }
+                let freed = free_held(&reg_arc, &held).await;
+                tracing::info!("flow-over: validated; {freed} source slot(s) on the appliance let go");
                 local_boot(then_local_boot).await;
                 retire_sources(retire).await;
             } else {
@@ -11378,6 +11722,186 @@ file = "{state}"
         assert!(pace.reason.contains("flushes"), "{pace:?}");
         assert_eq!(pace.still_flush_p90_ms.map(|v| v.round() as u64), Some(5), "{pace:?}");
         assert!(t.elapsed() >= Duration::from_millis(800), "it paused: {:?}", t.elapsed());
+    }
+
+    /// A drive that hands back a flipped byte at `bad` whatever was written
+    /// there (#412: a faulty disk or path).
+    struct Flipping {
+        inner: Arc<dyn BlockDevice>,
+        bad: std::sync::atomic::AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for Flipping {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.inner.id()
+        }
+        fn drive_id(&self) -> crate::drive::DeviceId {
+            self.inner.drive_id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.inner.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            self.inner.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            let n = self.inner.read(offset, buf).await?;
+            let bad = self.bad.load(std::sync::atomic::Ordering::Relaxed);
+            if bad != u64::MAX && bad >= offset && bad < offset + buf.len() as u64 {
+                buf[(bad - offset) as usize] ^= 0xFF;
+            }
+            Ok(n)
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            self.inner.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+        fn smart_status(&self) -> crate::drive::DriveResult<crate::drive::SmartData> {
+            self.inner.smart_status()
+        }
+    }
+
+    /// A golden of `EXTENTS` extents and a clone that wrote one of its own,
+    /// flowed from an appliance slab onto a local one with the sources held
+    /// (#412). The manager, the held moves, the local slab, its device.
+    async fn flowed_for_validation(
+        dir: &std::path::Path,
+        flipping: bool,
+    ) -> (VolumeManager, super::FlowHeld, crate::drive::slab::SlabId, Arc<Flipping>, crate::volume::VolumeId) {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::placement::topology::StorageTier;
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 16;
+        let open = |name: &str| {
+            let path = dir.join(name).display().to_string();
+            async move {
+                Arc::new(FileDevice::open_with_capacity(&path, 4 * EXTENTS * SLOT).await.unwrap()) as Arc<dyn BlockDevice>
+            }
+        };
+        let fmt = || SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System);
+        let mut mgr = VolumeManager::new(SLOT);
+        let source = Slab::format_with(open("appliance.slab").await, fmt()).await.unwrap();
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("golden", EXTENTS * SLOT).await.unwrap();
+        let g = mgr.get_volume(&golden).unwrap();
+        let content: Vec<u8> = (0..EXTENTS * SLOT).map(|i| (i % 251) as u8).collect();
+        g.write(0, &content).await.unwrap();
+        g.flush().await.unwrap();
+        mgr.seal_volume(golden, None).await.unwrap();
+        let clone = mgr.create_snapshot(golden, "svc").await.unwrap();
+        let c = mgr.get_volume(&clone).unwrap();
+        c.write(0, &[7u8; 4096]).await.unwrap();
+        c.flush().await.unwrap();
+        let dev = Arc::new(Flipping { inner: open("local.slab").await, bad: u64::MAX.into() });
+        let local = Slab::format_with(dev.clone() as Arc<dyn BlockDevice>, fmt()).await.unwrap();
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+        let held = super::FlowHeld::default();
+        let (moved, failed) = super::flow_slabs_held(
+            mgr.gem(),
+            mgr.registry(),
+            &[source_id],
+            local_id,
+            || mgr.persist(),
+            None,
+            0,
+            Some(&held),
+        )
+        .await
+        .expect("the flow-over finished");
+        assert_eq!((moved, failed), (EXTENTS + 1, 0), "the golden's extents and the clone's own one");
+        assert_eq!(held.moved.lock().unwrap().len() as u64, EXTENTS + 1);
+        // Held: nothing freed on the source yet.
+        let used = mgr.registry().read().await.get(&source_id).unwrap().allocated_slots();
+        assert_eq!(used, EXTENTS + 1, "the source slots are kept until the validation passes");
+        let _ = flipping;
+        (mgr, held, local_id, dev, golden)
+    }
+
+    fn sealed_of(mgr: &VolumeManager) -> std::collections::HashSet<crate::volume::VolumeId> {
+        mgr.volume_ids().into_iter().filter(|id| mgr.is_sealed(id)).collect()
+    }
+
+    /// #412: a byte flipped on the local disk after the flow-over is caught
+    /// by the validation and written again from the appliance; the clone's
+    /// own extent (written since: not comparable) is skipped; the held
+    /// source slots are freed only after it passes.
+    #[tokio::test]
+    async fn the_validation_catches_a_flipped_byte_and_repairs_it_from_the_appliance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, held, local_id, dev, golden) = flowed_for_validation(dir.path(), false).await;
+        // A byte of a golden's slot changes on the disk.
+        let (_, dest) = *held
+            .moved
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(src, _)| src.slot_idx == 3)
+            .expect("a moved slot");
+        let (off, slot) = {
+            let r = mgr.registry().read().await;
+            let s = r.get(&local_id).unwrap();
+            (s.data_offset() + dest.slot_idx * s.slot_size(), s.slot_size())
+        };
+        let mut b = vec![0u8; 1];
+        dev.inner.read(off + 100, &mut b).await.unwrap();
+        b[0] ^= 0x5A;
+        dev.inner.write(off + 100, &b).await.unwrap();
+
+        let v = super::validate_flow(mgr.gem(), mgr.registry(), &held, &sealed_of(&mgr)).await;
+        assert_eq!((v.validated, v.mismatched, v.repaired, v.skipped), (16, 1, 1, 1), "{v:?}");
+        assert!(v.unrepaired.is_empty());
+        assert_eq!(v.bytes, 16 * slot);
+        let report = crate::flowprogress::FLOW.snapshot().unwrap().validation.unwrap();
+        assert_eq!((report.state, report.repaired, report.total), ("passed", 1, 16));
+        // What the golden reads is what was written.
+        let g = mgr.get_volume(&golden).unwrap();
+        let mut back = vec![0u8; (16 * slot) as usize];
+        g.read(0, &mut back).await.unwrap();
+        assert!(back.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8), "the golden reads as written");
+        // Then the sources go.
+        let freed = super::free_held(mgr.registry(), &held).await;
+        assert_eq!(freed, 17);
+    }
+
+    /// #412: a drive that keeps reading back a wrong byte is FlowOverCorrupt:
+    /// the extent fails after every rewrite, its maps are pointed back at the
+    /// appliance's slot, and the volume reads right (from there).
+    #[tokio::test]
+    async fn a_drive_that_does_not_keep_what_it_is_given_is_corrupt_and_read_from_the_appliance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, held, local_id, dev, golden) = flowed_for_validation(dir.path(), true).await;
+        let (src, dest) = *held.moved.lock().unwrap().iter().find(|(s, _)| s.slot_idx == 5).unwrap();
+        let off = {
+            let r = mgr.registry().read().await;
+            let s = r.get(&local_id).unwrap();
+            s.data_offset() + dest.slot_idx * s.slot_size()
+        };
+        dev.bad.store(off + 777, std::sync::atomic::Ordering::Relaxed);
+
+        let v = super::validate_flow(mgr.gem(), mgr.registry(), &held, &sealed_of(&mgr)).await;
+        assert_eq!(v.unrepaired.len(), 1, "{v:?}");
+        assert_eq!((v.unrepaired[0].0, v.unrepaired[0].1), (src, dest));
+        assert!(v.unrepaired[0].2.contains("rewrites"), "{}", v.unrepaired[0].2);
+        assert_eq!(crate::flowprogress::FLOW.snapshot().unwrap().validation.unwrap().state, "corrupt");
+        let n = super::revert_to_sources(mgr.gem(), &v.unrepaired).await;
+        assert!(n >= 1, "the golden's map (and its clone's) point at the appliance again: {n}");
+        // The golden reads right: that extent comes from the appliance.
+        let g = mgr.get_volume(&golden).unwrap();
+        let mut back = vec![0u8; 64 * 1024 * 16];
+        g.read(0, &mut back).await.unwrap();
+        assert!(back.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8), "read from the appliance, correct");
     }
 
     /// The background flow-over moves a golden's slots while a clone of it
