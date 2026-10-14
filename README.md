@@ -255,8 +255,8 @@ it does not parse), then, in order:
    the config declares that are not there yet (`--raid` and `--volume` are
    the command line's way of declaring them, #165); with neither, every
    drive becomes a raw NVMe namespace;
-4. starts the cluster engine (`[cluster] enabled`, with `--features cluster`) and StormFS registration
-   (`[stormfs] enabled`);
+4. starts the cluster engine (`[cluster] enabled`, with `--features cluster`) and the registration
+   with stormstorage (`[registration] enabled`, #170);
 5. starts the **iSCSI target** (unless `--no-iscsi`) and the **NVMe-oF/TCP
    target** — the latter only when there is something to export at startup
    (a drive, an array or a volume); with no drives there is no :4420 listener;
@@ -525,9 +525,12 @@ slab, **formatted** if not) or `kind = "directory"` (`path`, `slab_bytes`).
 volumes are copied across nodes by stormstorage's heads (#179). A file that
 still sets them loads, with a warning.
 
-**`[stormfs]`** — `enabled` (`false`), `metadata_url`, `heartbeat_secs`
-(`30`), `advertise_addr`: announce this node's volumes to
-`<metadata_url>/api/v1/storage/register` (served by stormstorage).
+**`[registration]`** (#170) — `enabled` (`false`), `url`, `heartbeat_secs`
+(`30`), `advertise_addr`: announce this node's volumes to stormstorage at
+`<url>/api/v1/storage/register` (and `/deregister` on shutdown).
+`[stormfs]` with `metadata_url` is its old spelling (the route was named for
+StormFS, whose metadata server does not serve it): still read when there is
+no `[registration]`, with a warning to rename it, and ignored when there is.
 `api_token` (or `token_file`, its first line) is sent as `Authorization:
 Bearer` on register and deregister, so stormstorage can require it
 (stormstorage#6, #214). Absent: sent with none, as before. A `token_file`

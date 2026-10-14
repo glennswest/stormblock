@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-14
+- **refactor:** #170 (decision A, 2026-10-13): the registration is named for what serves it. `[stormfs] metadata_url` is now **`[registration] url`**: this node's volumes are announced to stormstorage's `/api/v1/storage/register`, which StormFS's metadata server never served. The module is `src/registration.rs`, and the log lines say "stormstorage registration".
+  - **Old configs keep working:** `[stormfs]` is still read when the file has no `[registration]`, with a warning to rename it, and is ignored (with a warning) when it has one. `metadata_url` is still read as `url`.
+  - **No behaviour change.** Test `mgmt::config::registration_tests::the_old_stormfs_spelling_is_read_as_registration`; the registration's own tests (a stand-in stormstorage, the bearer) unchanged.
 - **docs:** #193 closed as covered (option C, decided 2026-10-13): the boot clone stays read-write. The sealed golden is never written; a node with a disk writes nothing in place on its clone (#239); the boot ladder and diskless nodes write a clone the next claim discards. docs/auth.md no longer lists a read-only overlay as still to come.
 - **feat:** #384 (#245 step 2, the owner's decision A): a sealed volume's digest, checked in the background; `slab holds` reads the verdicts.
   - **The digest:** taken when a volume is sealed on the node that made it (forge, for a release's goldens), in the background with no lock held. It is the sha256 of the volume's content as 64 KiB chunks: each non-zero chunk inside a mapped extent, in offset order, as its byte offset and its bytes, after the prefix `sb-seal-1`. So it costs what the volume holds and does not depend on extent size or placement: a composed image's golden and a flowed-over copy (zeros unmapped, #401) hash as their source does. An unseal forgets it.
