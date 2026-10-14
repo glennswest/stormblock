@@ -199,7 +199,7 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
-### A keep-data install over a flow-over cut short drops goldens' extents (2026-10-14, #451, P0) — IN PROGRESS
+### A keep-data install over a flow-over cut short drops goldens' extents (2026-10-14, #451, P0) — DONE (golden-stormblock-46af5bb670bb), shipped; metal pending
 
 server2 (X9): 12.27 over a 12.14 install hard-powered-off ~2 min in (mid
 flow-over). 218 "slab 135f7828 not attached, mapping dropped" at the
@@ -224,7 +224,10 @@ slab keeps the old record, and restore takes the first record it meets.
       named once (`Install: FINDING: …`)
 - [x] the test with a PVC cloned from the stale golden (keeps every byte);
       install_tests 30/30; docs/staging.md, CHANGELOG
-- [ ] check.sh; golden (the master: names at once, before 05:00Z); close
+- [x] check.sh at 0398272 ALL PASS (1241/1241); golden
+      golden-stormblock-46af5bb670bb (58ce20a, stormcos#467; the initramfs
+      from ≥ 58ce20a); master told; `stormcentral shipped`. Metal: server2's
+      next reinstall (FINDING once, no "mapping dropped")
 
 ### server1 (X9) at the EFI shell after a 12.27 install (2026-10-14, #449, P0) — NOT stormblock's; waits on stormbootx#89 (v0.26.0 on server1's stick)
 
