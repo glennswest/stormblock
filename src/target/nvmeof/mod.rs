@@ -827,13 +827,23 @@ impl NvmeofTarget {
     /// Accept connections on a pre-bound listener. Useful for tests with ephemeral ports.
     pub async fn run_with_listener(self: Arc<Self>, listener: TcpListener, reactor: &ReactorPool) -> std::io::Result<()> {
         loop {
+            // Registered before the flag is read, so a `stop_accepting` that
+            // lands between them (or before this task first ran, #333) is
+            // never a lost wake-up: `notify_waiters` only reaches waiters
+            // already enabled, and a missed one kept the port bound forever.
+            let stop = self.stop_accept.notified();
+            tokio::pin!(stop);
+            stop.as_mut().enable();
+            if !self.is_accepting() {
+                return Ok(());
+            }
             let (stream, peer) = tokio::select! {
                 r = listener.accept() => r?,
                 // Draining: stop taking new connections and drop the listener,
                 // leaving everything already established to finish. From here
                 // the live count can only fall, which is what lets a drain end
                 // on a fact rather than on a timer.
-                _ = self.stop_accept.notified() => {
+                _ = &mut stop => {
                     tracing::debug!("NVMe-oF {} stopped accepting", self.config.nqn);
                     return Ok(());
                 }

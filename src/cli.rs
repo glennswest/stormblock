@@ -6296,6 +6296,8 @@ pub async fn run() -> anyhow::Result<()> {
     /// [`flow_system_half`] for any half: `sources` into `dest`, with `extra`
     /// extents still to come after this run counted in `remaining` (#285: the
     /// data half after the system half, so the count never dips to 0 between).
+    /// Tests only: the daemon runs `flow_slabs_held` (#412).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn flow_slabs<P, F>(
         gem: &Arc<crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>>,
@@ -6313,7 +6315,7 @@ pub async fn run() -> anyhow::Result<()> {
         flow_slabs_held(gem, registry, sources, dest, persist, remaining, extra, None).await
     }
 
-    /// [`flow_slabs`], keeping what it moved in `hold` (#412): its source
+    /// `flow_slabs`, keeping what it moved in `hold` (#412): its source
     /// slots are persisted away from but never freed, for the validation.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn flow_slabs_held<P, F>(

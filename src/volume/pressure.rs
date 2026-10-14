@@ -483,7 +483,7 @@ mod tests {
         (Arc::new(crate::lockwatch::TrackedRwLock::new(reg)), TempDirs(vec![dir]))
     }
 
-    struct TempDirs(Vec<tempfile::TempDir>);
+    struct TempDirs(#[allow(dead_code)] Vec<tempfile::TempDir>);
 
     #[tokio::test]
     async fn usage_sums_the_slabs_and_breaks_down_by_tier() {

@@ -1102,7 +1102,7 @@ async fn a_template_left_mid_format_is_finished_and_an_external_one_is_not() {
     drop(dev);
 
     // A store from before the flag: no filesystem, nothing serving it.
-    let legacy = template::create(&state.volume_manager, &state.fstemplates, &external("pvc-legacy"))
+    let _legacy = template::create(&state.volume_manager, &state.fstemplates, &external("pvc-legacy"))
         .await
         .unwrap();
 

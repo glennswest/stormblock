@@ -612,7 +612,7 @@ tier = "hot"
     };
 
     {
-        let mut mgr = open_both(dev.clone()).await;
+        let mgr = open_both(dev.clone()).await;
         let names: Vec<String> = mgr.list_volumes().await.into_iter().map(|(_, n, ..)| n).collect();
         assert_eq!(names.len(), 4, "both slabs' records were read: {names:?}");
         let id = mgr.find_volume("stormcert-data").await.expect("the tier-0 clone");

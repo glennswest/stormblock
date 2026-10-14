@@ -474,7 +474,6 @@ mod tests {
 
         // Start server in background
         let server_clone = server.clone();
-        let sock_clone = sock_path.clone();
         let server_handle = rt.spawn(async move {
             server_clone.run().await.unwrap();
         });

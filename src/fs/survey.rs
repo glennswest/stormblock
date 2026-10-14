@@ -290,7 +290,7 @@ mod tests {
         let at = ((log_start >> ag_log) * ag_blocks + (log_start & ((1 << ag_log) - 1))) * block;
         let mut log = vec![0u8; (log_blocks * block) as usize];
         let bb = 512usize;
-        let mut record = |log: &mut Vec<u8>, at: usize, data: usize, unmount: bool, tail: u64| {
+        let record = |log: &mut Vec<u8>, at: usize, data: usize, unmount: bool, tail: u64| {
             let h = at * bb;
             log[h..h + 4].copy_from_slice(&0xFEED_BABEu32.to_be_bytes());
             log[h + 4..h + 8].copy_from_slice(&1u32.to_be_bytes());

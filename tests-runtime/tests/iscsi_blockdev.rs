@@ -12,7 +12,6 @@
 //! Run: cargo test --test iscsi_blockdev -- --ignored --nocapture
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use stormblock::drive::BlockDevice;
 use stormblock::drive::iscsi_dev::IscsiDevice;

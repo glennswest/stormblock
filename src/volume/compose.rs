@@ -227,7 +227,7 @@ mod tests {
         let dev: Arc<dyn BlockDevice> = Arc::new(dev);
         let slab = Slab::format(dev, SLOT, StorageTier::Hot).await.unwrap();
 
-        let mut vm = VolumeManager::new(SLOT);
+        let vm = VolumeManager::new(SLOT);
         vm.registry().write().await.add(slab);
         (vm, path_str)
     }
@@ -318,7 +318,7 @@ mod tests {
             reg.add(slab);
             paths.push(ps);
         }
-        let mut vm = VolumeManager::new(SLOT);
+        let vm = VolumeManager::new(SLOT);
         *vm.registry().write().await = reg;
         (vm, ids[0], ids[1], paths)
     }

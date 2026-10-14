@@ -2082,7 +2082,7 @@ mod tests {
         let mut gem = GlobalExtentMap::new();
         for i in 0..4 {
             let slot = slab_a.allocate(vol, i).await.unwrap();
-            slab_a.write_slot(slot, 0, &vec![(i as u8 + 0x20); 4096]).await.unwrap();
+            slab_a.write_slot(slot, 0, &vec![i as u8 + 0x20; 4096]).await.unwrap();
             gem.insert(vol, i, ExtentLocation::new(slab_a_id, slot));
         }
         // A fifth extent whose slot does not exist on the source: reading it
@@ -2132,7 +2132,7 @@ mod tests {
         let mut gem = GlobalExtentMap::new();
         for i in 0..5 {
             let slot = slab_a.allocate(vol, i).await.unwrap();
-            slab_a.write_slot(slot, 0, &vec![(i as u8 + 0x10); 4096]).await.unwrap();
+            slab_a.write_slot(slot, 0, &vec![i as u8 + 0x10; 4096]).await.unwrap();
             gem.insert(vol, i, ExtentLocation::new(slab_a_id, slot));
         }
 
@@ -2239,7 +2239,7 @@ mod tests {
         // Put 3 extents on the cold slab
         for i in 0..3 {
             let slot = slab_cold.allocate(vol, i).await.unwrap();
-            slab_cold.write_slot(slot, 0, &vec![(i as u8 + 0x50); 4096]).await.unwrap();
+            slab_cold.write_slot(slot, 0, &vec![i as u8 + 0x50; 4096]).await.unwrap();
             gem.insert(vol, i, ExtentLocation::new(cold_id, slot));
         }
 

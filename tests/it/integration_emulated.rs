@@ -8,7 +8,6 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use stormblock::drive::emulated::{self, EmulatedSpec};
 use stormblock::drive::slab::{Slab, SlabFormat};
-use stormblock::drive::BlockDevice;
 use stormblock::mgmt::config::{DriveConfig, StormBlockConfig};
 use stormblock::mgmt::AppState;
 use stormblock::placement::topology::StorageTier;
