@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### 2026-10-14
+- **feat:** #159, step 1 of the owner's 3(b): a volume of a scheme this engine does not read is **refused, never misread**. Erasure coding (`ec:K+M`, decided 1(a): M 3–4, K+M ≤ 24, 8+3 by default; 2(a): RAID-6's P+Q stays) comes in step 2, once every release a node could roll back to carries this one. An older engine would read an `ec:8+3` volume as `Parity { data: 8, parity: 3 }`, compute P and Q only, and leave its third parity leg stale.
+  - **Format:** a volume's format-2 header extension can carry a scheme, after the digest: `S`, the code (1 = Reed-Solomon), K, M (`docs/metadata-v2.md`).
+  - **An engine that does not read the code refuses that volume** (none reads any yet):
+    - Kept and listed, its map and slots kept, and written back as it was on every persist.
+    - Every read, write, flush, discard and write-zeroes fails with the reason; resync, rebuild and the dirty-stripe verify at restore are refused; a clone, snapshot, composition or restripe of it is refused.
+    - It can still be deleted. Every other volume is served as before.
+  - **Tests:** `volume::scheme_tests` (a parity volume written with an `ec:2+1` scheme, then opened as a restart would: refused for I/O, resync, verify, clone, restripe, compose; another volume served; after another persist the scheme, the map and every slot are still there; a refused volume deleted), `metav2::tests::a_scheme_rides_after_the_digest` (with and without a digest before it, and #384's reader still finds its digest).
 - **docs:** #193 closed as covered (option C, decided 2026-10-13): the boot clone stays read-write. The sealed golden is never written; a node with a disk writes nothing in place on its clone (#239); the boot ladder and diskless nodes write a clone the next claim discards. docs/auth.md no longer lists a read-only overlay as still to come.
 - **feat:** #384 (#245 step 2, the owner's decision A): a sealed volume's digest, checked in the background; `slab holds` reads the verdicts.
   - **The digest:** taken when a volume is sealed on the node that made it (forge, for a release's goldens), in the background with no lock held. It is the sha256 of the volume's content as 64 KiB chunks: each non-zero chunk inside a mapped extent, in offset order, as its byte offset and its bytes, after the prefix `sb-seal-1`. So it costs what the volume holds and does not depend on extent size or placement: a composed image's golden and a flowed-over copy (zeros unmapped, #401) hash as their source does. An unseal forgets it.

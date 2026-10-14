@@ -167,8 +167,12 @@ on first open"), and as built:
     `SBX1`, the origin (#349), the tier (#151; written as 0, hot, when a
     digest follows), then a sealed volume's digest (#384): `D`, its sha256
     (32), the verdict (0 unchecked, 1 intact, 2 mismatch) and when it was
-    given (u64). Kinds 4 and up are skipped by every reader since #245 step 1,
-    and none is written.
+    given (u64), then a scheme the record does not say (#159): `S`, its code
+    (1 = Reed-Solomon `ec:K+M`), K, M. An engine that does not read the code
+    refuses that volume (kept, listed, written back as it was; never read,
+    written, rebuilt, verified, cloned, composed or restriped) rather than
+    read it as the record's `Parity`. Kinds 4 and up are skipped by every
+    reader since #245 step 1, and none is written.
   - Log record: magic, the store's nonce, sequence, length, kind (ops or
     wrap), CRC, then the ops (`Put`, `Del`, `DropVolume`), padded to pages. A
     record that does not fit before the end of the ring is preceded by a wrap
