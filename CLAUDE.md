@@ -301,14 +301,18 @@ namespace for a bearer.
 Forge's hot slab 7661cf8b (format 1) outgrew its 100 MiB record copy; every
 persist failed, volumes were made in memory, the restart lost them. Owner
 (via master): no recovery, GC may reclaim; make it not happen again.
-- [x] migration to v2 over the whole region when the record outgrew a copy
 - [x] creates/clones/snapshots/compositions refused while records fail
       (retry first); health degraded + `durability`; GC paused, POST 409;
-      WARN at 80 % (b29a9bd)
-- [x] test `integration_metadata_v2::a_record_that_outgrew_format_1_…`;
-      docs (durability rule 16, README), CHANGELOG
-- [ ] build VM run (tmp/sc-428-a.log); check.sh; golden; tell master the
-      forge steps (new engine, restart: its own migration)
+      WARN at 80 % (b29a9bd). Migration takes the whole region when the
+      record outgrew a copy, but v2 measured 2.04x v1: it does not rescue
+      forge's slab; deletes do (the owner's cleanup; forge saves again since
+      20:02). Bigger region / compact v2: #429
+- [x] test `integration_metadata_v2::a_record_too_large_for_either_format_
+      refuses_creates_until_deletes_make_room`; docs (durability rule 16,
+      README), CHANGELOG; check.sh at fe5e339 ALL PASS (1190/1190; #402's
+      two split tests ignored while it is paused)
+- [ ] golden: the stage failed on forge (404 for b1682c21, a volume the
+      cleanup removed?); master told. Then master puts it on forge; close
 
 ### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — PAUSED for P0 #428 (engine half built, b9j6oila5 run pending; /init half not started)
 
