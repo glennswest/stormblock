@@ -570,6 +570,8 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
 
 - `GET /api/v1/health` — public, never waits on a lock, no I/O:
   `{"status":"ok","service":"stormblock","version":…,"auth":"required"|"none"}`,
+  `status` is `degraded` with `"durability"` (the reason) while volume
+  records cannot be written; nothing new is made until they can (#428);
   plus `"raid"` (the worst RAID set's state) on a node that has sets, and
   `"flow_over_remaining"` (#260) on an engine running a flow-over: the extents
   of this node's volumes still on a remote slab (the appliance's), 0 once the

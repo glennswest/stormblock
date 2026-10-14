@@ -262,6 +262,19 @@ tests run on.
    per-volume log, because a drive's cache flush is device-wide in any
    design and a FUA write needs none.
 
+16. **What cannot be recorded is not made** (#428). Forge's hot slab
+   (format 1) grew a record larger than its 100 MiB copy: every persist
+   failed from 2026-10-10, the engine went on making volumes in memory, and
+   the restart of 2026-10-14 lost the 483 made since. Now a failed record
+   write is a durability fault: while it stands, creates, clones, snapshots
+   and compositions are refused with its reason (each first retries the
+   write, so the fault clears itself when it can); `/api/v1/health` says
+   `status: degraded` with `durability`; the extent GC frees nothing (a
+   record not written cannot be the GC's evidence) and its `POST` answers
+   409. A format-1 slab whose record no longer fits a copy migrates to format
+   2 over the whole region (the v1 copies are not kept: they could not hold
+   it); a WARN says when a record passes 80 % of what its slab reserves.
+
 ## How it is checked
 
 * `tests/integration_power_cut.rs`:
