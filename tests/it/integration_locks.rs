@@ -412,3 +412,68 @@ async fn an_import_never_flushes_with_the_volume_manager_held() {
     drop(vm);
     server.abort();
 }
+
+/// Two machines' first boots claim at once from an appliance whose disk
+/// flushes in 500 ms (#424): pvetest1 waited behind pvetest2 past the
+/// initramfs's 10 s. Each claim, and the second waiting for the first, is
+/// measured; then their second boots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_first_boot_claims_at_once_answer_in_seconds_on_a_slow_disk() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let release = {
+        let mut vm = state.volume_manager.lock().await;
+        let id = vm.create_volume_any("release-12.21", 256 << 20).await.unwrap();
+        let dev = vm.get_volume(&id).unwrap();
+        for e in 0..32u64 {
+            dev.write(e * DEFAULT_EXTENT_SIZE, &vec![e as u8 + 1; 4096]).await.unwrap();
+        }
+        dev.flush().await.unwrap();
+        vm.seal_volume(id, None).await.unwrap();
+        id
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{addr}");
+    let router = stormblock::mgmt::api::router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    common::wait_for_listener(addr).await;
+    let c = reqwest::Client::new();
+    let r = c
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": release.to_string()}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    std::env::set_var("STORMBLOCK_LOCK_ASSERT", "1");
+
+    let claim = |host: &'static str| {
+        let (c, base) = (c.clone(), base.clone());
+        tokio::spawn(async move {
+            let t = Instant::now();
+            let r = c
+                .post(format!("{base}/api/v1/synonyms/boothost/{host}/claim"))
+                .json(&serde_json::json!({"agent": {"name": "stormblock-initramfs"}}))
+                .send()
+                .await
+                .unwrap();
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap();
+            (host, status, body, t.elapsed())
+        })
+    };
+    for round in ["first boot", "second boot"] {
+        let a = claim("pvetest1");
+        let b = claim("pvetest2");
+        let mut slowest = Duration::ZERO;
+        for j in [a, b] {
+            let (host, status, body, took) = j.await.unwrap();
+            assert_eq!(status, 201, "{round} {host}: {body}");
+            println!("{round}: {host} claimed in {took:?}");
+            slowest = slowest.max(took);
+        }
+        println!("{round}: the slower of two claims at once took {slowest:?}");
+    }
+    server.abort();
+}

@@ -1032,7 +1032,10 @@ async fn claim_boothost(
     serial: Option<&str>,
     (agent, inventory): (Option<serde_json::Value>, Option<serde_json::Value>),
 ) -> Response {
+    // Where a claim's time goes (#424), said once per claim.
+    let mut timing = ClaimTiming::start();
     let _one_at_a_time = BOOT_CLAIMS.lock().await;
+    timing.step("wait");
     let by_default = claimed_as.eq_ignore_ascii_case(DEFAULT_HOST);
     let mut named_claim: Option<synonym::NamedClaim> = None;
     let (tag, mac, new_machine) = if by_default {
@@ -1246,6 +1249,7 @@ async fn claim_boothost(
         }
     };
     let hostgolden = state.synonyms.read().await.get(HOSTGOLDEN_NS, tag).cloned();
+    timing.step(if minted { "host golden made" } else { "host golden" });
 
     // 3. A fresh boot clone, and every earlier one released (#127).
     //
@@ -1277,6 +1281,7 @@ async fn claim_boothost(
         Ok(c) => c,
         Err(e) => return super::fstemplates::err(e),
     };
+    timing.step("boot clone");
     // What a claim makes for a host somebody created is theirs too (#422):
     // the boot clone, the host golden and its synonym, so they can remove
     // them as they removed the host's assignment.
@@ -1303,6 +1308,7 @@ async fn claim_boothost(
         }
     }
     let collected = collect_host_goldens(&state, tag, &names, golden).await;
+    timing.step("released");
 
     note_claim(c.volume_id);
     // Under `install`, this clone is the install (#148); the reply tells the
@@ -1320,6 +1326,7 @@ async fn claim_boothost(
         bind_aliases.push(claimed_as.to_string());
     }
     let attach = attach_info(&state, c.volume_id, AttachFor::Boothost { name: tag, aliases: bind_aliases }).await;
+    timing.step("attach");
     // What stormcert's boot-chain attestation reads (#216): written here, by
     // the engine, from what it served; nothing in it comes from the caller
     // but the name it claimed as.
@@ -1413,7 +1420,42 @@ async fn claim_boothost(
         "kept": kept.iter().map(|v| v.0).collect::<Vec<_>>(),
         "attach": attach,
     });
+    timing.done(tag, claimed_as);
     (StatusCode::CREATED, Json(out)).into_response()
+}
+
+/// A claim's steps and their times (#424): one line per claim, a warning
+/// when it took long enough to matter to a booting machine. The persist the
+/// request owes comes after (`lockwatch::track`) and is in the request line.
+struct ClaimTiming {
+    started: std::time::Instant,
+    last: std::time::Instant,
+    steps: Vec<(&'static str, std::time::Duration)>,
+}
+
+impl ClaimTiming {
+    fn start() -> Self {
+        let now = std::time::Instant::now();
+        ClaimTiming { started: now, last: now, steps: Vec::new() }
+    }
+
+    fn step(&mut self, what: &'static str) {
+        let now = std::time::Instant::now();
+        self.steps.push((what, now - self.last));
+        self.last = now;
+    }
+
+    fn done(&self, host: &str, claimed_as: &str) {
+        let total = self.started.elapsed();
+        let steps: Vec<String> = self.steps.iter().map(|(w, d)| format!("{w} {} ms", d.as_millis())).collect();
+        let steps = steps.join(", ");
+        let ms = total.as_millis() as u64;
+        if total >= std::time::Duration::from_secs(5) {
+            tracing::warn!(host, claimed_as, ms, "boot claim took {ms} ms: {steps}");
+        } else {
+            tracing::info!(host, claimed_as, ms, "boot claim in {ms} ms: {steps}");
+        }
+    }
 }
 
 /// An `install` override (#354): `boothost/<tag>` pointed at the release it
