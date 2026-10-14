@@ -1111,6 +1111,9 @@ mod tests {
             provenance: Some(format!("{name}@abc1234")),
             version: Some(version.into()),
             notes: None,
+            optional: false,
+            image: None,
+            kernel: None,
         }
     }
 

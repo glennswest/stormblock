@@ -435,6 +435,7 @@ impl Default for StormBlockConfig {
             metadata: MetadataSection::default(),
             capacity: CapacitySection::default(),
             storage: StorageSection::default(),
+            kernel: KernelSection::default(),
         }
     }
 }
