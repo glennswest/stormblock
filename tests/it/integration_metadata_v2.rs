@@ -896,11 +896,13 @@ async fn a_restripe_or_create_whose_records_fail_frees_nothing_and_says_so() {
 #[tokio::test]
 async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_cannot_be_written() {
     stormblock::drive::slab::set_default_format(SLAB_VERSION);
-    let dev = device("512M").await;
+    // Room for many more slots than the record can name: the record, not the
+    // slab, runs out first, as on forge.
+    let dev = device("4G").await;
     let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
         .with_role(SlabRole::Data)
         .with_version(SLAB_VERSION)
-        .with_metadata(4 << 20);
+        .with_metadata(1 << 20);
     let s = Slab::format_with(dev.clone(), fmt).await.unwrap();
     let sid = s.slab_id();
     let capacity = s.metadata_capacity();
@@ -915,7 +917,9 @@ async fn a_record_that_outgrew_format_1_migrates_and_nothing_is_made_while_it_ca
         let id = vm.create_volume_any(&format!("v{n}"), VOL).await.unwrap();
         let v = vm.get_volume(&id).unwrap();
         for e in 0..8u64 {
-            v.write(e * SLOT, &pattern((n % 251) as u8, e, 1)).await.unwrap();
+            v.write(e * SLOT, &pattern((n % 251) as u8, e, 1))
+                .await
+                .unwrap_or_else(|err| panic!("v{n} extent {e}: {err} (fault {:?})", vm.durability_fault()));
         }
         v.flush().await.unwrap();
         vm.persist().await;

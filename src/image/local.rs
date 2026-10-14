@@ -1485,9 +1485,11 @@ mod tests {
             mgr.adopt_slabs(found).await.unwrap();
             mgr.persist_to_slab(sys);
             mgr.add_slab(away).await;
-            // A volume written while the drive's own slab is quarantined
-            // lands on the other one, as an extent not yet moved would be.
+            // A volume with an extent on this drive and one written while the
+            // drive's own slab is quarantined, which lands on the other one,
+            // as an extent not yet moved would be.
             let scratch = mgr.create_volume_any("scratch", 4 * 1024 * 1024).await.unwrap();
+            mgr.get_volume(&scratch).unwrap().write(layout.slot_size, &[6u8; 4096]).await.unwrap();
             {
                 let mut reg = mgr.registry().write().await;
                 reg.set_quarantined(sys, true);
