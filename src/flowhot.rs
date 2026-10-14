@@ -85,7 +85,7 @@ pub fn save(path: &Path) -> std::io::Result<usize> {
         std::fs::create_dir_all(dir)?;
     }
     let bytes = serde_json::to_vec(&v).map_err(std::io::Error::other)?;
-    crate::serve::wiring::write_atomic(path, &bytes)?;
+    crate::serve::wiring::write_atomic(path, &bytes).map_err(std::io::Error::other)?;
     Ok(v.len())
 }
 
