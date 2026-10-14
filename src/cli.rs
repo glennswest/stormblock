@@ -10126,6 +10126,170 @@ file = "{state}"
     /// One install of `image` over `disk`, as a boot and its successor do it:
     /// claim, take the disk (the plan and the adopt), flow both halves over,
     /// persist. The install's report.
+    /// The successor's flow-over, both halves, onto wherever `flow` says.
+    async fn flow_into(claim: &str, flow: &crate::drive::handover::FlowOver) {
+        let mut paths = vec![claim.to_string(), flow.disk.clone()];
+        paths.extend(flow.data_disk.clone());
+        let (succ, _) = super::open_slabs_resuming(&paths, None, true).await.unwrap();
+        let sys_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
+        let data_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
+        succ.persist().await;
+    }
+
+    /// #402 (owner's A): N installed on one drive, the node's data on it; N+1
+    /// installed with a drive of its own for the system half, as `/init` asks
+    /// when stormdrive designates one. The data half stays where it was (same
+    /// partition, same slab, every byte, under the same ids), the old system
+    /// half and boot area are gone from it, the system slab on the new drive
+    /// is sized to it and holds N+1; after the flow-over and from the two
+    /// drives alone. Then N again over the split node: the system drive's
+    /// slab laid again, the data kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_system_half_moves_to_a_drive_of_its_own_and_the_data_stays_where_it_was() {
+        use crate::drive::slab::SlabRole;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (hdd, image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
+
+        // The node's data: `state` written, and a PVC.
+        let (mut node, _) = super::open_slabs_resuming(&[hdd.clone()], None, false).await.unwrap();
+        let v = node.get_volume(&node.find_volume("state").await.unwrap()).unwrap();
+        v.write(4096, &[0x51u8; 8192]).await.unwrap();
+        v.flush().await.unwrap();
+        let pvc = node
+            .create_volume_with("pvc-default-db", 16 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::Data))
+            .await
+            .unwrap();
+        let pvc_bytes: Vec<u8> = (0..16 * MIB as usize).map(|i| (i % 241) as u8 ^ 0x5A).collect();
+        {
+            let v = node.get_volume(&pvc).unwrap();
+            v.write(0, &pvc_bytes).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        node.persist().await;
+        let state_id = node.find_volume("state").await.unwrap();
+        let state_before = volume_bytes(&node, "state").await.unwrap();
+        drop(node);
+        let hdd_dev = super::open_storage(&hdd).await.unwrap();
+        let (data_i, _) = crate::image::local::node_layout(&hdd_dev).await.unwrap().expect("both halves");
+        let before = crate::pallet::gpt::Gpt::read(&hdd_dev).await.unwrap();
+        let data_at = (before.entries[data_i].first_lba, before.entries[data_i].last_lba);
+        let (data_slab, _, _) = crate::image::install::halves_split(&hdd_dev, None).await.unwrap();
+        let data_id = data_slab.slab_id();
+        drop((data_slab, hdd_dev));
+
+        // The system drive: 20 GiB, sparse.
+        let ssd = dir.path().join("ssd.raw").display().to_string();
+        std::fs::File::create(&ssd).unwrap().set_len(20 * 1024 * MIB).unwrap();
+
+        let claim = dir.path().join("claim-11.91.raw").display().to_string();
+        std::fs::copy(&image_n1, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (flow, report) = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), "hot", false, Some("stormpump")).await.unwrap();
+        let flow = flow.expect("laid");
+        assert_eq!(flow.disk, ssd, "the system drive is where local boot goes");
+        assert_eq!(flow.data_disk.as_deref(), Some(hdd.as_str()));
+        assert_eq!(flow.data_slab, data_id.0.to_string(), "the same data slab");
+        let report = report.expect("the data half kept");
+        assert_eq!(report.kept, vec!["state".to_string()], "{report:?}");
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+
+        // The HDD: the data half where it was, nothing of the system half.
+        let hdd_dev = super::open_storage(&hdd).await.unwrap();
+        let (d, sys) = crate::image::local::halves_on(&hdd_dev).await;
+        assert!(sys.is_none(), "the old system half is retired");
+        let after = crate::pallet::gpt::Gpt::read(&hdd_dev).await.unwrap();
+        let d = d.expect("the data half");
+        assert_eq!((after.entries[d].first_lba, after.entries[d].last_lba), data_at, "the data partition did not move");
+        assert!(after.partitions().all(|(_, e)| e.type_guid != crate::image::type_guid::ESP
+            && e.type_guid != crate::pallet::PALLET_TYPE_GUID), "no boot area left to boot the old release");
+        drop(hdd_dev);
+        // The SSD: one system slab, sized to it.
+        let ssd_dev = super::open_storage(&ssd).await.unwrap();
+        let (sd, ss) = crate::image::local::halves_on(&ssd_dev).await;
+        assert!(sd.is_none() && ss.is_some(), "the system half alone");
+        let g = crate::pallet::gpt::Gpt::read(&ssd_dev).await.unwrap();
+        let laid = g.entries[ss.unwrap()].size_bytes(g.block_size);
+        assert_eq!(laid, crate::image::local::system_drive_slab_bytes(ssd_dev.capacity_bytes(),
+            crate::image::local::LocalLayout::for_drive(ssd_dev.capacity_bytes()).boot_bytes));
+        drop(ssd_dev);
+
+        flow_into(&claim, &flow).await;
+        let check = |when: &'static str| {
+            let (ssd, hdd, state_before, pvc_bytes) = (ssd.clone(), hdd.clone(), state_before.clone(), pvc_bytes.clone());
+            async move {
+                let (m, _) = super::open_slabs_resuming(&[ssd.clone(), hdd.clone()], None, false).await.unwrap();
+                assert_eq!(m.find_volume("state").await, Some(state_id), "{when}: state, by its id");
+                assert_eq!(volume_bytes(&m, "state").await.unwrap(), state_before, "{when}: state");
+                assert_eq!(m.find_volume("pvc-default-db").await, Some(pvc), "{when}: the PVC");
+                assert_eq!(volume_bytes(&m, "pvc-default-db").await.unwrap(), pvc_bytes, "{when}: the PVC's bytes");
+                assert!(m.find_volume("kubelet-data").await.is_some(), "{when}: what N+1 adds");
+                assert_eq!(m.volume_role(&m.find_volume("svc").await.unwrap()), Some(SlabRole::System), "{when}");
+            }
+        };
+        check("from the two drives after the flow-over").await;
+        let i = super::open_storage(&image_n1).await.unwrap();
+        let l = super::open_storage(&ssd).await.unwrap();
+        let h = crate::image::local::release_held(&l, &i).await;
+        assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "N+1 held on the system drive: {h:?}");
+        drop((i, l));
+
+        // N again, over the split node: the system drive laid again in place.
+        let claim_n = dir.path().join("claim-11.90.raw").display().to_string();
+        std::fs::copy(&image_n, &claim_n).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim_n.clone()], None, true).await.unwrap();
+        let (flow, report) = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), "hot", false, Some("stormpump")).await.unwrap();
+        let flow = flow.expect("laid again");
+        assert!(report.is_some(), "the data half kept again");
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+        flow_into(&claim_n, &flow).await;
+        let (m, _) = super::open_slabs_resuming(&[ssd.clone(), hdd.clone()], None, false).await.unwrap();
+        assert_eq!(volume_bytes(&m, "state").await.unwrap(), state_before, "state, after going back to N");
+        assert_eq!(volume_bytes(&m, "pvc-default-db").await.unwrap(), pvc_bytes, "the PVC, after going back to N");
+    }
+
+    /// #402: a system drive with no room to stage the next release beside
+    /// this one is refused, with the numbers, and nothing is written to
+    /// either drive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_system_drive_without_room_for_an_update_is_refused_and_nothing_written() {
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (hdd, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
+        let hdd_before = std::fs::read(&hdd).unwrap();
+        // Room for one system half, not two: the release's is ~24 MiB.
+        let ssd = dir.path().join("small-ssd.raw").display().to_string();
+        std::fs::File::create(&ssd).unwrap().set_len(96 * MIB).unwrap();
+        let ssd_before = std::fs::read(&ssd).unwrap();
+        let claim = dir.path().join("claim-11.91.raw").display().to_string();
+        std::fs::copy(&image_n1, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let e = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), "hot", false, Some("stormpump"))
+            .await
+            .expect_err("no room for an update");
+        let e = e.to_string();
+        assert!(e.contains("an update needs"), "{e}");
+        assert_eq!(std::fs::read(&hdd).unwrap(), hdd_before, "the HDD untouched");
+        assert_eq!(std::fs::read(&ssd).unwrap(), ssd_before, "the SSD untouched");
+    }
+
     async fn install_over(dir: &tempfile::TempDir, disk: &str, image: &str, tag: &str) -> crate::image::install::Report {
         let claim = dir.path().join(format!("claim-{tag}.raw")).display().to_string();
         std::fs::copy(image, &claim).unwrap();
