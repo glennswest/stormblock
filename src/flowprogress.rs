@@ -14,6 +14,8 @@ pub static FLOW: FlowProgress = FlowProgress {
     zeroed: AtomicU64::new(0),
     bytes: AtomicU64::new(0),
     source: Mutex::new(None),
+    persists: AtomicU64::new(0),
+    pace: Mutex::new(None),
 };
 
 pub struct FlowProgress {
@@ -23,10 +25,40 @@ pub struct FlowProgress {
     bytes: AtomicU64,
     /// The source's fabric path, when it is reached over NVMe/TCP (#407).
     source: Mutex<Option<crate::drive::nvmeof_dev::FabricPath>>,
+    /// Persists made (#410: one for a batch of moves).
+    persists: AtomicU64,
+    /// How it is paced, and why (#410).
+    pace: Mutex<Option<Pace>>,
+}
+
+/// How a flow-over is paced, and why (#410): flat out unless the node's own
+/// I/O is measurably slower for it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Pace {
+    /// Extents a window moves at once now, and at most.
+    pub window: usize,
+    pub max_window: usize,
+    /// `full` or `backing_off`.
+    pub state: &'static str,
+    /// What the pacing last went by.
+    pub reason: String,
+    /// The node's reads/writes and flushes, p90, while the flow-over moves
+    /// (last 5 s) and without it (last measured).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_p90_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flush_p90_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub still_io_p90_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub still_flush_p90_ms: Option<f64>,
+    /// Times it backed off, and the seconds it spent paused.
+    pub pauses: u64,
+    pub paused_seconds: f64,
 }
 
 /// What [`FlowProgress::snapshot`] reports.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Snapshot {
     /// Extents copied to the local disk.
     pub moved: u64,
@@ -44,6 +76,11 @@ pub struct Snapshot {
     /// one command carries. Absent for a local source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<crate::drive::nvmeof_dev::FabricPath>,
+    /// Persists made so far (#410).
+    pub persists: u64,
+    /// How it is paced, and why (#410).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pace: Option<Pace>,
 }
 
 impl FlowProgress {
@@ -67,6 +104,14 @@ impl FlowProgress {
         *self.source.lock().unwrap_or_else(|e| e.into_inner()) = path;
     }
 
+    pub fn persisted(&self) {
+        self.persists.fetch_add(1, Relaxed);
+    }
+
+    pub fn pace(&self, p: Pace) {
+        *self.pace.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
+    }
+
     /// Nothing when no flow-over has begun in this process.
     pub fn snapshot(&self) -> Option<Snapshot> {
         let began = (*self.began.lock().unwrap_or_else(|e| e.into_inner()))?;
@@ -81,6 +126,8 @@ impl FlowProgress {
             mb_per_s: per(bytes as f64 / 1e6),
             extents_per_s: per((moved + zeroed) as f64),
             source_path: *self.source.lock().unwrap_or_else(|e| e.into_inner()),
+            persists: self.persists.load(Relaxed),
+            pace: self.pace.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         })
     }
 
@@ -103,6 +150,8 @@ mod tests {
             zeroed: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             source: Mutex::new(None),
+            persists: AtomicU64::new(0),
+            pace: Mutex::new(None),
         };
         assert!(p.snapshot().is_none());
         p.begin();

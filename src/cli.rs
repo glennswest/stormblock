@@ -6103,18 +6103,28 @@ pub async fn run() -> anyhow::Result<()> {
         }
     }
 
-    /// The longest a flow-over waits between two moves for foreground I/O
-    /// (#269). It waits as long as the last move took — the copy and the persist
-    /// after it — so a node doing its own I/O gets about half its disk; on a disk
-    /// whose flushes take seconds (server3), the move does too, and so the cap is
-    /// seconds as well.
-    const FLOW_YIELD_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+    /// Extents a flow-over window holds at most (#331, #410):
+    /// `STORMBLOCK_FLOW_WINDOW`, 64 (and never more than
+    /// [`FLOW_WINDOW_BYTES`] of them). The pacing shrinks it.
+    fn flow_window() -> usize {
+        std::env::var("STORMBLOCK_FLOW_WINDOW").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(64)
+    }
 
-    /// Moves a flow-over makes between persists (#331):
-    /// `STORMBLOCK_FLOW_BATCH`, 64. Each persist flushes every slab; one per
-    /// extent was most of a move.
-    fn flow_batch() -> usize {
-        std::env::var("STORMBLOCK_FLOW_BATCH").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(64)
+    /// Moves a flow-over makes between persists (#331, #410):
+    /// `STORMBLOCK_FLOW_BATCH`, 256, across windows. Each persist flushes
+    /// every slab, the source's over NVMe/TCP among them; one per window
+    /// held a flow-over to a window per flush. A cut before the persist
+    /// moves the batch again (durability rule 9).
+    fn flow_batch() -> u64 {
+        std::env::var("STORMBLOCK_FLOW_BATCH").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(256)
+    }
+
+    /// The longest a flow-over goes without a persist while it has moved
+    /// something (#410): `STORMBLOCK_FLOW_PERSIST_SECS`, 10. What a cut can
+    /// make it move again.
+    fn flow_persist_every() -> std::time::Duration {
+        let secs = std::env::var("STORMBLOCK_FLOW_PERSIST_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(10u64);
+        std::time::Duration::from_secs(secs.max(1))
     }
 
     /// The largest write a flow-over makes on its destination (#401):
@@ -6143,9 +6153,12 @@ pub async fn run() -> anyhow::Result<()> {
         registry.read().await.get(&leg.slab_id).map(|s| s.slot_size()).unwrap_or(0)
     }
 
-    /// Moves a flow-over makes at once (#331): `STORMBLOCK_FLOW_PARALLEL`, 8.
+    /// Sources a flow-over reads at once (#331, #410):
+    /// `STORMBLOCK_FLOW_PARALLEL`, 16 — over the initiator's connections
+    /// (`STORMBLOCK_NVME_TCP_QUEUES`, 8), so the network and the disk are
+    /// busy at once.
     fn flow_parallel() -> usize {
-        std::env::var("STORMBLOCK_FLOW_PARALLEL").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(8)
+        std::env::var("STORMBLOCK_FLOW_PARALLEL").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(16)
     }
 
     /// How long the node's volume I/O must be still before a successor's
@@ -6300,15 +6313,21 @@ pub async fn run() -> anyhow::Result<()> {
             }
         };
         report(later.iter().sum());
-        let mut foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
-        let mut last_move = std::time::Duration::ZERO;
         // Where the flow-over's time goes (#331): said every 100 moves and at
         // the end, so a slow one on a node says why.
         let mut spent = FlowSpent { began: Some(std::time::Instant::now()), ..Default::default() };
-        // The destination's disk, as its flushes are recorded (#282): a slab
-        // on a partition flushes its disk.
-        let dest_disk = registry.read().await.get(&dest).map(|s| s.device().drive_id().path).unwrap_or_default();
-        let mut pace = FlowPace::new(flow_batch(), flow_flush_bound());
+        let mut pace = FlowPace::new(flow_window(), FlowPace::from_env());
+        // Moves not yet persisted, and since when (#410): one persist for a
+        // batch of them, not one a window.
+        let (mut unpersisted, mut last_persist) = (0u64, std::time::Instant::now());
+        // The node's own I/O while this moves is told from it without (#410).
+        struct Moving;
+        impl Drop for Moving {
+            fn drop(&mut self) {
+                crate::fglat::set_moving(false);
+            }
+        }
+        let _moving = Moving;
         crate::flowprogress::FLOW.begin();
         for (i, &source) in sources.iter().enumerate() {
             later[i] = 0;
@@ -6353,6 +6372,9 @@ pub async fn run() -> anyhow::Result<()> {
                             failed += 1;
                             tracing::error!("flow-over: extents on {source:?} keep changing under the move");
                             if failed > 16 {
+                                if unpersisted > 0 {
+                                    flow_persist(&engine, registry, &persist, &mut spent).await;
+                                }
                                 give_up().await;
                                 return None;
                             }
@@ -6384,16 +6406,10 @@ pub async fn run() -> anyhow::Result<()> {
                         window.push((vol, vext, leg));
                     }
                 }
-                // Foreground first (#269): when a volume has been read or written
-                // since the last window, give the disk back for a quarter of the
-                // time that window took (capped), before the next. An idle node
-                // moves at full speed; a busy one still moves most of the time.
-                let t = std::time::Instant::now();
-                if crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed) != foreground {
-                    tokio::time::sleep((last_move / 4).min(FLOW_YIELD_MAX)).await;
-                }
-                spent.yielded += t.elapsed();
-                foreground = crate::volume::thin::FOREGROUND_IO.load(std::sync::atomic::Ordering::Relaxed);
+                // Flat out (#410): the node's own I/O is given way to only when
+                // it is measurably slower for this (the pacing below), never
+                // for merely running.
+                crate::fglat::set_moving(true);
                 let started = std::time::Instant::now();
                 // The window coalesced (#401): every source slot whose fence is
                 // free right now is read in parallel, its copy written with its
@@ -6473,54 +6489,45 @@ pub async fn run() -> anyhow::Result<()> {
                     }
                 }
                 spent.copy += copied;
-                // The map, then the slots it no longer names — once for the
-                // window (#331), not once an extent. Same order and same reason
-                // as the data half: this runs on a machine that can lose power at
-                // any point, and a slot table that has run ahead of the map is a
-                // volume with a hole in it. Until this persist, every source slot
-                // of the window is still owed, never freed.
-                if window_moved > 0 {
-                    let t = std::time::Instant::now();
-                    persist().await;
-                    spent.persist += t.elapsed();
-                    let t = std::time::Instant::now();
-                    let mut r = registry.write().await;
-                    engine.release_owed(&mut r).await;
-                    drop(r);
-                    spent.release += t.elapsed();
+                // The map, then the slots it no longer names — once for a
+                // batch of moves (#331, #410), not once a window. Same order and
+                // same reason as the data half: this runs on a machine that can
+                // lose power at any point, and a slot table that has run ahead of
+                // the map is a volume with a hole in it. Until this persist,
+                // every source slot of the batch is still owed, never freed.
+                unpersisted += window_moved;
+                let give_up_now = failed > 16;
+                if unpersisted > 0
+                    && (unpersisted >= flow_batch() || last_persist.elapsed() >= flow_persist_every() || give_up_now)
+                {
+                    flow_persist(&engine, registry, &persist, &mut spent).await;
+                    (unpersisted, last_persist) = (0, std::time::Instant::now());
                 }
                 // A handful of bad extents is a disk worth giving up on, and
                 // giving up leaves the node exactly where it was: running from
                 // the appliance.
-                if failed > 16 {
+                if give_up_now {
                     give_up().await;
                     return None;
                 }
-                // The whole window: the copies, and the flushes of the persist
-                // after them, which on a spinning disk are most of it (#269).
-                last_move = started.elapsed();
-                // What the destination disk sustains (#282): its flush times
-                // since the last 30 s, the persist's just now among them.
-                let flush = crate::drive::flushgate::recent(&dest_disk, std::time::Duration::from_secs(30), 0.9)
-                    .map(|(t, _)| t);
+                // Paced by the node's own I/O (#410): its latency while this
+                // moves against its latency while it does not. Off the disk
+                // during the pause, so the pause is also what measures it.
                 let was = pace.paced;
-                let pause = pace.after(flush);
+                let pause = pace.after(FlowPace::signal());
+                crate::flowprogress::FLOW.pace(pace.report());
                 if pace.paced != was {
-                    let f = flush.map(|f| f.as_millis()).unwrap_or(0);
                     if pace.paced {
-                        tracing::warn!(
-                            "flow-over: {dest_disk} flushes take {f} ms (p90), over {} ms: moving {} at a time \
-                             with a pause after each window until it keeps up",
-                            pace.bound.map(|b| b.as_millis()).unwrap_or(0),
-                            pace.window
-                        );
+                        tracing::warn!("flow-over: backing off to {} at a time: {}", pace.window, pace.reason);
                     } else {
-                        tracing::info!("flow-over: {dest_disk} keeps up again ({f} ms flushes): full speed");
+                        tracing::info!("flow-over: full speed again: {}", pace.reason);
                     }
                 }
                 if !pause.is_zero() {
+                    crate::fglat::set_moving(false);
                     tokio::time::sleep(pause).await;
                     spent.paced += pause;
+                    pace.paused += pause;
                 }
                 let before = spent.moves;
                 spent.moves += window_moved;
@@ -6529,59 +6536,203 @@ pub async fn run() -> anyhow::Result<()> {
                 }
             }
         }
+        if unpersisted > 0 {
+            flow_persist(&engine, registry, &persist, &mut spent).await;
+        }
         spent.say(moved);
         report(0);
         Some((moved, failed))
     }
 
-    /// The flush time of the destination disk above which the flow-over slows
-    /// down (#282): `STORMBLOCK_FLOW_FLUSH_BOUND_MS`, 1000; 0 turns it off.
-    fn flow_flush_bound() -> Option<std::time::Duration> {
-        let ms = std::env::var("STORMBLOCK_FLOW_FLUSH_BOUND_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1000u64);
-        (ms > 0).then(|| std::time::Duration::from_millis(ms))
+    /// A flow-over's persist (#331, #410): the map, then the source slots it
+    /// no longer names are freed.
+    async fn flow_persist<P, F>(
+        engine: &crate::placement::PlacementEngine,
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        persist: &P,
+        spent: &mut FlowSpent,
+    ) where
+        P: Fn() -> F,
+        F: std::future::Future<Output = ()>,
+    {
+        let t = std::time::Instant::now();
+        persist().await;
+        spent.persist += t.elapsed();
+        spent.persists += 1;
+        crate::flowprogress::FLOW.persisted();
+        let t = std::time::Instant::now();
+        let mut r = registry.write().await;
+        engine.release_owed(&mut r).await;
+        drop(r);
+        spent.release += t.elapsed();
     }
 
-    /// The longest pause the pacing takes between two windows (#282).
-    const FLOW_PACE_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+    /// The longest pause the pacing takes between two windows.
+    const FLOW_PACE_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+    /// The shortest: long enough to see the node without the flow-over.
+    const FLOW_PACE_MIN: std::time::Duration = std::time::Duration::from_millis(250);
+    /// Requests in a window before its latency counts.
+    const FLOW_PACE_SAMPLES: u64 = 5;
 
-    /// Pacing the flow-over to what the destination disk sustains (#282).
+    /// What the pacing reads (#410): the p90 of the node's reads and writes
+    /// and of its flushes, in the last few seconds of this flow-over moving,
+    /// and over the last two minutes without it (its pauses, the boot grace
+    /// before it), each with its count.
+    #[derive(Debug, Default, Clone, Copy)]
+    struct PaceSignal {
+        io: Option<(std::time::Duration, u64)>,
+        flush: Option<(std::time::Duration, u64)>,
+        still_io: Option<(std::time::Duration, u64)>,
+        still_flush: Option<(std::time::Duration, u64)>,
+    }
+
+    /// The thresholds (#410): a class is over when its p90 while moving is
+    /// past its floor and past `ratio` × its p90 without the flow-over.
+    #[derive(Debug, Clone, Copy)]
+    struct PaceBounds {
+        on: bool,
+        io_floor: std::time::Duration,
+        flush_floor: std::time::Duration,
+        ratio: f64,
+    }
+
+    /// Pacing the flow-over to the node's own I/O (#410; it was the
+    /// destination's flush time, #282, and any foreground I/O at all, #269).
     ///
-    /// A drive-managed SMR disk takes a flow-over's sustained writes into its
-    /// cache region at full speed, then, once that is full, rewrites shingles
-    /// behind every write: seconds per flush, for the node's own fsyncs too.
-    /// The flow-over measures that directly, as the destination's recent flush
-    /// times (`drive::flushgate::recent`, p90 over 30 s). Over the bound it
-    /// halves its window and pauses for one flush time (at most 10 s) so the
-    /// disk can drain; under it, the window doubles back to its size. A disk
-    /// that keeps up never sees it.
+    /// Flat out while the node's reads, writes and flushes take about what
+    /// they take without the flow-over. When one class's p90 while it moves
+    /// passes its floor (`STORMBLOCK_FLOW_FG_IO_MS` 25,
+    /// `STORMBLOCK_FLOW_FG_FLUSH_MS` 100) and `STORMBLOCK_FLOW_FG_RATIO` (3)
+    /// times what it takes without it, the window halves and the flow-over
+    /// pauses about that long (0.25–5 s), which also measures the node
+    /// without it; under, the window doubles back. A disk that is slow anyway
+    /// (a drive-managed SMR disk, a DRAM-less SSD flushing what it was
+    /// handed) is slow either way, and is moved onto at full speed: backing
+    /// off from it bought nothing and held server8's SSD to ~1 MB/s.
+    /// `STORMBLOCK_FLOW_PACE=0` turns it off.
     struct FlowPace {
         window: usize,
         max: usize,
-        bound: Option<std::time::Duration>,
+        bounds: PaceBounds,
         paced: bool,
+        /// The last thing the pacing went by, said in health.
+        reason: String,
+        last: PaceSignal,
+        /// The node without the flow-over, as last measured.
+        still_io: Option<std::time::Duration>,
+        still_flush: Option<std::time::Duration>,
+        paused: std::time::Duration,
+        pauses: u64,
     }
 
     impl FlowPace {
-        fn new(max: usize, bound: Option<std::time::Duration>) -> Self {
-            FlowPace { window: max.max(1), max: max.max(1), bound, paced: false }
+        fn from_env() -> PaceBounds {
+            let ms = |k: &str, d: u64| {
+                std::time::Duration::from_millis(std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d))
+            };
+            PaceBounds {
+                on: std::env::var("STORMBLOCK_FLOW_PACE").map(|v| v.trim() != "0").unwrap_or(true),
+                io_floor: ms("STORMBLOCK_FLOW_FG_IO_MS", 25),
+                flush_floor: ms("STORMBLOCK_FLOW_FG_FLUSH_MS", 100),
+                ratio: std::env::var("STORMBLOCK_FLOW_FG_RATIO")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|r: &f64| *r >= 1.0)
+                    .unwrap_or(3.0),
+            }
         }
 
-        /// After a window, given the destination's recent flush time: how long
-        /// to pause before the next one.
-        fn after(&mut self, flush: Option<std::time::Duration>) -> std::time::Duration {
-            match (self.bound, flush) {
-                (Some(bound), Some(f)) if f > bound => {
+        fn new(max: usize, bounds: PaceBounds) -> Self {
+            FlowPace {
+                window: max.max(1),
+                max: max.max(1),
+                bounds,
+                paced: false,
+                reason: "starting: flat out".into(),
+                last: PaceSignal::default(),
+                still_io: None,
+                still_flush: None,
+                paused: std::time::Duration::ZERO,
+                pauses: 0,
+            }
+        }
+
+        /// The signal now, from `fglat`.
+        fn signal() -> PaceSignal {
+            use crate::fglat::{quantile, Class};
+            let (busy, still) = (std::time::Duration::from_secs(5), std::time::Duration::from_secs(120));
+            PaceSignal {
+                io: quantile(Class::Io, true, busy, 0.9),
+                flush: quantile(Class::Flush, true, busy, 0.9),
+                still_io: quantile(Class::Io, false, still, 0.9),
+                still_flush: quantile(Class::Flush, false, still, 0.9),
+            }
+        }
+
+        /// After a window, given the signal: how long to pause before the next.
+        fn after(&mut self, sig: PaceSignal) -> std::time::Duration {
+            self.last = sig;
+            let enough = |x: Option<(std::time::Duration, u64)>| x.filter(|(_, n)| *n >= FLOW_PACE_SAMPLES).map(|(d, _)| d);
+            if let Some(d) = sig.still_io.filter(|(_, n)| *n >= 3).map(|(d, _)| d) {
+                self.still_io = Some(d);
+            }
+            if let Some(d) = sig.still_flush.filter(|(_, n)| *n >= 3).map(|(d, _)| d) {
+                self.still_flush = Some(d);
+            }
+            let b = self.bounds;
+            let over = |what: &str, busy: Option<std::time::Duration>, still: Option<std::time::Duration>, floor| {
+                let busy = busy?;
+                let past_still = still.is_none_or(|s| busy.as_secs_f64() > b.ratio * s.as_secs_f64());
+                (busy > floor && past_still).then(|| {
+                    let without = still.map(|s| format!("{} ms", s.as_millis())).unwrap_or_else(|| "not measured yet".into());
+                    (busy, format!("the node's {what} p90 is {} ms while moving, {without} without", busy.as_millis()))
+                })
+            };
+            let worst = [
+                over("reads/writes", enough(sig.io), self.still_io, b.io_floor),
+                over("flushes", enough(sig.flush), self.still_flush, b.flush_floor),
+            ]
+            .into_iter()
+            .flatten()
+            .max_by_key(|(d, _)| *d);
+            match worst {
+                Some((busy, why)) if b.on => {
                     self.window = (self.window / 2).max(1);
                     self.paced = true;
-                    f.min(FLOW_PACE_MAX)
+                    self.pauses += 1;
+                    self.reason = why;
+                    busy.clamp(FLOW_PACE_MIN, FLOW_PACE_MAX)
                 }
                 _ => {
                     self.window = (self.window * 2).min(self.max);
                     if self.window == self.max {
                         self.paced = false;
                     }
+                    self.reason = if !b.on {
+                        "pacing off (STORMBLOCK_FLOW_PACE=0)".into()
+                    } else if enough(sig.io).is_none() && enough(sig.flush).is_none() {
+                        "the node is idle: flat out".into()
+                    } else {
+                        "the node's own I/O takes what it takes without the flow-over: flat out".into()
+                    };
                     std::time::Duration::ZERO
                 }
+            }
+        }
+
+        fn report(&self) -> crate::flowprogress::Pace {
+            let ms = |d: Option<(std::time::Duration, u64)>| d.map(|(d, _)| d.as_secs_f64() * 1e3);
+            crate::flowprogress::Pace {
+                window: self.window,
+                max_window: self.max,
+                state: if self.paced { "backing_off" } else { "full" },
+                reason: self.reason.clone(),
+                io_p90_ms: ms(self.last.io),
+                flush_p90_ms: ms(self.last.flush),
+                still_io_p90_ms: self.still_io.map(|d| d.as_secs_f64() * 1e3),
+                still_flush_p90_ms: self.still_flush.map(|d| d.as_secs_f64() * 1e3),
+                pauses: self.pauses,
+                paused_seconds: self.paused.as_secs_f64(),
             }
         }
     }
@@ -6591,7 +6742,8 @@ pub async fn run() -> anyhow::Result<()> {
     struct FlowSpent {
         began: Option<std::time::Instant>,
         moves: u64,
-        yielded: std::time::Duration,
+        /// Persists made (#410: one a batch).
+        persists: u64,
         fence: std::time::Duration,
         copy: std::time::Duration,
         persist: std::time::Duration,
@@ -6606,12 +6758,12 @@ pub async fn run() -> anyhow::Result<()> {
             let secs = began.elapsed().as_secs_f64().max(1e-9);
             let (zeroed, mb) = crate::flowprogress::FLOW.snapshot().map(|p| (p.zeroed, p.mb_per_s)).unwrap_or((0, 0.0));
             let line = format!(
-                "flow-over: {moved} moved ({zeroed} all zeros, not copied) in {secs:.1}s ({:.0}/h, {mb:.1} MB/s): yield {:.1}s, fence {:.1}s, copy {:.1}s, persist {:.1}s, release {:.1}s, paced {:.1}s",
+                "flow-over: {moved} moved ({zeroed} all zeros, not copied) in {secs:.1}s ({:.0}/h, {mb:.1} MB/s): fence {:.1}s, copy {:.1}s, persist {:.1}s ({} persists), release {:.1}s, paced {:.1}s",
                 moved as f64 * 3600.0 / secs,
-                self.yielded.as_secs_f64(),
                 self.fence.as_secs_f64(),
                 self.copy.as_secs_f64(),
                 self.persist.as_secs_f64(),
+                self.persists,
                 self.release.as_secs_f64(),
                 self.paced.as_secs_f64(),
             );
@@ -11011,45 +11163,72 @@ file = "{state}"
         assert_eq!(snap.bytes, (EXTENTS - zeros) * SLOT);
     }
 
-    /// #282: the pacing rule. Over the bound: half the window, a pause of
-    /// one flush (at most 10 s). Under it: the window doubles back. No bound,
-    /// or no flushes seen: full speed.
+    /// #410: the pacing rule. A class is over when its p90 while moving is
+    /// past its floor and past 3× its p90 without the flow-over: half the
+    /// window, a pause about that long (0.25–5 s). Otherwise the window
+    /// doubles back. A disk slow either way is not paced; neither is an idle
+    /// node; nor a node never seen without the flow-over, below its floor.
     #[test]
-    fn the_flow_over_slows_to_a_disk_whose_flushes_take_seconds() {
+    fn the_flow_over_backs_off_only_when_it_slows_the_node() {
         use std::time::Duration;
         let ms = Duration::from_millis;
-        let mut p = super::FlowPace::new(64, Some(ms(1000)));
-        assert_eq!((p.after(Some(ms(40))), p.window), (Duration::ZERO, 64), "a disk that keeps up");
-        assert_eq!((p.after(Some(ms(2400))), p.window), (ms(2400), 32));
-        assert!(p.paced);
-        assert_eq!((p.after(Some(ms(30_000))), p.window), (Duration::from_secs(10), 16), "a pause is bounded");
+        let sig = |io: Option<u64>, flush: Option<u64>, still_io: Option<u64>, still_flush: Option<u64>| super::PaceSignal {
+            io: io.map(|v| (ms(v), 50)),
+            flush: flush.map(|v| (ms(v), 50)),
+            still_io: still_io.map(|v| (ms(v), 50)),
+            still_flush: still_flush.map(|v| (ms(v), 50)),
+        };
+        let bounds = super::PaceBounds { on: true, io_floor: ms(25), flush_floor: ms(100), ratio: 3.0 };
+        let mut p = super::FlowPace::new(64, bounds);
+        assert_eq!((p.after(sig(None, None, None, None)), p.window), (Duration::ZERO, 64), "idle");
+        assert!(p.reason.contains("idle"), "{}", p.reason);
+        // server8's SSD: flushes of a second whether moving or not. Flat out.
+        assert_eq!((p.after(sig(Some(2), Some(1000), Some(1), Some(900))), p.window), (Duration::ZERO, 64));
+        assert!(!p.paced);
+        // The node's flushes go from 30 ms to 400 ms while moving: back off.
+        assert_eq!((p.after(sig(Some(2), Some(400), Some(1), Some(30))), p.window), (ms(400), 32));
+        assert!(p.paced && p.reason.contains("flushes"), "{}", p.reason);
+        // Reads too; a long one is bounded.
+        assert_eq!((p.after(sig(Some(9000), None, Some(5), None)), p.window), (Duration::from_secs(5), 16));
+        // Under the floor is never over, however many times the baseline.
+        assert_eq!(p.after(sig(Some(20), Some(90), Some(1), Some(1))), Duration::ZERO);
+        // A baseline is kept once measured: a window with none still has it.
+        assert_eq!(p.after(sig(Some(2), Some(400), None, None)), ms(400), "30 ms without, as before");
+        // No baseline at all: past the floor is over (and the pause measures one).
+        let mut fresh = super::FlowPace::new(64, bounds);
+        assert_eq!(fresh.after(sig(None, Some(300), None, None)), ms(300));
+        assert!(fresh.reason.contains("not measured yet"), "{}", fresh.reason);
+        // Too few requests to judge: not paced.
+        let mut few = super::FlowPace::new(64, bounds);
+        let thin = super::PaceSignal { flush: Some((ms(900), 2)), ..Default::default() };
+        assert_eq!(few.after(thin), Duration::ZERO);
+        // Back to full speed, said.
         for _ in 0..8 {
-            p.after(Some(ms(1500)));
-        }
-        assert_eq!(p.window, 1, "never below one");
-        assert_eq!(p.after(None), Duration::ZERO, "no flushes seen: no pause");
-        for _ in 0..6 {
-            p.after(Some(ms(200)));
+            p.after(sig(Some(2), Some(40), Some(1), Some(30)));
         }
         assert_eq!(p.window, 64);
-        assert!(!p.paced, "back to full speed");
-        let mut off = super::FlowPace::new(64, None);
-        assert_eq!((off.after(Some(ms(9000))), off.window), (Duration::ZERO, 64), "bound off");
+        assert!(!p.paced);
+        let r = p.report();
+        assert_eq!((r.state, r.window, r.max_window), ("full", 64, 64));
+        assert_eq!(r.still_flush_p90_ms, Some(30.0));
+        let mut off = super::FlowPace::new(64, super::PaceBounds { on: false, ..bounds });
+        assert_eq!((off.after(sig(Some(9000), Some(9000), Some(1), Some(1))), off.window), (Duration::ZERO, 64), "off");
     }
 
-    /// #282, end to end: a flow-over whose destination's flushes take
-    /// 300 ms against a 100 ms bound moves everything, one extent at a time
-    /// after a few windows, pausing after each.
+    /// #410, end to end: a destination whose flushes take 300 ms (and a node
+    /// with no I/O of its own) is moved onto at full speed, with one persist
+    /// for a batch of moves rather than one a window; #282's pacing on the
+    /// destination's flush time held it to one extent per flush.
     #[tokio::test]
-    async fn a_flow_over_paces_itself_to_its_destinations_flush_time() {
+    async fn a_flow_over_runs_flat_out_onto_a_slow_flushing_disk_and_persists_in_batches() {
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
 
-        std::env::set_var("STORMBLOCK_FLOW_FLUSH_BOUND_MS", "100");
-        std::env::set_var("STORMBLOCK_FLOW_BATCH", "8");
+        std::env::set_var("STORMBLOCK_FLOW_WINDOW", "8");
+        std::env::set_var("STORMBLOCK_FLOW_BATCH", "16");
         const SLOT: u64 = 64 * 1024;
-        const EXTENTS: u64 = 32;
+        const EXTENTS: u64 = 64;
         let dir = tempfile::tempdir().unwrap();
         let slab = |name: &str| {
             let path = dir.path().join(name).display().to_string();
@@ -11074,8 +11253,7 @@ file = "{state}"
         let disk = local.device().drive_id().path;
         mgr.add_slab(local).await;
 
-        let windows = std::sync::atomic::AtomicU64::new(0);
-        let t = std::time::Instant::now();
+        let persists = std::sync::atomic::AtomicU64::new(0);
         let (moved, failed) = super::flow_system_half(
             mgr.gem(),
             mgr.registry(),
@@ -11083,7 +11261,7 @@ file = "{state}"
             local_id,
             || {
                 // The destination's flush, as a slow disk's would be recorded.
-                windows.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                persists.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 crate::drive::flushgate::record_for_test(&disk, std::time::Duration::from_millis(300));
                 mgr.persist()
             },
@@ -11091,15 +11269,81 @@ file = "{state}"
         )
         .await
         .expect("the flow-over finished");
-        let took = t.elapsed();
         assert_eq!((moved, failed), (EXTENTS, 0), "everything moved");
-        // 8, 4, 2, then one at a time: 21 windows, each followed by 300 ms.
-        let n = windows.load(std::sync::atomic::Ordering::Relaxed);
-        assert!(n >= 20, "the window shrank to one extent: {n} windows");
-        assert!(took >= std::time::Duration::from_millis(300 * (n - 1)), "paused after each: {took:?} for {n}");
+        // 64 moves, 16 to a persist: 4 (not 8 windows' worth, nor 64).
+        let n = persists.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(n, 4, "one persist a batch");
+        let snap = crate::flowprogress::FLOW.snapshot().unwrap();
+        let pace = snap.pace.expect("the pace is reported");
+        assert_eq!((pace.state, pace.window, pace.pauses), ("full", 8, 0), "{pace:?}");
+        assert_eq!(snap.persists, 4);
         let mut data = vec![0u8; (EXTENTS * SLOT) as usize];
         g.read(0, &mut data).await.unwrap();
         assert!(data.iter().all(|b| *b == 0x5A), "the golden reads as it was");
+    }
+
+    /// #410, end to end: a node whose flushes go from a few ms without the
+    /// flow-over to 400 ms with it is given way to: the flow-over backs off
+    /// (smaller windows, pauses, said in health) and still moves everything.
+    #[tokio::test]
+    async fn a_flow_over_backs_off_when_the_node_is_slower_for_it() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::fglat::{record_for_test, Class};
+        use crate::placement::topology::StorageTier;
+        use std::time::Duration;
+
+        std::env::set_var("STORMBLOCK_FLOW_WINDOW", "8");
+        std::env::set_var("STORMBLOCK_FLOW_BATCH", "8");
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 32;
+        let dir = tempfile::tempdir().unwrap();
+        let slab = |name: &str| {
+            let path = dir.path().join(name).display().to_string();
+            async move {
+                let dev = Arc::new(FileDevice::open_with_capacity(&path, 4 * EXTENTS * SLOT).await.unwrap())
+                    as Arc<dyn BlockDevice>;
+                Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System))
+                    .await
+                    .unwrap()
+            }
+        };
+        let mut mgr = VolumeManager::new(SLOT);
+        let source = slab("appliance.slab").await;
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("golden", EXTENTS * SLOT).await.unwrap();
+        let g = mgr.get_volume(&golden).unwrap();
+        g.write(0, &vec![0x5A; (EXTENTS * SLOT) as usize]).await.unwrap();
+        g.flush().await.unwrap();
+        let local = slab("local.slab").await;
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+
+        // The node without the flow-over: 5 ms flushes.
+        record_for_test(Class::Flush, false, Duration::from_millis(5), 20);
+        let t = std::time::Instant::now();
+        let (moved, failed) = super::flow_system_half(
+            mgr.gem(),
+            mgr.registry(),
+            &[source_id],
+            local_id,
+            || {
+                // While it moves: the node's fsyncs take 400 ms.
+                record_for_test(Class::Flush, true, Duration::from_millis(400), 20);
+                mgr.persist()
+            },
+            None,
+        )
+        .await
+        .expect("the flow-over finished");
+        assert_eq!((moved, failed), (EXTENTS, 0), "everything moved");
+        let pace = crate::flowprogress::FLOW.snapshot().unwrap().pace.expect("the pace is reported");
+        assert!(pace.pauses >= 2, "{pace:?}");
+        assert!(pace.window < 8, "the window shrank: {pace:?}");
+        assert!(pace.reason.contains("flushes"), "{pace:?}");
+        assert_eq!(pace.still_flush_p90_ms.map(|v| v.round() as u64), Some(5), "{pace:?}");
+        assert!(t.elapsed() >= Duration::from_millis(800), "it paused: {:?}", t.elapsed());
     }
 
     /// The background flow-over moves a golden's slots while a clone of it

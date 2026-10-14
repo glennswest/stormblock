@@ -94,10 +94,11 @@ pub fn default_host_nqn() -> &'static str {
         .get_or_init(|| std::env::var("STORMBLOCK_HOST_NQN").unwrap_or_else(|_| HOST_NQN.to_string()))
         .as_str()
 }
-/// I/O connections per attached namespace (#331): `STORMBLOCK_NVME_TCP_QUEUES`,
-/// 4, at least 1.
+/// I/O connections per attached namespace (#331, #410):
+/// `STORMBLOCK_NVME_TCP_QUEUES`, 8, at least 1. Each carries one command at a
+/// time, so this is what a flow-over has in flight to its source.
 fn io_queues() -> usize {
-    std::env::var("STORMBLOCK_NVME_TCP_QUEUES").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(4)
+    std::env::var("STORMBLOCK_NVME_TCP_QUEUES").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(8)
 }
 
 /// The transfer one command carries (#407): the target's MDTS (4 KiB pages;

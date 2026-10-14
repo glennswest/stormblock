@@ -3133,6 +3133,8 @@ impl BlockDevice for ThinVolumeHandle {
     async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
         self.resident().await?;
         FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // What the node waits for, which a flow-over paces itself by (#410).
+        let _took = crate::fglat::Timer::new(crate::fglat::Class::Io);
         let bs = u64::from(self.block_size());
         if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
             return self.read_blocks(offset, buf).await;
@@ -3160,6 +3162,7 @@ impl BlockDevice for ThinVolumeHandle {
         self.refuse_if_sealed()?;
         let _finished = Finished(&self.completed);
         FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _took = crate::fglat::Timer::new(crate::fglat::Class::Io);
         let bs = u64::from(self.block_size());
         if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
             return self.write_blocks(offset, buf).await;
@@ -3200,6 +3203,7 @@ impl BlockDevice for ThinVolumeHandle {
 
     async fn flush(&self) -> DriveResult<()> {
         self.resident().await?;
+        let _took = crate::fglat::Timer::new(crate::fglat::Class::Flush);
         // Nothing finished since a successful flush began: nothing to make
         // durable, so no device is flushed (#338). A FLUSH covers the writes
         // completed before it was issued, and every one of those bumped
