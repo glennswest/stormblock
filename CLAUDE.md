@@ -1044,7 +1044,7 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
-### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — IN PROGRESS
+### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — DONE here; golden waits on stormcentral#841
 
 Master for the owner (2026-10-13): **1B** the release's manifest lists its
 kernel set's optional goldens (`optional: true`, the image, the kernel), so a
@@ -1054,19 +1054,17 @@ forge-CA client certificate (`/data/stormcert/forge-node.{crt,key}.pem`,
 stormcert#78/#79, stormcos#486/#490): read-only, sealed only, Range with
 resume, digest checked, a revoked node refused by the CRL. The engine builds
 the content route and the mTLS check now; enrollment's wiring is stormcos's.
-- [ ] tls: a forge-CA certificate not on the admin list = `forge_node`; auth:
-      it reads only `GET /api/v1/volumes/{id}/content` and `GET
-      /api/v1/releases/{v}/manifest`
-- [ ] `GET /api/v1/volumes/{id}/content`: a sealed volume's bytes, Range
-- [ ] manifest entries: `optional`, `image`, `kernel` (additive)
-- [ ] http client identity; import with it (raw stream: resume, sha256,
-      seal, deleted on failure)
-- [ ] `[kernel]` config (forge_url, client_cert/key, forge_ca);
-      `POST /api/v1/kernel/optional {images, release?, kernel?, forge?}`:
-      resolve the row, pull (an import), clone as the image's name, record;
-      present = no-op; `GET` status
-- [ ] test with a stand-in forge over mTLS; docs; stormcentral issue (the
-      manifest rows), stormupdate issue (pull for N+1 when staging)
+- [x] tls `forge_node`; auth: it reads only `GET /api/v1/volumes/{id}/content`
+      and `GET /api/v1/releases/{v}/manifest`
+- [x] `GET /api/v1/volumes/{id}/content` (sealed, Range); manifest
+      `optional`/`image`/`kernel`; http client identity; import `tls`
+- [x] `[kernel]`; `mgmt::kernelopt`; `/api/v1/kernel/optional` (POST, GET,
+      GET /{image}); `kernel-optional.json`
+- [x] test `integration_kernelopt::…` (ran: stand-in forge over mTLS, pulled,
+      cloned, read back, no-op, 422, 502 nothing made, the certificate's
+      limits); README, auth.md, CHANGELOG; stormcentral#845 (manifest rows),
+      stormupdate#24 (A/B), stormcos#571 (the ask, forge's TLS)
+- [ ] check.sh; golden (held for stormcentral#841)
 
 ### A reviewed Kubernetes bearer for ordinary verbs (2026-10-10, #382, P2) — DONE (golden-stormblock-d56a8225b161)
 
