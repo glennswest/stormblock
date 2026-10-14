@@ -412,6 +412,10 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       4d79108 ⊇ b29a9bd); commented, `stormcentral shipped` (closes with the
       release); master told. Forge still runs an older engine (404 on
       `/api/v1/scrub`, 2026-10-14): putting it on forge is the master's
+      (after 12.23 passes pve), by the in-place runbook posted on #428
+      (canary + `slab volumes` vs API ids before the stop, snapshot with
+      the engine stopped, GC off on the first start, .prev / snapshot
+      rollback)
 
 ### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — PAUSED for P0 #428 (engine half built, b9j6oila5 run pending; /init half not started)
 
