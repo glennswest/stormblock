@@ -483,7 +483,7 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       #443 test extended past pvetest2's next boot (old clone deleted, its
       namespace gone, new clone fresh, blade7's untouched); docs
       (nvme-access.md), CHANGELOG
-- [x] check.sh; closed
+- [x] check.sh at 1171474 ALL PASS (1240/1240); closed
 
 ### Nodes refused by forge: the claim URI names the host (2026-10-14, #443, P0) — DONE (golden-stormblock-b2adfbc04f9a, on forge)
 
