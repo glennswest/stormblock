@@ -507,7 +507,7 @@ for a certificate and verifies it against that CA:
 | the client presents | result |
 |---|---|
 | a certificate the node CA issued | the **node token's tier**: every ordinary verb and attestation reads, with no token on the wire. A destructive verb still needs the admin token or a reviewed Kubernetes bearer (#274); with `admin_gate = audit` it is allowed and recorded. The audit log names it `client-cert:sha256:<16 hex>`. |
-| a certificate forge's CA (`tls_admin_ca`) issued, valid for a name in `tls_admin_names`, not revoked by `tls_admin_crl` (#379) | the **admin token's tier**: every verb, destructive ones included. The audit log names it `client-cert-admin:<name>:sha256:<16 hex>`. |
+| a certificate forge's CA (`tls_admin_ca`) issued, whose one subject CN is in `tls_admin_subjects` (#453) or valid for a name in `tls_admin_names` (#379), not revoked by `tls_admin_crl` | the **admin token's tier**: every verb, destructive ones included. The audit log names it `client-cert-admin:<name>:sha256:<16 hex>`. |
 | a certificate forge's CA issued to any other name (an enrolled node's, stormcert#78) | **a forge node** (#383): it may read a sealed volume's content (`GET /api/v1/volumes/{id}/content`) and a release's manifest (`GET /api/v1/releases/{v}/manifest`), nothing else (401). What a node pulls its kernel's optional images with. The request log names it `forge-node:sha256:<16 hex>` |
 | a certificate forge's CRL revokes | **no credential** (401, as with no certificate) |
 | a certificate from any other CA | refused in the handshake; no HTTP answer at all |
@@ -523,13 +523,20 @@ certificate otherwise.
 stormcentral runs as a second forge, the engine's admin token cannot be read
 off the node and nothing is handed over by hand. Instead stormcentral enrols
 with forge, and forge's CA signs its certificate.
-- **Configuration:** `tls_admin_ca` names forge's CA, `tls_admin_names` the
-  identities (SAN DNS names) it is admin for, and `tls_admin_crl` forge's CRL
-  (PEM or DER, re-read when it changes).
+- **Configuration:** `tls_admin_ca` names forge's CA, and `tls_admin_crl`
+  forge's CRL (PEM or DER, re-read when it changes). Who is admin:
+  - `tls_admin_subjects`: subject CNs (#453), e.g. `["stormcentral"]`. This is
+    how a forge **client** certificate is named: stormcert#117 signs it with
+    no subjectAltName at all (`CN=stormcentral`, `O=stormcentral:checks`, the
+    name a node's apiserver reads it by). The certificate must have exactly
+    one CN, matched whole. A `system:` CN (a node's, `system:node:*`) is never
+    admin, even when listed.
+  - `tls_admin_names`: SAN DNS names (#379), for a server-style
+    certificate.
 - **Verification:** a certificate is checked against forge's CA **alone**,
   for client auth, with the CRL at the end-entity (an unknown status is a
   refusal).
-- **Defaults:** no names listed means no certificate is admin. No CRL means a
+- **Defaults:** no subjects and no names listed means no certificate is admin. No CRL means a
   revoked certificate stays admin; both are said at start.
 - **The node CA's certificates** are checked against the node CA alone, and
   keep the node token's tier.

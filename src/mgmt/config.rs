@@ -475,8 +475,13 @@ pub struct ManagementConfig {
     /// (said at start).
     pub tls_admin_crl: Option<String>,
     /// The identities (SAN DNS names) a forge-issued certificate is admin
-    /// for. Empty (the default): none.
+    /// for: a server-style certificate. Empty (the default): none.
     pub tls_admin_names: Vec<String>,
+    /// The subject CNs a forge-issued certificate is admin for (#453): how a
+    /// forge client certificate is named, since it carries no SAN
+    /// (stormcert#117), e.g. `["stormcentral"]`. Exactly one CN, matched
+    /// whole; never a `system:` name (a node's). Empty (the default): none.
+    pub tls_admin_subjects: Vec<String>,
     pub data_dir: Option<String>,
     /// Bearer token required on **every** management request
     /// (`Authorization: Bearer <token>`), except the public probes listed in
@@ -622,6 +627,7 @@ impl Default for ManagementConfig {
             tls_admin_ca: None,
             tls_admin_crl: None,
             tls_admin_names: Vec::new(),
+            tls_admin_subjects: Vec::new(),
             data_dir: None,
             api_token: None,
             admin_token: None,

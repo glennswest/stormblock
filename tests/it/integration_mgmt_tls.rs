@@ -79,6 +79,29 @@ fn leaf_san(dir: &Path, ca: &str, name: &str, usage: &str, days: u32, san: &str)
     );
 }
 
+/// A forge client certificate as stormcert#117 signs it: client auth only,
+/// no subjectAltName of any kind, named by its subject (`subj`, e.g.
+/// `/CN=stormcentral/O=stormcentral:checks`). Files `<file>.crt`/`.key`.
+fn leaf_no_san(dir: &Path, ca: &str, file: &str, subj: &str) {
+    openssl(
+        dir,
+        &[
+            "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+            "-keyout", &format!("{file}.key"), "-out", &format!("{file}.csr"), "-subj", subj,
+        ],
+    );
+    let ext = format!("{file}.ext");
+    std::fs::write(dir.join(&ext), "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n").unwrap();
+    openssl(
+        dir,
+        &[
+            "x509", "-req", "-in", &format!("{file}.csr"), "-CA", &format!("{ca}.crt"), "-CAkey",
+            &format!("{ca}.key"), "-CAcreateserial", "-out", &format!("{file}.crt"), "-days", "365",
+            "-extfile", &ext,
+        ],
+    );
+}
+
 struct Pki {
     dir: PathBuf,
 }
@@ -108,6 +131,7 @@ impl Pki {
             admin_ca: None,
             admin_crl: None,
             admin_names: Vec::new(),
+            admin_subjects: Vec::new(),
         }
     }
     /// A caller trusting the node CA, presenting `identity` (a leaf name).
@@ -359,4 +383,79 @@ async fn a_forge_issued_certificate_for_a_listed_identity_is_admin_and_revocable
     let kubelet = pki.client(Some("kubelet"));
     assert_eq!(kubelet.get(format!("{base}/api/v1/volumes")).send().await.unwrap().status(), 200);
     assert_eq!(kubelet.put(format!("{base}/api/v1/forge/trust")).json(&trust).send().await.unwrap().status(), 401);
+}
+
+/// #453: stormcentral's forge-issued client certificate carries no SAN
+/// (stormcert#117: `CN=stormcentral`, `O=stormcentral:checks`, client auth
+/// only), so `tls_admin_names` can never match it. Listed by subject CN in
+/// `tls_admin_subjects`, it is admin; another forge client (a CN not listed)
+/// gets no admin verb; a `system:` subject is never admin even when listed
+/// (forge's nodes are `system:node:*`); one forge revoked is nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forge_client_certificate_is_admin_by_its_subject_cn() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    let d = pki.dir.clone();
+    ca(&d, "forge-ca");
+    leaf_no_san(&d, "forge-ca", "stormcentral", "/CN=stormcentral/O=stormcentral:checks");
+    leaf_no_san(&d, "forge-ca", "someone", "/CN=someone/O=stormcentral:checks");
+    leaf_no_san(&d, "forge-ca", "node7", "/CN=system:node:server7/O=system:nodes");
+    leaf_no_san(&d, "forge-ca", "old-stormcentral", "/CN=stormcentral/O=stormcentral:checks");
+    std::fs::write(d.join("index.txt"), "").unwrap();
+    std::fs::write(d.join("crlnumber"), "1000\n").unwrap();
+    std::fs::write(
+        d.join("ca.cnf"),
+        "[ ca ]\ndefault_ca = d\n[ d ]\ndir = .\ndatabase = index.txt\ncrlnumber = crlnumber\n\
+         default_md = sha256\ndefault_crl_days = 30\ncertificate = forge-ca.crt\nprivate_key = forge-ca.key\n",
+    )
+    .unwrap();
+    openssl(&d, &["ca", "-config", "ca.cnf", "-revoke", "old-stormcentral.crt"]);
+    openssl(&d, &["ca", "-config", "ca.cnf", "-gencrl", "-out", "forge.crl"]);
+    let cn = stormblock::mgmt::tls::subject_cn(&pem_der(&pki.read("stormcentral.crt"))).expect("one CN");
+    assert_eq!(cn, "stormcentral");
+    assert_eq!(stormblock::mgmt::tls::subject_cn(&pem_der(&pki.read("node7.crt"))).as_deref(), Some("system:node:server7"));
+
+    let port = free_port();
+    let mut cfg = config(&pki, &format!("127.0.0.1:{port}"));
+    cfg.management.admin_token = Some("admin-453".into());
+    cfg.management.data_dir = Some(tmp.path().join("data").display().to_string());
+    std::fs::create_dir_all(tmp.path().join("data")).unwrap();
+    cfg.management.tls_admin_ca = Some(pki.p("forge-ca.crt").display().to_string());
+    cfg.management.tls_admin_crl = Some(pki.p("forge.crl").display().to_string());
+    cfg.management.tls_admin_subjects = vec!["stormcentral".into(), "system:node:server7".into()];
+    cfg.validate().expect("the config validates");
+    let state = state_with(&tmp, cfg).await;
+    tokio::spawn(stormblock::mgmt::start_management_server(state));
+    wait_listening(port).await;
+    let base = format!("https://127.0.0.1:{port}");
+    let trust = serde_json::json!({
+        "ca": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        "bootstrap_token": "abc.def"
+    });
+
+    // stormcentral by subject: an admin verb and the ordinary ones, no token.
+    let sc = pki.client(Some("stormcentral"));
+    let r = sc.put(format!("{base}/api/v1/forge/trust")).json(&trust).send().await.unwrap();
+    assert_eq!(r.status(), 200, "admin by its CN: {}", r.text().await.unwrap_or_default());
+    assert_eq!(sc.get(format!("{base}/api/v1/volumes")).send().await.unwrap().status(), 200);
+
+    // Not listed, or a node's `system:` name even when listed: no admin verb.
+    for who in ["someone", "node7"] {
+        let c = pki.client(Some(who));
+        assert_eq!(c.put(format!("{base}/api/v1/forge/trust")).json(&trust).send().await.unwrap().status(), 401, "{who}");
+        assert_eq!(c.get(format!("{base}/api/v1/volumes")).send().await.unwrap().status(), 401, "{who}");
+    }
+    // Revoked by forge: nothing, though its CN is listed.
+    let old = pki.client(Some("old-stormcentral"));
+    assert_eq!(old.put(format!("{base}/api/v1/forge/trust")).json(&trust).send().await.unwrap().status(), 401);
+    assert_eq!(old.get(format!("{base}/api/v1/volumes")).send().await.unwrap().status(), 401);
+}
+
+/// The first certificate of a PEM file, as DER.
+fn pem_der(pem: &[u8]) -> Vec<u8> {
+    rustls_pemfile::certs(&mut std::io::BufReader::new(pem)).next().unwrap().unwrap().as_ref().to_vec()
 }

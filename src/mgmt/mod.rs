@@ -765,10 +765,11 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             admin_ca: state.config.management.tls_admin_ca.as_ref().map(Into::into),
             admin_crl: state.config.management.tls_admin_crl.as_ref().map(Into::into),
             admin_names: state.config.management.tls_admin_names.clone(),
+            admin_subjects: state.config.management.tls_admin_subjects.clone(),
         })?);
         if state.config.management.tls_admin_ca.is_some() {
-            if state.config.management.tls_admin_names.is_empty() {
-                tracing::warn!("tls_admin_ca is set and tls_admin_names lists nobody: no certificate is admin (#379)");
+            if state.config.management.tls_admin_names.is_empty() && state.config.management.tls_admin_subjects.is_empty() {
+                tracing::warn!("tls_admin_ca is set and neither tls_admin_subjects nor tls_admin_names lists anyone: no certificate is admin (#379, #453)");
             } else if state.config.management.tls_admin_crl.is_none() {
                 tracing::warn!("tls_admin_ca is set with no tls_admin_crl: a certificate forge revokes stays admin here (#379)");
             }

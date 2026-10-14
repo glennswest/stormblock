@@ -199,6 +199,16 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
+### Forge client certificates admin by subject CN (2026-10-14, #453, stormcos#497) — IN PROGRESS
+
+stormcert#117's forge client certificate has no SAN (`CN=stormcentral`), so
+#379's `tls_admin_names` never matched.
+- [x] `[management] tls_admin_subjects` (one CN, whole, never `system:`),
+      `tls::subject_cn` (DER walk after webpki verified); config, wiring
+- [x] test `integration_mgmt_tls::a_forge_client_certificate_is_admin_by_its_
+      subject_cn`; README, auth.md, CHANGELOG
+- [ ] run; check.sh; golden; stormcos#497 told; close
+
 ### A keep-data install over a flow-over cut short drops goldens' extents (2026-10-14, #451, P0) — DONE (golden-stormblock-46af5bb670bb), shipped; metal pending
 
 server2 (X9): 12.27 over a 12.14 install hard-powered-off ~2 min in (mid

@@ -57,6 +57,7 @@ pub struct Classifier {
     admin_cas: Vec<rustls::pki_types::CertificateDer<'static>>,
     crls: Vec<webpki::CertRevocationList<'static>>,
     admin_names: Vec<String>,
+    admin_subjects: Vec<String>,
 }
 
 impl Classifier {
@@ -106,15 +107,106 @@ impl Classifier {
         c.node = !self.node_cas.is_empty() && Self::verifies(&self.node_cas, &[], chain).is_some();
         if !self.admin_cas.is_empty() && Self::verifies(&self.admin_cas, &self.crls, chain).is_some() {
             let ee = webpki::EndEntityCert::try_from(leaf).ok()?;
-            c.admin = self.admin_names.iter().find(|n| {
-                rustls::pki_types::ServerName::try_from(n.as_str())
-                    .ok()
-                    .is_some_and(|sn| ee.verify_is_valid_for_subject_name(&sn).is_ok())
-            }).cloned();
+            c.admin = self
+                .admin_names
+                .iter()
+                .find(|n| {
+                    rustls::pki_types::ServerName::try_from(n.as_str())
+                        .ok()
+                        .is_some_and(|sn| ee.verify_is_valid_for_subject_name(&sn).is_ok())
+                })
+                .cloned()
+                // By subject (#453): a forge client certificate carries no SAN
+                // (stormcert#117), and is named by its one CN, as a node's
+                // apiserver reads it.
+                .or_else(|| {
+                    let cn = subject_cn(leaf.as_ref())?;
+                    self.admin_subjects.iter().find(|s| **s == cn && !cn.starts_with("system:")).cloned()
+                });
             c.forge_node = c.admin.is_none();
         }
         (c.node || c.admin.is_some() || c.forge_node).then_some(c)
     }
+}
+
+/// The subject's common name of a DER certificate, when it has exactly one
+/// (#453). Read only from a certificate the chain check has already passed,
+/// so the walk can be plain: Certificate → TBSCertificate → (version) serial,
+/// signature, issuer, validity → subject → each RDN's attributes. A name that
+/// is not a string type, or two CNs, gives `None`: nothing to match.
+pub fn subject_cn(der: &[u8]) -> Option<String> {
+    // One TLV at `at`: (tag, start of contents, end of contents).
+    fn tlv(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
+        let tag = *b.get(at)?;
+        let first = *b.get(at + 1)? as usize;
+        let (len, start) = if first < 0x80 {
+            (first, at + 2)
+        } else {
+            let n = first & 0x7F;
+            if n == 0 || n > 4 {
+                return None;
+            }
+            let mut len = 0usize;
+            for i in 0..n {
+                len = (len << 8) | *b.get(at + 2 + i)? as usize;
+            }
+            (len, at + 2 + n)
+        };
+        let end = start.checked_add(len)?;
+        (end <= b.len()).then_some((tag, start, end))
+    }
+    const SEQ: u8 = 0x30;
+    const SET: u8 = 0x31;
+    const CN: &[u8] = &[0x55, 0x04, 0x03];
+    let (t, cert, _) = tlv(der, 0)?;
+    if t != SEQ {
+        return None;
+    }
+    let (t, tbs, tbs_end) = tlv(der, cert)?;
+    if t != SEQ {
+        return None;
+    }
+    let mut at = tbs;
+    let (t, _, end) = tlv(der, at)?;
+    if t == 0xA0 {
+        at = end; // [0] version
+    }
+    // serial, signature, issuer, validity: skipped; then the subject.
+    for _ in 0..4 {
+        at = tlv(der, at)?.2;
+    }
+    let (t, mut rdn, subj_end) = tlv(der, at)?;
+    if t != SEQ || subj_end > tbs_end {
+        return None;
+    }
+    let mut found: Option<String> = None;
+    while rdn < subj_end {
+        let (t, mut atv, set_end) = tlv(der, rdn)?;
+        if t != SET {
+            return None;
+        }
+        while atv < set_end {
+            let (t, inner, atv_end) = tlv(der, atv)?;
+            if t != SEQ {
+                return None;
+            }
+            let (t, oid, oid_end) = tlv(der, inner)?;
+            if t == 0x06 && &der[oid..oid_end] == CN {
+                let (st, vs, ve) = tlv(der, oid_end)?;
+                // UTF8String, PrintableString, IA5String, T61String.
+                if !matches!(st, 0x0C | 0x13 | 0x16 | 0x14) {
+                    return None;
+                }
+                let v = std::str::from_utf8(&der[vs..ve]).ok()?.to_string();
+                if found.replace(v).is_some() {
+                    return None; // two CNs: not one name
+                }
+            }
+            atv = atv_end;
+        }
+        rdn = set_end;
+    }
+    found
 }
 
 /// The files the listener serves from.
@@ -127,8 +219,11 @@ pub struct TlsFiles {
     pub admin_ca: Option<PathBuf>,
     /// Forge's CRL(s), PEM or DER (#379, stormcert#61).
     pub admin_crl: Option<PathBuf>,
-    /// The SAN DNS names that are admin. None listed: no certificate is.
+    /// The SAN DNS names that are admin.
     pub admin_names: Vec<String>,
+    /// The subject CNs that are admin (#453): a forge client certificate's
+    /// name. With `admin_names` empty too, no certificate is.
+    pub admin_subjects: Vec<String>,
 }
 
 impl TlsFiles {
@@ -190,6 +285,7 @@ pub fn classifier(files: &TlsFiles) -> anyhow::Result<Classifier> {
         admin_cas: match &files.admin_ca { Some(p) => read_certs(p)?, None => Vec::new() },
         crls: match &files.admin_crl { Some(p) => read_crls(p)?, None => Vec::new() },
         admin_names: files.admin_names.clone(),
+        admin_subjects: files.admin_subjects.clone(),
     })
 }
 
