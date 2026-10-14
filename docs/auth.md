@@ -65,6 +65,9 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
   snapshots, which a CSI controller deletes as Kubernetes objects go.
 
 **Destructive:**
+- a scrub's repairs an operator asks for (#160): `POST
+  /api/v1/volumes/{id}/scrub/repair` (a chosen leg written over the others)
+  and `…/scrub/repair-parity`; asking for a scrub is ordinary;
 - slabs: `POST /api/v1/slabs` (format), `DELETE`, and a GC that is not a dry
   run;
 - arrays: create, delete, and members added, failed or replaced;

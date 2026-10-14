@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### 2026-10-14
+- **feat:** #160, the owner's decision ((c) with (a)): the scrub. Every redundant volume is read in full once a week, in the background.
+  - **What it reads:** every leg of every extent of a mirror, every stripe's data and parity, each under its lock and its slots' fence, so a write in flight never reads as a mismatch.
+  - **What repairs a mismatch** (there are no checksums):
+    - `mirror:3` and up: the copy a strict majority of the legs agree on is written over the others.
+    - `mirror:2`, or no majority: reported, never guessed. `POST /api/v1/volumes/{id}/scrub/repair {extent, from}` writes an operator's chosen leg over the others.
+    - Parity: reported, and rewritten from the data only with `POST …/scrub/repair-parity`.
+    - Both repair routes are destructive (#274).
+  - **Unreadable legs:** marked failed for the volume, as a read marks them.
+  - **When:** `[scrub] period_days` (7), one volume at a time, oldest pass first, at `duty_percent` (10) of the drives' time. Paused while an install's flow-over runs, and a volume the rebuild queue holds is left for later.
+  - **Findings:** kept per volume in `scrub.json`, at `GET /api/v1/volumes/{id}/scrub` and `GET /api/v1/scrub` (`DELETE` stops the pass running). Metrics `stormblock_scrub_*`.
+  - **BREAKING (RAID sets):** a RAID set's scrub no longer repairs by default (`repair` was true). It reports, as a volume's scrub does, and repairs only with `repair: true`.
+  - **Tests:** `volume::thin::scrub::tests` (majority repair at `mirror:3`; `mirror:2` reported with nothing written, then repaired from a chosen leg; three versions reported; parity reported, then rewritten when asked; cancel), `scrub::tests` (the schedule's due volumes and `scrub.json`; paused during a flow-over), `integration_multidrive::a_scrub_repairs_a_three_way_mirror_and_reports_it` (over HTTP), `serve::api::tests::a_scrubs_repairs_are_destructive_and_the_scrub_is_not`.
 - **docs:** #193 closed as covered (option C, decided 2026-10-13): the boot clone stays read-write. The sealed golden is never written; a node with a disk writes nothing in place on its clone (#239); the boot ladder and diskless nodes write a clone the next claim discards. docs/auth.md no longer lists a read-only overlay as still to come.
 - **feat:** #384 (#245 step 2, the owner's decision A): a sealed volume's digest, checked in the background; `slab holds` reads the verdicts.
   - **The digest:** taken when a volume is sealed on the node that made it (forge, for a release's goldens), in the background with no lock held. It is the sha256 of the volume's content as 64 KiB chunks: each non-zero chunk inside a mapped extent, in offset order, as its byte offset and its bytes, after the prefix `sb-seal-1`. So it costs what the volume holds and does not depend on extent size or placement: a composed image's golden and a flowed-over copy (zeros unmapped, #401) hash as their source does. An unseal forgets it.
