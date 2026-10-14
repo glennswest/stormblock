@@ -10926,6 +10926,7 @@ file = "{state}"
         // clone (a copy of N's image, attached as that boot had it).
         let old_clone = dir.path().join("clone-n-cut.raw").display().to_string();
         std::fs::copy(&image_n, &old_clone).unwrap();
+        let mut slot = 0u64;
         {
             let (mut node, _) = super::open_slabs_resuming(&[disk.clone(), old_clone.clone()], None, false).await.unwrap();
             let opts = crate::volume::CreateOptions { id: Some(golden_id), ..Default::default() }.in_role(SlabRole::Data);
@@ -10949,9 +10950,31 @@ file = "{state}"
             }
             node.seal_volume(id, None).await.unwrap();
             node.set_origin(id, Origin::Release);
+            // A PVC the node cloned from it, wholly on the disk: it shares
+            // the golden's local slots (the even extents) and wrote its own
+            // over the rest, moved onto the disk as well.
+            let pvc = node.create_snapshot(id, "pvc-from-golden").await.unwrap();
+            let pv = node.get_volume(&pvc).unwrap();
+            let es = node.slot_size();
+            slot = es;
+            for e in (1..extents).step_by(2) {
+                pv.write(e * es, &vec![0xA7u8; es as usize]).await.unwrap();
+            }
+            pv.flush().await.unwrap();
+            for e in (1..extents).step_by(2) {
+                let mut gem = node.gem().write().await;
+                let mut reg = node.registry().write().await;
+                let _ = crate::placement::PlacementEngine::new().migrate_extent(&mut gem, &mut reg, pvc, e, Some(local_data)).await;
+            }
             node.persist().await;
         }
         std::fs::remove_file(&old_clone).unwrap();
+        // What the PVC holds: the golden's bytes where it shares them, its own
+        // elsewhere.
+        let pvc_bytes: Vec<u8> = {
+            let es = slot;
+            (0..golden_bytes.len()).map(|i| if (i as u64 / es) % 2 == 1 { 0xA7 } else { 0x5C }).collect()
+        };
 
         // N+1 installed over it from its own claim; N's clone is gone.
         let claim = dir.path().join("claim-n1-451.raw").display().to_string();
@@ -10970,6 +10993,7 @@ file = "{state}"
         let (succ, _) = super::open_slabs_resuming(&[claim.clone(), flow.disk.clone()], None, true).await.unwrap();
         assert_eq!(succ.find_volume("kubelet-data.golden").await, Some(golden_id), "one golden, the release's id");
         assert_eq!(volume_bytes(&succ, "kubelet-data.golden").await.unwrap(), golden_bytes, "after the handover");
+        assert_eq!(volume_bytes(&succ, "pvc-from-golden").await.unwrap(), pvc_bytes, "the node's PVC after the handover");
         let sys_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
         let data_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
         let (sys_src, data_src): (Vec<_>, Vec<_>) = {
@@ -10986,6 +11010,7 @@ file = "{state}"
         drop(succ);
         let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
         assert_eq!(volume_bytes(&alone, "kubelet-data.golden").await.unwrap(), golden_bytes, "from the disk alone");
+        assert_eq!(volume_bytes(&alone, "pvc-from-golden").await.unwrap(), pvc_bytes, "the node's PVC from the disk alone");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
