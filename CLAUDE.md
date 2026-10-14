@@ -296,7 +296,7 @@ namespace for a bearer.
       it may list. Node/admin tokens stay node-wide; boot claims unchanged
 - [ ] tests, docs, CHANGELOG; stormcentral#642 told
 
-### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — IN PROGRESS
+### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — DONE here; golden waits on stormcentral#841
 
 No metal data reachable (no node syslog in stormcentral, server8's /metrics
 down), so by reading. Since #331/#401/#282: windows of 64, 8 reads at once,
@@ -322,8 +322,11 @@ initiator carries one command per connection (4), forge 13.7 128 KiB each.
       MB/s before → after: no flush cost + writer 33.8 → 358.8, idle 134.6 →
       182.8; 800 ms flushes + writer 4.5 → 34.7, idle 5.3 → 57.4. Docs
       (durability rule 10, README), CHANGELOG
-- [ ] check.sh; golden; close. Metal (server8, an X9, a pve VM) needs a
-      release with it: health `flow_over.mb_per_s` and `pace`
+- [x] check.sh at 73ad55b ALL PASS (1193/1193); commented on #410
+- [ ] golden: the stage's stormd input is gone from forge (404 on
+      golden-stormd-1fe5353b5402 too); proposed after stormcentral#841,
+      master told. Then golden, shipped, close. Metal (server8, an X9, a pve
+      VM) needs a release: health `flow_over.mb_per_s` and `pace`
 
 ### Forge lost 483 volumes: records unwritten since 10-10 (2026-10-13, #428, P0) — IN PROGRESS
 
