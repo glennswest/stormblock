@@ -285,3 +285,77 @@ impl Scrubber {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::Slab;
+    use crate::drive::BlockDevice;
+    use crate::placement::topology::StorageTier;
+    use crate::volume::redundancy::RedundancyPolicy;
+    use crate::volume::{CreateOptions, VolumeManager};
+
+    const MIB: u64 = 1 << 20;
+
+    async fn node(dir: &tempfile::TempDir) -> (Arc<crate::mgmt::AppState>, VolumeId, VolumeId) {
+        let mut vm = VolumeManager::new(MIB);
+        for i in 0..2 {
+            let path = dir.path().join(format!("d{i}.bin")).to_string_lossy().to_string();
+            let dev = FileDevice::open_with_capacity(&path, 64 * MIB).await.unwrap();
+            vm.add_slab(Slab::format(Arc::new(dev), MIB, StorageTier::Hot).await.unwrap()).await;
+        }
+        let m = vm
+            .create_volume_with("m", 8 * MIB, CreateOptions::redundant(RedundancyPolicy::parse("mirror:2").unwrap()))
+            .await
+            .unwrap();
+        let one = vm.create_volume_any("one", 8 * MIB).await.unwrap();
+        vm.get_volume(&m).unwrap().write(0, &[5u8; 4096]).await.unwrap();
+        let mut config = crate::mgmt::config::StormBlockConfig::default();
+        config.management.data_dir = Some(dir.path().to_string_lossy().to_string());
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        (Arc::new(crate::mgmt::AppState::new(config, vm, reg, gem)), m, one)
+    }
+
+    /// The schedule owes a pass to a redundant volume never scrubbed or
+    /// last scrubbed a period ago, never to a single copy; what it found
+    /// survives a restart (scrub.json).
+    #[tokio::test]
+    async fn the_schedule_owes_a_redundant_volume_a_pass_a_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, m, _one) = node(&dir).await;
+        let week = Duration::from_secs(7 * 86_400);
+        let s = &state.scrubber;
+        assert_eq!(s.due(&state, week).await, Some(m), "never scrubbed: due; the single copy never is");
+        s.run_one(&state, m, false).await.unwrap();
+        assert_eq!(s.due(&state, week).await, None, "scrubbed just now");
+        let mut last = s.last(&m).unwrap();
+        last.finished = now() - 8 * 86_400;
+        s.record(m, last);
+        assert_eq!(s.due(&state, week).await, Some(m), "a week and a day ago: due again");
+        let again = Scrubber::new(Some(dir.path()));
+        assert!(again.last(&m).is_some(), "kept in scrub.json");
+    }
+
+    /// A scrub waits while an install's flow-over runs, says so, and goes on
+    /// once it is done.
+    #[tokio::test]
+    async fn a_scrub_waits_while_a_flow_over_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, m, _) = node(&dir).await;
+        state.flow_over_remaining.store(12, Ordering::Relaxed);
+        let run = {
+            let (st, s) = (state.clone(), state.scrubber.clone());
+            tokio::spawn(async move { s.run_one(&st, m, false).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let r = state.scrubber.running().expect("running");
+        assert!(r.paused, "paused while the flow-over runs");
+        assert_eq!(r.done, 0);
+        state.flow_over_remaining.store(0, Ordering::Relaxed);
+        let report = tokio::time::timeout(Duration::from_secs(30), run).await.unwrap().unwrap().unwrap();
+        assert_eq!(report.extents, 1);
+        assert!(report.clean());
+        assert!(state.scrubber.running().is_none());
+    }
+}
