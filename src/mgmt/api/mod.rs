@@ -86,6 +86,11 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// 483 volumes.
         #[serde(skip_serializing_if = "Option::is_none")]
         durability: Option<String>,
+        /// Sealed volumes' digests (#384): how many copies read intact, how
+        /// many do not (`mismatched`, by id), how many were never read, and
+        /// how many seals wait for a digest. Read without waiting.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        digests: Option<serde_json::Value>,
         /// The worst of this node's RAID sets — `clean`, `rebuilding`,
         /// `degraded`, `failed` — when it has any (#252). Read without
         /// waiting: when the array table is busy, the last reading (#364).
@@ -172,9 +177,11 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         Err(_) => RAID_SEEN.lock().unwrap_or_else(|e| e.into_inner()).flatten(),
     };
     let durability = state.durability.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let digests = crate::volume::digest::summary(&state.volume_manager).await;
     Json(Health {
         status: if durability.is_some() { "degraded" } else { "ok" },
         durability,
+        digests,
         service: "stormblock",
         version: env!("CARGO_PKG_VERSION"),
         auth: if state.auth_enforced() { "required" } else { "none" },

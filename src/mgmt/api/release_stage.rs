@@ -235,6 +235,9 @@ async fn run_stage(
         }
     })
     .await?;
+    // The staged goldens carry the release's digests, unchecked: read once
+    // against them in the background (#384), before `slab holds` is asked.
+    state.check_goldens();
 
     // The boot pallet, below the one the disk boots now.
     let mut pallet = None;

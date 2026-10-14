@@ -25,6 +25,7 @@ pub mod versioned;
 pub mod gc;
 pub mod extable;
 pub mod erase;
+pub mod digest;
 pub mod holds;
 pub mod pressure;
 pub mod relocate;
@@ -357,6 +358,12 @@ pub struct VolumeManager {
     owners: HashMap<VolumeId, crate::volume::metadata::Owner>,
     /// Where each volume came from (#349). Absent = unmarked.
     origins: HashMap<VolumeId, crate::volume::metadata::Origin>,
+    /// Sealed volumes' digests and verdicts (#384).
+    digests: HashMap<VolumeId, crate::volume::metadata::SealDigest>,
+    /// Sealed here with no digest: the digester takes them (#384).
+    to_digest: std::collections::BTreeSet<VolumeId>,
+    /// Wakes the digester: a seal to digest, or a copy to check.
+    digest_wake: Arc<tokio::sync::Notify>,
     /// Why the last attempt to write this manager's record failed, if it did.
     ///
     /// A background persist cannot fail the call that triggered it — the
@@ -439,6 +446,9 @@ impl VolumeManager {
             fs_info: HashMap::new(),
             owners: HashMap::new(),
             origins: HashMap::new(),
+            digests: HashMap::new(),
+            to_digest: Default::default(),
+            digest_wake: Arc::new(tokio::sync::Notify::new()),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -472,6 +482,9 @@ impl VolumeManager {
             fs_info: HashMap::new(),
             owners: HashMap::new(),
             origins: HashMap::new(),
+            digests: HashMap::new(),
+            to_digest: Default::default(),
+            digest_wake: Arc::new(tokio::sync::Notify::new()),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -672,6 +685,14 @@ impl VolumeManager {
             }
             return Err(persist_failed(id, "seal", e));
         }
+        // A digest of what was sealed (#384), taken in the background with
+        // no lock held: only of what this node made. A release's volume (laid
+        // from an image, staged) keeps the digest it came with, or has none:
+        // a digest of this node's own copy would prove nothing about it.
+        if !self.digests.contains_key(&id) && self.origin(&id) != crate::volume::metadata::Origin::Release {
+            self.to_digest.insert(id);
+            self.digest_wake.notify_one();
+        }
         Ok(())
     }
 
@@ -708,8 +729,50 @@ impl VolumeManager {
     pub async fn unseal_volume(&mut self, id: VolumeId) -> Result<(), VolumeError> {
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
         handle.set_sealed(false);
+        // What it held may change now: its digest says nothing any more.
+        self.digests.remove(&id);
+        self.to_digest.remove(&id);
         self.persist().await;
         Ok(())
+    }
+
+    /// A sealed volume's digest and verdict (#384).
+    pub fn seal_digest(&self, id: &VolumeId) -> Option<crate::volume::metadata::SealDigest> {
+        self.digests.get(id).copied()
+    }
+
+    /// Record a sealed volume's digest (or a new verdict on it); `None`
+    /// forgets it. The caller persists (owed, #364).
+    pub fn set_seal_digest(&mut self, id: VolumeId, d: Option<crate::volume::metadata::SealDigest>) {
+        match d {
+            Some(d) if self.volumes.contains_key(&id) => {
+                self.digests.insert(id, d);
+            }
+            _ => {
+                self.digests.remove(&id);
+            }
+        }
+        self.to_digest.remove(&id);
+    }
+
+    /// Every sealed volume's digest, for the checker and health.
+    pub fn seal_digests(&self) -> Vec<(VolumeId, crate::volume::metadata::SealDigest)> {
+        self.digests.iter().map(|(k, v)| (*k, *v)).collect()
+    }
+
+    /// The volumes sealed here that wait for a digest (#384).
+    pub fn take_to_digest(&mut self) -> Vec<VolumeId> {
+        std::mem::take(&mut self.to_digest).into_iter().filter(|id| self.volumes.contains_key(id)).collect()
+    }
+
+    /// How many sealed volumes wait for a digest.
+    pub fn digests_waiting(&self) -> usize {
+        self.to_digest.len()
+    }
+
+    /// What wakes the digester.
+    pub fn digest_wake(&self) -> Arc<tokio::sync::Notify> {
+        self.digest_wake.clone()
     }
 
     /// What a volume's access is set to. Say nothing about sealing — ask
@@ -1526,6 +1589,9 @@ impl VolumeManager {
             if vrec.origin != crate::volume::metadata::Origin::Unmarked {
                 self.origins.insert(vrec.id, vrec.origin);
             }
+            if let Some(d) = vrec.digest {
+                self.digests.insert(vrec.id, d);
+            }
             self.volumes.insert(vrec.id, handle);
             self.present.insert(vrec.id);
             if let Some(parent) = vrec.parent {
@@ -2040,6 +2106,8 @@ impl VolumeManager {
         self.fs_info.remove(&id);
         self.owners.remove(&id);
         self.origins.remove(&id);
+        self.digests.remove(&id);
+        self.to_digest.remove(&id);
         self.retentions.remove(&id);
 
         // Remove all extents from GEM and dec_ref on slabs (their table
@@ -3403,6 +3471,7 @@ impl VolumeManager {
                 owner: self.owners.get(id).cloned(),
                 origin: self.origins.get(id).copied().unwrap_or_default(),
                 tier: Some(handle.preferred_tier()).filter(|t| *t != StorageTier::Hot),
+                digest: self.digests.get(id).copied(),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -3466,6 +3535,7 @@ impl VolumeManager {
                 owner: self.owners.get(&id).cloned(),
                 origin: self.origins.get(&id).copied().unwrap_or_default(),
                 tier: self.volumes.get(&id).map(|h| h.preferred_tier()).filter(|t| *t != StorageTier::Hot),
+                digest: self.digests.get(&id).copied(),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -3703,6 +3773,9 @@ impl VolumeManager {
             self.present.insert(vrec.id);
             if vrec.origin != crate::volume::metadata::Origin::Unmarked {
                 self.origins.insert(vrec.id, vrec.origin);
+            }
+            if let Some(d) = vrec.digest {
+                self.digests.insert(vrec.id, d);
             }
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);

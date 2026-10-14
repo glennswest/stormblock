@@ -359,6 +359,9 @@ pub struct AppState {
     /// The background eraser (#286): overwrites freed slots before they are
     /// reused. Started by [`AppState::start_eraser`].
     pub eraser: Arc<crate::volume::erase::Eraser>,
+    /// Tells the digester to check the goldens that arrived with a digest
+    /// (#384): a finished flow-over or stage, or a start with neither.
+    pub digest_check: Arc<tokio::sync::Notify>,
     /// The apiserver a destructive call's Kubernetes bearer is reviewed
     /// against (#274); `None` refuses such bearers.
     pub kube_auth: Option<Arc<kubeauth::KubeAuth>>,
@@ -465,6 +468,17 @@ impl AppState {
         let pending = self.slab_registry.read().await.erasing_slots();
         tracing::info!("secure delete: freed slots are overwritten ({level}); {pending} waiting");
         self.eraser.spawn();
+    }
+
+    /// The digester (#384): digests what is sealed here, checks what came
+    /// with a digest when [`check_goldens`](Self::check_goldens) says so.
+    pub fn start_digests(&self) {
+        crate::volume::digest::spawn(self.volume_manager.clone(), self.digest_check.clone());
+    }
+
+    /// Check this node's goldens against their digests, in the background.
+    pub fn check_goldens(&self) {
+        self.digest_check.notify_one();
     }
 
     /// Whether this node requires a credential — reported by `/api/v1/health`
@@ -591,6 +605,7 @@ impl AppState {
                 .clone()
                 .map(std::path::PathBuf::from)
                 .or_else(|| config.management.data_dir.as_ref().map(|d| std::path::Path::new(d).join("audit.log"))),
+            digest_check: Arc::new(tokio::sync::Notify::new()),
             eraser: crate::volume::erase::Eraser::new(
                 slab_registry_for_eraser,
                 config.management.data_dir.as_ref().map(std::path::PathBuf::from),

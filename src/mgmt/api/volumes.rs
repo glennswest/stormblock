@@ -1311,9 +1311,13 @@ async fn volume_digest(
     }
     let refresh = q.get("refresh").is_some_and(|v| v == "true" || v == "1");
     let name = h.name().await;
+    // The digest it was sealed with and what reading this copy found (#384):
+    // `sha256` is every byte of its capacity (#271), `seal` its content as
+    // the seal digest's scheme hashes it.
+    let seal = state.volume_manager.lock().await.seal_digest(&vol_id).map(|d| d.json());
     if !refresh {
         if let Some((sha, bytes)) = h.cached_digest() {
-            return Json(serde_json::json!({ "id": vol_id.0, "name": name, "sha256": sha, "size_bytes": bytes, "cached": true }))
+            return Json(serde_json::json!({ "id": vol_id.0, "name": name, "sha256": sha, "size_bytes": bytes, "cached": true, "seal": seal }))
                 .into_response();
         }
     }
@@ -1326,7 +1330,7 @@ async fn volume_digest(
     });
     match task.await {
         Ok(Ok((sha, bytes))) => {
-            Json(serde_json::json!({ "id": vol_id.0, "name": name, "sha256": sha, "size_bytes": bytes, "cached": false }))
+            Json(serde_json::json!({ "id": vol_id.0, "name": name, "sha256": sha, "size_bytes": bytes, "cached": false, "seal": seal }))
                 .into_response()
         }
         Ok(Err(e)) => ApiError::internal(format!("reading volume {}: {e}", vol_id.0)),

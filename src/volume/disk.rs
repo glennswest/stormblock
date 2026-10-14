@@ -895,6 +895,7 @@ impl VolumeManager {
                 source_bytes: cap,
                 size: gsize,
                 template: g.template,
+                digest: self.seal_digest(&g.source),
             });
         }
 
@@ -1069,6 +1070,9 @@ struct Planned {
     source_bytes: u64,
     size: u64,
     template: bool,
+    /// The source's digest (#384): the composed golden is its content, so it
+    /// carries it, unchecked, to every node that installs the image.
+    digest: Option<crate::volume::metadata::SealDigest>,
 }
 
 /// A slab compose, planned (#418).
@@ -1236,6 +1240,7 @@ impl SlabPlan {
                 let vol = nested.get_volume(&gid).ok_or(VolumeError::VolumeNotFound(gid))?;
                 crate::fs::disk::probe(&vol).await
             };
+            nested.set_seal_digest(gid, p.digest.map(|d| d.unchecked()));
             nested.seal_volume(gid, fs.clone()).await?;
             if p.template {
                 nested.mark_template(gid);

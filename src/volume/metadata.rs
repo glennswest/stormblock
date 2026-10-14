@@ -236,6 +236,10 @@ pub struct VolumeRecord {
     /// written by bincode; a format v2 header carries it after the origin.
     #[serde(skip)]
     pub tier: Option<crate::placement::topology::StorageTier>,
+    /// A sealed volume's digest and verdict (#384). Never written by
+    /// bincode; a format v2 header carries it after the tier.
+    #[serde(skip)]
+    pub digest: Option<SealDigest>,
 }
 
 /// Where a volume came from (#349, owner: an install drops old system
@@ -276,6 +280,79 @@ impl Origin {
             2 => Origin::Node,
             _ => Origin::Unmarked,
         }
+    }
+}
+
+/// A sealed volume's digest (#384, #245 step 2): the sha256 of its content,
+/// taken when it is sealed, and what the last check of this copy found.
+///
+/// The content hashed is every non-zero extent in index order, each as its
+/// index (u64 little-endian) and its bytes, after the scheme's prefix: so a
+/// 16 TiB blank costs what it holds, and an extent a flow-over unmapped
+/// because it was all zeros (#401) hashes as it did. Never written by
+/// bincode; a format v2 header carries it after the tier, which every v2
+/// reader skips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SealDigest {
+    pub sha256: [u8; 32],
+    pub verdict: Verdict,
+    /// Seconds since the epoch of the last check; 0 when never checked.
+    pub checked_at: u64,
+}
+
+/// What the last read of a sealed volume's copy found against its digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Verdict {
+    /// Never read here: the digest came with the volume (from the forge that
+    /// sealed it, or a stage) or was taken at the seal.
+    #[default]
+    Unchecked,
+    Intact,
+    Mismatch,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Unchecked => "unchecked",
+            Verdict::Intact => "intact",
+            Verdict::Mismatch => "mismatch",
+        }
+    }
+    pub fn code(self) -> u8 {
+        match self {
+            Verdict::Unchecked => 0,
+            Verdict::Intact => 1,
+            Verdict::Mismatch => 2,
+        }
+    }
+    pub fn from_code(c: u8) -> Self {
+        match c {
+            1 => Verdict::Intact,
+            2 => Verdict::Mismatch,
+            _ => Verdict::Unchecked,
+        }
+    }
+}
+
+impl SealDigest {
+    pub fn new(sha256: [u8; 32]) -> Self {
+        SealDigest { sha256, verdict: Verdict::Unchecked, checked_at: 0 }
+    }
+    pub fn hex(&self) -> String {
+        self.sha256.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    /// The same digest, never checked: what a copy of the volume carries.
+    pub fn unchecked(self) -> Self {
+        SealDigest { verdict: Verdict::Unchecked, checked_at: 0, ..self }
+    }
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sha256": self.hex(),
+            "scheme": crate::volume::digest::SCHEME,
+            "verdict": self.verdict.as_str(),
+            "checked_at": self.checked_at,
+        })
     }
 }
 
@@ -445,6 +522,7 @@ impl From<v8::VolumeMetadata> for VolumeMetadata {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    digest: None,
                 })
                 .collect(),
         }
@@ -558,6 +636,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    digest: None,
                 })
                 .collect(),
         }
@@ -623,6 +702,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    digest: None,
                 })
                 .collect(),
         }
@@ -689,6 +769,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    digest: None,
                     })
                 .collect(),
         }
@@ -750,6 +831,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    digest: None,
                     })
                 .collect(),
         }
@@ -813,6 +895,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    digest: None,
                     })
                 .collect(),
         }
@@ -870,6 +953,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    digest: None,
                     })
                 .collect(),
         }
@@ -930,6 +1014,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                         extent_size: 0,
                         origin: Default::default(),
                     tier: None,
+                    digest: None,
                     })
                 .collect(),
         }
@@ -1224,6 +1309,7 @@ mod tests {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    digest: None,
                 }],
         }
     }
@@ -1363,6 +1449,7 @@ mod tests {
                 extent_size: 0,
                 origin: Default::default(),
                     tier: None,
+                    digest: None,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1451,6 +1538,7 @@ mod tests {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    digest: None,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1677,6 +1765,7 @@ mod retention_tests {
                     extent_size: 0,
                     origin: Default::default(),
                     tier: None,
+                    digest: None,
                 }],
         }
     }

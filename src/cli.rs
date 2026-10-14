@@ -1177,6 +1177,7 @@ pub async fn run() -> anyhow::Result<()> {
     config.apply_networks().await;
     let mut state = Arc::new(AppState::new(config.clone(), volume_manager, slab_registry, gem));
     state.start_eraser().await;
+    state.start_digests();
 
     // What consumers will be told to dial, said once, before anything can be
     // attached — a derived address is a guess on a multi-homed node.
@@ -2075,6 +2076,18 @@ pub async fn run() -> anyhow::Result<()> {
                         println!(
                             "{local} does not hold the release on {image}: {missing} of {goldens} \
                              golden(s) missing"
+                        );
+                        std::process::exit(1);
+                    }
+                    ReleaseHeld::Corrupt { goldens, corrupt } => {
+                        // #384: what is here does not read as what was sealed.
+                        // Not held: the install lays the system half again
+                        // and keeps the data half (#311).
+                        println!(
+                            "{local} does not hold the release on {image}: all {goldens} golden(s) are \
+                             recorded, and {} do not read as what was sealed (digest mismatch): {}",
+                            corrupt.len(),
+                            corrupt.join(", ")
                         );
                         std::process::exit(1);
                     }
@@ -7429,6 +7442,11 @@ pub async fn run() -> anyhow::Result<()> {
                     *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
                     return;
                 }
+                // Every golden now on this disk, read once against the
+                // digest it was sealed with (#384), in the background.
+                if let Some(st) = state_for_persist.upgrade() {
+                    st.check_goldens();
+                }
                 local_boot(then_local_boot).await;
                 retire_sources(retire).await;
             } else {
@@ -8223,6 +8241,7 @@ async fn handle_adopt_ublk(
         let gem = mgr.gem().clone();
         let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));
         state.start_eraser().await;
+        state.start_digests();
         // Where a staged release's boot pallet goes (#122).
         *state.slab_paths.write().await = slab_paths.to_vec();
         // Their disks, so `/api/v1/pallets` lists and verifies the boot
@@ -8344,13 +8363,19 @@ async fn handle_adopt_ublk(
         }
         if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.clone()) {
             spawn_flow_over(&state, flow, local_boot, install);
-        } else if let Some((disk, sources)) = local_boot {
-            tokio::spawn(async move {
-                if let Err(e) = run_local_boot(&disk, &sources).await {
-                    println!("Local boot: {disk}: {e}");
-                    tracing::warn!("local boot on {disk}: {e}");
-                }
-            });
+        } else {
+            // No flow-over to wait for: the goldens here are this disk's
+            // (#384); any that came with a digest and were never read
+            // against it are, now.
+            state.check_goldens();
+            if let Some((disk, sources)) = local_boot {
+                tokio::spawn(async move {
+                    if let Err(e) = run_local_boot(&disk, &sources).await {
+                        println!("Local boot: {disk}: {e}");
+                        tracing::warn!("local boot on {disk}: {e}");
+                    }
+                });
+            }
         }
 
         // Push the working directory down to the volume, on a timer.

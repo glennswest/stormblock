@@ -363,6 +363,12 @@ pub enum ReleaseHeld {
     Held { goldens: usize },
     /// `missing` of the image's `goldens` are not on the local drive.
     NotHeld { goldens: usize, missing: usize },
+    /// Every golden is here, but `corrupt` (by name) do not read as what was
+    /// sealed (#384): their copy's verdict is a mismatch, or the digest this
+    /// drive records is not the image's. Not held: the system half is laid
+    /// again, the data half kept (#311). Read from the verdicts only — no
+    /// golden is read at boot.
+    Corrupt { goldens: usize, corrupt: Vec<String> },
     /// Every golden is recorded, but the install never finished: the local
     /// records still place extents on `slabs` slab(s) that are not on the
     /// drive — the appliance clone a flow-over was moving from (#239). The
@@ -439,6 +445,30 @@ pub async fn release_held(local: &Arc<dyn BlockDevice>, image: &Arc<dyn BlockDev
     let missing = goldens.iter().filter(|id| !have.contains(id)).count();
     if missing > 0 {
         return ReleaseHeld::NotHeld { goldens: goldens.len(), missing };
+    }
+    // Intact, as far as anything has looked (#384): a copy read against its
+    // digest and found different, or recorded with another digest than the
+    // image's. No digest (an image from before #384, or not yet read) says
+    // nothing either way: today's answer.
+    let sealed_with: std::collections::HashMap<uuid::Uuid, [u8; 32]> = image_vols
+        .iter()
+        .filter(|v| v.sealed)
+        .filter_map(|v| v.digest.map(|d| (v.id.0, d.sha256)))
+        .collect();
+    let mut corrupt: Vec<String> = local_vols
+        .iter()
+        .filter(|v| v.sealed && goldens.contains(&v.id.0))
+        .filter(|v| match v.digest {
+            Some(d) if d.verdict == crate::volume::metadata::Verdict::Mismatch => true,
+            Some(d) => sealed_with.get(&v.id.0).is_some_and(|s| *s != d.sha256),
+            None => false,
+        })
+        .map(|v| v.name.clone())
+        .collect();
+    if !corrupt.is_empty() {
+        corrupt.sort();
+        corrupt.dedup();
+        return ReleaseHeld::Corrupt { goldens: goldens.len(), corrupt };
     }
     // Complete, not only recorded: nothing still placed on a slab that is
     // not on this drive. Asked of the release's goldens and of whatever has a

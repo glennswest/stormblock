@@ -239,6 +239,8 @@ struct ImageVolume {
     lba: Option<u32>,
     fs: Option<crate::volume::metadata::FsInfo>,
     owner: Option<crate::volume::metadata::Owner>,
+    /// What the forge that sealed it recorded (#384).
+    digest: Option<crate::volume::metadata::SealDigest>,
     /// Virtual extent → (slab, slot) of its primary leg.
     extents: BTreeMap<u64, (crate::drive::slab::SlabId, u64)>,
 }
@@ -275,6 +277,7 @@ async fn read_image(image: &Arc<dyn BlockDevice>) -> anyhow::Result<(VolumeManag
             lba: vm.lba(&id),
             fs: vm.fs_info(&id).cloned(),
             owner: vm.owner(&id).cloned(),
+            digest: vm.seal_digest(&id),
             extents,
         });
     }
@@ -496,6 +499,9 @@ pub async fn stage(
                 let _ = m.set_owner(id, Some(o.clone())).await;
             }
             if v.sealed {
+                // The release's digest, to be checked against this copy
+                // (#384): never one taken of the copy itself.
+                m.set_seal_digest(id, v.digest.map(|d| d.unchecked()));
                 m.seal_volume(id, v.fs.clone()).await.map_err(|e| anyhow::anyhow!("sealing {staged_name}: {e}"))?;
             }
             m.persist().await;

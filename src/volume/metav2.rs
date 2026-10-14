@@ -1227,6 +1227,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     record.parity.clear();
     let origin = record.origin;
     let tier = record.tier;
+    let digest = record.digest;
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
@@ -1238,16 +1239,32 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // unmarked volume's header is byte for byte what it was.
     // Then the tier a claim asked for (#151), when not hot: a reader before
     // it reads the origin and ignores the byte after.
+    // Then a sealed volume's digest (#384): `D`, the sha256, the verdict and
+    // when it was given. A reader before it reads the origin and the tier and
+    // ignores what follows, so it needs no new key kind and an older engine
+    // opens the disk as before. The tier byte is written whenever a digest
+    // follows (0 for hot, which every reader reads as hot).
     let tier = tier.filter(|t| *t != crate::placement::topology::StorageTier::Hot);
-    if origin != super::metadata::Origin::Unmarked || tier.is_some() {
+    if origin != super::metadata::Origin::Unmarked || tier.is_some() || digest.is_some() {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
-        if let Some(t) = tier {
-            out.push(t as u8);
+        if tier.is_some() || digest.is_some() {
+            out.push(tier.map(|t| t as u8).unwrap_or(0));
+        }
+        if let Some(d) = digest {
+            out.push(DIGEST_TAG);
+            out.extend_from_slice(&d.sha256);
+            out.push(d.verdict.code());
+            out.extend_from_slice(&d.checked_at.to_le_bytes());
         }
     }
     out
 }
+
+/// The digest's place in a header's extension (#384): after the tier.
+const DIGEST_TAG: u8 = b'D';
+/// The tag, the sha256, the verdict, when.
+const DIGEST_LEN: usize = 1 + 32 + 1 + 8;
 
 /// The tag of the fields after a volume header (#349).
 const HEADER_EXT_TAG: &[u8; 4] = b"SBX1";
@@ -1264,6 +1281,14 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
                 3 => Some(StorageTier::Cold),
                 _ => None,
             };
+        }
+        let d = &rest[rest.len().min(6)..];
+        if d.len() >= DIGEST_LEN && d[0] == DIGEST_TAG {
+            rec.digest = Some(super::metadata::SealDigest {
+                sha256: d[1..33].try_into().unwrap(),
+                verdict: super::metadata::Verdict::from_code(d[33]),
+                checked_at: u64::from_le_bytes(d[34..42].try_into().unwrap()),
+            });
         }
     }
 }
@@ -1452,6 +1477,7 @@ mod tests {
             extent_size: 0,
             origin: Origin::Node,
             tier: None,
+            digest: None,
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1491,6 +1517,7 @@ mod tests {
             extent_size: 0,
             origin: Origin::Node,
             tier: None,
+            digest: None,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -1748,6 +1775,7 @@ mod tests {
             extent_size: 0,
             origin: Default::default(),
             tier: None,
+            digest: None,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -1783,6 +1811,7 @@ mod tests {
             extent_size: 0,
             origin: Default::default(),
             tier: None,
+            digest: None,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));
