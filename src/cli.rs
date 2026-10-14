@@ -10874,6 +10874,101 @@ file = "{state}"
         }
     }
 
+    /// #451 (server2, 12.27 over 12.14): an install whose flow-over was cut
+    /// short (an evening power-off two minutes in) leaves the data half
+    /// recording the release's data goldens with extents still on that
+    /// boot's forge clone. The next release carries the same golden under
+    /// the same id (an unchanged blank: forge composes it in by id) on a
+    /// clone whose slab ids are its own, so the old clone's slab is never
+    /// attached again. The install must lay the golden from the release:
+    /// every byte the release's, with no extent dropped, after the install,
+    /// after the handover and the flow-over, and from the disk alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_data_half_cut_short_mid_flow_over_gets_its_goldens_from_the_release() {
+        use crate::drive::slab::SlabRole;
+        use crate::volume::metadata::Origin;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
+
+        // N+1's golden: its id and its bytes.
+        let peek = dir.path().join("peek-n1.raw").display().to_string();
+        std::fs::copy(&image_n1, &peek).unwrap();
+        let (golden_id, golden_bytes) = {
+            let (m, _) = super::open_slabs_resuming(&[peek.clone()], None, true).await.unwrap();
+            let id = m.find_volume("kubelet-data.golden").await.expect("N+1 carries the golden");
+            (id, volume_bytes(&m, "kubelet-data.golden").await.unwrap())
+        };
+        std::fs::remove_file(&peek).unwrap();
+
+        // The node's data half as a cut flow-over leaves it: the golden under
+        // that id, half its extents on the disk and half still on the boot's
+        // clone (a copy of N's image, attached as that boot had it).
+        let old_clone = dir.path().join("clone-n-cut.raw").display().to_string();
+        std::fs::copy(&image_n, &old_clone).unwrap();
+        {
+            let (mut node, _) = super::open_slabs_resuming(&[disk.clone(), old_clone.clone()], None, false).await.unwrap();
+            let opts = crate::volume::CreateOptions { id: Some(golden_id), ..Default::default() }.in_role(SlabRole::Data);
+            let id = node.create_volume_with("kubelet-data.golden", golden_bytes.len() as u64, opts).await.unwrap();
+            let v = node.get_volume(&id).unwrap();
+            v.write(0, &vec![0x5Cu8; golden_bytes.len()]).await.unwrap();
+            v.flush().await.unwrap();
+            let (local_data, clone_data) = {
+                let reg = node.registry().read().await;
+                let datas: Vec<_> = reg.iter().filter(|(_, s)| s.is_data()).map(|(id, s)| (*id, s.device().id().path.clone())).collect();
+                let local = datas.iter().find(|(_, p)| p.starts_with(&disk)).map(|(id, _)| *id).expect("the disk's data slab");
+                let clone = datas.iter().find(|(_, p)| p.starts_with(&old_clone)).map(|(id, _)| *id).expect("the clone's data slab");
+                (local, clone)
+            };
+            let extents = golden_bytes.len() as u64 / node.slot_size();
+            for e in 0..extents {
+                let to = if e % 2 == 0 { local_data } else { clone_data };
+                let mut gem = node.gem().write().await;
+                let mut reg = node.registry().write().await;
+                let _ = crate::placement::PlacementEngine::new().migrate_extent(&mut gem, &mut reg, id, e, Some(to)).await;
+            }
+            node.seal_volume(id, None).await.unwrap();
+            node.set_origin(id, Origin::Release);
+            node.persist().await;
+        }
+        std::fs::remove_file(&old_clone).unwrap();
+
+        // N+1 installed over it from its own claim; N's clone is gone.
+        let claim = dir.path().join("claim-n1-451.raw").display().to_string();
+        std::fs::copy(&image_n1, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (flow, _report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump"))
+            .await
+            .unwrap_or_else(|e| panic!("the install refused: {e}"));
+        let flow = flow.expect("laid");
+        assert_eq!(volume_bytes(&mgr, "kubelet-data.golden").await.unwrap(), golden_bytes, "after the install");
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+
+        let (succ, _) = super::open_slabs_resuming(&[claim.clone(), flow.disk.clone()], None, true).await.unwrap();
+        assert_eq!(succ.find_volume("kubelet-data.golden").await, Some(golden_id), "one golden, the release's id");
+        assert_eq!(volume_bytes(&succ, "kubelet-data.golden").await.unwrap(), golden_bytes, "after the handover");
+        let sys_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
+        let data_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
+        succ.persist().await;
+        assert_eq!(volume_bytes(&succ, "kubelet-data.golden").await.unwrap(), golden_bytes, "after the flow-over");
+        drop(succ);
+        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        assert_eq!(volume_bytes(&alone, "kubelet-data.golden").await.unwrap(), golden_bytes, "from the disk alone");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_install_carries_the_nodes_system_half_volumes_and_drops_the_old_releases() {
         use crate::drive::slab::SlabRole;
