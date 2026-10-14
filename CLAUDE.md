@@ -212,7 +212,8 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
       main (88247c1), 101 ms on c2f10cd (195314cf5831, the old engine)
 - [x] stormblock-registry#131 (reconnect + retry block I/O, WARN the
       first timeout with what it waited for)
-- [x] check.sh; CHANGELOG; closed with the answers
+- [x] check.sh at 9877bb8 ALL PASS (1240/1240); CHANGELOG; closed with
+      the answers
 
 ### Attach a peer's volume over NVMe/TCP, return a device (2026-10-14, #328, P3, stormvm#46) — WAITING ON THE OWNER
 
