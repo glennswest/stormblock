@@ -742,15 +742,21 @@ Built meanwhile, the operator's tools either way:
       check.sh at 0d39fd5 ALL PASS (1148/1148)
 - [x] golden golden-stormblock-17aefc2dba61 (9453c4b); closed
 
-### Scrub: compare mirror legs and parity (2026-10-11, #160, P3) — WAITING ON THE OWNER
+### Scrub: compare mirror legs and parity (2026-10-11, #160, P3) — BUILT on branch wip/160-scrub; merges after 12.23
 
-No checksums, so a 2-way mismatch has no right answer. Asked on #160
-(needs-owner): (a) report + operator picks the leg, (b) per-slot/4K
-checksum (a format change on v2), (c) majority at mirror:3+ and report at
-mirror:2, (d) first leg wins (md; what RAID sets' scrub repair does today).
-Recommended (c)+(a), parity rewritten only when asked. Common part (a
-background per-volume scrub through the rebuild throttle, report only) is
-not built yet either.
+Owner (2026-10-13): (c) with (a): majority at mirror:3+, mirror:2 reported,
+parity reported and rewritten only when asked; weekly, ~10 % of the
+drives' time, paused during an install/flow-over, findings per volume.
+Built on **wip/160-scrub** (the 12.23 freeze: no code on main until it
+passes): `volume/thin/scrub.rs` (per extent/stripe under its lock and
+fence), `src/scrub.rs` (schedule, `scrub.json`, pause), `api/scrub.rs`
+(`/api/v1/scrub`, `…/{id}/scrub`, `/repair`, `/repair-parity`, the last two
+destructive), metrics, `[scrub]`; RAID-set scrub `repair` default off.
+- [x] tests: thin scrub units (5), scrub units (2), multidrive HTTP, auth
+- [x] docs (redundancy.md, README, auth.md, raid-sets.md), CHANGELOG
+- [x] check.sh on wip/160-scrub at e781f3d ALL PASS (1222/1222)
+- [ ] after 12.23 passes pve and the Dell: merge to main, check.sh, the
+      next stage; close
 
 ### Discovery records advertise the bind address (2026-10-11, #116) — DONE (golden-stormblock-c8f8f2594866)
 
