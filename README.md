@@ -1467,8 +1467,12 @@ reports the size it is given and stores only what is written:
   chunk with one `fstat` after each change, never by rescanning the
   directory. Through the API (`ci-emulated-format-verify.sh`), an ext4
   template on two 256T drives took 8.3 s at 1T and 66.9 s at 16T, against
-  5.1 s and 40.5 s in memory. A 1 PiB ext4 template does not seal yet:
-  mkfs-ext4 v4.1.0's check needs 32 GiB at that size (fio.ext4.rs#13).
+  5.1 s and 40.5 s in memory. A **1 PiB** ext4 template is made in core
+  since mkfs-ext4 v4.1.1 (fio-ext4 v1.8.1): format and seal (a full check)
+  on two directory-backed 1P drives in 1016 s, 1.6 GiB peak, 4.7 GiB
+  stored; the format alone straight onto one drive 258 s, its check 382 s,
+  1.1 GiB peak (`ci-emulated-pib-verify.sh`). What the template path adds
+  over a straight format is #403.
 - **What it does not store:** a range never written, written with zeros, or
   discarded holds nothing and reads as zeros. So formatting a 1 PiB slab
   (64 GiB of slot table) takes 0.1 s and stores nothing.

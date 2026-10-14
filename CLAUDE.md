@@ -889,8 +889,10 @@ Unparked: fio-ext4 v1.8.0 pins mkfs-ext4 v4.1.0 (fio.ext4.rs#10).
 - [x] check.sh at 500ae70 ALL PASS (1137/1137)
 - [x] fio.ext4.rs#13 done (2026-10-13): fio-ext4 v1.8.1 pins mkfs-ext4
       v4.1.1; both pins moved, Cargo.lock by hand (versions and tags only)
-- [ ] the 1P tests on a large build VM (straight format + check; the
-      template, format + seal); check.sh; golden (held for stormcentral#841)
+- [x] 1P on a 16 GB build VM (`ci-emulated-pib-verify.sh`): straight format
+      258 s + check 382 s clean, peak 1056 MiB; template (format + seal)
+      1016 s, peak 1579 MiB, 4.7 GiB stored. README, CHANGELOG
+- [ ] check.sh; golden (held for stormcentral#841); close
 
 ### RAID-6: SIMD for Q and GF(2^8) multiply (2026-10-10, #255, P3) — DONE (golden-stormblock-041d379caced)
 
