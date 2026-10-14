@@ -296,6 +296,20 @@ namespace for a bearer.
       it may list. Node/admin tokens stay node-wide; boot claims unchanged
 - [ ] tests, docs, CHANGELOG; stormcentral#642 told
 
+### Post-flow-over validation by sha256 (2026-10-13, #412, P1) — WAITING ON THE OWNER
+
+Owner: always on, every flow-over; a node goes local only through it. Item 1
+(per-extent sha256 recorded at seal) is a new v2 key kind on the slab, which
+#245's decision allows only once no node can roll back past step 1
+(golden-stormblock-47e88a267077); X9's last-known-good is 11.88 (9cbe6ca,
+before it). Asked on #412 (needs-owner): **A** validate each moved extent
+against the still-attached forge clone's bytes now, record per-extent hashes
+via #384 when the gate opens (recommended); **B** the slab key now (breaks
+rollback to 11.88); **C** forge-served hashes outside the slab. Nothing
+built; the rest of the issue (O_DIRECT read-back, keep forge until it
+passes, repair → `FlowOverCorrupt`, health, pacing, tests) is the same in
+all three.
+
 ### Flow-over ~1 MB/s on server8's SSD (2026-10-13, #410, P1) — DONE here; golden waits on stormcentral#841
 
 No metal data reachable (no node syslog in stormcentral, server8's /metrics
