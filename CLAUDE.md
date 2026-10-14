@@ -328,14 +328,17 @@ namespace for a bearer.
       it may list. Node/admin tokens stay node-wide; boot claims unchanged
 - [ ] tests, docs, CHANGELOG; stormcentral#642 told
 
-### NVMe-oF advertises the default route's address on a wildcard (2026-10-13, #417, stormcos#550) — DONE here; golden waits on stormcentral#841
+### NVMe-oF advertises the default route's address on a wildcard (2026-10-13, #417, stormcos#550) — DONE (golden-stormblock-12891c0025b2), closed
 
 - [x] `netif::route_source` (UDP connect, same family, uncached;
       `STORMBLOCK_ROUTE_SOURCE` for tests); `NvmeofTarget::new` uses it
       when nothing is configured (INFO), WARN only with no route
 - [x] test; nvmeof/discovery/serve/forge/netif 186/186; README, CHANGELOG
 - [x] check.sh at 84fda2b ALL PASS (1196/1196); commented
-- [ ] golden: held with #428/#410/#413 until stormcentral#841 is live; proposed after it
+- [x] in golden-stormblock-12891c0025b2 (12.23 stage, 4d79108 ⊇ 14518a0);
+      pvetest1 12.27 (2026-10-14): `forge mode: NVMe/TCP target on
+      0.0.0.0:4420` and no "with no advertised address" WARN on the
+      console. Closed
 
 ### A node's engine answers 500 to /api/v1/discovery and /metrics (2026-10-13, #413) — DONE (golden-stormblock-12891c0025b2), closed
 
