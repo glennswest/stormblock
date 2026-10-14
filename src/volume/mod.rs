@@ -361,7 +361,7 @@ pub struct VolumeManager {
     /// Sealed volumes' digests and verdicts (#384).
     digests: HashMap<VolumeId, crate::volume::metadata::SealDigest>,
     /// Sealed here with no digest: the digester takes them (#384).
-    to_digest: std::collections::BTreeSet<VolumeId>,
+    to_digest: std::collections::HashSet<VolumeId>,
     /// Wakes the digester: a seal to digest, or a copy to check.
     digest_wake: Arc<tokio::sync::Notify>,
     /// Why the last attempt to write this manager's record failed, if it did.
