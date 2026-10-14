@@ -430,7 +430,7 @@ persist failed, volumes were made in memory, the restart lost them. Owner
       the engine stopped, GC off on the first start, .prev / snapshot
       rollback)
 
-### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — DONE (check.sh at ee1e77a), golden requested
+### System half on its own SSD, data on the HDD (2026-10-13, #402, P1) — DONE (golden-stormblock-10eab8535dd2), metal pending
 
 Owner/master on #402 (2026-10-13): **A** — a drive designated `system` in
 stormdrive (`<system-data>/stormdrive/system-drives.json`, matched by WWN,
@@ -463,8 +463,9 @@ drives either may be sda.
       never started); check.sh at ee1e77a ALL PASS (1237/1237). Plain
       `cargo test` of install_tests runs five flow-over tests together that
       share process globals and fail that way only: nextest is the gate
-- [ ] golden (`component build stormblock`), shipped, close #402. Not on
-      metal: server8 with its SSD (a release with this engine and initramfs)
+- [x] golden golden-stormblock-10eab8535dd2 (0e756c0, stormcos#467); #402
+      closed. Not on metal: server8 with its SSD (a release with this engine
+      and initramfs; the initramfs from ≥ 0e756c0)
 
 ### Send extents: MDTS 8 MiB, commands sized by the target (2026-10-13, #407, P1) — DONE (golden-stormblock-0f2728dcf2ef)
 
