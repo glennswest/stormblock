@@ -433,6 +433,7 @@ impl Default for StormBlockConfig {
             gc: GcConfig::default(),
             pressure: crate::volume::pressure::PressureConfig::default(),
             rebuild: crate::rebuild::RebuildConfig::default(),
+            scrub: crate::scrub::ScrubConfig::default(),
             serve: ServeSection::default(),
             erase: EraseConfig::default(),
             metadata: MetadataSection::default(),
