@@ -11745,6 +11745,9 @@ file = "{state}"
         fn block_size(&self) -> u32 {
             self.inner.block_size()
         }
+        fn optimal_io_size(&self) -> u32 {
+            self.inner.optimal_io_size()
+        }
         fn device_type(&self) -> crate::drive::DriveType {
             self.inner.device_type()
         }
