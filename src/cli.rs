@@ -14301,3 +14301,41 @@ mod config_arrays_tests {
         assert_eq!((c.reactor.cores, c.reactor.pin_cores), (3, false), "a file with [boot] still loads; [reactor] is read");
     }
 }
+
+#[cfg(test)]
+mod boot_claim_wait_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// An appliance whose claim takes 12 s (#424: pvetest1 waited behind
+    /// another machine's on 12.21): one request, answered, no second claim
+    /// sent behind the first. The initramfs cut an attempt at 10 s.
+    #[tokio::test]
+    async fn a_claim_that_takes_longer_than_ten_seconds_is_waited_for_not_sent_again() {
+        let asked = Arc::new(AtomicUsize::new(0));
+        let a = asked.clone();
+        let app = axum::Router::new().route(
+            "/api/v1/synonyms/boothost/{tag}/claim",
+            axum::routing::post(move || {
+                let a = a.clone();
+                async move {
+                    a.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+                    axum::Json(serde_json::json!({
+                        "volume": {"name": "boothost-slow"},
+                        "attach": {"uri": "nvme-tcp://192.0.2.1:4420/nqn.test?nsid=1"}
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let t = std::time::Instant::now();
+        let uri = super::claim_boot_uri(&addr.to_string(), "slow", "boothost", 120, None).await.unwrap();
+        assert_eq!(uri, "nvme-tcp://192.0.2.1:4420/nqn.test?nsid=1");
+        assert!(t.elapsed() >= std::time::Duration::from_secs(12));
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "a second claim was sent behind the first");
+        server.abort();
+    }
+}
