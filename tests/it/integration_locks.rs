@@ -347,10 +347,35 @@ async fn health_and_listings_answer_while_composes_exports_clones_and_seals_run(
 /// persisted under the volume manager, across the slabs' flushes (seen on
 /// 12.21 as `held by task …` when sbregistry imported its fedora media). With
 /// the rule enforced it finishes, done, and its golden is there.
+/// [`setup`] with the volume records on the slabs themselves, as a node keeps
+/// them (format 2 metadata regions): a persist writes and flushes the slabs.
+async fn setup_records_on_slabs(dir: &TempDir) -> Arc<AppState> {
+    let devices = common::create_file_devices(dir, 2, 512 * 1024 * 1024).await;
+    let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    let mut ids = Vec::new();
+    for (dev, role) in devices.into_iter().zip([SlabRole::System, SlabRole::Data]) {
+        let slow: Arc<dyn BlockDevice> = Arc::new(Slow { inner: dev, read_ms: 0 });
+        let slab = Slab::format_with(
+            slow,
+            SlabFormat::new(DEFAULT_EXTENT_SIZE, StorageTier::Hot).with_role(role).with_metadata(8 << 20),
+        )
+        .await
+        .unwrap();
+        ids.push(slab.slab_id());
+        vm.add_slab(slab).await;
+    }
+    vm.persist_to_slabs(ids);
+    let mut config = StormBlockConfig::default();
+    config.management.ublk_transport = false;
+    let reg = vm.registry().clone();
+    let gem = vm.gem().clone();
+    Arc::new(AppState::new(config, vm, reg, gem))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_import_never_flushes_with_the_volume_manager_held() {
     let dir = TempDir::new().unwrap();
-    let state = setup(&dir).await;
+    let state = setup_records_on_slabs(&dir).await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
