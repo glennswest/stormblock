@@ -695,10 +695,16 @@ async fn rebalance_start(
     }
     // Each volume's rung, read before the map and the registry (the volume
     // manager is never taken after them).
-    let spread: std::collections::HashMap<crate::volume::VolumeId, String> = {
+    let (spread, affine): (
+        std::collections::HashMap<crate::volume::VolumeId, String>,
+        std::collections::HashSet<crate::volume::VolumeId>,
+    ) = {
         let vm = state.volume_manager.lock().await;
         let ids: Vec<_> = vm.list_volumes().await.into_iter().map(|(id, ..)| id).collect();
-        ids.into_iter().filter_map(|id| vm.redundancy(&id).map(|p| (id, p.spread.clone()))).collect()
+        (
+            ids.iter().filter_map(|id| vm.redundancy(id).map(|p| (*id, p.spread.clone()))).collect(),
+            ids.iter().copied().filter(|id| vm.is_affine(id)).collect(),
+        )
     };
     let plan = {
         let _pin = match crate::volume::gem::pin_resident(&state.gem).await {
@@ -711,6 +717,7 @@ async fn rebalance_start(
             &g,
             &r,
             &spread,
+            &affine,
             req.pool.as_deref(),
             req.max_moves.unwrap_or(crate::rebalance::DEFAULT_MAX_MOVES),
         )

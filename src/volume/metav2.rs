@@ -1576,6 +1576,50 @@ mod tests {
         }
     }
 
+    /// #153: a spread layout rides after the digest (affine writes nothing),
+    /// and #384's reader still finds its digest first.
+    #[test]
+    fn a_spread_layout_rides_after_the_digest() {
+        use crate::volume::metadata::{Origin, SealDigest, Verdict};
+        use crate::volume::thin::Layout;
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let digest = SealDigest { sha256: [3; 32], verdict: Verdict::Unchecked, checked_at: 0 };
+        for (layout, d) in [(Layout::Spread, None), (Layout::Spread, Some(digest)), (Layout::Affine, None)] {
+            let rec = VolumeRecord {
+                id,
+                name: "scratch".into(),
+                virtual_size: 1 << 20,
+                array_id: None,
+                extents: Default::default(),
+                retention: Default::default(),
+                redundancy: Default::default(),
+                parity: Default::default(),
+                failed_slabs: Vec::new(),
+                parent: None,
+                sealed: false,
+                template: false,
+                access: Default::default(),
+                fs: None,
+                owner: None,
+                lba: 4096,
+                extent_size: 0,
+                origin: Origin::Unmarked,
+                tier: None,
+                digest: d,
+                layout,
+            };
+            let bytes = header_bytes(&rec, 1 << 20);
+            let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
+            assert_eq!((back.layout, back.digest), (layout, d));
+            let (_, used): (Header, _) = bincode::serde::decode_from_slice(&bytes[4..], bincode::config::standard()).unwrap();
+            if layout == Layout::Affine {
+                assert_eq!(used + 4, bytes.len(), "affine and unmarked: the header as it always was");
+            } else {
+                assert_eq!(bytes[4 + used + 6] == DIGEST_TAG, d.is_some(), "the digest first");
+            }
+        }
+    }
+
     /// #349: a volume's origin rides after its header; a reader that knows
     /// only the header (every v2 engine before) decodes it as before.
     #[test]

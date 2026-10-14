@@ -106,7 +106,8 @@ pub struct Plan {
     pub moves: usize,
     pub bytes: u64,
     /// Extents on a slab above the mean that stay: no slab below the mean
-    /// keeps the volume's legs apart, or the volume has parity.
+    /// keeps the volume's legs apart, the volume has parity, or it is a
+    /// single-copy volume kept on one drive (#153).
     pub left: u64,
     #[serde(skip)]
     pub list: Vec<Move>,
@@ -117,6 +118,7 @@ pub fn plan(
     gem: &GlobalExtentMap,
     reg: &SlabRegistry,
     spread: &HashMap<VolumeId, String>,
+    affine: &HashSet<VolumeId>,
     pool: Option<&str>,
     max_moves: usize,
 ) -> Plan {
@@ -181,7 +183,9 @@ pub fn plan(
                     if !seen.insert(leg) {
                         continue;
                     }
-                    if parity.contains(&vol) {
+                    // A single-copy volume kept on one drive (#153) is moved
+                    // whole or not at all: the rebalance leaves it where it is.
+                    if parity.contains(&vol) || affine.contains(&vol) {
                         out.left += 1;
                         continue;
                     }

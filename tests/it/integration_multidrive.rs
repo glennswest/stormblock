@@ -113,13 +113,25 @@ async fn a_node_with_several_drives_places_fails_rebuilds_and_grows() {
     assert_eq!(domains.len(), 4);
     assert!(domains.iter().all(|d| d.contains("shelf=") && d.contains("drive=")), "{domains:?}");
 
-    // A volume with no redundancy spreads: each extent goes to the most-free slab.
+    // A volume with no redundancy keeps to one drive (#153, affine by
+    // default): lost with one drive, not with any of four.
     let (s, plain) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "plain", "size": "32M", "redundancy": "none" }))).await;
     assert!(s == 200 || s == 201, "{plain}");
+    assert_eq!(plain["layout"], "affine", "{plain}");
     let plain = VolumeId(plain["id"].as_str().unwrap().parse().unwrap());
     fill(&state, plain, 16, 1).await;
     let p = placement(&c, &api, plain).await;
+    assert_eq!(p["drives"].as_array().unwrap().len(), 1, "16 extents on one drive: {p:#}");
+    // One that asks to spread: each extent on the most-free slab.
+    let (s, scratch) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "scratch", "size": "32M", "placement": "spread" }))).await;
+    assert!(s == 200 || s == 201, "{scratch}");
+    assert_eq!(scratch["layout"], "spread");
+    let scratch = VolumeId(scratch["id"].as_str().unwrap().parse().unwrap());
+    fill(&state, scratch, 16, 9).await;
+    let p = placement(&c, &api, scratch).await;
     assert_eq!(p["drives"].as_array().unwrap().len(), 4, "16 extents over four drives: {p:#}");
+    let (s, e) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "bad", "size": "4M", "placement": "striped" }))).await;
+    assert_eq!(s, 400, "{e}");
 
     // A mirror across shelves: one leg of every extent in each shelf.
     let (s, m) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "m", "size": "16M", "redundancy": "mirror:2@shelf" }))).await;
@@ -174,7 +186,7 @@ async fn a_node_with_several_drives_places_fails_rebuilds_and_grows() {
 
     // The mirror is rebuilt around it; nothing of either volume is left on it.
     let d0_path = dir.path().join("d0.img").to_string_lossy().to_string();
-    for (id, name) in [(m, "m"), (plain, "plain")] {
+    for (id, name) in [(m, "m"), (plain, "plain"), (scratch, "scratch")] {
         let p = placement(&c, &api, id).await;
         assert!(
             p["slabs"].as_array().unwrap().iter().all(|s| s["drive"]["path"] != d0_path.as_str()),
@@ -187,7 +199,11 @@ async fn a_node_with_several_drives_places_fails_rebuilds_and_grows() {
     let by = legs_by_shelf(&p);
     assert_eq!((by.get("A"), by.get("B")), (Some(&8), Some(&8)), "still one leg per shelf: {by:?}");
     check(&state, plain, 16, 1).await;
+    check(&state, scratch, 16, 9).await;
     check(&state, m, 8, 50).await;
+    // Drained or not, the affine volume is still on one drive (#153).
+    let p = placement(&c, &api, plain).await;
+    assert_eq!(p["drives"].as_array().unwrap().len(), 1, "plain kept to one drive: {p:#}");
 
     // A drive is added in a third shelf: the pool grows by it.
     let before = call(&c, reqwest::Method::GET, format!("{api}/slabs/pool"), None).await.1["usage"]["total_bytes"].as_u64().unwrap();

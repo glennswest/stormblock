@@ -58,7 +58,12 @@ async fn an_added_slab_takes_its_share_and_every_byte_stays() {
     let dir = TempDir::new().unwrap();
     let mut vm = VolumeManager::new(SLOT);
     vm.add_slab(file_slab(&dir, "a").await).await;
-    let id = vm.create_volume_with("v", 64 * SLOT, CreateOptions::default()).await.unwrap();
+    // Spread (#153): an affine single-copy volume is left whole (below).
+    let spread = CreateOptions {
+        placement: stormblock::volume::PlacementPolicy { layout: stormblock::volume::thin::Layout::Spread, ..Default::default() },
+        ..Default::default()
+    };
+    let id = vm.create_volume_with("v", 64 * SLOT, spread).await.unwrap();
     let v = vm.get_volume(&id).unwrap();
     for e in 0..40u64 {
         v.write(e * SLOT, &vec![e as u8 + 1; SLOT as usize]).await.unwrap();
@@ -129,4 +134,35 @@ async fn a_mirror_never_gets_two_legs_on_one_slab() {
         v.read(e * SLOT, &mut b).await.unwrap();
         assert!(b.iter().all(|x| *x == e as u8 + 7), "extent {e}");
     }
+}
+
+
+/// #153: a single-copy volume kept on one drive (affine, the default) is
+/// moved whole or not at all; the rebalance leaves it, and says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_affine_volume_is_left_on_its_drive() {
+    let dir = TempDir::new().unwrap();
+    let mut vm = VolumeManager::new(SLOT);
+    vm.add_slab(file_slab(&dir, "a").await).await;
+    let id = vm.create_volume_with("v", 64 * SLOT, CreateOptions::default()).await.unwrap();
+    let v = vm.get_volume(&id).unwrap();
+    for e in 0..40u64 {
+        v.write(e * SLOT, &vec![e as u8 + 1; SLOT as usize]).await.unwrap();
+    }
+    v.flush().await.unwrap();
+    vm.add_slab(file_slab(&dir, "b").await).await;
+    let (state, url) = serve(&dir, vm).await;
+    let c = reqwest::Client::new();
+    let before = used(&state).await;
+    let r: Value = c.post(&url).json(&json!({ "dry_run": false })).send().await.unwrap().json().await.unwrap();
+    assert_eq!(r["plan"]["moves"], 0, "{r}");
+    assert!(r["plan"]["left"].as_u64().unwrap() >= 20, "left, and counted: {r}");
+    assert_eq!(used(&state).await, before, "nothing moved");
+    // New extents keep to its drive too.
+    let v = state.volume_manager.lock().await.get_volume(&stormblock::volume::VolumeId(id.0)).unwrap();
+    v.write(50 * SLOT, &[9u8; 4096]).await.unwrap();
+    let after = used(&state).await;
+    let grew: Vec<_> = after.iter().filter(|(k, n)| before.get(*k) != Some(n)).collect();
+    assert_eq!(grew.len(), 1, "one slab took the new extent: {grew:?}");
+    assert!(before[grew[0].0] > 0, "the slab it was already on");
 }
