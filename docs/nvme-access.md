@@ -118,6 +118,17 @@ subsystem, port, NSID and `host_nqns`. The next boot's clone lands in the same
 subsystem and the released one leaves it. No firmware change is needed. The
 template is `[nvmeof] boothost_host_nqn` (`{name}` is replaced).
 
+**The node connects as the host its clone admits** (#443). `boot-claim` adds
+`hostnqn=` to the URI it hands back. The value is the node's
+`STORMBLOCK_HOST_NQN` when the reply's `host_nqns` admits it, else the first of
+`host_nqns`, else `nqn.2026-09.lo.storm:host-<tag>`. The URI travels with the
+slab path to `boot-local`, the handover record and `adopt-ublk`. So the engine
+after switch_root, which has no `STORMBLOCK_HOST_NQN`, presents the same name
+as the initramfs. 12.25's did not: it presented
+`nqn.2024.io.stormblock:initiator`, and forge refused it (status 0x8308). One
+clone serves one host: a host forge has never seen claims a clone of its own
+(through `boothost/default`), never another host's (#445).
+
 On a node without the shared listener (no NVMe-oF target at startup), a claim
 is served from the volume's own subsystem, `<serve prefix>:vol-<uuid>` at
 NSID 1, with the same allowed hosts. It is a subsystem of the one `[serve]`
