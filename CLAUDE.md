@@ -1044,17 +1044,29 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
-### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — WAITING ON THE OWNER
+### An optional kernel image (gpu/misc) from forge on day 2 (2026-10-10, #383, P2) — IN PROGRESS
 
-stormcos#276 (A: only when asked). The engine half (copy a sealed golden
-into the system slab, mountable clone, idempotent, progress, forge
-unreachable refused) is clear; two questions asked on #383 (needs-owner):
-**1** which golden is gpu for the running kernel (A: a forge synonym
-`kernelopt/<kernel release>/<image>` stormcentral keeps, recommended; B the
-release manifest's optional rows; C the caller names it); **2** what lets a
-node pull from forge (A: its #247 host secret reads a sealed golden's content
-by Range, recommended; B kernel-set goldens readable openly; C stormcentral
-pushes). Nothing built yet.
+Master for the owner (2026-10-13): **1B** the release's manifest lists its
+kernel set's optional goldens (`optional: true`, the image, the kernel), so a
+node resolves "the gpu for my kernel" from its own release on any forge (no
+stormcentral at a customer site); **2** the node pulls with its enrolled
+forge-CA client certificate (`/data/stormcert/forge-node.{crt,key}.pem`,
+stormcert#78/#79, stormcos#486/#490): read-only, sealed only, Range with
+resume, digest checked, a revoked node refused by the CRL. The engine builds
+the content route and the mTLS check now; enrollment's wiring is stormcos's.
+- [ ] tls: a forge-CA certificate not on the admin list = `forge_node`; auth:
+      it reads only `GET /api/v1/volumes/{id}/content` and `GET
+      /api/v1/releases/{v}/manifest`
+- [ ] `GET /api/v1/volumes/{id}/content`: a sealed volume's bytes, Range
+- [ ] manifest entries: `optional`, `image`, `kernel` (additive)
+- [ ] http client identity; import with it (raw stream: resume, sha256,
+      seal, deleted on failure)
+- [ ] `[kernel]` config (forge_url, client_cert/key, forge_ca);
+      `POST /api/v1/kernel/optional {images, release?, kernel?, forge?}`:
+      resolve the row, pull (an import), clone as the image's name, record;
+      present = no-op; `GET` status
+- [ ] test with a stand-in forge over mTLS; docs; stormcentral issue (the
+      manifest rows), stormupdate issue (pull for N+1 when staging)
 
 ### A reviewed Kubernetes bearer for ordinary verbs (2026-10-10, #382, P2) — DONE (golden-stormblock-d56a8225b161)
 
