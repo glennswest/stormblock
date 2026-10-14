@@ -1064,7 +1064,8 @@ the content route and the mTLS check now; enrollment's wiring is stormcos's.
       cloned, read back, no-op, 422, 502 nothing made, the certificate's
       limits); README, auth.md, CHANGELOG; stormcentral#845 (manifest rows),
       stormupdate#24 (A/B), stormcos#571 (the ask, forge's TLS)
-- [ ] check.sh; golden (held for stormcentral#841)
+- [x] check.sh at 552996d ALL PASS (1201/1201); commented
+- [ ] golden: held until stormcentral#841 is live; proposed after it
 
 ### A reviewed Kubernetes bearer for ordinary verbs (2026-10-10, #382, P2) — DONE (golden-stormblock-d56a8225b161)
 
