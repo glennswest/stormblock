@@ -129,7 +129,9 @@ async fn a_node_with_several_drives_places_fails_rebuilds_and_grows() {
     let scratch = VolumeId(scratch["id"].as_str().unwrap().parse().unwrap());
     fill(&state, scratch, 16, 9).await;
     let p = placement(&c, &api, scratch).await;
-    assert_eq!(p["drives"].as_array().unwrap().len(), 4, "16 extents over four drives: {p:#}");
+    // The emptiest each time: the three drives `plain` is not on (16 slots
+    // emptier than its drive, which 16 extents over three never reach).
+    assert_eq!(p["drives"].as_array().unwrap().len(), 3, "16 extents over the three emptier drives: {p:#}");
     let (s, e) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "bad", "size": "4M", "placement": "striped" }))).await;
     assert_eq!(s, 400, "{e}");
 
