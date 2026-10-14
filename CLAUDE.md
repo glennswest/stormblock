@@ -1044,7 +1044,7 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
-### lockwatch: the volume manager held across a flush, still (2026-10-14, #415) — IN PROGRESS
+### lockwatch: the volume manager held across a flush, still (2026-10-14, #415) — DONE here; golden waits on stormcentral#841
 
 - [x] import task: `spawn_owing` + `persist_detached_checked`, done after it
 - [x] flow-over retire: `retire_drained_slab` no longer persists; the
@@ -1053,7 +1053,8 @@ format change (#354, #380, #379 only).
 - [x] test `integration_locks::an_import_never_flushes_with_the_volume_
       manager_held` (records on the slabs): fails without the fix with
       12.21's line, passes with it; targeted 14/14; CHANGELOG
-- [ ] check.sh; golden (held for stormcentral#841); close
+- [x] check.sh at 9e57c5e ALL PASS (1204/1204); commented
+- [ ] golden: held until stormcentral#841 is live; proposed after it; then close
 
 ### The netdev wait never saw a virtio NIC (2026-10-14, #414) — DONE (initramfs at 87343f8)
 
