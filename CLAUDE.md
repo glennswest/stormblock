@@ -1246,7 +1246,7 @@ newest published, 9cbe6ca) reads no v2 at all. So no new key kind.
 - [x] check.sh at e6eca7e ALL PASS (1213/1213); commented
 - [ ] golden: held until stormcentral#841 is live; proposed after it; then close
 
-### A boot claim timed out at 10 s and was sent again (2026-10-14, #424, P2) — DONE here; golden waits on stormcentral#841
+### A boot claim timed out at 10 s and was sent again (2026-10-14, #424, P2) — DONE (golden-stormblock-12891c0025b2), closed
 
 pvetest1 12.21 (forge on 13.7.0): pvetest2's claim ~9 s, pvetest1's queued
 behind it (one lock for every claim) past the initramfs's 10 s attempt.
@@ -1258,7 +1258,9 @@ Today: 2 clones per first boot (stamp + flush each), 2.3 s at 500 ms flushes.
       abandoned claim finishes), `cli::boot_claim_wait_tests::…` (12 s claim,
       one request); README, auth.md, CHANGELOG
 - [x] check.sh at 99a13ac ALL PASS (1208/1208); commented
-- [ ] golden: held until stormcentral#841 is live; proposed after it; then close
+- [x] in golden-stormblock-12891c0025b2 (4d79108 ⊇ 99a13ac), forge on
+      5b2e16a; 12.27: pvetest1 and pvetest2 claimed at once (18 s, 16 s), no
+      timeout or retry on either console. Closed
 
 ### A storage-user deletes what it created (2026-10-14, #422 + #416, P2) — DONE (golden-stormblock-12891c0025b2), closed
 
