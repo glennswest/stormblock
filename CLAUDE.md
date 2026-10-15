@@ -207,8 +207,11 @@ self-update result) was gone seconds later.
       served on boothost GET/list and the boothost synonym
 - [x] test `integration_synonyms::each_boot_agents_last_claim_is_kept_beside_
       the_last_one`; README, CHANGELOG
-- [ ] run; check.sh; golden after the master's wave (they asked: no new
-      stormblock golden until its pve result); stormcentral#286 told; close
+- [x] integration_synonyms 49/49 (found: the record's MAC was the alias
+      variable, null for a known host; fixed); check.sh at fcca56e ALL PASS
+      (1243/1243); stormcentral#286 told
+- [ ] golden once the master's wave has its pve result (their ask: no new
+      stormblock golden until then); then close
 
 ### Forge client certificates admin by subject CN (2026-10-14, #453, stormcos#497) — DONE (golden-stormblock-59729e1c6576), closed
 
