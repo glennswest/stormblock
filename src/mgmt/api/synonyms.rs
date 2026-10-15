@@ -1386,7 +1386,7 @@ async fn claim_boothost(
             assignment_version: assignment.version,
             agent,
             inventory,
-            mac: mac.map(str::to_string),
+            mac: mac.clone(),
         },
     );
     // This machine's own credential for what a node may do to its own boot

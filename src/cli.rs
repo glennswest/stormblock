@@ -10926,7 +10926,7 @@ file = "{state}"
         // clone (a copy of N's image, attached as that boot had it).
         let old_clone = dir.path().join("clone-n-cut.raw").display().to_string();
         std::fs::copy(&image_n, &old_clone).unwrap();
-        let mut slot = 0u64;
+        let slot: u64;
         {
             let (mut node, _) = super::open_slabs_resuming(&[disk.clone(), old_clone.clone()], None, false).await.unwrap();
             let opts = crate::volume::CreateOptions { id: Some(golden_id), ..Default::default() }.in_role(SlabRole::Data);
