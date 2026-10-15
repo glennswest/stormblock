@@ -1275,7 +1275,7 @@ Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).
 - [x] check.sh at bf5380a ALL PASS (1206/1206); commented; stormcos#557 told
 - [ ] golden: held until stormcentral#841 is live; #422/#416 proposed after it
 
-### lockwatch: the volume manager held across a flush, still (2026-10-14, #415) — DONE here; golden waits on stormcentral#841
+### lockwatch: the volume manager held across a flush, still (2026-10-14, #415) — DONE (golden-stormblock-12891c0025b2), closed
 
 - [x] import task: `spawn_owing` + `persist_detached_checked`, done after it
 - [x] flow-over retire: `retire_drained_slab` no longer persists; the
@@ -1285,7 +1285,8 @@ Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).
       manager_held` (records on the slabs): fails without the fix with
       12.21's line, passes with it; targeted 14/14; CHANGELOG
 - [x] check.sh at 9e57c5e ALL PASS (1204/1204); commented
-- [ ] golden: held until stormcentral#841 is live; proposed after it; then close
+- [x] in golden-stormblock-12891c0025b2 (4d79108 ⊇ 9e57c5e); pvetest1's 12.27
+      console: no lockwatch line, the flow-over's end clean; closed
 
 ### The netdev wait never saw a virtio NIC (2026-10-14, #414) — DONE (initramfs at 87343f8)
 
