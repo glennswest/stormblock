@@ -141,8 +141,13 @@ pub(super) async fn body(state: &AppState, s: &Synonym, changed: Option<bool>) -
     // claimed, what it got, and the agent that asked.
     if s.namespace == BOOTHOST_NS {
         let store = state.synonyms.read().await;
-        if let Some(c) = store.host_of(&s.name).and_then(|h| store.host(&h)).and_then(|h| h.last_claim) {
-            v["last_claim"] = c.json();
+        if let Some(h) = store.host_of(&s.name).and_then(|h| store.host(&h)) {
+            if let Some(c) = &h.last_claim {
+                v["last_claim"] = c.json();
+            }
+            if !h.claims_by_agent.is_empty() {
+                v["claims_by_agent"] = h.claims_by_agent.iter().map(|(k, c)| (k.clone(), c.json())).collect::<serde_json::Map<_, _>>().into();
+            }
         }
     }
     if let Some(id) = s.target.volume_id() {
@@ -1381,6 +1386,7 @@ async fn claim_boothost(
             assignment_version: assignment.version,
             agent,
             inventory,
+            mac: mac.map(str::to_string),
         },
     );
     // This machine's own credential for what a node may do to its own boot

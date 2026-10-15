@@ -111,6 +111,9 @@ async fn view(state: &AppState, h: &Host) -> serde_json::Value {
         "tpm": tpm_word(h),
         "tpm_set_at": h.tpm_set_at,
         "last_claim": h.last_claim.as_ref().map(|c| c.json()),
+        // Each boot agent's last claim (#456): stormbootx's survives the
+        // initramfs's claim seconds later.
+        "claims_by_agent": h.claims_by_agent.iter().map(|(k, c)| (k.clone(), c.json())).collect::<serde_json::Map<_, _>>(),
         "assignment": assignment,
         "host_golden": golden,
         "created_at": h.created_at,

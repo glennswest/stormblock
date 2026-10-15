@@ -257,6 +257,12 @@ pub struct Host {
     /// boot-chain attestation reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_claim: Option<ClaimRecord>,
+    /// The last claim of each boot agent (#456), by its `name`: a boot
+    /// claims twice (stormbootx, then the initramfs seconds later), and
+    /// `last_claim` keeps only the second. stormbootx's record carries its
+    /// version and its self-update trial result (stormcentral#286).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub claims_by_agent: std::collections::BTreeMap<String, ClaimRecord>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -372,6 +378,27 @@ pub struct ClaimRecord {
     /// Kept as given, bounded; absent when none was sent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inventory: Option<serde_json::Value>,
+    /// The MAC the claim named, when it named one (#456): a canary in
+    /// stormbootx's update manifest is named by its MAC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+}
+
+/// The agents a host keeps a last claim for, at most (#456): the claim is
+/// unauthenticated, so what it can leave behind is bounded. Two are what a
+/// boot makes (stormbootx, then the initramfs).
+pub const CLAIM_AGENTS_MAX: usize = 8;
+
+/// The name a claim's record is kept under in `claims_by_agent` (#456): the
+/// agent's `name`, at most 64 characters, else `unnamed`.
+pub fn agent_key(rec: &ClaimRecord) -> String {
+    rec.agent
+        .as_ref()
+        .and_then(|a| a.get("name"))
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.is_empty() && n.len() <= 64)
+        .unwrap_or("unnamed")
+        .to_string()
 }
 
 /// The most a claim's `agent` or `inventory` may take, serialized (#177).
@@ -408,6 +435,7 @@ impl ClaimRecord {
             "host_nqns": self.host_nqns,
             "agent": self.agent,
             "inventory": self.inventory,
+            "mac": self.mac,
         })
     }
 }
@@ -1071,6 +1099,14 @@ impl SynonymStore {
             ..Host::default()
         });
         let h = self.hosts.entry(host.to_string()).or_insert(base);
+        let key = agent_key(&rec);
+        if !h.claims_by_agent.contains_key(&key) && h.claims_by_agent.len() >= CLAIM_AGENTS_MAX {
+            // Full: the agent heard from longest ago makes room.
+            if let Some(oldest) = h.claims_by_agent.iter().min_by_key(|(_, c)| c.claimed_at).map(|(k, _)| k.clone()) {
+                h.claims_by_agent.remove(&oldest);
+            }
+        }
+        h.claims_by_agent.insert(key, rec.clone());
         h.last_claim = Some(rec);
         self.persist();
     }

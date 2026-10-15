@@ -1677,6 +1677,78 @@ async fn a_claim_leaves_a_record_a_manager_can_read() {
     server.abort();
 }
 
+/// #456: a boot claims twice, stormbootx and then the initramfs seconds
+/// later, and `last_claim` keeps only the second. Each agent's last claim is
+/// kept by its name, with the MAC it named, on the host and its synonym,
+/// across a restart; `last_claim` is unchanged. At most a bounded number of
+/// agents are kept (the claim is unauthenticated).
+#[tokio::test]
+async fn each_boot_agents_last_claim_is_kept_beside_the_last_one() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "server1", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    let claim = |body: serde_json::Value| {
+        let (client, url) = (client.clone(), format!("{base}/api/v1/synonyms/boothost/server1/claim"));
+        async move {
+            let r = client.post(url).json(&body).send().await.unwrap();
+            assert_eq!(r.status(), 201);
+            r.json::<serde_json::Value>().await.unwrap()
+        }
+    };
+    let sbx = serde_json::json!({"name": "stormbootx", "version": "0.26.0", "update_serial": 2, "update": "serial:2"});
+    let first = claim(serde_json::json!({"agent": sbx, "mac": "ac:1f:6b:8a:a7:9c"})).await;
+    let initramfs = serde_json::json!({"name": "stormblock-initramfs", "version": "20.0.0"});
+    let second = claim(serde_json::json!({"agent": initramfs})).await;
+
+    let get = |path: String| {
+        let client = client.clone();
+        async move { client.get(path).send().await.unwrap().json::<serde_json::Value>().await.unwrap() }
+    };
+    for path in [format!("{base}/api/v1/boothost/server1"), format!("{base}/api/v1/synonyms/boothost/server1")] {
+        let v = get(path.clone()).await;
+        assert_eq!(v["last_claim"]["agent"], initramfs, "{path}: the last claim is the initramfs's: {v}");
+        assert_eq!(v["last_claim"]["clone"], second["volume"]["id"]);
+        let by = &v["claims_by_agent"];
+        assert_eq!(by["stormbootx"]["agent"], sbx, "{path}: stormbootx's record survives: {v}");
+        assert_eq!(by["stormbootx"]["agent"]["update"], "serial:2", "{path}: its self-update result");
+        assert_eq!(by["stormbootx"]["mac"], "ac:1f:6b:8a:a7:9c", "{path}: the MAC it named");
+        assert_eq!(by["stormbootx"]["clone"], first["volume"]["id"]);
+        assert_eq!(by["stormblock-initramfs"]["clone"], second["volume"]["id"]);
+    }
+
+    // Bounded: many agent names keep at most eight, the newest among them.
+    for i in 0..10 {
+        claim(serde_json::json!({"agent": {"name": format!("agent-{i}")}})).await;
+    }
+    let v = get(format!("{base}/api/v1/boothost/server1")).await;
+    let by = v["claims_by_agent"].as_object().unwrap();
+    assert!(by.len() <= 8, "at most eight agents kept: {:?}", by.keys().collect::<Vec<_>>());
+    assert!(by.contains_key("agent-9"), "the newest is kept: {:?}", by.keys().collect::<Vec<_>>());
+    server.abort();
+
+    // A restart keeps them.
+    claim_after_restart(&dir, &client).await;
+}
+
+/// The host record read again from a fresh engine on the same data dir (#456).
+async fn claim_after_restart(dir: &TempDir, client: &reqwest::Client) {
+    let mut config = StormBlockConfig::default();
+    config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
+    let fresh = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    let (reg, gem) = (fresh.registry().clone(), fresh.gem().clone());
+    let (base, server) = start(Arc::new(AppState::new(config, fresh, reg, gem))).await;
+    let v: serde_json::Value = client.get(format!("{base}/api/v1/boothost/server1")).send().await.unwrap().json().await.unwrap();
+    assert!(v["claims_by_agent"]["agent-9"]["clone"].is_string(), "after a restart: {v}");
+    server.abort();
+}
+
 // ------------------------------------------------------------------ #247
 //
 // A machine's own host secret: handed at every boot claim, it re-points that
