@@ -210,8 +210,8 @@ self-update result) was gone seconds later.
 - [x] integration_synonyms 49/49 (found: the record's MAC was the alias
       variable, null for a known host; fixed); check.sh at fcca56e ALL PASS
       (1243/1243); stormcentral#286 told
-- [ ] golden once the master's wave has its pve result (their ask: no new
-      stormblock golden until then); then close
+- [ ] golden on Saturday 2026-10-17 (the master: everything pauses Thursday
+      and Friday from 05:00Z; #456 goes into the next wave); then close
 
 ### Forge client certificates admin by subject CN (2026-10-14, #453, stormcos#497) — DONE (golden-stormblock-59729e1c6576), closed
 
@@ -253,7 +253,9 @@ slab keeps the old record, and restore takes the first record it meets.
 - [x] check.sh at 0398272 ALL PASS (1241/1241); golden
       golden-stormblock-46af5bb670bb (58ce20a, stormcos#467; the initramfs
       from ≥ 58ce20a); master told; `stormcentral shipped`. Metal: server2's
-      next reinstall (FINDING once, no "mapping dropped")
+      next reinstall (FINDING once, no "mapping dropped"). 12.30 (this
+      engine and initramfs) passed on pve 2026-10-15: no findings, slabs
+      local, 5/5 power-cut rounds
 
 ### server1 (X9) at the EFI shell after a 12.27 install (2026-10-14, #449, P0) — NOT stormblock's; waits on stormbootx#89 (v0.26.0 on server1's stick)
 
