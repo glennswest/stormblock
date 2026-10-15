@@ -1069,6 +1069,9 @@ async fn claim_boothost(
     let resolving = BOOT_CLAIMS.lock().await;
     let by_default = claimed_as.eq_ignore_ascii_case(DEFAULT_HOST);
     let mut named_claim: Option<synonym::NamedClaim> = None;
+    // The MAC the claim named, as named, for its record (#456): below, `mac`
+    // becomes the one a new host is given as its alias, or none.
+    let claim_mac = mac.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
     let (tag, mac, new_machine) = if by_default {
         let Some(mac) = mac.filter(|m| !m.trim().is_empty()) else {
             return ApiError::bad_request(format!(
@@ -1386,7 +1389,7 @@ async fn claim_boothost(
             assignment_version: assignment.version,
             agent,
             inventory,
-            mac: mac.clone(),
+            mac: claim_mac,
         },
     );
     // This machine's own credential for what a node may do to its own boot
