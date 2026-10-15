@@ -1260,7 +1260,7 @@ Today: 2 clones per first boot (stamp + flush each), 2.3 s at 500 ms flushes.
 - [x] check.sh at 99a13ac ALL PASS (1208/1208); commented
 - [ ] golden: held until stormcentral#841 is live; proposed after it; then close
 
-### A storage-user deletes what it created (2026-10-14, #422 + #416, P2) — DONE here; golden waits on stormcentral#841
+### A storage-user deletes what it created (2026-10-14, #422 + #416, P2) — DONE (golden-stormblock-12891c0025b2), closed
 
 Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).
 - [x] `mgmt::creators` (`creators.json`): volumes (create, clone, import),
@@ -1273,7 +1273,8 @@ Owner's option 1 on stormbootx-test#2 (master, 2026-10-13).
 - [x] test `integration_destructive::a_storage_user_deletes_what_it_created_
       and_nothing_else`; 103/103 targeted; auth.md, README, CHANGELOG
 - [x] check.sh at bf5380a ALL PASS (1206/1206); commented; stormcos#557 told
-- [ ] golden: held until stormcentral#841 is live; #422/#416 proposed after it
+- [x] in golden-stormblock-12891c0025b2 (4d79108 ⊇ bf5380a); the tests pass on
+      main (14/14); stormcos#557 told (add delete to storage-user); closed
 
 ### lockwatch: the volume manager held across a flush, still (2026-10-14, #415) — DONE (golden-stormblock-12891c0025b2), closed
 
