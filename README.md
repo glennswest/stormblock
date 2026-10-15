@@ -1115,8 +1115,17 @@ the host, `last_claim`, which a manager reads on `GET /api/v1/boothost/{name}`
   `update`; stormbootx#20: MACs, NIC drivers, storage controllers and disks).
 
 Each of `agent` and `inventory` is kept only when it is a JSON object of at
-most 16 KiB, since the claim is the one open write. The record is persisted
-and survives a restart.
+most 16 KiB, since the claim is the one open write. The record also keeps the
+`mac` the claim named, when it named one (#456). It is persisted and survives
+a restart.
+
+**Each boot agent's last claim (#456).** A boot claims twice: stormbootx, then
+the initramfs a few seconds later. `last_claim` is always the second, so the
+host also keeps `claims_by_agent`, the last claim of each agent by its `name`
+(`stormbootx`, `stormblock-initramfs`; `unnamed` when none was sent), on the
+same endpoints. stormbootx's record carries its version and its self-update
+trial result (`agent.update`, stormcentral#286). At most 8 agents are kept;
+when full, the one heard from longest ago makes room.
 
 **Attestation and the TPM mark (#216).** Each host carries `tpm: required |
 none` (unset = none), set by an admin or the platform (`PUT

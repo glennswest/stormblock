@@ -199,6 +199,17 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
+### Each boot agent's last claim kept (2026-10-14, #456, stormcentral#286) — IN PROGRESS
+
+`last_claim` kept only the initramfs's claim; stormbootx's (version, its
+self-update result) was gone seconds later.
+- [x] `Host.claims_by_agent` (by agent name, ≤ 8, names ≤ 64), `ClaimRecord.mac`;
+      served on boothost GET/list and the boothost synonym
+- [x] test `integration_synonyms::each_boot_agents_last_claim_is_kept_beside_
+      the_last_one`; README, CHANGELOG
+- [ ] run; check.sh; golden after the master's wave (they asked: no new
+      stormblock golden until its pve result); stormcentral#286 told; close
+
 ### Forge client certificates admin by subject CN (2026-10-14, #453, stormcos#497) — DONE (golden-stormblock-59729e1c6576), closed
 
 stormcert#117's forge client certificate has no SAN (`CN=stormcentral`), so
