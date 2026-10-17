@@ -676,6 +676,13 @@ async fn every_nic_that_reaches_the_target_carries_a_path() {
         assert!(seen.contains(&a) && seen.contains(&b), "connections from both NICs' addresses: {seen:?}");
     }
     assert_eq!(dev.id().path, spec.uri(), "the device is named by the URI as given");
+    // Health's flow-over names the source's paths and what each carried.
+    let as_dev: std::sync::Arc<dyn stormblock::drive::BlockDevice> = dev.clone();
+    stormblock::flowprogress::FLOW.begin();
+    stormblock::flowprogress::FLOW.source_device(&as_dev);
+    let snap = serde_json::to_value(stormblock::flowprogress::FLOW.snapshot().unwrap()).unwrap();
+    assert_eq!(snap["paths"][1]["interface"], "nic1", "{snap}");
+    assert!(snap["paths"][0]["bytes"].as_u64().unwrap() > 0, "{snap}");
 
     // nic1's link drops: the I/O goes on by nic0.
     cut_from("127.0.0.2".parse().unwrap());
