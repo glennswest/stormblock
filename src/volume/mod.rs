@@ -365,6 +365,9 @@ pub struct VolumeManager {
     schemes: HashMap<VolumeId, crate::volume::metadata::SchemeExt>,
     /// Secret volumes (#74): never copied, never exported, deleted erased.
     secrets: std::collections::HashSet<VolumeId>,
+    /// Whether this node makes erasure-coded volumes (#159): off until every
+    /// release a node could roll back to refuses them (decision A).
+    erasure_coding: bool,
     /// Sealed volumes' digests and verdicts (#384).
     digests: HashMap<VolumeId, crate::volume::metadata::SealDigest>,
     /// Sealed here with no digest: the digester takes them (#384).
@@ -456,6 +459,7 @@ impl VolumeManager {
             digests: HashMap::new(),
             schemes: HashMap::new(),
             secrets: std::collections::HashSet::new(),
+            erasure_coding: false,
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             durability: Arc::new(std::sync::Mutex::new(None)),
@@ -494,6 +498,7 @@ impl VolumeManager {
             digests: HashMap::new(),
             schemes: HashMap::new(),
             secrets: std::collections::HashSet::new(),
+            erasure_coding: false,
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             durability: Arc::new(std::sync::Mutex::new(None)),
@@ -755,6 +760,20 @@ impl VolumeManager {
             Some(why) => Err(VolumeError::Busy(why)),
             None => Ok(()),
         }
+    }
+
+    /// Let this node make erasure-coded volumes (#159), `[redundancy]
+    /// erasure_coding`.
+    pub fn set_erasure_coding(&mut self, on: bool) {
+        self.erasure_coding = on;
+    }
+
+    /// Refuse an erasure-coded policy while EC is off on this node (#159).
+    pub fn refuse_erasure_off(&self, policy: &RedundancyPolicy) -> Result<(), VolumeError> {
+        if policy.is_erasure() && !self.erasure_coding {
+            return Err(VolumeError::ErasureCodingOff(policy.spelling()));
+        }
+        Ok(())
     }
 
     /// Whether a volume is secret (#74).
@@ -1400,6 +1419,7 @@ impl VolumeManager {
         opts: CreateOptions,
     ) -> Result<VolumeId, VolumeError> {
         self.refuse_if_undurable().await?;
+        self.refuse_erasure_off(&opts.redundancy)?;
         // The role is settled here, once, and written onto the handle: an
         // unspecified role means "wherever this node keeps volumes", which is
         // the system slabs on a node that has them and the data slabs on a
@@ -1935,6 +1955,7 @@ impl VolumeManager {
     /// offline operation — the API refuses it while the volume is exported.
     pub async fn restripe(&mut self, id: VolumeId, policy: RedundancyPolicy) -> Result<RestripeReport, VolumeError> {
         self.refuse_unknown_scheme(&id)?;
+        self.refuse_erasure_off(&policy)?;
         let handle = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
         let (mut r, old) = Self::restripe_work(handle, self.gem.clone(), self.registry.clone(), self.slot_size, id, policy).await?;
         // The old placement is freed only once the map that stopped naming
@@ -1957,6 +1978,7 @@ impl VolumeManager {
         let (handle, gem, registry, slot, _op) = {
             let m = vm.lock().await;
             m.refuse_unknown_scheme(&id)?;
+            m.refuse_erasure_off(&policy)?;
             let h = m.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?.clone();
             let op = m.begin_op(id, "restripe").map_err(|r| VolumeError::Busy(format!("volume {id} has a {r} running")))?;
             (h, m.gem.clone(), m.registry.clone(), m.slot_size, op)
@@ -3575,7 +3597,9 @@ impl VolumeManager {
                 origin: self.origins.get(id).copied().unwrap_or_default(),
                 tier: Some(handle.preferred_tier()).filter(|t| *t != StorageTier::Hot),
                 digest: self.digests.get(id).copied(),
-                scheme: self.schemes.get(id).copied(),
+                // An erasure-coded volume says so, so an engine before EC
+                // refuses it instead of reading it as RAID-6 (#159).
+                scheme: self.schemes.get(id).copied().or_else(|| metadata::SchemeExt::of_policy(&handle.redundancy())),
                 layout: handle.layout(),
                 secret: self.secrets.contains(id),
                 lba: handle.lba(),
@@ -3642,7 +3666,7 @@ impl VolumeManager {
                 origin: self.origins.get(&id).copied().unwrap_or_default(),
                 tier: self.volumes.get(&id).map(|h| h.preferred_tier()).filter(|t| *t != StorageTier::Hot),
                 digest: self.digests.get(&id).copied(),
-                scheme: self.schemes.get(&id).copied(),
+                scheme: self.schemes.get(&id).copied().or_else(|| metadata::SchemeExt::of_policy(&redundancy)),
                 layout: self.volumes.get(&id).map(|h| h.layout()).unwrap_or_default(),
                 secret: self.secrets.contains(&id),
                 lba,

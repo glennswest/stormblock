@@ -341,10 +341,24 @@ impl SchemeExt {
         }
     }
 
-    /// Whether this engine reads the scheme. None yet: erasure coding is
-    /// built once every release a node could roll back to refuses it (#159).
+    /// Whether this engine reads the scheme: erasure coding with 3–4 legs
+    /// and at most 24 members (#159).
     pub fn known(&self) -> bool {
-        false
+        self.code == Self::ERASURE
+            && (3..=crate::volume::stripe::MAX_PARITY).contains(&self.parity)
+            && self.data >= 2
+            && self.data as usize + self.parity as usize <= crate::volume::stripe::MAX_EC_WIDTH
+    }
+
+    /// The scheme an erasure-coded policy is written with, so an engine
+    /// before EC refuses the volume instead of reading it as RAID-6 (#159).
+    pub fn of_policy(p: &crate::volume::RedundancyPolicy) -> Option<SchemeExt> {
+        match p.scheme {
+            crate::volume::redundancy::Redundancy::Parity { data, parity } if parity >= 3 => {
+                Some(SchemeExt { code: Self::ERASURE, data, parity })
+            }
+            _ => None,
+        }
     }
 
     /// Why this engine refuses the volume.

@@ -136,3 +136,58 @@ async fn a_refused_volume_can_still_be_deleted() {
     vm.delete_volume(ec).await.expect("an operator may still remove it");
     assert!(vm.get_volume_handle(&ec).is_none());
 }
+
+/// #159 step 2 (decision A): an `ec:4+3` volume is refused while erasure
+/// coding is off on the node, and once it is on, made, written and read back
+/// after a restart. Its header carries the scheme (code 1), so an engine of
+/// step 1, which does not read code 1, refuses it instead of reading it as
+/// RAID-6; this engine reads it.
+#[tokio::test]
+async fn an_erasure_coded_volume_is_made_only_with_ec_on_and_reads_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let devs = drives(&dir, 7).await;
+    let policy = RedundancyPolicy::parse("ec:4+3").unwrap();
+    let datas: Vec<Vec<u8>> = (0..4u8).map(|i| vec![0x30 + i; SLOT as usize]).collect();
+    let ec = {
+        let mut vm = VolumeManager::new(SLOT);
+        let mut ids = Vec::new();
+        for d in &devs {
+            let slab = Slab::format_with(d.clone(), SlabFormat::new(SLOT, StorageTier::Hot).with_metadata(4 << 20).with_version(2))
+                .await
+                .unwrap();
+            ids.push(slab.slab_id());
+            vm.add_slab(slab).await;
+        }
+        vm.persist_to_slabs(ids);
+        let off = vm.create_volume_with("ec", 8 * SLOT, CreateOptions::redundant(policy.clone())).await;
+        assert!(matches!(off, Err(crate::volume::VolumeError::ErasureCodingOff(_))), "{off:?}");
+        assert!(off.unwrap_err().to_string().contains("off on this node"));
+        assert!(
+            vm.create_volume_with("r6", 8 * SLOT, CreateOptions::redundant(RedundancyPolicy::parse("raid6:4+2").unwrap())).await.is_ok(),
+            "RAID-6 needs no switch"
+        );
+        vm.set_erasure_coding(true);
+        let ec = vm.create_volume_with("ec", 8 * SLOT, CreateOptions::redundant(policy.clone())).await.unwrap();
+        let dev = vm.get_volume(&ec).unwrap();
+        for (i, d) in datas.iter().enumerate() {
+            dev.write(i as u64 * SLOT, d).await.unwrap();
+        }
+        dev.flush().await.unwrap();
+        vm.persist().await;
+        ec
+    };
+    let vm = reopen(&devs).await;
+    let want = SchemeExt { code: SchemeExt::ERASURE, data: 4, parity: 3 };
+    assert_eq!(vm.scheme_ext(&ec), Some(want), "the header says ec:4+3");
+    assert!(want.known(), "this engine reads it");
+    let h = vm.get_volume_handle(&ec).unwrap();
+    assert!(h.refused().is_none(), "not refused here");
+    assert_eq!(h.redundancy().spelling(), "ec:4+3");
+    assert_eq!(vm.gem().read().await.lookup_parity(ec, 0).unwrap().legs.len(), 3);
+    let dev = vm.get_volume(&ec).unwrap();
+    for (i, d) in datas.iter().enumerate() {
+        let mut back = vec![0u8; SLOT as usize];
+        dev.read(i as u64 * SLOT, &mut back).await.unwrap();
+        assert_eq!(&back, d, "member {i} after the restart");
+    }
+}

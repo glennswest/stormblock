@@ -66,6 +66,20 @@ pub struct StormBlockConfig {
     /// The other nodes whose volumes this node attaches (#328).
     #[serde(default)]
     pub fabric: FabricSection,
+    /// Redundancy schemes this node makes (#159).
+    #[serde(default)]
+    pub redundancy: RedundancySection,
+}
+
+/// `[redundancy]` (#159).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RedundancySection {
+    /// Make erasure-coded volumes (`ec:K+M`). Off by default (decision A):
+    /// an engine before EC reads an EC volume as RAID-6 and lets its third
+    /// leg go stale, so EC is turned on only once every release a node could
+    /// roll back to refuses it (#159 step 1). Until then `ec:K+M` answers 409.
+    pub erasure_coding: bool,
 }
 
 /// `[fabric]` (#328, stormvm#46): the peers this node asks for a volume it
@@ -497,6 +511,7 @@ impl Default for StormBlockConfig {
             storage: StorageSection::default(),
             kernel: KernelSection::default(),
             fabric: FabricSection::default(),
+            redundancy: RedundancySection::default(),
         }
     }
 }
