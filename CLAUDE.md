@@ -258,6 +258,13 @@ a restart. stormcluster PUTs a copy until then. Nothing built.
 stormupdate#13 (owner, 2026-10-09): the release's data-volumes file, applied
 at stage (#122), is the only data policy; no copy/fresh/drop API. Nothing built.
 
+### No tag since v20.0.0 (2026-10-17, #353, P3) — WAITING ON THE OWNER
+
+1119 commits since v20.0.0 with breaking changes (#274, #382, #161, #160):
+semver says v21.0.0. Asked on #353 (needs-owner): A v21.0.0 now + a tag per
+staged golden (recommended), B 20.1.0 as asked, C after the pacing.
+Consumers: stormuefi#39 (#205's fix), stormblock-test#4 (>= #274).
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
