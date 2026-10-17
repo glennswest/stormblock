@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **docs:** #99 closed: its engine side is built (the GUID in the address, `vol-<uuid>` and the NGUID; one listener for every subsystem, #188/#98; NSIDs never reused, #96; lineage and placement per volume). The fleet resolver by GUID and snapshots travelling upward moved to stormstorage, which every node already registers its volumes with (#170).
 - **docs:** #44 closed (master's decision A): the GEM's scaling ceiling was solved locally (#155, #157, #158), and the cluster-metadata half would move `src/cluster/` (opt-in, built and run by nothing) onto StormKV. #42 (SWIM gossip for that membership) closed with it.
 - **feat:** #74 (decision A): **secret volumes**, what stormcos's `stormcert-data` (the node CA's private key) becomes. Until now anything holding the node token could clone it and attach the copy.
   - **Made secret:** on create (`/api/v1` and `/v1` `secret: true`), by an image's golden (`[[slab.golden]] secret = true`, `compose/slab`'s `secret`: its clones are secret), or by the admin with `PUT /api/v1/volumes/{id}/secret` (one way). It is kept in the volume's format-2 header, last (`X`); an older engine reads it as an ordinary volume.
