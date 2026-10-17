@@ -236,6 +236,14 @@ slots/bytes). The node-wide verb that deletes everything a cluster held is
 #291 (waiting on the owner). Verified at a6e91e0: erase/scrub/secret/
 power-cut tests 48/48 on a build VM. No code change.
 
+### Flow-over skips extents already local, by recorded hashes (2026-10-17, #436, P3) — AFTER #444
+
+Needs #444's per-extent sha256 at seal (its rule 1: verify bytes, not
+metadata), which waits until no node can roll back past
+golden-stormblock-47e88a267077 (the X9 blades' last-known-good is 11.88).
+Then: behind a switch, default off, and the owner's fault-injection suite.
+Proposed after #444. Nothing built.
+
 ### Grow a RAID1 array and its dedicated slab (2026-10-17, #318, P2/P3) — PARKED until the single-node pacing lifts
 
 For stormstorage#73 (P2, volume expand). To build on a wip/ branch (plan on
