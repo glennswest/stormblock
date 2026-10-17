@@ -204,6 +204,15 @@ gone), ERROR + health `ublk_lost`; re-add a stopped device, fail visibly on
 a deleted one. Test-pod access to /dev/ublk-control: stormcentral#932.
 Nothing built.
 
+### Clone verify: i-blocks-wrong on fedora-base (2026-10-17, #293, P3) — AFTER mkfs.ext4.rs#25
+
+Not extent index blocks (mkfs-ext4 v4.1.1's `walk_extents` counts them):
+the checker leaves out the xattr block (`i_file_acl`), mkfs.ext4.rs#25
+(also #86). Fedora's SELinux/capability xattrs spill into a block; shared
+blocks (`h_refcount`) noted there. Here, once mkfs-ext4 and fio-ext4 tag:
+both pins, un-ignore #86's SELinux+ACL tar test, a shared-xattr-block clone
+test. Nothing built.
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
