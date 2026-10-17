@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **feat:** #159 step 2 (decision A, on branch `wip/159-ec`): **erasure coding** `ec:K+M`. Reed–Solomon over a Cauchy matrix, so any M of the K+M members and legs, mixed, are recovered. M is 3 or 4, K+M at most 24, 8+3 when no width is given (`ec`), 16+4 at scale.
+  - **Write and rebuild:** read-modify-write by delta, as for RAID-5/6; rebuild, resync, verify and scrub recompute every leg.
+  - **RAID-5/6 unchanged:** one or two legs keep P and P+Q, their coefficients and their code (decision 2a). Their GF(2^8) multiply uses the RAID engine's SIMD (same bytes).
+  - **Off by default:** `[redundancy] erasure_coding = true`; until then `ec:K+M` answers 409 on create and restripe. Every EC volume's format-2 header carries its scheme (`S`, code 1), which step-1 engines refuse.
+  - **Tests:** every erasure pattern for 8+3, 16+4, 2+3 and 20+4; deltas equal a recompute; an `ec:4+3` volume losing two members and a leg, read back and rebuilt; the gate and a restart. docs/redundancy.md, README.
 - **feat:** #74 (decision A): **secret volumes**, what stormcos's `stormcert-data` (the node CA's private key) becomes. Until now anything holding the node token could clone it and attach the copy.
   - **Made secret:** on create (`/api/v1` and `/v1` `secret: true`), by an image's golden (`[[slab.golden]] secret = true`, `compose/slab`'s `secret`: its clones are secret), or by the admin with `PUT /api/v1/volumes/{id}/secret` (one way). It is kept in the volume's format-2 header, last (`X`); an older engine reads it as an ordinary volume.
   - **Never copied:** clone, snapshot, group snapshot, template claims, goldens, every composition, cross-role copy, moves and StormFS copy are refused (409) in the volume manager.

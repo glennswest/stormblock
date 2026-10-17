@@ -23,6 +23,7 @@ legs to that map:
 | `mirror:N` | N slots, each a full copy | N |
 | `raid5:D+1` | one slot; every D consecutive extents form a **stripe** with one parity slot (P) | D+1 |
 | `raid6:D+2` | as above with P and Q | D+2 |
+| `ec:K+M` | as above with M = 3 or 4 Reed–Solomon legs (Cauchy), K+M ≤ 24; `ec` alone is 8+3 (#159). **Off by default** | K+M |
 
 Every leg of an extent — and every member and parity leg of a stripe — lands
 on a distinct **failure domain**. That is a boundary, not a preference: an
@@ -215,7 +216,33 @@ With a policy `array_id` is not needed — the volume's extents pick their own
 slabs. `[[volumes]]` in `stormblock.toml` and the `--volume name:size:policy`
 CLI flag take the same spelling. Spellings: `none`, `mirror` (2), `mirror:N`,
 `raid1`, `raid10`, `raid5:D+1`, `raid5:M` (M members, one parity),
-`raid6:D+2`, `raid6:M`, any with `@rung`.
+`raid6:D+2`, `raid6:M`, `ec` (8+3), `ec:K+M` (M 3–4, K ≥ 2, K+M ≤ 24),
+any with `@rung`.
+
+### Erasure coding (#159)
+
+`ec:K+M` stripes K data extents with M parity legs, each member and leg on
+its own failure domain, and survives any M of the K+M lost (`margin` = M
+minus what is lost). The legs are the rows of a Cauchy matrix over GF(2^8),
+`c(j, i) = 1 / (j ⊕ (M + i))`: every square submatrix of it is invertible,
+so any combination of members and legs, up to M, is recovered by solving
+for what is missing. A write is a read-modify-write by delta, as for
+RAID-5/6. A rebuild, a resync, the dirty-stripe verify and the scrub
+recompute the legs from the members.
+
+- **RAID-5/6 are unchanged** (decision 2a): one or two legs are P and P+Q
+  with the coefficients they always had, and EC never has fewer than three
+  legs, so the parity count says which code a stripe is in. Their GF(2^8)
+  multiply now uses the RAID engine's SIMD (#255), which computes the same
+  bytes.
+- **Off by default** (decision A): `[redundancy] erasure_coding = true` turns
+  it on per node. Until then `ec:K+M` on create or restripe answers 409,
+  naming why. An engine before step 2 reads an EC volume's record as RAID-6
+  and lets its third leg go stale, so EC is turned on only once every
+  release a node could roll back to carries step 1. Step 1's readers refuse
+  a volume whose header names a scheme they do not read, and every EC volume
+  carries its scheme (`S`, code 1, K, M) in its format-2 header. Reading an
+  EC volume needs no switch.
 
 ## What is recorded where
 
@@ -411,13 +438,9 @@ unless asked.
 ## Not in this cut
 
 - StormFS chunk/versioned volumes stay `none` — StormFS replicates above.
-- Erasure coding wider than two parity members (`ec:K+M`, M 3–4, K+M ≤
-  24, 8+3 by default and 16+4 at scale; RAID-6's P+Q stays, #159). It
-  arrives in two steps (the owner's 3(b)): first every engine refuses a
-  volume whose header names a scheme it does not read (built: the `S` tag,
-  `docs/metadata-v2.md`), so a node rolled back can never compute P and Q
-  over an 8+3 stripe; then EC itself, once every release a node could roll
-  back to carries that.
+- Erasure coding turned on by default (#159): built and off until every
+  release a node could roll back to carries step 1 (the release side,
+  decision C).
 - A checksum per slot or block (#160's option (b)): what would say which of
   two copies is right. Worth building if a scrub reports real mismatches on
   `mirror:2` volumes.

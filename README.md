@@ -90,6 +90,7 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   UNMAP / WRITE SAME, NVMe DSM). **Copy-on-write clones** share extents by
   refcount; a **sealed** volume takes no writes and is what clones come from.
 - **Redundancy is per volume** — `none`, `mirror:N`, `raid5:D+1`, `raid6:D+2`,
+  `ec:K+M` (Reed–Solomon, M 3–4, off unless `[redundancy] erasure_coding`, #159),
   each with the failure-domain rung its legs are kept apart at
   (`mirror:2@shelf`). A failed drive's volumes are **rebuilt automatically**,
   most endangered first, several at once, under one byte budget
