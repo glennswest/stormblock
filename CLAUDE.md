@@ -2188,7 +2188,7 @@ values nothing writes.
       #361 (needs-owner: one slab per class? which service state survives a
       demote? factory wipe? existing volumes? who sets the class?)
 
-### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — PAUSED for P0 #349 (back in line)
+### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — IN PROGRESS (2026-10-17, the owner's ask; a check script only, nothing that ships)
 
 #147 checked XFS with xfsprogs on files only. Needed before any PVC class
 defaults to XFS (stormcos#91).
