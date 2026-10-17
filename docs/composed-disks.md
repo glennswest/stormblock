@@ -294,7 +294,7 @@ is the count that becomes non-zero once disks share their goldens).
 agrees with itself: offsets, sharing, allocation counts, the version, the
 read-back. As the ext4 and image work taught, that proves nothing about a
 consumer, so **`ci-compose-disk-verify.sh` is the check that counts.** On
-dev.g8.lo it runs the built binary, imports a real kernel, initramfs and an ESP
+a build VM it runs the built binary, imports a real kernel, initramfs and an ESP
 carrying shim and grub, composes the pallet and the disk, attaches the disk as
 a ublk block device, and hands it to tools that are not ours:
 

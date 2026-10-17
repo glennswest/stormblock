@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **docs:** refreshed from the code since 2026-10-09: the README's "Not built, or not wired" no longer lists what is built (registry-scale serving #188, NSID reuse #96, one subsystem scheme #98, the parity/StormFS slot fence #240, metadata at scale #155–#158, affinity and overcommit #152–#154) and says what is on `wip/` branches; encryption points at #462 and names secret volumes (#74); source-layout counts; CLAUDE.md's current state and build section (fresh build VMs, no dev).
+
+### 2026-10-17
 - **feat:** who is attached right now (#292, stormcluster#15/#21, stormblock-registry#63). Every NVMe/TCP connection bound to a subsystem, and every iSCSI connection in a normal session, is recorded while it lasts (`target::remote`). Each volume attachment carries `remote[]` (`host`, `addr`, `protocol`, `target`, `connections`, `since`). New routes: `GET /api/v1/exports/{id}/connections` and `GET /api/v1/connections` (every remote host on any target of this engine). Read-only; nothing on disk changes.
 
 ### 2026-10-17

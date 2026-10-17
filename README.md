@@ -152,11 +152,12 @@ cluster.
 
 ## Building
 
-Build and test **on dev.g8.lo, never on a workstation**: the storage path
+Build and test **on a build VM, never on a workstation**: the storage path
 (`io_uring`, `ublk`, `O_DIRECT`, `/dev/kmsg`) is `cfg(target_os = "linux")`,
 so another OS compiles a different, smaller program. From this repo's
-sessions that means `sc-build` after `git push` — it fetches the pushed commit
-onto dev as an unprivileged user, builds in a scratch directory and deletes it.
+sessions that means `sc-build` after `git push` — it clones a fresh build VM
+(dev.g8.lo is retired), fetches the pushed commit as an unprivileged user,
+builds on a drive of its own and destroys the VM when the job ends.
 Nothing here needs root.
 
 ```bash
@@ -2373,24 +2374,26 @@ What earlier docs described and the code does not do, each with its issue:
 - **The StormFS shared-ring IPC server** (`drive/uring_server.rs`): built and
   tested, started by nothing; the counterpart of StormFS's client (#169).
   vhost-user-blk (#82) did not need it.
-- **Erasure coding
-  beyond P+Q** (#159), a per-block checksum to tell which of two copies is
-  right (#160's option (b)), metadata at 40 PB a node (#155–#158), drive affinity,
-  overcommit and StorageClass policy for claims (#151–#154).
-- **Serving at registry scale**: each per-volume subsystem takes its own
-  portal port, so `/serve/v1` serves at most 128 volumes per node by default
-  (#188). NSIDs on the shared subsystem are reused after a detach (#96), and
-  two subsystem schemes are live at once (#98).
+- **Erasure coding beyond P+Q** (#159): only step 1 is on main — a volume
+  whose header names a scheme this engine does not read is refused (kept and
+  written back as it was, deletable). The coder waits on a `wip/` branch, off
+  by default. Also not built: a per-block checksum to tell which of two
+  copies is right (#160's option (b)), and the work parked on `wip/` branches
+  until the single-node pacing lifts (grow a RAID1 array #318, live mirror of
+  an in-use volume #295, release an array #296, multicast discovery #104, a
+  lost ublk device #299, namespaces and quotas #408).
 - **"No C dependencies"** was never true: TLS brings in `ring` (the only
   backend since #209; `aws-lc-sys` is gone).
 - **NVMe/TCP access** (#210, `docs/nvme-access.md`): a `/serve/v1` export
   that names no `host_nqn` still admits any host while `[serve]
   allow_any_host` is on, the default (#212). Since #217 it serves only its
   own exports.
-- **The slot fence (#239)** covers thin, mirrored and copy-on-write I/O; parity
-  stripes and the StormFS chunk/versioned paths are not fenced against a move
-  (#240).
-- **Encryption at rest** is not built (#74). `/v1` refuses `encrypted:
+- **The slot fence (#239)** covers thin, mirrored, copy-on-write and parity
+  I/O (a parity stripe is fenced whole, #240) and the StormFS chunk and
+  versioned paths.
+- **Encryption at rest** is not built (#462). Secret volumes (#74) are the
+  engine-enforced half: never copied, snapshotted or exported over a network,
+  one consumer at a time, erased on delete. `/v1` refuses `encrypted:
   true` with 422 `unsupported` and reports every volume `encrypted: false`
   (#232: it used to be stored and reported while nothing was encrypted).
 - **`/v1` replication (`prestage`, `promote`, `dual-attach`)** is
@@ -2435,8 +2438,8 @@ What earlier docs described and the code does not do, each with its issue:
 
 ## Source layout
 
-99k lines of Rust in `src/`, 12k in `tests/it/` and 3.5k in `tests-runtime/`,
-about 920 tests; the test container is glennswest/stormblock-test (#371).
+150k lines of Rust in `src/`, 22k in `tests/it/` and 3.8k in `tests-runtime/`,
+about 1,250 tests; the test container is glennswest/stormblock-test (#371).
 
 ```
 src/mgmt/       21.2k  management API (axum): every /api/v1 surface, /v1, kube resources,

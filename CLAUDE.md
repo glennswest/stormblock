@@ -6,13 +6,14 @@ Pure Rust enterprise block storage engine. Turns raw NVMe/SAS drives into networ
 ## Design Principle: Single-node first, scale-out later
 StormBlock must be fully functional as a **standalone single-node** storage engine — no cluster requirement. A single node handles its own drives, RAID, volumes, and exports independently. Clustering (replication, Raft) is layered on top and strictly optional. New nodes can be added to an existing deployment at any time without disrupting running nodes.
 
-## Build and test with sc-build, on dev
+## Build and test with sc-build, on a fresh build VM
 
 **Every `cargo build`, `cargo test`, `cargo check` and every image build runs on
-dev.g8.lo, through `sc-build` after `git push`** — never on the session host,
-never as root, never "just to check quickly". `sc-build` fetches the pushed
-commit onto dev as the unprivileged `stormbuild` user, builds it in a scratch
-directory and deletes it; there is no checkout on dev to use. `sc-build 'cmd'`
+a build VM, through `sc-build` after `git push`** — never on the session host,
+never as root, never "just to check quickly". `sc-build` clones a fresh VM
+(dev.g8.lo is retired, stormcentral#107), fetches the pushed commit onto it as
+the unprivileged `stormbuild` user, builds it on a drive of its own and
+destroys the VM when the job ends; nothing is kept. `sc-build 'cmd'`
 runs any command; `SC_BUILD_NO_ISSUE=1` keeps an exploratory run from filing a
 `build-failure` issue. Builds queue for a slot, so give it a generous timeout.
 
@@ -155,20 +156,29 @@ per-volume LBA 512|4096, metadata V9 (#228); the install stopgap and
 `slab holds` (#236, #239); the slot fence and no in-place writes on a slab
 being emptied (#239, durability rules 10–11); and in the initramfs: every
 `console=` (#237), the firmware's boot name from EFI variables (#249),
-mlx4_en and late netdevs (#250), the NTP clock step (#251). 99k lines in `src/`, 12k
-in `tests/it/`, 3.5k in `tests-runtime/`, ~920 tests; the test container is
-glennswest/stormblock-test (#371). The full suite (nextest) passes on dev apart from #134 when
-the box is busy; #120 is now in `tests-runtime/`, run by `ci-runtime-tests.sh` (#222).
-v20.0.0 was cut at the owner's request on #148 (2026-09-28); the forge rollout
-(settings, rollback = VM snapshot only) is answered there. #171 (power-cut
-durability) is closed: the on-metal acceptance passed on 2026-09-27 (C2NR0Q2,
-11.48 = v19.2.1 engine and initramfs, 5 cuts, 1500/1500 objects). The
-flow-over resume of v19.2.2 has not met metal yet; that check is #172. The README is the reference for what the code does, rewritten from the code in
-#131 and refreshed from the code on 2026-09-27, 2026-09-28 (#199, #200,
-#148, #209, #210) and 2026-10-02 (#228–#251: the initramfs command line,
-`slab holds`, boot-time files, stormcos#65's corrections #242); the docs in `docs/` were checked against it and the
-superseded ones moved to `docs/history/`. What earlier docs promised and the code does not do is
-listed in the README's "Not built, or not wired" with its issues (#159–#170, #205–#248).
+mlx4_en and late netdevs (#250), the NTP clock step (#251).
+Also unreleased since the 2026-10-09 refresh (details in CHANGELOG.md and the
+work plan below): secret volumes (#74), a reviewed Kubernetes bearer and
+creator-scoped deletes (#382, #422), forge client certificates admin by
+subject CN (#453), forge's per-host install-config (#459) and boot-agent
+claims (#456), a system half on its own SSD (#402), post-flow-over sha256
+validation (#412) and the faster, latency-paced flow-over (#401, #410, #411),
+FUA and multi-queue ublk (#409), NVMe/TCP multipath and path-per-NIC
+(#90, #450 engine half), `[fabric]` peer attach (#328), remote-host
+connections (#292), RAID-6 SIMD (#255), erase/scrub/digest (#286, #160, #271,
+#384), the lock work (#364, #418, #438), the VFIO stub removed (#167) and
+`[registration]` (#170). 150k lines in `src/`, 22k in `tests/it/`, 3.8k in
+`tests-runtime/`, ~1,250 tests; the test container is glennswest/stormblock-test
+(#371). The full suite (nextest) is the routine check, `check.sh` (#357).
+Pacing: P0/P1 only until single-node stormcos is stable (2026-10-17); parked
+work lives on `wip/` branches. v20.0.0 was cut at the owner's request on #148
+(2026-09-28); a v21.0.0 is asked on #353. #171 (power-cut durability) is
+closed: the on-metal acceptance passed on 2026-09-27. The README is the
+reference for what the code does, refreshed from the code on 2026-09-27,
+2026-09-28, 2026-10-02 and 2026-10-17; the docs in `docs/` were checked
+against it and the superseded ones moved to `docs/history/`. What earlier
+docs promised and the code does not do is listed in the README's "Not built,
+or not wired" with its issues.
 The v17+ engine (closed by default, #107) ships in releases since 11.55
 (golden-stormblock-296e38521d4c first); only forge still runs 13.7.0 (#235).
 
