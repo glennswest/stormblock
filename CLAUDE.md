@@ -180,6 +180,15 @@ terragrunt (`deploy/terragrunt/`). DNS: 192.168.1.252, 192.168.1.154
 
 ## TODO — Implementation Roadmap
 
+### Pacing: P0/P1 only until single-node stormcos is stable (master, 2026-10-17)
+
+The Claude quota is largely used. Only blocking P0/P1 work; no new P2/P3 work.
+A release wave takes every component's newest golden, so main is the next
+release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
+#74 (secret volumes) and #450's engine half stay on main (master's A): both
+are inert until used, and an unmarked volume's record is byte-identical to
+the format before #74. Newest golden: golden-stormblock-3c3b29808089 (ec23149).
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
