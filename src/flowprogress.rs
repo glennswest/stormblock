@@ -212,6 +212,7 @@ mod tests {
             zeroed: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             source: Mutex::new(None),
+            source_device: Mutex::new(None),
             persists: AtomicU64::new(0),
             pace: Mutex::new(None),
             validation: Mutex::new(None),
