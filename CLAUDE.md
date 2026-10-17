@@ -292,24 +292,30 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
 - [x] check.sh at 9877bb8 ALL PASS (1240/1240); CHANGELOG; closed with
       the answers
 
-### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — IN PROGRESS
+### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — DONE here; golden next
 
 Decided (master for the owner, 2026-10-13, as recommended): 1(a) a peer
 list in config, 2(a) the node certificate over mTLS (a peer's
 `tls_client_ca` admits it at the node-token tier, #203), 3(b) the engine's
 own NVMe/TCP initiator served through ublk; the device under `device_hint`
 (owner's amendment); the connect names this node's own host NQN.
-- [ ] `[fabric] peers, client_cert, client_key, ca, host_nqn` (cert/key
+- [x] `[fabric] peers, client_cert, client_key, ca, host_nqn` (cert/key
       default to `[management] tls_cert/tls_key`, ca to `tls_client_ca`;
       host NQN: config > /etc/nvme/hostnqn > `nqn.2026-09.lo.storm:host-<node>`)
-- [ ] `mgmt/peers.rs`: find a volume on the peers (GET), forward a clone,
+- [x] `mgmt/peers.rs`: find a volume on the peers (GET), forward a clone,
       attach (peer attach `nvme_tcp` + host_nqn + holder `peer:<node>`,
       connect, ublk export, `device_hint`), detach (ublk down, peer
       released), `peer_attaches.json`, stale records released at start
-- [ ] volumes API: attach/clone/get/detach fall back to the peers on 404
-- [ ] tests: two engines over mTLS (find, clone forwarded, the connect
-      reads A's bytes, ublk unavailable → 409 and A's namespace released);
-      QEMU check with a real ublk device; README, CHANGELOG; stormvm#46 told
+- [x] volumes API: attach/clone/get/detach fall back to the peers on 404
+- [x] tests: `integration_peers` (two engines over mTLS: find, clone
+      forwarded, the connect reads A's bytes and writes land on A, the next
+      start releases a stale record, ublk unavailable → 409 and A released,
+      no certificate → 404); `ci-peer-attach-verify.sh` ALL PASS (QEMU,
+      kernel 7.2.8: B's /dev/ublkb0 reads A's golden through the clone, a
+      write lands on A, mounted → 409, detach releases A); check.sh at
+      f8d9f12 ALL PASS (1246/1246); README, CHANGELOG
+- [ ] check.sh at head; golden; stormvm#46 told; close. Not on metal: two
+      stormcos nodes with `[fabric]` written by stormcos (stormcos issue)
 
 ### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — DONE (golden-stormblock-195314cf5831), metal pending
 
