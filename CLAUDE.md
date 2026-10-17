@@ -253,6 +253,11 @@ forge.json, serve `default_settings` (restart if on with other settings),
 GET `from: default`; 409 for a config-owned target; idempotent; tests incl.
 a restart. stormcluster PUTs a copy until then. Nothing built.
 
+### Data volumes for a staged upgrade (2026-10-17, #280, P3) — CLOSED as superseded
+
+stormupdate#13 (owner, 2026-10-09): the release's data-volumes file, applied
+at stage (#122), is the only data policy; no copy/fresh/drop API. Nothing built.
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
