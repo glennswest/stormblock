@@ -213,15 +213,17 @@ blocks (`h_refcount`) noted there. Here, once mkfs-ext4 and fio-ext4 tag:
 both pins, un-ignore #86's SELinux+ACL tar test, a shared-xattr-block clone
 test. Nothing built.
 
-### Which remote hosts have each volume attached (2026-10-17, #292, P3; blocks stormcluster#21, P1) — IN PROGRESS
+### Which remote hosts have each volume attached (2026-10-17, #292, P3; blocks stormcluster#21, P1) — DONE (in the current wave, per the master), closed
 
 Built at ac1d550 (read-only, on main): `target::remote` (connections by
 target name, registered at NVMe Connect / iSCSI login, dropped with the
 connection), `attachments[].remote`, `GET /api/v1/exports/{id}/connections`,
 `GET /api/v1/connections`.
 - [x] code, unit test, integration tests (nvme_hosts, iscsi); README, CHANGELOG
-- [ ] build VM: targeted tests + clippy; check.sh; golden; tell stormcluster#21
-      and stormblock-registry#63; close
+- [x] targeted 48/48; the 3 new tests; check.sh at aa08675 ALL PASS; clippy
+      clean on the changed files at b355da7; stormcluster#21 and
+      stormblock-registry#63 told; closed. No separate golden (master: ac1d550
+      rode into the current wave; b355da7 is lint-only)
 
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
