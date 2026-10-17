@@ -292,7 +292,7 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
 - [x] check.sh at 9877bb8 ALL PASS (1240/1240); CHANGELOG; closed with
       the answers
 
-### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — DONE here; golden next
+### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — DONE (golden-stormblock-0a9fe2d97cf9), closed
 
 Decided (master for the owner, 2026-10-13, as recommended): 1(a) a peer
 list in config, 2(a) the node certificate over mTLS (a peer's
@@ -314,8 +314,10 @@ own NVMe/TCP initiator served through ublk; the device under `device_hint`
       kernel 7.2.8: B's /dev/ublkb0 reads A's golden through the clone, a
       write lands on A, mounted → 409, detach releases A); check.sh at
       f8d9f12 ALL PASS (1246/1246); README, CHANGELOG
-- [ ] check.sh at head; golden; stormvm#46 told; close. Not on metal: two
-      stormcos nodes with `[fabric]` written by stormcos (stormcos issue)
+- [x] check.sh at cfb48af ALL PASS (1246/1246, no warnings); golden
+      golden-stormblock-0a9fe2d97cf9 (00f3691, stormcos#601); stormvm#46
+      told; closed. Not on metal: two stormcos nodes with `[fabric]`
+      written by stormcos (stormcos#600)
 
 ### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — DONE (golden-stormblock-195314cf5831), metal pending
 
