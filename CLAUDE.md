@@ -863,7 +863,7 @@ destination; API `placement` on create, `layout` on responses.
 - [x] check.sh on wip/153-affinity at 1d3148a ALL PASS (1216/1216)
 - [ ] after 12.23 passes: merge, check.sh, the next stage; close
 
-### Erasure coding k+m (2026-10-11, #159, P3) — STEP 1 BUILT on branch wip/159-refuse-unknown-scheme; EC (step 2) after the rollback gate
+### Erasure coding k+m (2026-10-11, #159, P3) — STEP 1 ON MAIN (437b7c2, in golden-stormblock-12891c0025b2+); STEP 2 WAITING ON THE OWNER (the gate)
 
 Owner (2026-10-13): 1(a) M 3–4, K+M ≤ 24, 8+3 default, 16+4 at scale;
 2(a) RAID-6's P+Q stays; 3(b) readers refuse unknown schemes first, EC once
@@ -874,7 +874,12 @@ every release a node could roll back to carries that.
       snapshot, compose, restripe; kept and written back; deletable)
 - [x] tests `volume::scheme_tests` (2), metav2; docs; check.sh at 0c50a1b
       ALL PASS (1216/1216)
-- [ ] merge after 12.23; the next stage
+- [x] merged (437b7c2), in the 12.23 stage and every golden since
+- [ ] the gate is not met (2026-10-17): every published release (11.40–11.88)
+      and the kept 12.21 predate step 1. Asked on #159 (needs-owner): A build
+      step 2 now, EC off by default (`[redundancy] erasure_coding`, 409 until
+      on) (recommended, with C when the owner chooses), B wait, C publish
+      ≥ 12.30 and retire every published release < 12.23
 - [ ] step 2 (EC: RS over GF(2^8), Cauchy; `ec:K+M` parse; stripes of K+M
       across domains; RMW; reconstruct ≤ M in assemble_stripe; margin;
       `SchemeExt::known` for code 1) once every rollback target carries step 1
