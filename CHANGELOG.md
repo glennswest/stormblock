@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **docs:** #298 closed. "No HTTP status line" was a claim answered later than stormbootx's read lasted. It happened again today on forge (pvetest1/2, 17:39Z): forge's watchdog shows both claims past 10 s, one holding the extent map for 9.3 s. The engine half is #438 (now with that capture), stormbootx's read is stormbootx#158. The stale 64 MiB namespace no longer happens since #443/#445 (one clone per host, a released claim frees its namespace).
 - **docs:** #99 closed: its engine side is built (the GUID in the address, `vol-<uuid>` and the NGUID; one listener for every subsystem, #188/#98; NSIDs never reused, #96; lineage and placement per volume). The fleet resolver by GUID and snapshots travelling upward moved to stormstorage, which every node already registers its volumes with (#170).
 - **docs:** #44 closed (master's decision A): the GEM's scaling ceiling was solved locally (#155, #157, #158), and the cluster-metadata half would move `src/cluster/` (opt-in, built and run by nothing) onto StormKV. #42 (SWIM gossip for that membership) closed with it.
 - **feat:** #74 (decision A): **secret volumes**, what stormcos's `stormcert-data` (the node CA's private key) becomes. Until now anything holding the node token could clone it and attach the copy.
