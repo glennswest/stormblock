@@ -358,6 +358,7 @@ reads *before* it claims:
 GET  /api/v1/synonyms/boothost/<name>/intent      → {host, intent, updated_at}   open
 PUT  /api/v1/synonyms/boothost/<name>/intent      {"intent": "install"|"local"|"auto"}  admin token
 PUT  /api/v1/synonyms/boothost/<name>/install-config   the YAML (#459)       admin token
+PUT  /api/v1/volumes/{id}/secret        {"secret": true} (#74, one way)        admin token
 GET  /api/v1/synonyms/boothost/<name>/install-config   the YAML              admin token (it carries secrets)
 DELETE /api/v1/synonyms/boothost/<name>/install-config                       admin token
 POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>, "stage": "laid"|"booted"}  open

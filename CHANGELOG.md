@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **feat:** #74 (decision A): **secret volumes**, what stormcos's `stormcert-data` (the node CA's private key) becomes. Until now anything holding the node token could clone it and attach the copy.
+  - **Made secret:** on create (`/api/v1` and `/v1` `secret: true`), by an image's golden (`[[slab.golden]] secret = true`, `compose/slab`'s `secret`: its clones are secret), or by the admin with `PUT /api/v1/volumes/{id}/secret` (one way). It is kept in the volume's format-2 header, last (`X`); an older engine reads it as an ordinary volume.
+  - **Never copied:** clone, snapshot, group snapshot, template claims, goldens, every composition, cross-role copy, moves and StormFS copy are refused (409) in the volume manager.
+  - **Never exported or read out:** NVMe/TCP (`/api/v1` and `/v1`), exports, iSCSI LUNs, `/serve/v1`, vhost-user-blk, `…/content` and `…/files` are refused.
+  - **One consumer:** a local ublk device only, one consumer at a time.
+  - **Erased on delete:** at least once, whatever `[erase] default` says.
+  - **Rotation:** seal and re-point a synonym; one previous copy is kept and older secret targets are deleted, erased (`rotated_out`).
+  - **What still works:** drains, rebuilds, rebalance, retier, restripe and the flow-over move it internally.
+  - **Tests:** `integration_secret::a_secret_volume_is_never_copied_or_exposed_and_is_erased_when_deleted`, `metav2::tests::a_secret_rides_last_and_an_older_reader_reads_the_rest`, `ci-secret-verify.sh` (QEMU, a real ublk device). README, auth.md, metadata-v2.md.
 - **feat:** #459 (stormcos#604, for stormcentral#710): forge keeps a per-host install-config and hands it to that host at its claim. Test machines boot one shared stormbootx ISO, so the media's install-config (#275) never reached them, and stormcentral mints a stormupdate token per machine at each install.
   - **The routes:** `PUT/GET/DELETE /api/v1/synonyms/boothost/<name>/install-config`, every verb admin-only, the read included. The YAML is kept 0600 in `<data_dir>/install-configs/<host>.yaml`, never in `synonyms.json`, listings or logs. It follows the host's rename and goes with its delete.
   - **The claim:** a claim of that host carries `install_config` and `install_config_sha256`. `boot-claim` stages it 0600 in `/run/stormblock/install-config.forge.yaml`. Its error lines no longer print a reply carrying it.

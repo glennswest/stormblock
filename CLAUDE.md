@@ -792,16 +792,29 @@ usually no gateway); the knob is which interface. docs/storage-network.md.
 - [x] follow-ups: #404 (dirty log + inflight: live migration); stormvm told.
       The ring IPC (`uring_server.rs`) was not needed
 
-### Secrets volume class (2026-10-11, #74, P3) — WAITING ON THE OWNER
+### Secrets volume class (2026-10-11, #74, P3) — BUILT (decision A, 2026-10-13); checks running
 
-Found: stormcos's `stormcert-data` (the node CA key) is an ordinary volume,
-cloneable and attachable with the node token since #274. Asked on #74
-(needs-owner): A the engine-enforced `secret` class now (no clone/snapshot/
-template/compose/copy/move/export, local ublk only, one consumer, erase on
-delete, seal + synonym repoint keeping the previous; stormcos marks
-stormcert-data) — recommended; B A + attach bound to the workload's
-ServiceAccount (needs rustkube-node/stormcos); C nothing until stormcert
-asks. Workload auth and encryption as separate design issues. Nothing built.
+Decision A: the engine-enforced half now; workload-bound attach (B) and
+per-volume encryption are their own issues.
+- [x] model: `secret` on the record (v2 header `X`, last: an older reader
+      serves it as ordinary), the manager's set, restore, `mark_secret` (one
+      way), erased (≥ once) on delete
+- [x] refused in the manager: snapshot (clone, template claim, golden),
+      group snapshot, compose volume/pallet/slab/disk, copy_volume
+- [x] refused at the doors: NVMe/TCP attach (/api/v1, /v1), vhost, another
+      node, exports, LUNs, /serve/v1, moves, StormFS copy, content, files;
+      ublk only, one consumer (/api/v1, /v1)
+- [x] marked: create (/api/v1, /v1 this node only), image spec and
+      compose/slab `secret` (clones), `PUT …/secret` (admin)
+- [x] rotation: re-point keeps one previous, older secret targets deleted
+      (erased) and dropped from the history (`rotated_out`)
+- [x] internal moves kept (drain, rebuild, rebalance, retier, restripe,
+      flow-over): no copy, nothing off the engine (read of "move/relocate"
+      as the API verbs)
+- [x] tests: integration_secret, metav2 tag; targeted 218/218; README,
+      auth.md, metadata-v2.md, CHANGELOG
+- [ ] ci-secret-verify.sh (QEMU); check.sh; golden; stormcos issue (mark
+      stormcert-data); issues for B and encryption; close
 
 ### Writable cmdline and a kdump target (2026-10-11, #59, P3) — CLOSED: 1B, 2C (master, 2026-10-13)
 
