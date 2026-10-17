@@ -225,6 +225,17 @@ connection), `attachments[].remote`, `GET /api/v1/exports/{id}/connections`,
       stormblock-registry#63 told; closed. No separate golden (master: ac1d550
       rode into the current wave; b355da7 is lint-only)
 
+### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — PARKED until the single-node pacing lifts
+
+For stormstorage#44 (VM disk migration) and stormcluster#53 (evacuate a
+storage node before a release), both P3. To build on a wip/ branch (plan on
+#295): `POST/DELETE /api/v1/volumes/{id}/mirror {target}` (nvme-tcp leg on
+the handle; writes/zeroes/discards under the extent lock, ack after both;
+flush both), background copy of mapped non-zero extents under the extent
+lock, paced; `mirror {state copying|synced|failed, bytes_*}` on GET; leg
+errors → failed, never the guest's; `mirrors.json`, failed after a restart;
+node-level evacuate settled with stormcluster. Nothing built.
+
 ### Release an array with no write to its members (2026-10-17, #296, P3) — PARKED until the single-node pacing lifts
 
 For a live RAID-head handover (stormstorage#33; failover already works).
