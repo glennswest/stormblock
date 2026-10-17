@@ -236,6 +236,14 @@ slots/bytes). The node-wide verb that deletes everything a cluster held is
 #291 (waiting on the owner). Verified at a6e91e0: erase/scrub/secret/
 power-cut tests 48/48 on a build VM. No code change.
 
+### Per-extent sha256 at seal (2026-10-17, #444, P3) — WAITING: X9 last-known-good past 47e88a267077, and the pacing
+
+Gate checked 2026-10-17 (`stormcentral release lkg`): X9 lkg 11.88 (newest
+12.14 failed); its engine refuses an unknown v2 key kind. To build then: a
+`hashes` v2 key kind per sealed golden (sha256 per extent index), written at
+seal, carried by compose/slab and stage; #412's validation and #436's skip
+read it. Nothing built.
+
 ### Flow-over skips extents already local, by recorded hashes (2026-10-17, #436, P3) — AFTER #444
 
 Needs #444's per-extent sha256 at seal (its rule 1: verify bytes, not
