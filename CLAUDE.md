@@ -196,7 +196,7 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
 - [ ] when stormcentral#841 is live: `stormcentral component build stormblock`
       (stage of main's head) for 12.23; then shipped/close #428, #413,
       #417, #412 (closed 2026-10-14), #300, #383, #411, #415, #422/#416, #424, #384 and the merged
-      #167, #170, #160 and #154 (#170, #160, #154 closed 2026-10-17), #153 (#159 stays open for EC, step 2)
+      #167, #170, #160 and #154 (#170, #160, #154 closed 2026-10-17), #153 (closed 2026-10-17) (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
 ### Each boot agent's last claim kept (2026-10-14, #456, stormcentral#286) — DONE (golden-stormblock-0a9fe2d97cf9), closed
@@ -849,7 +849,7 @@ wait, not a total time (6.4 s vs 2.9 s once under full-suite load).
 - [x] check.sh on wip/167-remove-vfio at 7347203 ALL PASS (1213/1213)
 - [ ] after 12.23 passes: merge, check.sh, the next stage; close
 
-### Non-redundant volumes: drive affinity (2026-10-11, #153, P3) — BUILT on branch wip/153-affinity (C); merges after 12.23
+### Non-redundant volumes: drive affinity (2026-10-11, #153, P3) — DONE (merged ecde642; in golden-stormblock-12891c0025b2 and later), closed 2026-10-17
 
 Decision 1, C (2026-10-13): `placement: affine | spread` per volume, default
 affine; redundant volumes spread; the rebalance keeps an affine volume whole.
@@ -861,7 +861,9 @@ destination; API `placement` on create, `layout` on responses.
 - [x] tests (multidrive, rebalance, drain, metav2); multi-drive.md, README,
       CHANGELOG
 - [x] check.sh on wip/153-affinity at 1d3148a ALL PASS (1216/1216)
-- [ ] after 12.23 passes: merge, check.sh, the next stage; close
+- [x] merged to main (ecde642), check.sh ALL PASS since (0d6fbe7:
+      1249/1249, the affinity, drain, rebalance and metav2 tests); in the
+      12.23 stage (4d79108) and golden-stormblock-0a9fe2d97cf9; closed
 
 ### Erasure coding k+m (2026-10-11, #159, P3) — STEP 1 ON MAIN (437b7c2, in golden-stormblock-12891c0025b2+); STEP 2 WAITING ON THE OWNER (the gate)
 
