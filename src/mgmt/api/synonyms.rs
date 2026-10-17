@@ -1851,12 +1851,18 @@ async fn installed(
         }
         Some(other) => return ApiError::bad_request(format!("stage {other:?} is laid or booted")),
     }
-    let done = state.synonyms.write().await.install_done(&name, clone);
-    if let (Ok((h, InstallDone::Reset)), Some(src)) = (&done, req.install_config.as_deref()) {
-        if matches!(src, "media" | "forge" | "none") {
-            state.synonyms.write().await.note_install_config_source(&h.name, src);
+    let done = {
+        let mut store = state.synonyms.write().await;
+        let done = store.install_done(&name, clone);
+        // Where its install-config came from (#459), in the record answered.
+        match (done, req.install_config.as_deref()) {
+            (Ok((h, InstallDone::Reset)), Some(src)) if matches!(src, "media" | "forge" | "none") => {
+                store.note_install_config_source(&h.name, src);
+                Ok((store.host(&h.name).unwrap_or(h), InstallDone::Reset))
+            }
+            (d, _) => d,
         }
-    }
+    };
     match done {
         Ok((h, outcome)) => {
             let reset = outcome == InstallDone::Reset;
