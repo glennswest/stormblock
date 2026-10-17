@@ -840,14 +840,18 @@ stopped. The feature, its 90 gates and the six without-it branches removed
 `cluster`, `ui`: 0 errors, 0 warnings; check.sh at c368973 ALL PASS
 (1150/1150). No golden (the default build is unchanged).
 
-### VFIO NVMe driver: build or delete the stub (2026-10-11, #167, P3) — BUILT on branch wip/167-remove-vfio (B); merges after 12.23
+### VFIO NVMe driver: build or delete the stub (2026-10-11, #167, P3) — DONE (merged ad33637; in golden-stormblock-12891c0025b2 and later)
 
 Decision B (2026-10-13): delete. On **wip/167-remove-vfio**: `src/drive/
 nvme.rs` gone, `dma.rs`'s hugepage allocator and IOVA lookup gone (`DmaBuf`
 stays); README, deck, CHANGELOG. Also there: #424's claim test asserts the
 wait, not a total time (6.4 s vs 2.9 s once under full-suite load).
 - [x] check.sh on wip/167-remove-vfio at 7347203 ALL PASS (1213/1213)
-- [ ] after 12.23 passes: merge, check.sh, the next stage; close
+- [x] merged to main (ad33637); in the 12.23 stage (4d79108) and
+      golden-stormblock-0a9fe2d97cf9
+- [x] leftovers (2026-10-17): `DriveError::VfioNotAvailable` (never raised)
+      removed, the drive layer's and CLI's module comments corrected
+- [ ] check.sh on main with that; close
 
 ### Non-redundant volumes: drive affinity (2026-10-11, #153, P3) — DONE (merged ecde642; in golden-stormblock-12891c0025b2 and later), closed 2026-10-17
 
