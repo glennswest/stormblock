@@ -96,7 +96,7 @@ pub fn all() -> Vec<Remote> {
 fn grouped(target: Option<&str>) -> Vec<Remote> {
     let mut by: HashMap<(String, String, String), Remote> = HashMap::new();
     with(|m| {
-        for c in m.values().filter(|c| target.is_none_or(|t| c.target == t)) {
+        for c in m.values().filter(|c| match target { Some(t) => c.target == t, None => true }) {
             let key = (c.target.clone(), c.host.clone(), c.addr.ip().to_string());
             let r = by.entry(key.clone()).or_insert_with(|| Remote {
                 host: key.1,
