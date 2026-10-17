@@ -171,7 +171,11 @@ on first open"), and as built:
     (1 = Reed-Solomon `ec:K+M`), K, M. An engine that does not read the code
     refuses that volume (kept, listed, written back as it was; never read,
     written, rebuilt, verified, cloned, composed or restriped) rather than
-    read it as the record's `Parity`. Kinds 4 and up are skipped by every
+    read it as the record's `Parity`. Then a single-copy volume's spread
+    layout (#153): `L`, 1. Last, a secret volume (#74): `X`, 1. A reader
+    stops at a tag it does not know, so every engine before #74 reads all
+    that comes before the secret's tag and serves the volume as an ordinary
+    one (no data is misread; what it loses is the refusals). Kinds 4 and up are skipped by every
     reader since #245 step 1, and none is written.
   - Log record: magic, the store's nonce, sequence, length, kind (ops or
     wrap), CRC, then the ops (`Put`, `Del`, `DropVolume`), padded to pages. A

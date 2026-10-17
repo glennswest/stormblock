@@ -979,6 +979,43 @@ PROTECT. The same care applies to space — a thin volume with nowhere to put a
 write answers *Capacity Exceeded* (ENOSPC at the initiator) rather than a
 media error (#92).
 
+### Secret volumes (#74)
+
+A volume can be **secret**: stormcos's `stormcert-data`, which holds the node
+CA's private key, is the first. The engine enforces it, with nothing asked of
+the caller:
+
+- **Made secret** on create (`POST /api/v1/volumes {"secret": true}`,
+  `POST /v1/volumes {"secret": true}`, on this node only), by an image's
+  golden (`[[slab.golden]] secret = true`, or `secret` on a `compose/slab`
+  golden: its clones are secret, the blank golden is not), or later by the
+  admin, `PUT /api/v1/volumes/{id}/secret {"secret": true}`. One way: `false`
+  is refused, since a volume that stopped being secret could then be cloned.
+  Every volume response says `"secret": true`; `GET …/{id}/secret` asks.
+- **Never copied:** clone, snapshot, group snapshot, a template's claim, a
+  golden made from it, `compose` (volume, pallet, slab, disk), a cross-role
+  copy, a move (`/api/v1/moves`) and StormFS copy are refused (409) by the
+  volume manager, whatever the door.
+- **Never exported or read out:** an NVMe/TCP attach (`/api/v1` and `/v1`),
+  `/api/v1/exports`, an iSCSI LUN, `/serve/v1` exports, vhost-user-blk,
+  `GET …/content` and `GET …/files` are refused (409).
+- **One consumer, on this node:** it is attached as a local ublk device only,
+  and a second attach while one is held (or while the boot holds it) is 409.
+- **Erased on delete**, at least once, whatever the node's `[erase]` default.
+- **Rotated by a synonym:** seal the new material and re-point a synonym at
+  it. The engine keeps exactly one previous copy (for a rollback); an older
+  secret target in the synonym's history is deleted, erased, and dropped from
+  it (`rotated_out` in the answer), unless another synonym still uses it.
+- **Still moved internally:** a drain, a rebuild onto a spare, a rebalance, a
+  retier, a restripe and an install's flow-over move its extents inside the
+  engine. None of them makes a second copy or takes the bytes off the node.
+- **Kept with the volume** in its format-2 header, last (`X`); an engine
+  before #74 reads the volume as an ordinary one.
+
+Not here, each its own issue: an attach bound to the consuming workload's
+identity (a reviewed ServiceAccount, not the node token), and per-volume
+encryption.
+
 ### Synonyms — a stable name, re-pointed at a new version
 
 A consumer refers to storage by a name it chose once (`fedora-43`,

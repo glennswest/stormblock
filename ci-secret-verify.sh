@@ -42,7 +42,7 @@ say "guest initramfs: busybox, stormblock, curl, ublk_drv"
 I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
-for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff head tail sed awk cut tr seq mkdir rm timeout; do
+for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff head tail sed awk cut tr seq mkdir rm timeout wc sync printf; do
     ln -sf busybox "$I/bin/$a"
 done
 for b in "$BIN" "$CURL"; do
