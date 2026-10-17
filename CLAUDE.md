@@ -234,6 +234,18 @@ drop slab + volumes from memory with no persist/erase; stop the array with
 no superblock/bitmap/flush write; forget the members); test: assemble on a
 second engine, every member byte unchanged. Nothing built.
 
+### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P3; stormcluster#21, P1) — WAITING ON THE OWNER
+
+stormcluster#14's release (gone: workloads, claims, etcd, certs, role,
+customer images, overwritten once; kept: release system images; new SNO).
+The node's own service volumes are mounted ublk devices (held, #267), so a
+live call cannot erase them. Asked on #291 (needs-owner): A live call that
+refuses while anything is attached; B a ticket run by boot-local at the next
+boot before anything is exported (recommended); C a same-release install
+with a fresh data half. Keep set: sealed origin-release goldens, system-data,
+stormcos-state's network/install-config; unmarked volumes erased. Nothing
+built; with the pacing, the build goes on a wip/ branch.
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
