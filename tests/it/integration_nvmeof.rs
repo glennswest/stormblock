@@ -595,3 +595,103 @@ async fn an_extent_moves_as_one_command_and_an_older_target_still_gets_its_size(
     assert!(local.fabric_path().is_none(), "a local device has no fabric path");
     server.abort();
 }
+
+/// A proxy to `to` on `on` that records each connection's source address
+/// and can cut every connection from one source, and refuse its next ones:
+/// a NIC whose link drops.
+async fn recording_proxy(
+    on: &str,
+    to: std::net::SocketAddr,
+) -> (std::net::SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<std::net::IpAddr>>>, impl Fn(std::net::IpAddr)) {
+    use std::sync::{Arc, Mutex};
+    let listener = tokio::net::TcpListener::bind(on).await.unwrap();
+    let at = listener.local_addr().unwrap();
+    let seen: Arc<Mutex<Vec<std::net::IpAddr>>> = Arc::default();
+    let cut: Arc<Mutex<Vec<std::net::IpAddr>>> = Arc::default();
+    let tasks: Arc<Mutex<Vec<(std::net::IpAddr, tokio::task::JoinHandle<()>)>>> = Arc::default();
+    let (s2, c2, t2) = (seen.clone(), cut.clone(), tasks.clone());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut a, peer)) = listener.accept().await else { return };
+            s2.lock().unwrap().push(peer.ip());
+            if c2.lock().unwrap().contains(&peer.ip()) {
+                continue;
+            }
+            let t = tokio::spawn(async move {
+                let Ok(mut b) = tokio::net::TcpStream::connect(to).await else { return };
+                let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+            });
+            t2.lock().unwrap().push((peer.ip(), t));
+        }
+    });
+    let cut_from = move |ip: std::net::IpAddr| {
+        cut.lock().unwrap().push(ip);
+        for (from, t) in tasks.lock().unwrap().iter() {
+            if *from == ip {
+                t.abort();
+            }
+        }
+    };
+    (at, seen, cut_from)
+}
+
+/// #450: one target address, two NICs that reach it: two paths, each bound
+/// to its NIC's address, sharing the I/O; when one NIC's link drops the I/O
+/// goes on by the other, every byte right, and nothing was configured.
+#[tokio::test]
+async fn every_nic_that_reaches_the_target_carries_a_path() {
+    use stormblock::drive::nvmeof_dev::{NvmeTcpSpec, NvmeofDevice};
+    std::env::set_var("STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS", "3");
+    // Two "NICs" on loopback addresses; the target is on their subnet.
+    std::env::set_var("STORMBLOCK_IFADDRS", "nic0=127.0.0.1/8,nic1=127.0.0.2/8");
+    let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;
+    let (target, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+    let (proxy, seen, cut_from) = recording_proxy("127.0.0.1:0", target).await;
+
+    let spec = NvmeTcpSpec::parse(&format!("nvme-tcp://{proxy}/{SUBSYSTEM_NQN}?nsid=1")).unwrap();
+    let dev = std::sync::Arc::new(NvmeofDevice::connect(&spec).await.expect("attaches"));
+    let chunk = 128 * 1024usize;
+    let writes: Vec<_> = (0..64u64)
+        .map(|i| {
+            let dev = dev.clone();
+            tokio::spawn(async move {
+                let buf = vec![(i as u8).wrapping_add(1); chunk];
+                dev.write(i * chunk as u64, &buf).await.unwrap();
+            })
+        })
+        .collect();
+    for w in writes {
+        w.await.unwrap();
+    }
+    let st = dev.path_stats();
+    assert_eq!(st.len(), 2, "one path per NIC: {st:?}");
+    assert_eq!(st[0].interface.as_deref(), Some("nic0"));
+    assert_eq!(st[1].interface.as_deref(), Some("nic1"));
+    assert_eq!(st[1].source.as_deref(), Some("127.0.0.2"));
+    assert!(st.iter().all(|p| p.bytes >= 4 * chunk as u64), "both carry writes: {st:?}");
+    {
+        let seen = seen.lock().unwrap();
+        let a: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let b: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+        assert!(seen.contains(&a) && seen.contains(&b), "connections from both NICs' addresses: {seen:?}");
+    }
+    assert_eq!(dev.id().path, spec.uri(), "the device is named by the URI as given");
+
+    // nic1's link drops: the I/O goes on by nic0.
+    cut_from("127.0.0.2".parse().unwrap());
+    for i in 0..32u64 {
+        dev.write(i * 4096, &[i as u8; 4096]).await.expect("a write after one NIC dropped");
+    }
+    let mut back = vec![0u8; 4096];
+    for i in 0..32u64 {
+        dev.read(i * 4096, &mut back).await.unwrap();
+        assert!(back.iter().all(|b| *b == i as u8));
+    }
+    let mut big = vec![0u8; chunk];
+    for i in 32..64u64 {
+        dev.read(i * chunk as u64, &mut big).await.unwrap();
+        assert!(big.iter().all(|b| *b == (i as u8).wrapping_add(1)), "block run {i}");
+    }
+    std::env::remove_var("STORMBLOCK_IFADDRS");
+    server.abort();
+}

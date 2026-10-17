@@ -116,6 +116,10 @@ impl BlockDevice for PartitionDevice {
         self.inner.fabric_path()
     }
 
+    fn fabric_paths(&self) -> Vec<super::nvmeof_dev::PathStats> {
+        self.inner.fabric_paths()
+    }
+
     fn capacity_bytes(&self) -> u64 {
         self.len
     }

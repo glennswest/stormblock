@@ -199,6 +199,9 @@ pub struct NvmeTcpSpec {
     pub dhchap: Option<crate::target::nvmeof::auth::DhchapKey>,
     /// How operations pick a path when there are several (#90).
     pub iopolicy: IoPolicy,
+    /// Whether the URI named it (#450: paths the node's NICs add share by
+    /// load unless it did).
+    pub iopolicy_named: bool,
 }
 
 impl NvmeTcpSpec {
@@ -225,12 +228,14 @@ impl NvmeTcpSpec {
         let mut nsid = 1u32;
         let mut host_nqn = None;
         let mut iopolicy = IoPolicy::default();
+        let mut iopolicy_named = false;
         if let Some(q) = query {
             for kv in q.split('&') {
                 if let Some(v) = kv.strip_prefix("nsid=") {
                     nsid = v.parse().ok()?;
                 } else if let Some(v) = kv.strip_prefix("iopolicy=") {
                     iopolicy = IoPolicy::parse(v)?;
+                    iopolicy_named = true;
                 } else if let Some(v) = kv.strip_prefix("hostnqn=") {
                     // Spelled as nvme-cli spells it, so an operator moving
                     // between the two does not have to translate.
@@ -247,6 +252,7 @@ impl NvmeTcpSpec {
             host_nqn,
             dhchap: None,
             iopolicy,
+            iopolicy_named,
         })
     }
 
@@ -342,16 +348,16 @@ pub fn io_timeout() -> std::time::Duration {
     })
 }
 
-/// Connect to one path's address, leaving by the local storage interface on
-/// its subnet when there is one (#90): bound to the device, so egress is that
-/// NIC whatever the route lookup would pick, and to its address, so the
-/// source agrees with what the NIC answers ARP for.
-async fn connect_path(addr: &str, path: usize) -> io::Result<TcpStream> {
+/// Connect to one path's address, leaving by its local interface when it has
+/// one (#90, #450): bound to the device, so egress is that NIC whatever the
+/// route lookup would pick, and to its address, so the source agrees with
+/// what the NIC answers ARP for.
+async fn connect_path(addr: &str, source: Option<&crate::netif::PathSource>) -> io::Result<TcpStream> {
     let target = tokio::net::lookup_host(addr)
         .await?
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{addr} resolves to nothing")))?;
-    let Some(src) = crate::netif::source_for(target.ip(), path) else {
+    let Some(src) = source.filter(|s| s.address.is_ipv4() == target.is_ipv4()) else {
         return TcpStream::connect(target).await;
     };
     let sock = if target.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
@@ -368,8 +374,40 @@ async fn connect_path(addr: &str, path: usize) -> io::Result<TcpStream> {
         }
     }
     sock.bind(std::net::SocketAddr::new(src.address, 0))?;
-    tracing::debug!("NVMe-TCP path {path} to {target} by {} ({})", src.interface, src.address);
+    tracing::debug!("NVMe-TCP path to {target} by {} ({})", src.interface, src.address);
     sock.connect(target).await
+}
+
+/// The paths a spec's addresses make (#90, #450): each address with the
+/// local interfaces that reach it. Addresses reached by the same interfaces
+/// are paired with them in turn, as many paths as the larger of the two, so
+/// two target addresses and two NICs make two paths (one NIC each), one
+/// address and two NICs make two (one address by each NIC), and an address
+/// no local interface is known to reach makes one path, unbound.
+pub async fn plan_paths(addrs: &[&str]) -> Vec<(String, Option<crate::netif::PathSource>)> {
+    let mut groups: Vec<(Vec<crate::netif::PathSource>, Vec<String>)> = Vec::new();
+    for a in addrs {
+        let ip = match tokio::net::lookup_host(*a).await.ok().and_then(|mut i| i.next()) {
+            Some(t) => Some(t.ip()),
+            None => None,
+        };
+        let sources = ip.map(crate::netif::sources_for).unwrap_or_default();
+        match groups.iter_mut().find(|(s, _)| *s == sources) {
+            Some((_, v)) => v.push(a.to_string()),
+            None => groups.push((sources, vec![a.to_string()])),
+        }
+    }
+    let mut out = Vec::new();
+    for (sources, addrs) in groups {
+        if sources.is_empty() {
+            out.extend(addrs.into_iter().map(|a| (a, None)));
+            continue;
+        }
+        for k in 0..addrs.len().max(sources.len()) {
+            out.push((addrs[k % addrs.len()].clone(), Some(sources[k % sources.len()].clone())));
+        }
+    }
+    out
 }
 
 /// A command (or a connect) bounded by [`io_timeout`].
@@ -386,9 +424,14 @@ async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = io::Resul
 impl Conn {
     /// TCP connect + ICReq/ICResp + Fabric Connect for `qid`, and
     /// DH-HMAC-CHAP when the target asks for it.
-    async fn establish(spec: &NvmeTcpSpec, addr: &str, path: usize, qid: u16) -> io::Result<Self> {
+    async fn establish(
+        spec: &NvmeTcpSpec,
+        addr: &str,
+        source: Option<&crate::netif::PathSource>,
+        qid: u16,
+    ) -> io::Result<Self> {
         let (nqn, host_nqn) = (spec.nqn.as_str(), spec.effective_host_nqn());
-        let stream = bounded("connect", connect_path(addr, path)).await?;
+        let stream = bounded("connect", connect_path(addr, source)).await?;
         stream.set_nodelay(true)?;
         // A dead peer is noticed while idle too, not only by a command's
         // timeout: probes after 10 s idle, every 5 s, 3 tries (#358).
@@ -724,6 +767,9 @@ impl Conn {
 /// has gone.
 struct Path {
     addr: String,
+    /// The local interface its connections leave by (#90, #450); None: the
+    /// route's choice.
+    source: Option<crate::netif::PathSource>,
     /// I/O queue connections; None until first used, and after an error
     /// until the next op re-establishes it.
     conns: Vec<Mutex<Option<Conn>>>,
@@ -739,9 +785,10 @@ struct Path {
 }
 
 impl Path {
-    fn new(addr: &str) -> Self {
+    fn new(addr: &str, source: Option<crate::netif::PathSource>) -> Self {
         Path {
             addr: addr.to_string(),
+            source,
             conns: (0..io_queues()).map(|_| Mutex::new(None)).collect(),
             inflight: std::sync::atomic::AtomicUsize::new(0),
             down_until: std::sync::Mutex::new(None),
@@ -763,6 +810,12 @@ const PATH_DOWN: std::time::Duration = std::time::Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PathStats {
     pub addr: String,
+    /// The local interface it leaves by, and its address (#450); absent when
+    /// the route picks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub ops: u64,
     pub bytes: u64,
     pub down: bool,
@@ -826,18 +879,44 @@ impl NvmeofDevice {
         if addrs.is_empty() {
             return Err(DriveError::Other(anyhow::anyhow!("nvme-tcp: no address in {}", spec.uri())));
         }
+        let plan = plan_paths(&addrs).await;
+        // The URI as given names the device (#65): never the policy chosen here.
+        let uri = spec.uri();
+        // More paths than addresses: the node's NICs (#450). They share the
+        // I/O by load unless the URI named a policy.
+        let mut spec = spec.clone();
+        if plan.len() > addrs.len() && !spec.iopolicy_named {
+            spec.iopolicy = IoPolicy::QueueDepth;
+        }
+        let spec = &spec;
         tracing::info!(
             "NVMe-TCP initiator: connecting to {} nqn={} nsid={}{}",
             spec.addr,
             spec.nqn,
             spec.nsid,
-            if addrs.len() > 1 { format!(" ({} paths, {})", addrs.len(), spec.iopolicy.as_str()) } else { String::new() }
+            if plan.len() > 1 {
+                format!(
+                    " ({} paths, {}: {})",
+                    plan.len(),
+                    spec.iopolicy.as_str(),
+                    plan.iter()
+                        .map(|(a, s)| match s {
+                            Some(s) => format!("{a} by {} ({})", s.interface, s.address),
+                            None => a.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                String::new()
+            }
         );
-        let paths: Vec<Path> = addrs.iter().map(|a| Path::new(a)).collect();
+        let paths: Vec<Path> = plan.iter().map(|(a, s)| Path::new(a, s.clone())).collect();
         let mut admin = None;
         let mut last = None;
-        for (i, a) in addrs.iter().enumerate() {
-            match Conn::establish(spec, a, i, 0).await {
+        for (i, p) in paths.iter().enumerate() {
+            let a = &p.addr;
+            match Conn::establish(spec, a, p.source.as_ref(), 0).await {
                 Ok(c) => {
                     admin = Some((i, c));
                     break;
@@ -877,7 +956,7 @@ impl NvmeofDevice {
         let max_transfer = transfer_for(mdts, block_size);
         drop(admin);
 
-        let io_conn = Conn::establish(spec, addrs[first], first, 1)
+        let io_conn = Conn::establish(spec, &paths[first].addr, paths[first].source.as_ref(), 1)
             .await
             .map_err(DriveError::Io)?;
         let mtu = io_conn.mtu;
@@ -885,7 +964,7 @@ impl NvmeofDevice {
         *paths[first].conns[0].lock().await = Some(io_conn);
         tracing::info!(
             "NVMe-TCP initiator: {} = {} bytes, block_size {}, model {:?}, {} KiB per command (target MDTS {mdts}), path MTU {}",
-            spec.uri(),
+            uri,
             capacity,
             block_size,
             model,
@@ -897,7 +976,6 @@ impl NvmeofDevice {
             },
         );
 
-        let uri = spec.uri();
         let id = DeviceId {
             wwn: String::new(),
             // Stable across reopens: derived from the attach URI, never
@@ -929,6 +1007,8 @@ impl NvmeofDevice {
             .iter()
             .map(|p| PathStats {
                 addr: p.addr.clone(),
+                interface: p.source.as_ref().map(|s| s.interface.clone()),
+                source: p.source.as_ref().map(|s| s.address.to_string()),
                 ops: p.ops.load(Ordering::Relaxed),
                 bytes: p.bytes.load(Ordering::Relaxed),
                 down: p.is_down(),
@@ -972,7 +1052,7 @@ impl NvmeofDevice {
         };
         let mut guard = ConnGuard { guard, path };
         if guard.is_none() {
-            match Conn::establish(&self.spec, &path.addr, pi, 1).await {
+            match Conn::establish(&self.spec, &path.addr, path.source.as_ref(), 1).await {
                 Ok(c) => {
                     if c.mtu > 0 {
                         path.mtu.store(c.mtu, Ordering::Relaxed);
@@ -1083,6 +1163,10 @@ impl BlockDevice for NvmeofDevice {
     fn fabric_path(&self) -> Option<FabricPath> {
         let mtu = self.paths.iter().map(|p| p.mtu.load(Ordering::Relaxed)).max().unwrap_or(0);
         Some(FabricPath { mtu, jumbo: mtu >= 9000, max_transfer: self.max_transfer as u32 })
+    }
+
+    fn fabric_paths(&self) -> Vec<PathStats> {
+        self.path_stats()
     }
 
     fn device_type(&self) -> DriveType {
@@ -1318,6 +1402,33 @@ mod tests {
         let a = Uuid::new_v5(&Uuid::NAMESPACE_URL, s.uri().as_bytes());
         let b = Uuid::new_v5(&Uuid::NAMESPACE_URL, s.uri().as_bytes());
         assert_eq!(a, b);
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn one_address_and_two_nics_make_two_paths() {
+        std::env::set_var("STORMBLOCK_IFADDRS", "nic0=127.0.0.1/8,nic1=127.0.0.2/8");
+        let p = plan_paths(&["127.0.0.1:4420"]).await;
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_eq!(p[0].1.as_ref().unwrap().interface, "nic0");
+        assert_eq!(p[1].1.as_ref().unwrap().interface, "nic1");
+        assert!(p.iter().all(|(a, _)| a == "127.0.0.1:4420"));
+        // Two addresses, two NICs: two paths, one NIC each (#90's pairing).
+        let p = plan_paths(&["127.0.0.1:4420", "127.0.0.3:4420"]).await;
+        assert_eq!(p.len(), 2, "{p:?}");
+        assert_ne!(p[0].1, p[1].1);
+        // A target no NIC is known to reach: one path, the route's.
+        let p = plan_paths(&["192.0.2.9:4420"]).await;
+        assert_eq!(p, vec![("192.0.2.9:4420".to_string(), None)]);
+        std::env::remove_var("STORMBLOCK_IFADDRS");
+        // A single-NIC node: unchanged.
+        std::env::set_var("STORMBLOCK_IFADDRS", "nic0=127.0.0.1/8");
+        assert_eq!(plan_paths(&["127.0.0.1:4420"]).await, vec![("127.0.0.1:4420".to_string(), None)]);
+        std::env::remove_var("STORMBLOCK_IFADDRS");
     }
 }
 

@@ -33,8 +33,39 @@ pub fn addresses(interface: &str) -> Vec<IpAddr> {
 }
 
 /// Every address on `interface` with its prefix length (#90).
-#[cfg(unix)]
 pub fn addresses_with_prefix(interface: &str) -> Vec<(IpAddr, u8)> {
+    interface_addresses().into_iter().filter(|a| a.interface == interface).map(|a| (a.address, a.prefix)).collect()
+}
+
+/// One address of one interface, as the kernel lists it (#450).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfAddr {
+    pub interface: String,
+    pub address: IpAddr,
+    pub prefix: u8,
+    /// `IFF_LOOPBACK`.
+    pub loopback: bool,
+}
+
+/// Every address of every interface (getifaddrs), in the kernel's order.
+/// `STORMBLOCK_IFADDRS` (`name=addr/prefix,…`) stands in for the kernel's
+/// list (tests: two "NICs" on loopback addresses).
+pub fn interface_addresses() -> Vec<IfAddr> {
+    if let Ok(v) = std::env::var("STORMBLOCK_IFADDRS") {
+        return v
+            .split(',')
+            .filter_map(|e| {
+                let (name, rest) = e.trim().split_once('=')?;
+                let (a, p) = rest.split_once('/')?;
+                Some(IfAddr { interface: name.to_string(), address: a.parse().ok()?, prefix: p.parse().ok()?, loopback: false })
+            })
+            .collect();
+    }
+    kernel_interface_addresses()
+}
+
+#[cfg(unix)]
+fn kernel_interface_addresses() -> Vec<IfAddr> {
     let mut out = Vec::new();
     let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs fills `head` with a list we free below; every node
@@ -51,10 +82,8 @@ pub fn addresses_with_prefix(interface: &str) -> Vec<(IpAddr, u8)> {
             continue;
         }
         // SAFETY: a NUL-terminated name owned by the list.
-        let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) };
-        if name.to_bytes() != interface.as_bytes() {
-            continue;
-        }
+        let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }.to_string_lossy().into_owned();
+        let loopback = ifa.ifa_flags & (libc::IFF_LOOPBACK as u32) != 0;
         // SAFETY: the family says which sockaddr this is.
         match unsafe { (*ifa.ifa_addr).sa_family } as i32 {
             libc::AF_INET => {
@@ -66,7 +95,8 @@ pub fn addresses_with_prefix(interface: &str) -> Vec<(IpAddr, u8)> {
                     let m = unsafe { &*(ifa.ifa_netmask as *const libc::sockaddr_in) };
                     u32::from_be(m.sin_addr.s_addr).count_ones() as u8
                 };
-                out.push((IpAddr::V4(Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr))), prefix));
+                let address = IpAddr::V4(Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr)));
+                out.push(IfAddr { interface: name, address, prefix, loopback });
             }
             libc::AF_INET6 => {
                 let sa = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
@@ -77,7 +107,8 @@ pub fn addresses_with_prefix(interface: &str) -> Vec<(IpAddr, u8)> {
                     let m = unsafe { &*(ifa.ifa_netmask as *const libc::sockaddr_in6) };
                     m.sin6_addr.s6_addr.iter().map(|b| b.count_ones()).sum::<u32>() as u8
                 };
-                out.push((IpAddr::V6(Ipv6Addr::from(sa.sin6_addr.s6_addr)), prefix));
+                let address = IpAddr::V6(Ipv6Addr::from(sa.sin6_addr.s6_addr));
+                out.push(IfAddr { interface: name, address, prefix, loopback });
             }
             _ => {}
         }
@@ -88,7 +119,7 @@ pub fn addresses_with_prefix(interface: &str) -> Vec<(IpAddr, u8)> {
 }
 
 #[cfg(not(unix))]
-pub fn addresses_with_prefix(_interface: &str) -> Vec<(IpAddr, u8)> {
+fn kernel_interface_addresses() -> Vec<IfAddr> {
     Vec::new()
 }
 
@@ -330,12 +361,92 @@ pub fn sources_of<'a>(interfaces: impl Iterator<Item = &'a str>) -> Vec<PathSour
 /// paths to two target addresses on one subnet leave by two NICs. None when
 /// no storage interface is on that subnet.
 pub fn source_for(target: IpAddr, index: usize) -> Option<PathSource> {
-    let on: Vec<PathSource> =
-        path_sources().into_iter().filter(|s| in_subnet(target, s.address, s.prefix)).collect();
+    let on = sources_for(target);
     if on.is_empty() {
         return None;
     }
     Some(on[index % on.len()].clone())
+}
+
+/// Every local interface a connection to `target` can leave by (#90, #450).
+///
+/// With storage interfaces configured (`[storage] interface(s)`,
+/// `$STORMBLOCK_STORAGE_INTERFACE`), those on `target`'s subnet, as before.
+/// Without, the node's own (#450: "use every NIC that's up and routes to
+/// the source", no configuration): every interface whose link is not down
+/// and which has an address on `target`'s subnet, and the interface the
+/// route to `target` leaves by, that one first; never a loopback one, never
+/// one `$STORMBLOCK_PATH_SKIP` / `[storage] path_skip` names. Fewer than two:
+/// none, so a single-NIC node connects as it always has (the route's
+/// choice, nothing bound). `$STORMBLOCK_AUTO_PATHS=off` turns it off.
+pub fn sources_for(target: IpAddr) -> Vec<PathSource> {
+    let configured = path_sources();
+    if !configured.is_empty() {
+        return configured.into_iter().filter(|s| in_subnet(target, s.address, s.prefix)).collect();
+    }
+    auto_sources(target)
+}
+
+/// Interfaces never used as a path (#450): `$STORMBLOCK_PATH_SKIP`
+/// (comma-separated), else what the configuration set.
+static PATH_SKIP: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+pub fn set_path_skip(names: Vec<String>) {
+    *PATH_SKIP.write().unwrap_or_else(|e| e.into_inner()) = names;
+}
+
+fn path_skip() -> Vec<String> {
+    let mut v: Vec<String> = std::env::var("STORMBLOCK_PATH_SKIP")
+        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default();
+    v.extend(PATH_SKIP.read().unwrap_or_else(|e| e.into_inner()).iter().cloned());
+    v
+}
+
+/// The local address the routing table picks to reach `target` (a UDP
+/// connect sends nothing).
+pub fn route_source_to(target: IpAddr) -> Option<IpAddr> {
+    let bind: SocketAddr =
+        if target.is_ipv4() { (Ipv4Addr::UNSPECIFIED, 0).into() } else { (Ipv6Addr::UNSPECIFIED, 0).into() };
+    let sock = std::net::UdpSocket::bind(bind).ok()?;
+    sock.connect(SocketAddr::new(target, 9)).ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
+}
+
+/// [`sources_for`] when nothing is configured: the node's own NICs (#450).
+pub fn auto_sources(target: IpAddr) -> Vec<PathSource> {
+    if matches!(std::env::var("STORMBLOCK_AUTO_PATHS").as_deref(), Ok("off") | Ok("0") | Ok("false")) {
+        return Vec::new();
+    }
+    let skip = path_skip();
+    let all = interface_addresses();
+    let usable = |a: &IfAddr| {
+        !a.loopback
+            && a.address.is_ipv4() == target.is_ipv4()
+            && !skip.iter().any(|s| s == &a.interface)
+            && !matches!(operstate(&a.interface).as_deref(), Some("down") | Some("lowerlayerdown"))
+            && !matches!(a.address, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80)
+    };
+    let mut out: Vec<PathSource> = Vec::new();
+    let mut add = |a: &IfAddr| {
+        if !out.iter().any(|s| s.interface == a.interface) {
+            out.push(PathSource { interface: a.interface.clone(), address: a.address, prefix: a.prefix });
+        }
+    };
+    // The route's own NIC first: it is the path a single-NIC node has.
+    if let Some(src) = route_source_to(target) {
+        if let Some(a) = all.iter().find(|a| a.address == src && usable(a)) {
+            add(a);
+        }
+    }
+    for a in all.iter().filter(|a| usable(a) && in_subnet(target, a.address, a.prefix)) {
+        add(a);
+    }
+    if out.len() < 2 {
+        return Vec::new();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -409,5 +520,27 @@ mod tests {
         assert_eq!(source_for("10.98.0.9".parse().unwrap(), 1).unwrap().interface, "eth3");
         assert!(source_for("192.0.2.1".parse().unwrap(), 0).is_none());
         set_path_sources(Vec::new());
+    }
+
+    #[test]
+    fn every_nic_that_reaches_a_target_is_a_path_unless_skipped() {
+        // Two NICs on the target's subnet, one elsewhere (#450).
+        std::env::set_var("STORMBLOCK_IFADDRS", "nic0=127.0.0.1/8,nic1=127.0.0.2/8,other=10.77.0.1/24");
+        let t: IpAddr = "127.0.0.1".parse().unwrap();
+        let s = auto_sources(t);
+        assert_eq!(s.iter().map(|x| x.interface.as_str()).collect::<Vec<_>>(), ["nic0", "nic1"], "the route's NIC first");
+        assert_eq!(sources_for(t), s, "nothing configured: the node's own");
+        assert!(auto_sources("192.0.2.1".parse().unwrap()).is_empty(), "one way out at most: no binding");
+        std::env::set_var("STORMBLOCK_PATH_SKIP", "nic1");
+        assert!(auto_sources(t).is_empty(), "the other skipped: a single NIC, unbound as before");
+        std::env::remove_var("STORMBLOCK_PATH_SKIP");
+        std::env::set_var("STORMBLOCK_AUTO_PATHS", "off");
+        assert!(auto_sources(t).is_empty());
+        std::env::remove_var("STORMBLOCK_AUTO_PATHS");
+        // Configured storage interfaces win.
+        set_path_sources(vec![PathSource { interface: "nic1".into(), address: "127.0.0.2".parse().unwrap(), prefix: 8 }]);
+        assert_eq!(sources_for(t).len(), 1);
+        set_path_sources(Vec::new());
+        std::env::remove_var("STORMBLOCK_IFADDRS");
     }
 }

@@ -14,6 +14,7 @@ pub static FLOW: FlowProgress = FlowProgress {
     zeroed: AtomicU64::new(0),
     bytes: AtomicU64::new(0),
     source: Mutex::new(None),
+    source_device: Mutex::new(None),
     persists: AtomicU64::new(0),
     pace: Mutex::new(None),
     validation: Mutex::new(None),
@@ -27,6 +28,8 @@ pub struct FlowProgress {
     bytes: AtomicU64,
     /// The source's fabric path, when it is reached over NVMe/TCP (#407).
     source: Mutex<Option<crate::drive::nvmeof_dev::FabricPath>>,
+    /// The source's device, for its paths (#450); not kept alive by this.
+    source_device: Mutex<Option<std::sync::Weak<dyn crate::drive::BlockDevice>>>,
     /// Persists made (#410: one for a batch of moves).
     persists: AtomicU64,
     /// How it is paced, and why (#410).
@@ -103,6 +106,10 @@ pub struct Snapshot {
     /// one command carries. Absent for a local source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<crate::drive::nvmeof_dev::FabricPath>,
+    /// The source's paths over NVMe/TCP (#450): one per target address and
+    /// local NIC, with the bytes each has carried. Empty for a local source.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<crate::drive::nvmeof_dev::PathStats>,
     /// Persists made so far (#410).
     pub persists: u64,
     /// How it is paced, and why (#410).
@@ -136,6 +143,11 @@ impl FlowProgress {
         *self.source.lock().unwrap_or_else(|e| e.into_inner()) = path;
     }
 
+    /// The device being read from now, for its paths (#450).
+    pub fn source_device(&self, dev: &std::sync::Arc<dyn crate::drive::BlockDevice>) {
+        *self.source_device.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::downgrade(dev));
+    }
+
     pub fn hot(&self, n: u64) {
         self.hot.fetch_add(n, Relaxed);
     }
@@ -166,6 +178,14 @@ impl FlowProgress {
             mb_per_s: per(bytes as f64 / 1e6),
             extents_per_s: per((moved + zeroed) as f64),
             source_path: *self.source.lock().unwrap_or_else(|e| e.into_inner()),
+            paths: self
+                .source_device
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .map(|d| d.fabric_paths())
+                .unwrap_or_default(),
             persists: self.persists.load(Relaxed),
             pace: self.pace.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             validation: self.validation.lock().unwrap_or_else(|e| e.into_inner()).clone(),

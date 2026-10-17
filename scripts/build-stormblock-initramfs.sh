@@ -733,6 +733,10 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.ntp=*)         NTP_MODE="${param#*=}" ;;
         # `off`: the boot NIC ignores the node's declared [network] (#229).
         rd.stormblock.declared-net=*) DECLARED_NET="${param#*=}" ;;
+        # Interfaces the engine's NVMe/TCP connections never leave by (#450;
+        # comma-separated). Every other NIC that is up and reaches the
+        # appliance carries a path of the flow-over.
+        rd.stormblock.path-skip=*)   export STORMBLOCK_PATH_SKIP="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
         # this from SMBIOS and presented it to load the kernel; presenting the

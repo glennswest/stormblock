@@ -293,6 +293,22 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
 - [x] check.sh at 9877bb8 ALL PASS (1240/1240); CHANGELOG; closed with
       the answers
 
+### Flow-over over every NIC that's up (2026-10-17, #450, P2) — IN PROGRESS
+
+Owner: "can we use both nics in flowover if there up?" A path was per
+*target* address, its NIC picked from configured `[storage] interfaces`;
+forge has one address, so the flow-over had one NIC.
+- [x] engine: `netif::sources_for`/`auto_sources` (nothing configured: every
+      NIC up with an address on the target's subnet + the route's NIC, ≥ 2
+      or none; `[storage] path_skip`, `$STORMBLOCK_PATH_SKIP`,
+      `rd.stormblock.path-skip=`; `$STORMBLOCK_AUTO_PATHS=off`);
+      `nvmeof_dev::plan_paths` (address × NIC, #90's pairing kept), queue-depth
+      when NICs added paths; per-path interface/source in `path_stats`, health
+      `flow_over.paths`, `/metrics` `stormblock_nvme_tcp_path_{bytes,down}`
+- [ ] tests (netif, plan, integration two NICs + one dropping); README, CHANGELOG
+- [ ] the second NIC has no address today: the initramfs addresses only its
+      uplink (in stormbr0), the running node is stormpump's. Owner question
+
 ### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — DONE (golden-stormblock-0a9fe2d97cf9), closed
 
 Decided (master for the owner, 2026-10-13, as recommended): 1(a) a peer

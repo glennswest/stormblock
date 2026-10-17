@@ -170,6 +170,12 @@ pub struct StorageSection {
     /// How long to wait at start for the interface to have its address
     /// (a VLAN brought up beside the engine). Default 30.
     pub wait_secs: Option<u64>,
+    /// Interfaces never used as an NVMe/TCP path (#450). With no
+    /// `interface(s)` set, a connection to a remote slab (the flow-over's
+    /// source above all) has a path by every NIC that is up and reaches it;
+    /// these are left out. `$STORMBLOCK_PATH_SKIP` adds to them
+    /// (`rd.stormblock.path-skip=` in the initramfs).
+    pub path_skip: Vec<String>,
     /// The address resolved at start (the first interface's). Not
     /// configuration.
     #[serde(skip)]
@@ -1145,6 +1151,8 @@ impl StormBlockConfig {
                 ),
             }
         }
+        // Interfaces a connection never leaves by (#450).
+        crate::netif::set_path_skip(self.storage.path_skip.clone());
         let names = self.storage.interface_names();
         let Some(name) = names.first().cloned() else {
             crate::netif::set_data_address(None);

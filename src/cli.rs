@@ -6510,6 +6510,26 @@ pub async fn run() -> anyhow::Result<()> {
             // 128 KiB commands are seen where the rate is.
             let fabric = registry.read().await.get(&source).and_then(|s| s.device().fabric_path());
             crate::flowprogress::FLOW.source(fabric);
+            if let Some(dev) = registry.read().await.get(&source).map(|s| s.device().clone()) {
+                crate::flowprogress::FLOW.source_device(&dev);
+                let paths = dev.fabric_paths();
+                if paths.len() > 1 {
+                    let line = format!(
+                        "flow-over: source {source} by {} NVMe/TCP paths: {}",
+                        paths.len(),
+                        paths
+                            .iter()
+                            .map(|p| match &p.interface {
+                                Some(i) => format!("{} by {i}", p.addr),
+                                None => p.addr.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    println!("{line}");
+                    tracing::info!("{line}");
+                }
+            }
             if let Some(p) = fabric {
                 let line = format!(
                     "flow-over: source {source} over NVMe/TCP: path MTU {}{}, {} KiB per command ({} per {} KiB extent)",

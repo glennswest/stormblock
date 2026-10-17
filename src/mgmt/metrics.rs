@@ -339,6 +339,11 @@ pub fn register_metrics() {
         "Total free slab storage across all slabs in bytes"
     );
     metrics::describe_gauge!("stormblock_luns_total", "Number of exported iSCSI LUNs");
+    metrics::describe_gauge!(
+        "stormblock_nvme_tcp_path_bytes",
+        "Bytes a remote slab's NVMe/TCP path has carried, by target address and local interface (#450)"
+    );
+    metrics::describe_gauge!("stormblock_nvme_tcp_path_down", "1 while a remote slab's NVMe/TCP path is skipped after a failure (#450)");
 }
 
 /// Refresh slab capacity gauges from live state.
@@ -369,8 +374,16 @@ async fn refresh_capacity_gauges(state: &crate::mgmt::AppState) {
             .set(capacity_bytes as f64);
         metrics::gauge!("stormblock_slab_allocated_bytes", "slab" => slab_id.clone(), "tier" => tier.clone())
             .set(allocated_bytes as f64);
-        metrics::gauge!("stormblock_slab_free_bytes", "slab" => slab_id, "tier" => tier)
+        metrics::gauge!("stormblock_slab_free_bytes", "slab" => slab_id.clone(), "tier" => tier)
             .set(free_bytes as f64);
+        // A remote slab's NVMe/TCP paths (#450): what each has carried.
+        for p in slab.device().fabric_paths() {
+            let iface = p.interface.clone().unwrap_or_else(|| "route".into());
+            metrics::gauge!("stormblock_nvme_tcp_path_bytes", "slab" => slab_id.clone(), "target" => p.addr.clone(), "interface" => iface.clone())
+                .set(p.bytes as f64);
+            metrics::gauge!("stormblock_nvme_tcp_path_down", "slab" => slab_id.clone(), "target" => p.addr, "interface" => iface)
+                .set(if p.down { 1.0 } else { 0.0 });
+        }
 
         cap_total += capacity_bytes;
         alloc_total += allocated_bytes;

@@ -302,6 +302,12 @@ pub trait BlockDevice: Send + Sync {
         None
     }
 
+    /// For a device reached over NVMe/TCP: each path, the local interface it
+    /// leaves by and what it has carried (#90, #450). Empty for a local device.
+    fn fabric_paths(&self) -> Vec<nvmeof_dev::PathStats> {
+        Vec::new()
+    }
+
     /// Total capacity in bytes.
     fn capacity_bytes(&self) -> u64;
 
