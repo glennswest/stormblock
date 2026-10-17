@@ -113,10 +113,20 @@ engine's initiator now looks at the node itself for every connection it makes:
   `stormblock_nvme_tcp_path_down` for every remote slab. A rate is a delta of
   `bytes` between two samples. The flow-over says its paths once per source
   (`flow-over: source … by 2 NVMe/TCP paths: …`).
-- **A NIC needs an address to carry a path.** In the initramfs only the
-  chosen uplink is addressed (on `stormbr0`), and on a running node the
-  addresses are stormpump's, so a second NIC carries a path once something
-  gives it an address on forge's network.
+- **A NIC needs an address to carry a path.** The initramfs gives every other
+  cabled port one (the master's A on #450): after the uplink is up, each
+  physical port with carrier that is not the uplink, not a bond or bridge
+  port and not named by `rd.stormblock.path-skip=` is leased with its own
+  DHCP script (`path.script`). It gets an address and its subnet route at
+  metric 1024, below the uplink's, so nothing that is not bound to it leaves
+  by it. It gets no default route, no resolv.conf and no hostname (the node's
+  name is its uplink's). `arp_ignore=1` and `arp_announce=2` are set on all,
+  on the port and on the uplink. The address stays across switch_root, and
+  the lease is handed to stormpump in `/run/stormblock/path-nics/<port>.json`
+  (`interface`, `address`, `prefix`, `server`, `lease_secs`, `leased_at`) to
+  renew, since nothing in the initramfs survives switch_root to do it.
+  `rd.stormblock.path-nics=off` turns it off. A port on another network gets
+  an address off forge's subnet, and so carries no path.
 
 ## Failure: a node whose data path is down is not a dead node
 
