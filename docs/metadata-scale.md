@@ -179,6 +179,14 @@ dev, which now counts heap bytes (4 M slots):
   registry lock (copy-on-write, release, discard, delete, clone, the eraser,
   a move's publish, a sync's publish) read the pages first with no lock held,
   so a page read never holds every volume's I/O (#269).
+  A clone and a delete, the two that change every slot of a volume at
+  once, go further (#438). A golden larger than the cache (a release on
+  forge: tens of thousands of slots) had its prefetched pages evicted again
+  before the batch, and read them with the GEM and the registry held for
+  writing: 9.3 s of a claim on forge. They read every entry first into memory
+  of their own (`SlotTable::read_many`, a `Preread` with the table's write
+  epoch) and use it under the locks while the epoch is unchanged; a share
+  count that only goes down is written by the next sync, as `dec_ref`'s is.
 * **The GEM** (`volume/extable.rs`) holds 24 bytes an extent: a slab ordinal
   into a process-wide table, the slot, the share count and the generation,
   in chunks of 64 consecutive virtual extents; mirror legs out of line. The

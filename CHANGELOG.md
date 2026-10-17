@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **fix:** #438: a claim no longer holds the extent map, the slab registry and the volume manager for seconds. On forge (2026-10-17 17:39Z) one claim held the extent map (write) for 9.3 s and both pve installs fell through: their claims outlived stormbootx's read (stormbootx#158). Cause: a release golden there has more slot-table pages than the slab's 16 MiB page cache, and the cache evicts oldest-first. The prefetch before the locks warmed pages the cache evicted again, so the clone's and the delete's ref-count batches read them from the device with the GEM and registry write locks held. The delete also wrote every touched page back synchronously.
+  - **The fix:** a clone and a delete read the volume's entries first into memory of their own (`VolumeManager::preread_volume`, `SlotTable::read_many`, a `Preread` with the table's write epoch, moved before and after every table write). The batches use it under the locks while the epoch is unchanged, and otherwise read as before.
+  - **Decrements:** a decrement that leaves a share is written by the next sync, as `dec_ref` does (#171). Freed slots are written at once as before.
+  - **Measured** (`integration_locks::a_clone_of_a_golden_larger_than_the_page_cache_keeps_no_reader_waiting`: a 1 MiB cache, 24,000 extents, 1 ms reads):
+    - the delete: 2.79 s → 0.33 s, the longest wait of a reader of the extent map 1.84 s → 46 µs;
+    - the clone: 2.71 s → 0.36 s;
+    - device reads: 2250 → 238.
+  - **The rest:** two first-boot claims at once on the test's slow-flush disk still take 3.3–3.8 s against 2.3 s alone, their persists taking turns on one slab's flush (500 ms there; forge's p99 is 7 ms). docs/metadata-scale.md.
 - **docs:** #298 closed. "No HTTP status line" was a claim answered later than stormbootx's read lasted. It happened again today on forge (pvetest1/2, 17:39Z): forge's watchdog shows both claims past 10 s, one holding the extent map for 9.3 s. The engine half is #438 (now with that capture), stormbootx's read is stormbootx#158. The stale 64 MiB namespace no longer happens since #443/#445 (one clone per host, a released claim frees its namespace).
 - **docs:** #99 closed: its engine side is built (the GUID in the address, `vol-<uuid>` and the NGUID; one listener for every subsystem, #188/#98; NSIDs never reused, #96; lineage and placement per volume). The fleet resolver by GUID and snapshots travelling upward moved to stormstorage, which every node already registers its volumes with (#170).
 - **docs:** #44 closed (master's decision A): the GEM's scaling ceiling was solved locally (#155, #157, #158), and the cluster-metadata half would move `src/cluster/` (opt-in, built and run by nothing) onto StormKV. #42 (SWIM gossip for that membership) closed with it.
