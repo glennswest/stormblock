@@ -158,7 +158,7 @@ being emptied (#239, durability rules 10–11); and in the initramfs: every
 `console=` (#237), the firmware's boot name from EFI variables (#249),
 mlx4_en and late netdevs (#250), the NTP clock step (#251).
 Also unreleased since the 2026-10-09 refresh (details in CHANGELOG.md and the
-work plan below): secret volumes (#74), a reviewed Kubernetes bearer and
+work plan below): volumes in namespaces with quotas (#408), secret volumes (#74), a reviewed Kubernetes bearer and
 creator-scoped deletes (#382, #422), forge client certificates admin by
 subject CN (#453), forge's per-host install-config (#459) and boot-agent
 claims (#456), a system half on its own SSD (#402), post-flow-over sha256
@@ -638,54 +638,28 @@ manager whenever the catalog was stale.
 - Found: the build VMs' clippy (1.95) fails the crate with ~100 old lints
   (none in the lines changed here): #398
 
-### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — MERGING: main merged into wip/408-namespaces-v3 (2026-10-17)
-
-2026-10-17: v2 merged with main (121 commits, #74's secret among them) on
-**wip/408-namespaces-v3**. The header order: … `L`, `X` (secret), `N`
-(namespace) last, so an engine of #74 still reads a secret as one. Next:
-check.sh on v3, fast-forward main, tell stormcentral#642, close.
-
-
-Built on wip/408-namespaces-v2 (rebased on main 4d79108): the `N` header
-block, create/clone/import/rename/goldens take `namespace`, unique names
-outside `stormcos`, `?namespace=` on `{id}` routes (task-local in
-`volumes.rs`), `mgmt/namespaces.rs` (quotas.json, usage, settle,
-`/api/v1/namespaces`), SAR `review_in` with the volume's namespace and a
-bearer's list per namespace (`auth::ListNamespaces`), kube label; test
-`integration_destructive::a_familys_bearer_keeps_to_its_namespace_and_its_quota`;
-README, auth.md, CHANGELOG. First check.sh: only that test red (a test
-fault: cloned an unsealed source; fixed 02c9733, #440 filed by sc-build).
-check.sh at 02c9733 ALL PASS (1236/1236, no warnings); #440 closed by
-sc-build. Next: rebase on main, merge, check.sh on main's head, tell
-stormcentral#642, close #408.
+### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — DONE on main (16648a6)
 
 Forge holds more than stormcos (nana builds goldens there): a namespace per
-family, a Kubernetes namespace on forge's apiserver. Branch
-wip/408-namespaces (unbuilt): the record field + v2 header extension and its
-test, the manager's map (create, clone inherits, restore, delete), the
-catalog, `namespace` on every volume response, `?namespace=` on the list.
-Next there: `src/mgmt/namespaces.rs` (quota store, usage = Σ exclusive +
-sealed volumes' shared, settle_new_volume: set ns, unique name, quota, undo),
-goldens keyed by (namespace, name), SAR with namespace (KubeAuth::review
-gains it; JSON body's namespace read for bearers), list filtered per
-namespace for a bearer.
-- [ ] model: `namespace` on the volume (v2 header extension after the
-      tier; none = `stormcos`), kept by the manager like origins, inherited
-      by snapshots/clones unless the clone names one; catalog; immutable once
-      sealed
-- [ ] API: `namespace` on every volume (and label `storm.io/namespace` on
-      the kube projection, metadata.namespace); `?namespace=` on the list;
-      create, clone, import, goldens make take it; a name is unique within
-      its namespace at those and at rename (409 naming the other); `{id}`
-      routes take `?namespace=` to resolve a name; PATCH namespace (unsealed)
-- [ ] quota: `/api/v1/namespaces` (usage: volumes, goldens, distinct
-      allocated bytes) and `/{ns}/quota` (PUT/DELETE destructive), kept in
-      `quotas.json`; create/clone/import/seal/goldens make over quota → 403
-      `quota_exceeded` with the numbers
-- [ ] RBAC: a Kubernetes bearer's SubjectAccessReview carries the volume's
-      (or the request's) namespace; a list by a bearer shows the namespaces
-      it may list. Node/admin tokens stay node-wide; boot claims unchanged
-- [ ] tests, docs, CHANGELOG; stormcentral#642 told
+family, a Kubernetes namespace on forge's apiserver. Inert for stormcos: the
+default (`stormcos`) writes nothing and keeps names non-unique, as before.
+- [x] model: `namespace` on the record, v2 header `N` block last (after
+      #74's `X`, so an engine of #74 still reads a secret as one); manager,
+      catalog, clones inherit, immutable once sealed
+- [x] API: `namespace` on every volume and the kube label; create, clone,
+      import, rename, `POST /api/v1/goldens` take it; unique names outside
+      `stormcos` (409 `name_taken`); `?namespace=` on the list and `{id}`
+- [x] quota: `mgmt/namespaces.rs`, `quotas.json`, `/api/v1/namespaces`,
+      `/{ns}/quota` (destructive), 403 `quota_exceeded` with the numbers
+- [x] RBAC: SAR `review_in` with the volume's namespace; a bearer's list
+      per namespace (`auth::ListNamespaces`); tokens node-wide. stormcos's
+      `storage-user`/`storage-admin` are ClusterRoleBindings: unchanged
+- [x] test `integration_destructive::a_familys_bearer_keeps_to_its_namespace_
+      and_its_quota`, header tests; README, auth.md, metadata-v2.md, CHANGELOG
+- [x] merged with main as wip/408-namespaces-v3; check.sh at 16648a6 ALL
+      PASS (1261/1261, no warnings); main fast-forwarded
+- [ ] golden (`stormcentral component build stormblock`); stormcentral#642
+      told; #408 closed
 
 ### NVMe-oF advertises the default route's address on a wildcard (2026-10-13, #417, stormcos#550) — DONE (golden-stormblock-12891c0025b2), closed
 
