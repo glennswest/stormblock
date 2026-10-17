@@ -90,7 +90,7 @@ async fn a_secret_volume_is_never_copied_or_exposed_and_is_erased_when_deleted()
     refused(c.get(format!("{base}/volumes/{id}/content")).send().await.unwrap(), "content").await;
     refused(c.get(format!("{base}/volumes/{id}/files?path=/etc/x")).send().await.unwrap(), "file read").await;
     refused(
-        c.post(format!("{base}/moves")).json(&serde_json::json!({"volume_id": id, "target_size": "16M"})).send().await.unwrap(),
+        c.post(format!("{base}/moves")).json(&serde_json::json!({"volume_id": id, "target_name": "moved", "target_size": "16M"})).send().await.unwrap(),
         "move",
     )
     .await;
