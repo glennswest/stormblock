@@ -199,7 +199,7 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
       #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
-### Each boot agent's last claim kept (2026-10-14, #456, stormcentral#286) — IN PROGRESS
+### Each boot agent's last claim kept (2026-10-14, #456, stormcentral#286) — DONE (golden-stormblock-0a9fe2d97cf9), closed
 
 `last_claim` kept only the initramfs's claim; stormbootx's (version, its
 self-update result) was gone seconds later.
@@ -210,8 +210,9 @@ self-update result) was gone seconds later.
 - [x] integration_synonyms 49/49 (found: the record's MAC was the alias
       variable, null for a known host; fixed); check.sh at fcca56e ALL PASS
       (1243/1243); stormcentral#286 told
-- [ ] golden on Saturday 2026-10-17 (the master: everything pauses Thursday
-      and Friday from 05:00Z; #456 goes into the next wave); then close
+- [x] golden golden-stormblock-0a9fe2d97cf9 (00f3691 ⊇ fcca56e, stormcos#601,
+      2026-10-17); stormcentral#286 told; closed. Live on forge once a
+      release carries this engine
 
 ### Forge client certificates admin by subject CN (2026-10-14, #453, stormcos#497) — DONE (golden-stormblock-59729e1c6576), closed
 
