@@ -196,7 +196,7 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
 - [ ] when stormcentral#841 is live: `stormcentral component build stormblock`
       (stage of main's head) for 12.23; then shipped/close #428, #413,
       #417, #412 (closed 2026-10-14), #300, #383, #411, #415, #422/#416, #424, #384 and the merged
-      #167, #170, #160 (closed 2026-10-17), #154, #153 (#159 stays open for EC, step 2)
+      #167, #170, #160 and #154 (closed 2026-10-17), #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
 ### Each boot agent's last claim kept (2026-10-14, #456, stormcentral#286) — DONE (golden-stormblock-0a9fe2d97cf9), closed
@@ -927,7 +927,7 @@ recovery (`UblkServer` is non-recoverable by default).
 - [x] migrate/boot_iscsi 24/24, clippy clean; check.sh at c71b637 ALL PASS (1150/1150)
 - [x] golden golden-stormblock-3b051585c805 (fa68d3e); closed
 
-### A drive added grows the pool and is used (2026-10-11, #154, P3) — DECISION 3 BUILT on branch wip/154-drive-offer; merges after 12.23
+### A drive added grows the pool and is used (2026-10-11, #154, P3) — DONE (merged a8c16a0; in golden-stormblock-12891c0025b2 and later), closed 2026-10-17
 
 Shipped earlier (golden-stormblock-d9d2dc698e70): `POST /api/v1/slabs/
 rebalance` (dry run first, fence-only moves) and the drain off the global
@@ -943,7 +943,10 @@ Built on **wip/154-drive-offer** (the 12.23 freeze):
 - [x] tests (multidrive HTTP, units, auth); multi-drive.md, README, auth.md,
       CHANGELOG; stormconsole#153 (the UI)
 - [x] check.sh on wip/154-drive-offer at 9f5df4b ALL PASS (1217/1217)
-- [ ] after 12.23 passes: merge, check.sh, the next stage; close
+- [x] merged to main (a8c16a0), check.sh ALL PASS since (0d6fbe7:
+      1249/1249, the offer, format and rebalance tests); in the 12.23 stage
+      (4d79108) and golden-stormblock-0a9fe2d97cf9; closed. The UI is
+      stormconsole#153
 
 ### image build: `clones = [...]` made (2026-10-11, #124) — DONE (golden-stormblock-17aefc2dba61)
 
