@@ -236,6 +236,15 @@ slots/bytes). The node-wide verb that deletes everything a cluster held is
 #291 (waiting on the owner). Verified at a6e91e0: erase/scrub/secret/
 power-cut tests 48/48 on a build VM. No code change.
 
+### Grow a RAID1 array and its dedicated slab (2026-10-17, #318, P2/P3) — PARKED until the single-node pacing lifts
+
+For stormstorage#73 (P2, volume expand). To build on a wip/ branch (plan on
+#318): `POST /api/v1/arrays/{id}/grow`: re-identify members (nvme-tcp reads
+its size once, at connect), 409 naming one not grown; new data_size, bitmap
+re-chunked, superblocks with an event bump; resync only the new region; the
+dedicated slab grown (formatted with no table room today: new ones get
+growth room, older ones report `slab_grown: false`). Nothing built.
+
 ### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — PARKED until the single-node pacing lifts
 
 For stormstorage#44 (VM disk migration) and stormcluster#53 (evacuate a
