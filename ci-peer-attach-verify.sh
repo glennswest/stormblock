@@ -149,7 +149,7 @@ gd=$(a -X POST $A/volumes/$g/attach -d '{"transport":"ublk"}' | hint)
 dd if=/dev/urandom of=/tmp/pat bs=1M count=16 2>/dev/null
 dd if=/tmp/pat of=$gd bs=1M oflag=direct conv=fsync 2>/dev/null
 a -X DELETE $A/volumes/$g/attach >/dev/null
-a -X POST $A/volumes/$g/seal -d '{}' >/dev/null || bail a-seal "seal"
+a -X POST $A/volumes/$g/seal -d '{"force":true}' >/dev/null || bail a-seal "seal"
 echo "GUEST golden $g sealed on A"
 
 # Through B alone.
