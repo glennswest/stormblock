@@ -18,7 +18,6 @@ use std::time::Duration;
 
 use crate::common;
 use stormblock::drive::filedev::FileDevice;
-use stormblock::drive::BlockDevice;
 use stormblock::mgmt::config::{NvmeofExportConfig, StormBlockConfig};
 use stormblock::mgmt::AppState;
 use stormblock::raid::RaidArrayId;
