@@ -1203,6 +1203,7 @@ async fn create_volume(
         Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => {
             ApiError::conflict(format!("failed to create volume: {e}"))
         }
+        Err(e @ crate::volume::VolumeError::ErasureCodingOff(_)) => ApiError::conflict(format!("failed to create volume: {e}")),
         Err(e) => ApiError::bad_request(format!("failed to create volume: {e}")),
     }
 }
@@ -2644,6 +2645,7 @@ async fn restripe_volume(
         Err(crate::volume::VolumeError::VolumeNotFound(_)) => ApiError::not_found(format!("volume {uuid} not found")),
         Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => ApiError::conflict(e.to_string()),
         Err(e @ crate::volume::VolumeError::Busy(_)) => ApiError::conflict(e.to_string()),
+        Err(e @ crate::volume::VolumeError::ErasureCodingOff(_)) => ApiError::conflict(e.to_string()),
         Err(e) => ApiError::internal(e.to_string()),
     }
 }

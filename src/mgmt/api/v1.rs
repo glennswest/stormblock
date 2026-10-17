@@ -1380,6 +1380,8 @@ async fn create_volume(
             Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => return Err(V1Error::Conflict(e.to_string())),
             // A clone or snapshot of a secret volume (#74).
             Err(e @ crate::volume::VolumeError::Secret { .. }) => return Err(V1Error::Conflict(e.to_string())),
+            // Erasure coding off on this node (#159).
+            Err(e @ crate::volume::VolumeError::ErasureCodingOff(_)) => return Err(V1Error::Conflict(e.to_string())),
             Err(crate::volume::VolumeError::AllocatorError(m)) if m.contains("is secret:") => return Err(V1Error::Conflict(m)),
             Err(crate::volume::VolumeError::NoSpace) => {
                 return Err(V1Error::OutOfSpace("no slab has room for the volume".into()))

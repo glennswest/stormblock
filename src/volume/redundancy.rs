@@ -91,6 +91,11 @@ impl RedundancyPolicy {
         RedundancyPolicy { scheme: Redundancy::Mirror { copies }, spread: DEFAULT_RUNG.into() }
     }
 
+    /// Erasure coded (#159): three or more parity legs.
+    pub fn is_erasure(&self) -> bool {
+        matches!(self.scheme, Redundancy::Parity { parity, .. } if parity >= 3)
+    }
+
     pub fn parity(data: u8, parity: u8) -> Self {
         RedundancyPolicy {
             scheme: Redundancy::Parity { data, parity },
@@ -193,6 +198,33 @@ impl RedundancyPolicy {
                 }
                 Redundancy::Parity { data, parity }
             }
+            // Erasure coding (#159, decision 1a): Reed–Solomon over a Cauchy
+            // matrix, M 3 or 4, K+M at most 24; 8+3 when no width is given.
+            "ec" => {
+                let (data, parity) = match arg {
+                    None => (8u8, 3u8),
+                    Some(a) => match a.split_once('+') {
+                        Some((d, p)) => (
+                            d.trim().parse::<u8>().map_err(|_| format!("bad data width '{d}'"))?,
+                            p.trim().parse::<u8>().map_err(|_| format!("bad parity width '{p}'"))?,
+                        ),
+                        None => return Err("ec needs K+M, e.g. ec:8+3 or ec:16+4".into()),
+                    },
+                };
+                if !(3..=crate::volume::stripe::MAX_PARITY).contains(&parity) {
+                    return Err(format!("ec:{data}+{parity}: M is 3 or 4 (raid6 for 2, raid5 for 1)"));
+                }
+                if data < 2 {
+                    return Err(format!("ec:{data}+{parity}: at least 2 data members"));
+                }
+                if data as usize + parity as usize > crate::volume::stripe::MAX_EC_WIDTH {
+                    return Err(format!(
+                        "ec:{data}+{parity}: at most {} members (K+M)",
+                        crate::volume::stripe::MAX_EC_WIDTH
+                    ));
+                }
+                Redundancy::Parity { data, parity }
+            }
             other => return Err(format!("unknown redundancy '{other}'")),
         };
         Ok(RedundancyPolicy { scheme, spread: rung.to_string() })
@@ -204,7 +236,8 @@ impl RedundancyPolicy {
             Redundancy::None => "none".to_string(),
             Redundancy::Mirror { copies } => format!("mirror:{copies}"),
             Redundancy::Parity { data, parity: 1 } => format!("raid5:{data}+1"),
-            Redundancy::Parity { data, parity } => format!("raid6:{data}+{parity}"),
+            Redundancy::Parity { data, parity: 2 } => format!("raid6:{data}+2"),
+            Redundancy::Parity { data, parity } => format!("ec:{data}+{parity}"),
         };
         if self.spread == DEFAULT_RUNG || self.is_none() {
             base
@@ -280,4 +313,22 @@ mod tests {
         assert_eq!(RedundancyPolicy::from_request(Some("mirror"), None).unwrap().spelling(), "mirror:2");
     }
 
+
+    #[test]
+    fn erasure_coding_parses_within_the_decided_widths() {
+        let p = RedundancyPolicy::parse("ec").unwrap();
+        assert_eq!(p.scheme, Redundancy::Parity { data: 8, parity: 3 }, "8+3 is the default");
+        assert!(p.is_erasure());
+        assert_eq!(p.spelling(), "ec:8+3");
+        let p = RedundancyPolicy::parse("ec:16+4@shelf").unwrap();
+        assert_eq!(p.spelling(), "ec:16+4@shelf");
+        assert_eq!(RedundancyPolicy::parse(&p.spelling()).unwrap(), p, "round trip");
+        for bad in ["ec:8+2", "ec:8+5", "ec:1+3", "ec:21+4", "ec:8"] {
+            assert!(RedundancyPolicy::parse(bad).is_err(), "{bad}");
+        }
+        assert!(RedundancyPolicy::parse("ec:20+4").is_ok(), "24 members");
+        assert!(!RedundancyPolicy::parse("raid6:4+2").unwrap().is_erasure());
+        assert_eq!(RedundancyPolicy::parse("raid6:4+2").unwrap().spelling(), "raid6:4+2");
+        assert!(RedundancyPolicy::parse("raid6:4+3").is_err(), "raid6 stays two legs");
+    }
 }

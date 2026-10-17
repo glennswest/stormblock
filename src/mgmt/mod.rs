@@ -517,10 +517,12 @@ impl AppState {
 
     pub fn new(
         config: StormBlockConfig,
-        volume_manager: VolumeManager,
+        mut volume_manager: VolumeManager,
         slab_registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
         gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
     ) -> Self {
+        // Erasure coding, off until the rollback gate is met (#159).
+        volume_manager.set_erasure_coding(config.redundancy.erasure_coding);
         // NSIDs are never handed out twice, across restarts too (#96): the
         // high-water marks live in the data directory.
         if let Some(dir) = config.management.data_dir.as_ref() {

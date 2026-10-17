@@ -69,6 +69,20 @@ pub struct StormBlockConfig {
     /// Where `POST /api/v1/images/build` may write (#393).
     #[serde(default)]
     pub images: ImagesSection,
+    /// Redundancy schemes this node makes (#159).
+    #[serde(default)]
+    pub redundancy: RedundancySection,
+}
+
+/// `[redundancy]` (#159).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RedundancySection {
+    /// Make erasure-coded volumes (`ec:K+M`). Off by default (decision A):
+    /// an engine before EC reads an EC volume as RAID-6 and lets its third
+    /// leg go stale, so EC is turned on only once every release a node could
+    /// roll back to refuses it (#159 step 1). Until then `ec:K+M` answers 409.
+    pub erasure_coding: bool,
 }
 
 /// `[images]` (#393): the one directory an image built or converted through
@@ -521,6 +535,7 @@ impl Default for StormBlockConfig {
             kernel: KernelSection::default(),
             fabric: FabricSection::default(),
             images: ImagesSection::default(),
+            redundancy: RedundancySection::default(),
         }
     }
 }

@@ -181,6 +181,8 @@ pub enum VolumeError {
     Busy(String),
     /// The volume is secret (#74): it is never copied or exposed.
     Secret { id: VolumeId, what: String },
+    /// Erasure coding is off on this node (#159).
+    ErasureCodingOff(String),
 }
 
 impl fmt::Display for VolumeError {
@@ -221,6 +223,12 @@ impl fmt::Display for VolumeError {
                 by.join(", ")
             ),
             VolumeError::Busy(why) => write!(f, "{why}; try again when it has finished"),
+            VolumeError::ErasureCodingOff(p) => write!(
+                f,
+                "{p} is erasure coded, and erasure coding is off on this node: it is turned on only once \
+                 every release a node could roll back to refuses erasure-coded volumes (#159); \
+                 [redundancy] erasure_coding = true turns it on"
+            ),
             VolumeError::Secret { id, what } => write!(
                 f,
                 "volume {id} is secret: no {what}. A secret volume is attached as a local ublk device by one consumer, and never cloned, snapshotted, composed, copied or exported (#74)"
@@ -1975,23 +1983,27 @@ impl ThinVolumeHandle {
         if members.iter().all(|m| m.is_some()) {
             return Ok(members.into_iter().map(|m| m.unwrap()).collect());
         }
-        let mut p: Option<Vec<u8>> = None;
-        let mut q: Option<Vec<u8>> = None;
+        // Every leg that reads, by its index: P, Q, or a Cauchy row (#159).
+        let mut legs: Vec<Option<Vec<u8>>> = Vec::new();
         if let Some(g) = &group {
-            for (i, leg) in g.legs.iter().enumerate() {
+            for leg in g.legs.iter() {
                 if self.is_failed(leg.slab_id) {
+                    legs.push(None);
                     continue;
                 }
                 let mut buf = vec![0u8; self.slot_size as usize];
                 match self.read_leg(*leg, 0, &mut buf).await {
-                    Ok(()) => {
-                        if i == 0 { p = Some(buf) } else { q = Some(buf) }
+                    Ok(()) => legs.push(Some(buf)),
+                    Err(e) => {
+                        self.mark_failed(leg.slab_id, &e);
+                        legs.push(None);
                     }
-                    Err(e) => self.mark_failed(leg.slab_id, &e),
                 }
             }
         }
-        stripe::reconstruct(&mut members, p.as_deref(), q.as_deref(), self.slot_size as usize)
+        let refs: Vec<Option<&[u8]>> = legs.iter().map(|l| l.as_deref()).collect();
+        let parity = group.as_ref().map(|g| g.legs.len() as u8).unwrap_or(1);
+        stripe::reconstruct_legs(&mut members, &refs, parity, self.slot_size as usize)
             .map_err(|e| DriveError::Other(anyhow::anyhow!(
                 "stripe {stripe} of volume {} is unrecoverable: {e}", self.id
             )))?;
@@ -2080,6 +2092,7 @@ impl ThinVolumeHandle {
     /// Fold a member's change into the stripe's parity in place.
     async fn update_parity(&self, group: &ParityGroup, member_idx: usize, off: u64, delta: &[u8]) -> DriveResult<()> {
         let mut wrote = 0usize;
+        let parity = group.legs.len() as u8;
         for (i, leg) in group.legs.iter().enumerate() {
             if self.is_failed(leg.slab_id) {
                 continue;
@@ -2087,11 +2100,8 @@ impl ThinVolumeHandle {
             let mut cur = vec![0u8; delta.len()];
             let r = async {
                 self.read_leg(*leg, off, &mut cur).await?;
-                if i == 0 {
-                    stripe::xor_into(&mut cur, delta);
-                } else {
-                    stripe::mul_xor_into(&mut cur, delta, stripe::gf_pow2(member_idx));
-                }
+                // P, Q, or the leg's Cauchy row (#159).
+                stripe::apply_delta_leg(&mut cur, parity, i, member_idx, delta);
                 self.write_leg(*leg, off, &cur).await
             }
             .await;
@@ -4843,6 +4853,61 @@ mod redundancy_tests {
         for (i, d) in datas.iter().enumerate() {
             let l = loc(&gem, v.volume_id(), i as u64).await;
             assert_eq!(raw(&reg, l.primary(), slot as usize).await, d.clone());
+        }
+        cleanup(&paths);
+    }
+
+    /// #159: an `ec:4+3` volume over seven slabs, each member and leg on its
+    /// own: written, three slabs lost (two members, one leg), every byte read
+    /// back, rebuilt onto three new slabs, and healthy.
+    #[tokio::test]
+    async fn ec_4_3_reconstructs_three_lost_shards_and_resyncs() {
+        let slot = 4096u64;
+        let (gem, reg, _ids, mut paths) = setup_slabs(7, slot).await;
+        let v = volume(&gem, &reg, "ec:4+3", slot);
+        let datas: Vec<Vec<u8>> = (0..4).map(|i| pattern(70 + i, slot as usize)).collect();
+        for (i, d) in datas.iter().enumerate() {
+            v.write(i as u64 * slot, d).await.unwrap();
+        }
+        // A partial rewrite: the legs follow by delta.
+        let mut d2 = datas[2].clone();
+        d2[100..700].fill(0xC3);
+        v.write(2 * slot + 100, &d2[100..700]).await.unwrap();
+        let datas = vec![datas[0].clone(), datas[1].clone(), d2, datas[3].clone()];
+        let g = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
+        assert_eq!(g.legs.len(), 3);
+        let members: Vec<Vec<u8>> = datas.clone();
+        let refs: Vec<Option<&[u8]>> = members.iter().map(|m| Some(m.as_slice())).collect();
+        let want = stripe::compute_parity(&refs, slot as usize, 3);
+        for (j, leg) in g.legs.iter().enumerate() {
+            assert_eq!(raw(&reg, *leg, slot as usize).await, want[j], "leg {j} on disk is the Cauchy row");
+        }
+
+        let l0 = loc(&gem, v.volume_id(), 0).await;
+        let l3 = loc(&gem, v.volume_id(), 3).await;
+        reg.write().await.remove(&l0.slab_id);
+        reg.write().await.remove(&l3.slab_id);
+        reg.write().await.remove(&g.legs[1].slab_id);
+        for (i, d) in datas.iter().enumerate() {
+            let mut back = vec![0u8; slot as usize];
+            v.read(i as u64 * slot, &mut back).await.unwrap();
+            assert_eq!(&back, d, "member {i} with three shards lost");
+        }
+        assert_eq!(v.health().await.state, HealthState::Degraded);
+
+        for _ in 0..3 {
+            add_slab(&reg, &mut paths, slot).await;
+        }
+        let report = v.resync(false).await;
+        assert_eq!(report.legs_rebuilt, 3, "{report:?}");
+        assert_eq!(v.health().await.state, HealthState::Healthy);
+        for (i, d) in datas.iter().enumerate() {
+            let l = loc(&gem, v.volume_id(), i as u64).await;
+            assert_eq!(raw(&reg, l.primary(), slot as usize).await, d.clone(), "member {i} rebuilt");
+        }
+        let g = gem.read().await.lookup_parity(v.volume_id(), 0).unwrap().clone();
+        for (j, leg) in g.legs.iter().enumerate() {
+            assert_eq!(raw(&reg, *leg, slot as usize).await, want[j], "leg {j} rebuilt");
         }
         cleanup(&paths);
     }
