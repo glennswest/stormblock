@@ -1823,8 +1823,10 @@ mod tests {
             let ob = &document_of(header_entries(id, &before)).unwrap().volumes[0];
             assert_eq!((ob.origin, ob.digest, ob.layout, ob.secret), (origin, d, layout, false));
         }
-    /// #408: a volume's namespace rides last, after the digest, the scheme
-    /// and the layout; the default (`stormcos`) writes nothing, and an
+    }
+
+    /// #408: a volume's namespace rides last, after the digest, the scheme,
+    /// the layout and a secret; the default (`stormcos`) writes nothing, and an
     /// engine that does not know the tag stops there, having read the rest.
     #[test]
     fn a_namespace_rides_last_and_the_default_writes_nothing() {
