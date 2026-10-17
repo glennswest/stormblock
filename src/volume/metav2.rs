@@ -1714,7 +1714,9 @@ mod tests {
             assert_eq!(after_tier[0] == DIGEST_TAG, d.is_some(), "the digest first, where #384 reads it");
         }
         assert_eq!(sc.spelling(), "ec:8+3");
-        assert!(!sc.known(), "no engine reads it yet (step 1)");
+        assert!(sc.known(), "step 2 reads ec:8+3 (#159)");
+        assert!(!SchemeExt { code: SchemeExt::ERASURE, data: 8, parity: 2 }.known(), "two legs is RAID-6, never a scheme");
+        assert!(!SchemeExt { code: 9, data: 8, parity: 3 }.known(), "an unknown code stays refused");
     }
 
     /// #153: a spread layout rides after the digest (affine writes nothing),
