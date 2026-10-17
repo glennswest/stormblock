@@ -196,7 +196,7 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
 - [ ] when stormcentral#841 is live: `stormcentral component build stormblock`
       (stage of main's head) for 12.23; then shipped/close #428, #413,
       #417, #412 (closed 2026-10-14), #300, #383, #411, #415, #422/#416, #424, #384 and the merged
-      #167, #170, #160 and #154 (closed 2026-10-17), #153 (#159 stays open for EC, step 2)
+      #167, #170, #160 and #154 (#170, #160, #154 closed 2026-10-17), #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
 ### Each boot agent's last claim kept (2026-10-14, #456, stormcentral#286) — DONE (golden-stormblock-0a9fe2d97cf9), closed
@@ -879,7 +879,7 @@ every release a node could roll back to carries that.
       across domains; RMW; reconstruct ≤ M in assemble_stripe; margin;
       `SchemeExt::known` for code 1) once every rollback target carries step 1
 
-### StormFS registration names its target (2026-10-11, #170, P3) — BUILT on branch wip/170-registration (A); merges after 12.23
+### StormFS registration names its target (2026-10-11, #170, P3) — DONE (merged abdf3cf; in golden-stormblock-12891c0025b2 and later), closed 2026-10-17
 
 Decision A (2026-10-13): `[stormfs] metadata_url` → `[registration] url`,
 `src/stormfs.rs` → `src/registration.rs`, log lines "stormstorage
@@ -887,7 +887,9 @@ registration"; `[stormfs]` read as the old spelling with a warning
 (ignored when `[registration]` is given), `metadata_url` an alias of `url`.
 - [x] test `mgmt::config::registration_tests::…`; README, CHANGELOG
 - [x] check.sh on wip/170-registration at a87cfd8 ALL PASS (1214/1214)
-- [ ] after 12.23 passes: merge, check.sh, the next stage; close
+- [x] merged to main (abdf3cf), check.sh ALL PASS since (0d6fbe7:
+      1249/1249, the registration tests); in the 12.23 stage (4d79108) and
+      golden-stormblock-0a9fe2d97cf9; closed
 
 ### Dead code and empty features (2026-10-11, #169) — DONE
 
