@@ -375,6 +375,8 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_FLOW_FG_IO_MS`, `STORMBLOCK_FLOW_FG_FLUSH_MS`, `STORMBLOCK_FLOW_FG_RATIO` | the node's own read/write and flush p90 while a flow-over moves above which, and above that ratio of its p90 without it, the flow-over halves its window and pauses (#410; replaces `STORMBLOCK_FLOW_FLUSH_BOUND_MS`, #282) | `25`, `100`, `3` |
 | `STORMBLOCK_FLOW_PACE` | `0`: a flow-over never paces itself (#410) | on |
 | `STORMBLOCK_NVME_MAX_TRANSFER` | The most one NVMe/TCP command carries, in bytes (a power of two, 4096 to 32 MiB): what a target advertises as MDTS and maxh2cdata, and what the initiator sends at most (#407). 131072 is what every engine did before | `8388608` |
+| `STORMBLOCK_PATH_SKIP` | interfaces NVMe/TCP paths never leave by, comma-separated, beside `[storage] path_skip` (#450) | none |
+| `STORMBLOCK_AUTO_PATHS` | `off`: no path by each of the node's own NICs when no storage interface is configured (#450) | on |
 | `STORMBLOCK_NVME_TCP_QUEUES` | I/O connections per path of an attached NVMe/TCP namespace, each one command at a time (#331, #90, #410) | `8` |
 | `STORMBLOCK_SEED_DATA_SYNC` | seed a freshly laid data half before exporting, as before #285 | the successor moves it in the background |
 | `STORMBLOCK_BOOTHOST` | the appliance `boot-local` claims a fresh clone from when the local records name a slab that is not here (a flow-over cut short, #171); the initramfs exports the appliance it found | no claim; `boot-local` refuses to boot if extents are left with no leg (#259) |
@@ -424,6 +426,7 @@ subnet and MTU. Unset: one network, as before.
 | `address` | its first IPv4, else first global IPv6 | which of the interface's addresses |
 | `advertised_addr` | the address | what initiators dial, when it is not the address (host only) |
 | `mtu` | — | the network's MTU; the interface's is compared at start (WARN) and in health (`mtu_mismatch`) |
+| `path_skip` | `[]` | interfaces an NVMe/TCP connection never leaves by (#450). With no `interface(s)`, every NIC that is up and reaches a remote slab's target (the flow-over's source) carries a path; `$STORMBLOCK_PATH_SKIP`, `rd.stormblock.path-skip=` too. [docs/storage-network.md](docs/storage-network.md#every-nic-that-is-up-with-nothing-configured-450) |
 | `wait_secs` | `30` | how long to wait at start for the address. None by then: the data targets bind loopback only (never the LAN) until a restart, an ERROR says so, health says `no_address`/`missing` |
 
 **`[[drives]]`** `path` — a device, partition, file or `nvme-tcp://`/`iscsi://` URI;

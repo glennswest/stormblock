@@ -83,6 +83,41 @@ NIC answers ARP for the other's address and the two paths collapse onto one.
   storage interfaces from `$STORMBLOCK_STORAGE_INTERFACE` (comma-separated).
 - iSCSI listens on the first storage address only.
 
+## Every NIC that is up, with nothing configured (#450)
+
+Forge has one address, and a path was one per *target* address, so the
+flow-over used one NIC however many the node had. With no storage interfaces
+configured (`[storage] interface(s)`, `$STORMBLOCK_STORAGE_INTERFACE`), the
+engine's initiator now looks at the node itself for every connection it makes:
+
+- **Which NICs:** every interface whose link is not down and which has an
+  address on the target's subnet, plus the interface the route to the target
+  leaves by (that one first). Never a loopback interface or an IPv6
+  link-local address; nothing when that is fewer than two NICs, so a
+  single-NIC node connects exactly as before (the route's choice, nothing
+  bound). A routed target (another subnet) gets the route's NIC only.
+- **Paths:** each (target address, NIC) is a path, paired as #90 pairs them:
+  one address and two NICs make two paths, one by each. Each path's
+  connections are bound to its NIC and its address. Paths the NICs added
+  share the I/O by load (`queue-depth`, fewest commands in flight) unless
+  the URI names an `iopolicy`. A path that fails is skipped for 5 s and the
+  operation goes by another, so a NIC whose link drops stops taking extents
+  and nothing fails. The device keeps the id its URI gives it.
+- **The opt-out, the only setting:** `[storage] path_skip = ["eth1"]`,
+  `$STORMBLOCK_PATH_SKIP=eth1` (comma-separated), or
+  `rd.stormblock.path-skip=eth1` on the kernel command line for the
+  initramfs's engine. `$STORMBLOCK_AUTO_PATHS=off` turns it off.
+- **What it carried:** health's `flow_over.paths` lists the source's paths
+  (`addr`, `interface`, `source`, `ops`, `bytes`, `down`); `/metrics` has
+  `stormblock_nvme_tcp_path_bytes{slab,target,interface}` and
+  `stormblock_nvme_tcp_path_down` for every remote slab. A rate is a delta of
+  `bytes` between two samples. The flow-over says its paths once per source
+  (`flow-over: source … by 2 NVMe/TCP paths: …`).
+- **A NIC needs an address to carry a path.** In the initramfs only the
+  chosen uplink is addressed (on `stormbr0`), and on a running node the
+  addresses are stormpump's, so a second NIC carries a path once something
+  gives it an address on forge's network.
+
 ## Failure: a node whose data path is down is not a dead node
 
 - **Health** (`GET /api/v1/health`, the control channel) reports
@@ -116,6 +151,14 @@ NIC answers ARP for the other's address and the two paths collapse onto one.
   - B sent 27.6 MB on eth0 and 29.7 MB on eth1, and A received on both (the
     per-interface counters the owner asked for, not the total).
   - With B's eth1 down, a second import completed over eth0 alone.
+
+- `ci-flow-nics-verify.sh` (#450): A with one NIC and one address (as forge),
+  B with two NICs on that /24 and nothing configured, all three on one L2
+  segment (an in-QEMU hub). B's import over the one-address URI made two
+  paths, one by each NIC, and sent 27.5 MB on eth0 and 29.6 MB on eth1. With
+  `STORMBLOCK_PATH_SKIP=eth1` a second import sent 70 bytes on eth1. With
+  eth1's link pulled mid-import, a third finished over eth0 (after the 30 s
+  command timeout on the path that went silent).
 
 - unit tests: `netif` (addresses on `lo`, a fake sysfs for a link that is
   down), the config's per-role hosts, the beacon and the peer table;

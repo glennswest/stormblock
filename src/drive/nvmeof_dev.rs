@@ -798,6 +798,14 @@ impl Path {
         }
     }
 
+    /// How a log line names it: the address, and the NIC when it has one.
+    fn name(&self) -> String {
+        match &self.source {
+            Some(s) => format!("{} by {}", self.addr, s.interface),
+            None => self.addr.clone(),
+        }
+    }
+
     fn is_down(&self) -> bool {
         matches!(*self.down_until.lock().unwrap_or_else(|e| e.into_inner()), Some(t) if t > std::time::Instant::now())
     }
@@ -922,7 +930,7 @@ impl NvmeofDevice {
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("NVMe-TCP initiator: path {a} does not answer: {e}");
+                    tracing::warn!("NVMe-TCP initiator: path {} does not answer: {e}", p.name());
                     *paths[i].down_until.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(std::time::Instant::now() + PATH_DOWN);
                     last = Some(e);
@@ -1058,12 +1066,12 @@ impl NvmeofDevice {
                         path.mtu.store(c.mtu, Ordering::Relaxed);
                     }
                     *guard = Some(c);
-                    tracing::debug!("NVMe-TCP initiator: connected to {}", path.addr);
+                    tracing::debug!("NVMe-TCP initiator: connected to {}", path.name());
                 }
                 Err(e) => {
                     *path.down_until.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(std::time::Instant::now() + PATH_DOWN);
-                    tracing::warn!("NVMe-TCP initiator: path {} is down: {e}", path.addr);
+                    tracing::warn!("NVMe-TCP initiator: path {} is down: {e}", path.name());
                     return Err(DriveError::Io(e));
                 }
             }
@@ -1091,7 +1099,7 @@ impl NvmeofDevice {
     fn failed(guard: &mut ConnGuard<'_>, e: io::Error) -> DriveError {
         **guard = None;
         *guard.path.down_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now() + PATH_DOWN);
-        tracing::warn!("NVMe-TCP initiator: path {} failed: {e}", guard.path.addr);
+        tracing::warn!("NVMe-TCP initiator: path {} failed: {e}", guard.path.name());
         DriveError::Io(e)
     }
 
