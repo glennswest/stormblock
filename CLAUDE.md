@@ -293,7 +293,7 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
 - [x] check.sh at 9877bb8 ALL PASS (1240/1240); CHANGELOG; closed with
       the answers
 
-### A per-host install-config from forge (2026-10-17, #459, P1, stormcos#604) — IN PROGRESS
+### A per-host install-config from forge (2026-10-17, #459, P1, stormcos#604) — DONE (golden-stormblock-77d2023b4ad2), closed; metal pending
 
 Test machines boot one shared stormbootx ISO, so the media's install-config
 (#275) never reaches them; stormcentral mints a per-node stormupdate token
@@ -314,9 +314,11 @@ at each install (stormcentral#710) and needs a per-host channel.
       install_config units, initramfs-install-config.sh (+20, sh and busybox
       sh), initramfs-system-data.sh; targeted 80/80; README, auth.md,
       boot-hooks.md, CHANGELOG
-- [ ] check.sh; golden; stormcos#604 / stormcentral#710 told (PUT it with the
-      intent); close. Metal: a test install leaves the token in
-      /data/stormupdate/update-token (stormcos#604's done-when)
+- [x] check.sh at c8a0dc1 ALL PASS (1252/1252); golden
+      golden-stormblock-77d2023b4ad2 (stormcos#601); stormcos#604 and
+      stormcentral#710 told (PUT it with the intent, admin token); closed.
+      Metal: a test install leaves the token in /data/stormupdate/update-token
+      (stormcos#604's done-when; needs stormcentral's PUT and stormpump#168)
 
 ### Flow-over over every NIC that's up (2026-10-17, #450, P2) — ENGINE DONE; WAITING ON THE OWNER (how a 2nd NIC gets an address)
 
