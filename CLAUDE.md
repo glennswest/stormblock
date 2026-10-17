@@ -792,7 +792,7 @@ usually no gateway); the knob is which interface. docs/storage-network.md.
 - [x] follow-ups: #404 (dirty log + inflight: live migration); stormvm told.
       The ring IPC (`uring_server.rs`) was not needed
 
-### Secrets volume class (2026-10-11, #74, P3) — BUILT (decision A, 2026-10-13); checks running
+### Secrets volume class (2026-10-11, #74, P3) — DONE (golden-stormblock-3c3b29808089), closed
 
 Decision A: the engine-enforced half now; workload-bound attach (B) and
 per-volume encryption are their own issues.
@@ -813,8 +813,12 @@ per-volume encryption are their own issues.
       as the API verbs)
 - [x] tests: integration_secret, metav2 tag; targeted 218/218; README,
       auth.md, metadata-v2.md, CHANGELOG
-- [ ] ci-secret-verify.sh (QEMU); check.sh; golden; stormcos issue (mark
-      stormcert-data); issues for B and encryption; close
+- [x] ci-secret-verify.sh ALL PASS (QEMU, kernel 7.2.8: a real ublk device,
+      one consumer, clone/NVMe refused, erased from the raw disk with
+      `[erase] default = none`); check.sh at ec23149 ALL PASS (1254/1254);
+      golden golden-stormblock-3c3b29808089 (stormcos#601); stormcos#606
+      (mark stormcert-data); #461 (workload-bound attach, B), #462
+      (encryption); closed
 
 ### Writable cmdline and a kdump target (2026-10-11, #59, P3) — CLOSED: 1B, 2C (master, 2026-10-13)
 
