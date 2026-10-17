@@ -292,18 +292,24 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
 - [x] check.sh at 9877bb8 ALL PASS (1240/1240); CHANGELOG; closed with
       the answers
 
-### Attach a peer's volume over NVMe/TCP, return a device (2026-10-14, #328, P3, stormvm#46) — WAITING ON THE OWNER
+### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — IN PROGRESS
 
-Read against main e1b720b: stormvm attaches and clones through its own
-node's engine, which holds only volumes backed here (it already answers
-ublk for those). A volume on a peer is unknown to it (404): adopt-ublk has
-no peer list, no discovery and no credential for another node's API.
-Asked on #328 (needs-owner): 1 where the node finds the volume (a peer
-list in config / the caller names it / a directory), 2 how it talks to the
-peer (node certificate over mTLS / a shared token), 3 what device it
-returns (kernel `/dev/nvmeXnY` / the engine's initiator through ublk).
-Recommended 1(a) 2(a) 3(b). The answer goes under `device_hint` (owner's
-amendment). Nothing built.
+Decided (master for the owner, 2026-10-13, as recommended): 1(a) a peer
+list in config, 2(a) the node certificate over mTLS (a peer's
+`tls_client_ca` admits it at the node-token tier, #203), 3(b) the engine's
+own NVMe/TCP initiator served through ublk; the device under `device_hint`
+(owner's amendment); the connect names this node's own host NQN.
+- [ ] `[fabric] peers, client_cert, client_key, ca, host_nqn` (cert/key
+      default to `[management] tls_cert/tls_key`, ca to `tls_client_ca`;
+      host NQN: config > /etc/nvme/hostnqn > `nqn.2026-09.lo.storm:host-<node>`)
+- [ ] `mgmt/peers.rs`: find a volume on the peers (GET), forward a clone,
+      attach (peer attach `nvme_tcp` + host_nqn + holder `peer:<node>`,
+      connect, ublk export, `device_hint`), detach (ublk down, peer
+      released), `peer_attaches.json`, stale records released at start
+- [ ] volumes API: attach/clone/get/detach fall back to the peers on 404
+- [ ] tests: two engines over mTLS (find, clone forwarded, the connect
+      reads A's bytes, ublk unavailable → 409 and A's namespace released);
+      QEMU check with a real ublk device; README, CHANGELOG; stormvm#46 told
 
 ### 12.21 hangs on the Dell before PID 1; diskless is an error (2026-10-13, #427, P0, stormcos#561) — DONE (golden-stormblock-195314cf5831), metal pending
 
