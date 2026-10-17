@@ -734,22 +734,20 @@ sysctls are the node network's (stormpump#17). docs/storage-network.md.
       listing both; `ci-nvme-multipath-verify.sh` ALL PASS (27.6/29.7 MB
       over B's NICs, A rx on both, failover); nvmeof/netif 87/87
 
-### SWIM gossip for membership (2026-10-11, #42, P3) — AFTER #44 AND stormkv#2
+### SWIM gossip for membership (2026-10-11, #42, P3) — CLOSED with #44 (A)
 
-Would replace `src/cluster/` membership/heartbeat (opt-in, unused). Blocked
-on stormkv#2 (stormkv-gossip depends on stormkv-core; its transport is in
-stormkv-net beside Raft) and on #44's answer: A makes this moot, B makes it
-part of that work. Proposed after #44. Nothing built.
+#44's A leaves no membership to replace: `src/cluster/` stays opt-in and
+unused. Closed 2026-10-17.
 
-### StormKV for cluster metadata and the GEM (2026-10-11, #44, P3) — WAITING ON THE OWNER
+### StormKV for cluster metadata and the GEM (2026-10-11, #44, P3) — CLOSED: A (master, 2026-10-13)
 
-The GEM half shipped locally (#155, #157, #158: ~25 B/extent, paged index,
-cold maps evicted; 1 PiB emulated). StormKV has a TCP transport now
-(stormkv-net), and its gossip is still in-process only (stormkv#2). What is left is
-`src/cluster/` (one openraft group, opt-in since #209), which no component
-builds and no node runs; cross-node redundancy is stormstorage's (#179 b).
-Asked on #44 (needs-owner): A close (recommended), B build it on StormKV,
-C park until cluster mode has a user. Nothing built.
+The GEM's scaling ceiling is gone, solved locally (#155 compaction, #157
+change log, #158 paged index with cold maps evicted; 1 PiB emulated), which
+keeps the network off the I/O path. The cluster-metadata half would move
+`src/cluster/` (opt-in since #209, built by nothing, run by no node) onto
+StormKV: no reader. Cluster metadata on multi-Raft, if ever wanted, belongs
+to what runs the fleet's metadata (stormstorage, StormFS). Closed 2026-10-17
+with #42.
 
 ### Offline clone verb and golden --from-volume (2026-10-11, #87, P3) — DONE
 
