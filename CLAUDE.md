@@ -329,6 +329,15 @@ at each install (stormcentral#710) and needs a per-host channel.
       Metal: a test install leaves the token in /data/stormupdate/update-token
       (stormcos#604's done-when; needs stormcentral's PUT and stormpump#168)
 
+### Multicast discovery of the appliance (2026-10-17, #104, P3) — WAITING ON THE OWNER
+
+The issue reserves the trust model for the owner. Asked on #104
+(needs-owner): A on by default (`rd.stormblock.nodiscover` off), B opt-in
+(`rd.stormblock.discover=on`, recommended), C signed answers (a fleet key in
+every image). Either way the node listens for the engine's existing beacon
+(239.255.42.99:7447) last in the order; stormbootx needs the same answer.
+Nothing built.
+
 ### Flow-over over every NIC that's up (2026-10-17, #450, P2) — ENGINE ON MAIN; INITRAMFS HALF ON wip/450-path-nics (after stormpump#169 and pacing)
 
 Owner: "can we use both nics in flowover if there up?" A path was per
