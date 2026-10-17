@@ -225,6 +225,17 @@ connection), `attachments[].remote`, `GET /api/v1/exports/{id}/connections`,
       stormblock-registry#63 told; closed. No separate golden (master: ac1d550
       rode into the current wave; b355da7 is lint-only)
 
+### Node release/reset: one overwrite of what user volumes use (2026-10-17, #312) — DONE by #286 + #313, closed
+
+Owner (2026-10-06): overwrite only the slots user volumes use, then free them;
+time ∝ data written; no crypto-erase. Engine side already built: #286 (a
+freed slot is `Erasing` until overwritten, discarded on flash, audited in
+`/api/v1/erasures`; CoW old slots too at the default `once`) and #313
+(`DELETE …?scrub=used`, at least `once` even on a `none` node, 200 with
+slots/bytes). The node-wide verb that deletes everything a cluster held is
+#291 (waiting on the owner). Verified at a6e91e0: erase/scrub/secret/
+power-cut tests 48/48 on a build VM. No code change.
+
 ### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — PARKED until the single-node pacing lifts
 
 For stormstorage#44 (VM disk migration) and stormcluster#53 (evacuate a
