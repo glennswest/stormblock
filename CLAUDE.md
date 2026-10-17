@@ -293,6 +293,23 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
 - [x] check.sh at 9877bb8 ALL PASS (1240/1240); CHANGELOG; closed with
       the answers
 
+### A per-host install-config from forge (2026-10-17, #459, P1, stormcos#604) — IN PROGRESS
+
+Test machines boot one shared stormbootx ISO, so the media's install-config
+(#275) never reaches them; stormcentral mints a per-node stormupdate token
+at each install (stormcentral#710) and needs a per-host channel.
+- [ ] forge: `PUT/GET/DELETE /api/v1/synonyms/boothost/<name>/install-config`
+      (admin, every verb), `<data_dir>/install-configs/<host>.yaml` 0600,
+      never listed or logged; follows a rename, goes with a host delete
+- [ ] claim: `install_config` in the reply, to that host only
+- [ ] boot-claim: `/run/stormblock/install-config.forge.yaml` 0600 (stale
+      removed), never printed
+- [ ] /init: media first; forge's replaces /state's on an install (ticket or
+      INSTALL_OVER), else only when /state has none; staged copies removed
+- [ ] source (media|forge|none) in system-data records and the `installed`
+      report (Host.install), never the bytes
+- [ ] tests (store/HTTP/auth, initramfs-install-config.sh), docs, CHANGELOG
+
 ### Flow-over over every NIC that's up (2026-10-17, #450, P2) — ENGINE DONE; WAITING ON THE OWNER (how a 2nd NIC gets an address)
 
 Owner: "can we use both nics in flowover if there up?" A path was per
