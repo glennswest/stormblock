@@ -64,9 +64,10 @@ if command -v python3 >/dev/null 2>&1; then
     r=$(python3 -c '
 import json, sys, glob
 b = json.load(open(glob.glob(sys.argv[1] + "/history/boots/*.json")[0]))
-print(b["release"], b["tag"], "stormblock.volume=stormpump" in b["cmdline"], b["local_disk"]["state"], b["handover"]["installed"]["version"])
+print(b["release"], b["tag"], "stormblock.volume=stormpump" in b["cmdline"], b["local_disk"]["state"], b["handover"]["installed"]["version"], b["install_config"])
 ' "$WORK/sd" 2>&1)
-    check "the boot record is JSON with what the boot knew" "11.97 C2NR0Q2 True taken 11.97" "$r"
+    # No install-config block in this run: its source reads none (#459).
+    check "the boot record is JSON with what the boot knew" "11.97 C2NR0Q2 True taken 11.97 none" "$r"
 fi
 
 # A boot that did not install: a boot record, no install record.

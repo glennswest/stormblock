@@ -802,6 +802,26 @@ writes it to `/state/config/install-config.yaml` (0600) on a first boot only:
 when `/state` is mounted and holds none (#275; stormpump applies it,
 stormpump#78).
 
+**From forge, per host (#459, stormcos#604).** A machine that boots a
+shared stormbootx ISO has no install-config of its own on its media, so
+forge keeps one per host:
+`PUT /api/v1/synonyms/boothost/<name>/install-config` (the YAML as the
+body), `GET` and `DELETE`: every verb the admin's, the read too, since it
+carries secrets (stormcentral's per-install stormupdate token,
+stormcentral#710). It is kept 0600 in `<data_dir>/install-configs/<host>.yaml`,
+never in `synonyms.json`, never listed or logged, follows the host's rename and
+goes with its delete. Only that host's claim carries it (`install_config`,
+`install_config_sha256`); `boot-claim` stages it 0600 in
+`/run/stormblock/install-config.forge.yaml` and never prints it. `/init` takes
+the media's first; with none, forge's: on an install (the install ticket, or a
+disk the probe installs over) it **replaces** what `/state` has, so every
+install rotates the secrets in it; on any other boot it is written only when
+`/state` has none. The staged copies are removed before switch_root. Which one
+the boot took (`media`, `forge`, `none`) is in `/run/stormblock/install-config.source`,
+in the node's `system-data` boot and install records (`install_config`), and in
+the `installed` report, so forge's host record says it
+(`install.install_config`); never the bytes.
+
 ## How it ships
 
 stormblock is a **`special`** component in stormcentral's component registry

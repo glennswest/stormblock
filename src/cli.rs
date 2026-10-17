@@ -8718,7 +8718,10 @@ async fn claim_boot_uri(
                 let body = resp.text().await.unwrap_or_default();
                 if status.is_success() {
                     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-                        anyhow::anyhow!("claim returned {status} but not JSON: {e}: {body}")
+                        anyhow::anyhow!(
+                            "claim returned {status} but not JSON: {e}: {}",
+                            crate::mgmt::install_config::redacted(&body)
+                        )
                     })?;
                     // Every path when the appliance has several (#90): the
                     // engine's initiator takes the multipath form.
@@ -8729,7 +8732,8 @@ async fn claim_boot_uri(
                         .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "claim answered without an attach URI — a volume id alone is not \
-                                 bootable: {body}"
+                                 bootable: {}",
+                                crate::mgmt::install_config::redacted(&body)
                             )
                         })?;
                     if let Some(name) = v.get("volume").and_then(|x| x.get("name")).and_then(|x| x.as_str()) {
@@ -8748,6 +8752,14 @@ async fn claim_boot_uri(
                     note_install_ticket(&base, &v);
                     note_host_secret(&base, &v);
                     note_boot_override(&v);
+                    // This machine's install-config, when forge keeps one
+                    // (#459): staged for /init, never printed.
+                    let staged = std::path::Path::new(crate::mgmt::install_config::STAGED);
+                    match crate::mgmt::install_config::from_claim(staged, &v) {
+                        Ok(w) if w == "none" => {}
+                        Ok(w) => eprintln!("boot-claim: install-config from {base}: {w}"),
+                        Err(e) => eprintln!("boot-claim: install-config from {base} not staged: {e}"),
+                    }
                     // Forge's trust, for the node's enrolment (#381).
                     match crate::mgmt::forge_trust::from_claim(&crate::mgmt::forge_trust::node_dir(), &base, &v) {
                         Ok("written") => eprintln!("boot-claim: forge trust written to {}", crate::mgmt::forge_trust::node_dir().display()),
@@ -8878,6 +8890,10 @@ pub(crate) enum ReportOutcome {
 /// disk boots on its own: the machine's intent goes back to `local` and its
 /// record says `laid`. `booted` from the first boot off that disk: the
 /// install is proven. Retried for an hour, never fatal.
+/// Where `/init` writes which install-config this boot used (#459):
+/// `media`, `forge` or `none`.
+pub(crate) const INSTALL_CONFIG_SOURCE: &str = "/run/stormblock/install-config.source";
+
 pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTicket, stage: &str) -> ReportOutcome {
     let url = format!(
         "{}/api/v1/synonyms/boothost/{}/installed",
@@ -8896,7 +8912,10 @@ pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTic
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
     loop {
-        let body = serde_json::json!({ "volume": ticket.volume, "stage": stage });
+        // Where the install's install-config came from (#459), as /init
+        // wrote it down; never its content.
+        let source = std::fs::read_to_string(INSTALL_CONFIG_SOURCE).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let body = serde_json::json!({ "volume": ticket.volume, "stage": stage, "install_config": source });
         let last = match client.post(&url).json(&body).send().await {
             Ok(resp) if resp.status().is_success() => {
                 match stage {

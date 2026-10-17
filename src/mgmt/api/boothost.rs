@@ -178,9 +178,17 @@ async fn rename(
     Path(name): Path<String>,
     Json(req): Json<RenameRequest>,
 ) -> Response {
-    let renamed = state.synonyms.write().await.rename_host(&name, &req.to, req.keep_alias);
+    let renamed = {
+        let mut store = state.synonyms.write().await;
+        let from = store.host_of(&name);
+        store.rename_host(&name, &req.to, req.keep_alias).map(|h| (h, from))
+    };
     match renamed {
-        Ok(h) => {
+        Ok((h, from)) => {
+            // Its install-config goes with it (#459).
+            if let Some(from) = from.filter(|f| *f != h.name) {
+                crate::mgmt::install_config::rename(&state, &from, &h.name);
+            }
             tracing::info!(
                 from = %name, to = %h.name,
                 "boot host renamed; {} and its golden moved with their history",
@@ -382,6 +390,7 @@ async fn remove_host(State(state): State<Arc<AppState>>, Path(name): Path<String
     match removed {
         Ok(gone) => {
             crate::mgmt::creators::forget(&state, &crate::mgmt::creators::host(&name));
+            crate::mgmt::install_config::delete(&state, &name);
             for k in &gone {
                 let (ns, n) = crate::volume::synonym::split(k);
                 crate::mgmt::creators::forget(&state, &crate::mgmt::creators::synonym(&ns, &n));

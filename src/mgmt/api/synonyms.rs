@@ -10,6 +10,9 @@
 //! GET    /api/v1/synonyms/boothost/{name}/intent      a machine's boot intent (open)
 //! PUT    /api/v1/synonyms/boothost/{name}/intent      {intent: install|local|auto}
 //! POST   /api/v1/synonyms/boothost/{name}/installed   {volume} — an install finished (open)
+//! PUT    /api/v1/synonyms/boothost/{name}/install-config   its install-config.yaml (admin, #459)
+//! GET    /api/v1/synonyms/boothost/{name}/install-config   (admin)
+//! DELETE /api/v1/synonyms/boothost/{name}/install-config   (admin)
 //! ```
 //!
 //! Both path shapes work: `/api/v1/synonyms/fedora-43` is
@@ -61,6 +64,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{namespace}/{name}/claim", post(claim_two))
         .route("/{namespace}/{name}/intent", get(get_intent).put(put_intent))
         .route("/{namespace}/{name}/installed", post(installed))
+        .route(
+            "/{namespace}/{name}/install-config",
+            get(get_install_config).put(put_install_config).delete(delete_install_config),
+        )
         .with_state(state)
 }
 
@@ -1102,7 +1109,8 @@ async fn claim_boothost(
             Ok((host, how)) => {
                 match &how {
                     synonym::NamedClaim::Renamed { from, by } => {
-                        tracing::info!(host, from, by, "a machine claimed by a name of its own: renamed from its provisional one")
+                        tracing::info!(host, from, by, "a machine claimed by a name of its own: renamed from its provisional one");
+                        crate::mgmt::install_config::rename(&state, from, &host);
                     }
                     synonym::NamedClaim::Aliased { name, by } => {
                         tracing::info!(host, name, by, "a machine claimed by a second name: kept its own, the new one is an alias")
@@ -1407,10 +1415,14 @@ async fn claim_boothost(
             state.synonyms.write().await.note_boot_override(tag, None);
         }
     }
+    // Its install-config (#459): to this host's own claim only, never logged.
+    let install_config = crate::mgmt::install_config::for_claim(&state, tag);
     let out = json!({
         "intent": intent_word,
         "override": ov,
         "host_secret": host_secret,
+        "install_config": install_config.as_ref().map(|(_, t)| t),
+        "install_config_sha256": install_config.as_ref().map(|(d, _)| d),
         // Forge's CA, apiserver and bootstrap token, for the node's
         // enrolment (#381): null when this forge holds none.
         "forge_trust": crate::mgmt::forge_trust::claim_answer(&state),
@@ -1725,6 +1737,69 @@ async fn put_intent(
     }
 }
 
+/// The host an install-config route names: a host forge knows, by its name
+/// or an alias, in the `boothost` namespace.
+async fn install_config_host(state: &AppState, namespace: &str, name: &str) -> Result<String, Response> {
+    boothost_only(namespace)?;
+    let store = state.synonyms.read().await;
+    store.host_of(name).ok_or_else(|| err(SynonymError::NotFound(synonym::key(BOOTHOST_NS, name))))
+}
+
+fn install_config_body(host: &str, bytes: &[u8]) -> serde_json::Value {
+    use sha2::Digest;
+    json!({ "host": host, "bytes": bytes.len(), "sha256": hex::encode(sha2::Sha256::digest(bytes)) })
+}
+
+/// `PUT /api/v1/synonyms/boothost/<name>/install-config` — the machine's
+/// install-config.yaml (#459), handed to it at its next claims and written
+/// to `/state` by an install. The body is the YAML; the answer says how
+/// many bytes and their sha256, never the content. Admin (`serve::api`).
+async fn put_install_config(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> Response {
+    let host = match install_config_host(&state, &namespace, &name).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    match crate::mgmt::install_config::put(&state, &host, &body) {
+        Ok(()) => {
+            tracing::info!(host = %host, bytes = body.len(), "install-config kept for the host's claims");
+            Json(install_config_body(&host, &body)).into_response()
+        }
+        Err(e) => ApiError::bad_request(e),
+    }
+}
+
+/// `GET …/install-config` — the YAML forge keeps for the host (admin).
+async fn get_install_config(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    let host = match install_config_host(&state, &namespace, &name).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    match crate::mgmt::install_config::get(&state, &host) {
+        Some(b) => ([(axum::http::header::CONTENT_TYPE, "application/yaml")], b).into_response(),
+        None => ApiError::not_found(format!("forge keeps no install-config for {host}")),
+    }
+}
+
+/// `DELETE …/install-config` — forget it (admin). Idempotent.
+async fn delete_install_config(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    let host = match install_config_host(&state, &namespace, &name).await {
+        Ok(h) => h,
+        Err(r) => return r,
+    };
+    let removed = crate::mgmt::install_config::delete(&state, &host);
+    Json(json!({ "host": host, "removed": removed })).into_response()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct InstalledRequest {
     /// The boot clone the node installed from — the `volume.id` of its claim.
@@ -1733,6 +1808,10 @@ pub struct InstalledRequest {
     /// successor once the disk is laid; `booted` from the first boot off it.
     #[serde(default)]
     pub stage: Option<String>,
+    /// Where the install's install-config came from (#459): `media`,
+    /// `forge` or `none`. Never its content.
+    #[serde(default)]
+    pub install_config: Option<String>,
 }
 
 /// `POST /api/v1/synonyms/boothost/<name>/installed {"volume": <clone id>}` —
@@ -1773,6 +1852,11 @@ async fn installed(
         Some(other) => return ApiError::bad_request(format!("stage {other:?} is laid or booted")),
     }
     let done = state.synonyms.write().await.install_done(&name, clone);
+    if let (Ok((h, InstallDone::Reset)), Some(src)) = (&done, req.install_config.as_deref()) {
+        if matches!(src, "media" | "forge" | "none") {
+            state.synonyms.write().await.note_install_config_source(&h.name, src);
+        }
+    }
     match done {
         Ok((h, outcome)) => {
             let reset = outcome == InstallDone::Reset;

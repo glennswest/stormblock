@@ -468,6 +468,9 @@ pub struct InstallProgress {
     pub laid_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub booted_at: Option<u64>,
+    /// Where its install-config came from (#459): `media`, `forge`, `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_config: Option<String>,
 }
 
 impl InstallProgress {
@@ -477,6 +480,7 @@ impl InstallProgress {
             "clone": self.clone.0,
             "laid_at": self.laid_at,
             "booted_at": self.booted_at,
+            "install_config": self.install_config,
         })
     }
 }
@@ -1142,11 +1146,19 @@ impl SynonymStore {
         h.intent = BootIntent::Local;
         h.install_claim = None;
         // Laid, not proven: the first boot off the disk says so (#220).
-        h.install = Some(InstallProgress { state: InstallStage::Laid, clone, laid_at: t, booted_at: None });
+        h.install = Some(InstallProgress { state: InstallStage::Laid, clone, laid_at: t, booted_at: None, install_config: None });
         h.updated_at = t;
         let out = h.clone();
         self.persist();
         Ok((out, InstallDone::Reset))
+    }
+
+    /// Where the install just reported laid took its install-config (#459).
+    pub fn note_install_config_source(&mut self, host: &str, source: &str) {
+        if let Some(p) = self.hosts.get_mut(host).and_then(|h| h.install.as_mut()) {
+            p.install_config = Some(source.to_string());
+            self.persist();
+        }
     }
 
     /// A new host secret for `host` (#247), replacing the last: what a boot

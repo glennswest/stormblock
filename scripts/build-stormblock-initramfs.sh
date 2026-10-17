@@ -936,6 +936,19 @@ install_config_read() {
     install_config_forget
 }
 install_config_read
+# Which install-config this boot takes (#459): the boot media's when it
+# handed one down, else forge's, which boot-claim staged from this host's
+# claim (`install_config`), else none. Media first, as stormcos#604 asks.
+INSTALL_CONFIG_FORGE="${STORM_RUN:-/run/stormblock}/install-config.forge.yaml"
+install_config_source() {
+    if [ -n "${INSTALL_CONFIG_STAGED:-}" ] && [ -f "$INSTALL_CONFIG_STAGED" ]; then
+        echo media
+    elif [ -f "$INSTALL_CONFIG_FORGE" ]; then
+        echo forge
+    else
+        echo none
+    fi
+}
 # --- END install config read
 
 # --- BEGIN mount list (covered by tests/initramfs-mounts.sh)
@@ -4454,6 +4467,8 @@ if [ -s "$SD_DEV_FILE" ]; then
             printf '{"at": "%s", "release": %s, "tag": %s, "cmdline": %s,\n' \
                 "$sd_at" "$(sd_str "$sd_release")" "$(sd_str "${BOOTTAG:-}")" "$(sd_str "$(cat "$SD_CMDLINE" 2>/dev/null)")"
             printf ' "local_disk": %s,\n' "$(sd_json "$SD_RUN/local-disk.json")"
+            # Which install-config this boot takes (#459), never its bytes.
+            printf ' "install_config": %s,\n' "$(sd_str "$(install_config_source 2>/dev/null || echo none)")"
             printf ' "handover": %s}\n' "$(sd_json "$SD_RUN/handover.json")"
         } > "$sd_boot"
         if grep -q '"installed"' "$SD_RUN/handover.json" 2>/dev/null; then
@@ -4523,26 +4538,64 @@ if [ ! -x /sysroot/sbin/init ] && [ ! -x /sysroot/usr/lib/systemd/systemd ]; the
 fi
 
 # --- BEGIN install config write (covered by tests/initramfs-install-config.sh)
-# The staged install-config.yaml goes to /state on a first boot only: when
-# /state is mounted and holds none yet, so booting old media again never
-# overwrites a node's applied config (#275). stormpump applies it from there
-# (stormpump#78). The staged copy is removed either way: /run moves into the
-# real root at switch_root.
-if [ -n "${INSTALL_CONFIG_STAGED:-}" ] && [ -f "$INSTALL_CONFIG_STAGED" ]; then
-    _icst="${STORM_SYSROOT:-/sysroot}/state"
+# The install-config this boot takes goes to /state (stormpump applies it
+# from there, stormpump#78), and which one is written down, never its bytes.
+# - **The boot media's** (#275): on a first boot only, when /state holds
+#   none yet, so booting old media again never overwrites a node's applied
+#   config. Forge's is then not used.
+# - **Forge's** (#459, staged by boot-claim): on an install, it replaces what
+#   /state has, so every install rotates the secrets in it (stormcentral
+#   mints a new stormupdate token per install). On any other boot, only when
+#   /state has none. An install is this boot's install ticket (intent
+#   `install`) or a disk the probe installs over.
+# The staged copies are removed either way: /run moves into the real root
+# at switch_root.
+_icsrc=$(install_config_source)
+_icfile=""
+case "$_icsrc" in
+    media) _icfile="$INSTALL_CONFIG_STAGED"
+           [ -f "$INSTALL_CONFIG_FORGE" ] && echo "install-config: the boot media's is used; forge's is not" ;;
+    forge) _icfile="$INSTALL_CONFIG_FORGE" ;;
+esac
+_icinstall=""
+if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] || [ -n "${INSTALL_OVER:-}" ]; then
+    _icinstall=yes
+fi
+_icst="${STORM_SYSROOT:-/sysroot}/state"
+if [ -n "$_icfile" ]; then
     if ! awk -v m="$_icst" '$2 == m { f = 1 } END { exit !f }' "${STORM_MOUNTS_FILE:-/proc/mounts}"; then
-        echo "install-config: /state is not mounted - not written (the boot media still has it)"
-    elif [ -e "$_icst/config/install-config.yaml" ]; then
-        echo "install-config: /state already has one - kept, the media's is not applied again"
-    elif mkdir -p "$_icst/config" && ( umask 077; cp "$INSTALL_CONFIG_STAGED" "$_icst/config/install-config.yaml" ) \
-         && chmod 600 "$_icst/config/install-config.yaml"; then
-        echo "install-config: written to /state/config/install-config.yaml (first boot)"
+        if [ "$_icsrc" = media ]; then
+            echo "install-config: /state is not mounted - not written (the boot media still has it)"
+        else
+            echo "install-config: /state is not mounted - not written (forge still has it)"
+        fi
+        _icsrc="$_icsrc, not written"
+    elif [ -e "$_icst/config/install-config.yaml" ] && { [ "$_icsrc" = media ] || [ -z "$_icinstall" ]; }; then
+        if [ "$_icsrc" = media ]; then
+            echo "install-config: /state already has one - kept, the media's is not applied again"
+        else
+            echo "install-config: /state already has one - kept (not an install), forge's is not applied"
+        fi
+        _icsrc="$_icsrc, kept"
+    elif mkdir -p "$_icst/config" && ( umask 077; cp "$_icfile" "$_icst/config/.install-config.yaml.new" ) \
+         && chmod 600 "$_icst/config/.install-config.yaml.new" \
+         && mv -f "$_icst/config/.install-config.yaml.new" "$_icst/config/install-config.yaml"; then
+        if [ "$_icsrc" = forge ] && [ -n "$_icinstall" ]; then
+            echo "install-config: written to /state/config/install-config.yaml from forge (install: replaces what was there)"
+        elif [ "$_icsrc" = forge ]; then
+            echo "install-config: written to /state/config/install-config.yaml from forge (first boot)"
+        else
+            echo "install-config: written to /state/config/install-config.yaml (first boot)"
+        fi
     else
         echo "install-config: could not write /state/config/install-config.yaml"
-        rm -f "$_icst/config/install-config.yaml"
+        rm -f "$_icst/config/.install-config.yaml.new"
+        _icsrc="$_icsrc, not written"
     fi
-    rm -f "$INSTALL_CONFIG_STAGED"
 fi
+mkdir -p "${STORM_RUN:-/run/stormblock}" 2>/dev/null
+printf '%s\n' "${_icsrc%%,*}" > "${STORM_RUN:-/run/stormblock}/install-config.source" 2>/dev/null || true
+rm -f "${INSTALL_CONFIG_STAGED:-}" "$INSTALL_CONFIG_FORGE" 2>/dev/null
 # --- END install config write
 
 stamp "root ready"

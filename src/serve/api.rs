@@ -193,6 +193,11 @@ fn is_destructive(method: &Method, path: &str, query: Option<&str>) -> bool {
     if path.ends_with("/seal") {
         return true;
     }
+    if path.starts_with("/api/v1/synonyms/boothost/") && path.trim_end_matches('/').ends_with("/install-config") {
+        // A machine's install-config carries its secrets (#459): every verb,
+        // the read included, is the admin's.
+        return true;
+    }
     if *method == Method::PUT && path.starts_with("/api/v1/synonyms/boothost/") && path.ends_with("/intent") {
         // `install` takes the machine's disk whatever it carries — the
         // node's identity included (#148).

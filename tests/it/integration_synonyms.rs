@@ -2012,3 +2012,121 @@ async fn a_default_claim_finds_its_host_by_a_serial_alias_never_by_a_serial_name
     assert_eq!(a["claimed_from"]["release"].as_str(), Some(v1.to_string().as_str()), "the default image: {a}");
     server.abort();
 }
+
+/// #459 (stormcos#604): forge keeps a machine's install-config. The admin
+/// puts and reads it, nothing else does; it goes to that machine's claim
+/// alone, never into a listing; it follows the host's rename; the install's
+/// report records where it came from.
+#[tokio::test]
+async fn forge_hands_a_host_its_own_install_config_at_its_claim() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    state.set_auth(stormblock::serve::api::AuthConfig {
+        api_token: Some("tok".into()),
+        admin_token: Some("adm".into()),
+        audit_only: false,
+    });
+    default_claim(&client, &base, "AC:1F:6B:8A:A7:9C").await;
+    default_claim(&client, &base, "AC:1F:6B:8A:A7:9D").await;
+    let r = client
+        .post(format!("{base}/api/v1/boothost/mac-ac1f6b8aa79c/rename"))
+        .bearer_auth("tok")
+        .json(&serde_json::json!({"to": "pvetest1"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+
+    let yaml = "apiVersion: v1\nstormupdate:\n  updateToken: SECRET-UPDATE-TOKEN\n";
+    let url = |h: &str| format!("{base}/api/v1/synonyms/boothost/{h}/install-config");
+    let put = |h: &str, tok: Option<&'static str>, body: &'static str| {
+        let mut r = client.put(url(h)).body(body);
+        if let Some(t) = tok {
+            r = r.bearer_auth(t);
+        }
+        r.send()
+    };
+    // The admin's, every verb.
+    assert_eq!(put("pvetest1", None, yaml).await.unwrap().status(), 401);
+    assert_eq!(put("pvetest1", Some("tok"), yaml).await.unwrap().status(), 401, "the node token is not enough");
+    assert_eq!(put("nosuch", Some("adm"), yaml).await.unwrap().status(), 404, "a host forge does not know");
+    assert_eq!(put("pvetest1", Some("adm"), "").await.unwrap().status(), 400, "empty");
+    let r = put("pvetest1", Some("adm"), yaml).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["bytes"], yaml.len());
+    assert!(!v.to_string().contains("SECRET"), "the answer never carries it: {v}");
+    assert_eq!(client.get(url("pvetest1")).send().await.unwrap().status(), 401);
+    assert_eq!(client.get(url("pvetest1")).bearer_auth("tok").send().await.unwrap().status(), 401);
+    let got = client.get(url("pvetest1")).bearer_auth("adm").send().await.unwrap();
+    assert_eq!(got.status(), 200);
+    assert_eq!(got.text().await.unwrap(), yaml);
+    // By an alias too: the MAC reaches the host.
+    assert_eq!(client.get(url("ac1f6b8aa79c")).bearer_auth("adm").send().await.unwrap().text().await.unwrap(), yaml);
+    let f = dir.path().join("install-configs/pvetest1.yaml");
+    assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+
+    // Its claim carries it; another machine's does not.
+    let c = boot_claim(&client, &base, "pvetest1").await;
+    assert_eq!(c["install_config"], yaml);
+    use sha2::Digest;
+    assert_eq!(c["install_config_sha256"], hex::encode(sha2::Sha256::digest(yaml.as_bytes())));
+    let other = default_claim(&client, &base, "AC:1F:6B:8A:A7:9D").await;
+    assert!(other["install_config"].is_null(), "{other}");
+
+    // Never in a listing or a read of the host.
+    for (u, tok) in [
+        (format!("{base}/api/v1/boothost/pvetest1"), Some("tok")),
+        (format!("{base}/api/v1/boothost"), Some("tok")),
+        (format!("{base}/api/v1/synonyms/boothost/pvetest1"), Some("tok")),
+        (format!("{base}/api/v1/synonyms?namespace=boothost"), Some("tok")),
+        (format!("{base}/api/v1/synonyms/boothost/pvetest1/intent"), None),
+    ] {
+        let mut r = client.get(&u);
+        if let Some(t) = tok {
+            r = r.bearer_auth(t);
+        }
+        let body = r.send().await.unwrap().text().await.unwrap();
+        assert!(!body.contains("SECRET"), "{u} shows it: {body}");
+    }
+    assert!(!std::fs::read_to_string(dir.path().join("synonyms.json")).unwrap().contains("SECRET"));
+
+    // An install records where its install-config came from, not what.
+    let r = client
+        .put(format!("{base}/api/v1/synonyms/boothost/pvetest1/intent"))
+        .bearer_auth("adm")
+        .json(&serde_json::json!({"intent": "install"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let c = boot_claim(&client, &base, "pvetest1").await;
+    assert_eq!(c["install_config"], yaml, "an install claim carries it");
+    let v: serde_json::Value = client
+        .post(format!("{base}/api/v1/synonyms/boothost/pvetest1/installed"))
+        .json(&serde_json::json!({"volume": c["volume"]["id"], "install_config": "forge"}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!((v["reset"].as_bool(), v["install"]["install_config"].as_str()), (Some(true), Some("forge")), "{v}");
+
+    // Renamed: it goes with the host.
+    let r = client
+        .post(format!("{base}/api/v1/boothost/pvetest1/rename"))
+        .bearer_auth("tok")
+        .json(&serde_json::json!({"to": "pvetest9"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(boot_claim(&client, &base, "pvetest9").await["install_config"], yaml);
+    assert!(dir.path().join("install-configs/pvetest9.yaml").exists() && !f.exists());
+
+    // Deleted: the next claim carries none.
+    let r = client.delete(url("pvetest9")).bearer_auth("adm").send().await.unwrap();
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["removed"], true);
+    assert_eq!(client.get(url("pvetest9")).bearer_auth("adm").send().await.unwrap().status(), 404);
+    assert!(boot_claim(&client, &base, "pvetest9").await["install_config"].is_null());
+    server.abort();
+}

@@ -134,7 +134,7 @@ pub fn status(state: &AppState) -> Value {
     }
 }
 
-fn write_file(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+pub(crate) fn write_file(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();

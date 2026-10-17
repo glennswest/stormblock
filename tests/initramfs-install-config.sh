@@ -66,7 +66,12 @@ boot() { # mounted(yes|no) -> runs read then write; console in $WORK/console
     : > "$WORK/mounts"
     [ "$1" = yes ] && echo "/dev/ublkb9 $WORK/sysroot/state ext4 rw 0 0" > "$WORK/mounts"
     STORM_EFIVARS="$EV" STORM_RUN="$WORK/run" STORM_SYSROOT="$WORK/sysroot" \
-    STORM_MOUNTS_FILE="$WORK/mounts" sh -c '
+    STORM_MOUNTS_FILE="$WORK/mounts" STORM_INSTALL_TICKET="$WORK/run/install.json" \
+    FORGE="${FORGE:-}" TICKET="${TICKET:-}" INSTALL_OVER="${INSTALL_OVER:-}" sh -c '
+        mkdir -p "$STORM_RUN"
+        # What boot-claim leaves (#459): forge'"'"'s copy, and the ticket.
+        [ -n "$FORGE" ] && { ( umask 077; cp "$FORGE" "$STORM_RUN/install-config.forge.yaml" ); }
+        [ -n "$TICKET" ] && echo "{}" > "$STORM_INSTALL_TICKET"
         . "$0/boot-identity.sh"
         . "$0/install-config-read.sh"
         echo "STAGED=${INSTALL_CONFIG_STAGED:-}"
@@ -118,5 +123,43 @@ check "/state not mounted: nothing written" no "$([ -e "$WORK/sysroot/state/conf
 check "  and it says so" yes "$(said 'not mounted')"
 check "  the staged copy is gone" no "$([ -e "$WORK/run/install-config.yaml" ] && echo yes || echo no)"
 check "no run printed a secret" 0 "$(grep -c 'SECRET-' "$WORK/console" || true)"
+check "  the source is the media's" media "$(cat "$WORK/run/install-config.source" 2>/dev/null)"
+
+echo "forge (#459):"
+FCONF="$WORK/forge.yaml"
+printf 'stormupdate:\n  updateToken: SECRET-UPDATE-1\n' > "$FCONF"
+FSHA=$(sha256sum "$FCONF" | cut -d' ' -f1)
+stash() { sha256sum "$WORK/sysroot/state/config/install-config.yaml" 2>/dev/null | cut -d' ' -f1; }
+forge_gone() { [ -e "$WORK/run/install-config.forge.yaml" ] && echo yes || echo no; }
+rm -rf "$EV" "$WORK/sysroot"; mkdir -p "$EV" "$WORK/sysroot/state"
+FORGE="$FCONF" boot yes
+check "no media, forge's, /state empty: written" "$FSHA" "$(stash)"
+check "  0600" 600 "$(stat -c %a "$WORK/sysroot/state/config/install-config.yaml" 2>/dev/null)"
+check "  the source is forge" forge "$(cat "$WORK/run/install-config.source")"
+check "  the staged copy is gone" no "$(forge_gone)"
+echo "applied: true" > "$WORK/sysroot/state/config/install-config.yaml"
+FORGE="$FCONF" boot yes
+check "not an install, /state has one: kept" "applied: true" "$(cat "$WORK/sysroot/state/config/install-config.yaml")"
+check "  and says so" yes "$(said 'kept (not an install)')"
+check "  the staged copy is gone" no "$(forge_gone)"
+FORGE="$FCONF" TICKET=1 boot yes
+check "an install (the ticket): forge's replaces it" "$FSHA" "$(stash)"
+check "  and says so" yes "$(said 'install: replaces what was there')"
+printf 'stormupdate:\n  updateToken: SECRET-UPDATE-2\n' > "$FCONF"
+FSHA2=$(sha256sum "$FCONF" | cut -d' ' -f1)
+FORGE="$FCONF" INSTALL_OVER=/dev/sda boot yes
+check "an install over a disk: the next token replaces it" "$FSHA2" "$(stash)"
+lay; echo "applied: true" > "$WORK/sysroot/state/config/install-config.yaml"
+FORGE="$FCONF" TICKET=1 boot yes
+check "media and forge: the media's wins (and /state's is kept)" "applied: true" "$(cat "$WORK/sysroot/state/config/install-config.yaml")"
+check "  forge's is said not to be used" yes "$(said "forge's is not")"
+check "  the source is the media's" media "$(cat "$WORK/run/install-config.source")"
+check "  forge's staged copy is gone" no "$(forge_gone)"
+rm -rf "$EV"; mkdir -p "$EV"; boot yes
+check "neither: the source is none" none "$(cat "$WORK/run/install-config.source")"
+rm -rf "$WORK/sysroot"; mkdir -p "$WORK/sysroot/state"; FORGE="$FCONF" TICKET=1 boot no
+check "forge's, /state not mounted: nothing written" no "$([ -e "$WORK/sysroot/state/config/install-config.yaml" ] && echo yes || echo no)"
+check "  and its staged copy is gone" no "$(forge_gone)"
+check "no forge run printed a secret" 0 "$(grep -c 'SECRET-' "$WORK/console" || true)"
 
 [ "$fail" = 0 ] && echo "PASS" || { echo "FAIL"; exit 1; }

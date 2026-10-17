@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **feat:** #459 (stormcos#604, for stormcentral#710): forge keeps a per-host install-config and hands it to that host at its claim. Test machines boot one shared stormbootx ISO, so the media's install-config (#275) never reached them, and stormcentral mints a stormupdate token per machine at each install.
+  - **The routes:** `PUT/GET/DELETE /api/v1/synonyms/boothost/<name>/install-config`, every verb admin-only, the read included. The YAML is kept 0600 in `<data_dir>/install-configs/<host>.yaml`, never in `synonyms.json`, listings or logs. It follows the host's rename and goes with its delete.
+  - **The claim:** a claim of that host carries `install_config` and `install_config_sha256`. `boot-claim` stages it 0600 in `/run/stormblock/install-config.forge.yaml`. Its error lines no longer print a reply carrying it.
+  - **`/init`:** the media's first. Forge's, on an install (the install ticket, or a disk the probe installs over), replaces `/state/config/install-config.yaml`, so every install rotates its secrets; on any other boot it is written only when `/state` has none. The staged copies are removed before switch_root.
+  - **The record:** the source (`media`, `forge`, `none`) is written to `/run/stormblock/install-config.source`, to the `system-data` boot and install records, and to the `installed` report (`install.install_config` on forge's host record). Never the bytes.
+  - **Tests:** `integration_synonyms::forge_hands_a_host_its_own_install_config_at_its_claim`, `mgmt::install_config::tests`, `tests/initramfs-install-config.sh` (+20) and `tests/initramfs-system-data.sh`. README, auth.md, boot-hooks.md.
 - **docs:** #59 (decided 2026-10-13: 1B, 2C): docs/pallets.md §2.10 says what was decided. There is no writable kernel command line in the format: the cmdline stays a sealed, signed member, and per-node settings arrive by boothost, install-config, `[network]`, `system-data` and the mount list. Data pallets are not PVCs (#356). A kdump target waits until stormcos runs kdump, and is then a data-half volume, never a pallet. §2.6–§2.8 (writable containers in pallets) are marked superseded.
 - **docs:** #15 and #182 closed (master's decision A): the CSI driver's live-backend run is stormblock-csi#38 and #54. The checks from #15 that still apply were added to stormblock-csi#38.
 - **chore:** #167: what the VFIO stub's removal left: `DriveError::VfioNotAvailable` (nothing constructed it) is gone, and the drive layer's and the CLI's module comments no longer describe a userspace NVMe driver.
