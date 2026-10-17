@@ -246,6 +246,13 @@ with a fresh data half. Keep set: sealed origin-release goldens, system-data,
 stormcos-state's network/install-config; unmarked volumes erased. Nothing
 built; with the pacing, the build goes on a wip/ branch.
 
+### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — PARKED until the single-node pacing lifts
+
+To build on a wip/ branch: `POST /api/v1/forge/default` (admin): remove
+forge.json, serve `default_settings` (restart if on with other settings),
+GET `from: default`; 409 for a config-owned target; idempotent; tests incl.
+a restart. stormcluster PUTs a copy until then. Nothing built.
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
