@@ -776,15 +776,14 @@ stormcert-data) — recommended; B A + attach bound to the workload's
 ServiceAccount (needs rustkube-node/stormcos); C nothing until stormcert
 asks. Workload auth and encryption as separate design issues. Nothing built.
 
-### Writable cmdline and a kdump target (2026-10-11, #59, P3) — WAITING ON THE OWNER
+### Writable cmdline and a kdump target (2026-10-11, #59, P3) — CLOSED: 1B, 2C (master, 2026-10-13)
 
-The PVC half is settled (CoW clones on the data slab; pallets.md §2.5 says
-writable data is not a pallet, #356). Asked on #59 (needs-owner): (1)
-writable cmdline: A an unsigned operator delta with an allowlist (format +
-stormuefi), B none, per-node settings stay in boothost/install-config/
-system-data (recommended), C a denylist; (2) kdump: A a data-half volume like
-system-data, sized from RAM, B a writable `dump` pallet kind, C not until
-stormcos runs kdump (recommended, then A). Nothing built.
+Decided as recommended: no writable cmdline in the format (the signed
+cmdline stays sealed; per-node settings by boothost, install-config,
+`[network]`, system-data, the mount list); no kdump target until stormcos
+runs kdump, then a data-half volume like system-data (2A), never a pallet.
+Nothing built. docs/pallets.md §2.10 says it; §2.6–2.8 marked superseded;
+data-classes.md. Closed 2026-10-17.
 
 ### StormFS server-side chunk copy (2026-10-11, #64, P3) — DONE
 

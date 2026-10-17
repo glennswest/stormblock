@@ -203,7 +203,7 @@ kind, so a pallet written before the field existed is never stranded.
 
 ### 2.6 Containers: one structure, sealed or not
 
-**Status: designed 2026-08-23, not yet implemented (#59).** (#62, which this section once cited, was closed by goldens landing in the slab, 1890291 — a different shape.) Everything above
+**Status: superseded, not to be built (#59, decided 2026-10-13; #356).** Writable data is not a pallet: a node's writable volumes are CoW clones on the data slab, and a pallet stays sealed content. §2.6–§2.8 are kept as the design that was considered; what was decided is §2.10. (#62, which this section once cited, was closed by goldens landing in the slab, 1890291 — a different shape.) Everything above
 this describes a pallet as sealed content and nothing else. That is what ships
 an image which *contains* a node; what makes one that **is** a node is that a
 pallet also carries the writable half.
@@ -273,7 +273,7 @@ partition = one pallet
 
 ### 2.7 The map: two levels, and the drive lives at the top
 
-**Status: design (#59), not implemented.** Nothing in `src/` builds an L1/L2
+**Status: superseded, not to be built (#59, §2.10).** Nothing in `src/` builds an L1/L2
 map or a container descriptor. Read-through goldens were delivered a different
 way, by volumes that share slab extents (`docs/composed-disks.md`); this
 section and §2.8 are kept as the design for writable containers inside a
@@ -325,7 +325,7 @@ adding them changes no format.
 
 ### 2.8 A/B, per kind
 
-**Status: design (#59), not implemented.** See §2.7.
+**Status: superseded, not to be built (#59, §2.10).** In particular the command line is *not* a writable file: it stays a sealed, signed member.
 
 The unit of replacement differs by what is being replaced, because a pallet is
 the thing you copy whole:
@@ -412,6 +412,36 @@ trusted keys (rotation, one per release line) picks the right one.
   `malformed: …`.
 
 ---
+
+### 2.10 Writable content: what was decided (#59)
+
+The master for the owner, 2026-10-13, as recommended on #59:
+
+- **No writable kernel command line in the format (1B).** The cmdline is a
+  sealed member of the boot pallet, covered by its Ed25519 signature (§2.9),
+  and changing it means a new pallet. No unsigned region is appended to it:
+  the most security-sensitive text in the boot takes no unsigned input, and
+  no allowlist has to be kept safe for ever. What differs per node reaches
+  it by the channels that already exist:
+  - the boothost record on forge that stormbootx boots from (which release,
+    the boot intent);
+  - `install-config.yaml` (#275) and the node's own `[network]` in
+    stormcos-state (#229);
+  - the node's `system-data` volume (#355);
+  - the mount list in the root volume, `/etc/stormblock/mounts` (#262).
+
+  For one-off debugging, edit the command line at the stormuefi prompt.
+- **Data pallets as PVCs: no (#356).** A PVC is a CoW clone of a sealed blank
+  of its size class, on the data slab (`pvc-ext4j-<MiB>m`); writable data
+  lives in the data half, which installs keep (#311). §2.5's `data`, `vendor`
+  and `user` kinds name partitions, not writable containers.
+- **A kdump target: not until stormcos runs kdump (2C, then 2A).** Nothing on
+  stormcos loads a capture kernel or sets `crashkernel=`, so a dump target
+  would be space nothing writes. When stormcos turns kdump on, the target is
+  a thin `kdump` volume in the data half, made at boot-local the way
+  `system-data` is, sized from RAM (RAM + 10 %), on the other drive when
+  there is one, and only when the release asks for it. It is never a
+  writable pallet kind.
 
 ## 3. Multi-pallet: several on one drive
 
