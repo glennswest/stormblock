@@ -714,11 +714,12 @@ async fn a_clone_of_a_golden_larger_than_the_page_cache_keeps_no_reader_waiting(
                 let t = Instant::now();
                 drop(gem.read().await);
                 let w = t.elapsed();
-                let mut m = worst.lock().unwrap();
-                if w > *m {
-                    *m = w;
+                {
+                    let mut m = worst.lock().unwrap();
+                    if w > *m {
+                        *m = w;
+                    }
                 }
-                drop(m);
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
         })
