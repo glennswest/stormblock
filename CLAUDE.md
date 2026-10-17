@@ -329,7 +329,7 @@ at each install (stormcentral#710) and needs a per-host channel.
       Metal: a test install leaves the token in /data/stormupdate/update-token
       (stormcos#604's done-when; needs stormcentral's PUT and stormpump#168)
 
-### Flow-over over every NIC that's up (2026-10-17, #450, P2) — ENGINE DONE; WAITING ON THE OWNER (how a 2nd NIC gets an address)
+### Flow-over over every NIC that's up (2026-10-17, #450, P2) — ENGINE ON MAIN; INITRAMFS HALF ON wip/450-path-nics (after stormpump#169 and pacing)
 
 Owner: "can we use both nics in flowover if there up?" A path was per
 *target* address, its NIC picked from configured `[storage] interfaces`;
@@ -346,11 +346,18 @@ forge has one address, so the flow-over had one NIC.
       `ci-flow-nics-verify.sh` ALL PASS (one target address, two NICs, nothing
       configured: 27.5/29.6 MB by eth0/eth1; skip: eth1 70 bytes; failover);
       docs/storage-network.md, README, CHANGELOG
-- [ ] the second NIC has no address today: the initramfs addresses only its
-      uplink (in stormbr0), the running node is stormpump's. Asked on #450
-      (needs-owner): A initramfs DHCPs every other carrier port, kept across
-      switch_root (recommended; + stormpump issue), B declared only, C
-      initramfs only
+- [x] decided A (master, 2026-10-13): the initramfs DHCPs every other
+      carrier port, kept across switch_root
+- [x] built on **wip/450-path-nics** (687128f): the `path nics` block +
+      `path.script` (address and subnet route at metric 1024, no default
+      route, no resolv.conf, no hostname; ARP per port; lease handed over in
+      /run/stormblock/path-nics/<port>.json); `rd.stormblock.path-nics=off`;
+      tests/initramfs-path-nics.sh (sh, busybox sh); ci-path-nics-verify.sh
+      ALL PASS (real busybox DHCP both ends); check.sh on the branch ALL PASS
+      (1254/1254); docs, CHANGELOG on the branch
+- [ ] merge when stormpump#169 renews the leases (else a kept address
+      outlives its lease) and single-node pacing ends; then a golden, close.
+      Metal: the Dell's ConnectX-4 Lx must be cabled to g16 to carry a path
 
 ### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — DONE (golden-stormblock-0a9fe2d97cf9), closed
 
