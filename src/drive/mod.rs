@@ -1,4 +1,5 @@
-//! Drive layer — unified BlockDevice trait over NVMe (VFIO), SAS (io_uring), and file (tokio).
+//! Drive layer — unified BlockDevice trait over kernel block devices (NVMe, SAS, SATA: O_DIRECT, io_uring),
+//! fabric initiators (NVMe/TCP, iSCSI) and files (tests and development). No userspace NVMe driver (#167).
 
 #[cfg(target_os = "linux")]
 #[cfg(target_os = "linux")]
@@ -115,7 +116,6 @@ pub enum DriveError {
     /// initiator can tell a setting from a fault.
     ReadOnly(String),
     DeviceNotReady,
-    VfioNotAvailable,
     Other(anyhow::Error),
 }
 
@@ -176,7 +176,6 @@ impl fmt::Display for DriveError {
             DriveError::NoSpace(what) => write!(f, "no space: {what}"),
             DriveError::ReadOnly(why) => write!(f, "read-only: {why}"),
             DriveError::DeviceNotReady => write!(f, "device not ready"),
-            DriveError::VfioNotAvailable => write!(f, "VFIO not available"),
             DriveError::Other(e) => write!(f, "{e}"),
         }
     }
@@ -204,7 +203,8 @@ pub struct SmartData {
 
 /// Unified interface for all physical drive types.
 ///
-/// Implemented by NvmeDevice (VFIO), SasDevice (io_uring), and FileDevice (tokio).
+/// Implemented by SasDevice (any kernel block device, O_DIRECT through io_uring),
+/// the NVMe/TCP and iSCSI initiators, PartitionDevice, and FileDevice (tests).
 /// The RAID engine and volume manager only interact with this trait.
 /// Zeros written as zeros, a megabyte at a time: what a device that cannot
 /// do better does, and what one that can falls back to.

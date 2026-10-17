@@ -3,7 +3,7 @@
 //! StormBlock — Pure Rust Enterprise Block Storage Engine
 //!
 //! Single binary serving NVMe-oF/TCP and iSCSI targets from
-//! NVMe SSDs (VFIO userspace) and SAS drives (io_uring).
+//! the drives the kernel opens (NVMe, SAS, SATA: O_DIRECT, io_uring).
 
 use std::sync::Arc;
 
