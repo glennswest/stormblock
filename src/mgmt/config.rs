@@ -63,6 +63,50 @@ pub struct StormBlockConfig {
     /// Optional kernel images from forge (#383).
     #[serde(default)]
     pub kernel: KernelSection,
+    /// The other nodes whose volumes this node attaches (#328).
+    #[serde(default)]
+    pub fabric: FabricSection,
+}
+
+/// `[fabric]` (#328, stormvm#46): the peers this node asks for a volume it
+/// does not hold. An attach (or clone) of a volume this engine does not know
+/// is asked of each peer in turn; the one that holds it serves it over
+/// NVMe/TCP to this node's host NQN, and this engine connects with its own
+/// initiator and serves the namespace as a local ublk device, so the caller
+/// gets a `device_hint` whichever node the volume is on. Unset: no peers,
+/// an unknown volume is a 404 as before.
+///
+/// The credential is the node's own certificate (the master's decision on
+/// #328, 2a): a peer whose `[management] tls_client_ca` is the node CA
+/// takes it at the node-token tier (#203), which is enough to look, clone,
+/// attach and detach.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FabricSection {
+    /// Each peer's management API, `https://nodeA.g16.lo:9090`.
+    pub peers: Vec<String>,
+    /// The certificate presented to a peer; `[management] tls_cert` when absent.
+    pub client_cert: Option<String>,
+    /// Its key; `[management] tls_key` when absent.
+    pub client_key: Option<String>,
+    /// The CA a peer's certificate chains to; `[management] tls_client_ca`
+    /// (the node CA) when absent.
+    pub ca: Option<String>,
+    /// The host NQN this node connects to a peer as; `/etc/nvme/hostnqn`,
+    /// else `nqn.2026-09.lo.storm:host-<node name>`, when absent.
+    pub host_nqn: Option<String>,
+}
+
+impl FabricSection {
+    pub fn client_cert<'a>(&'a self, m: &'a ManagementConfig) -> Option<&'a str> {
+        self.client_cert.as_deref().or(m.tls_cert.as_deref())
+    }
+    pub fn client_key<'a>(&'a self, m: &'a ManagementConfig) -> Option<&'a str> {
+        self.client_key.as_deref().or(m.tls_key.as_deref())
+    }
+    pub fn ca<'a>(&'a self, m: &'a ManagementConfig) -> Option<&'a str> {
+        self.ca.as_deref().or(m.tls_client_ca.as_deref())
+    }
 }
 
 /// `[kernel]` (#383): where a node pulls its kernel's optional images (`gpu`,
@@ -446,6 +490,7 @@ impl Default for StormBlockConfig {
             capacity: CapacitySection::default(),
             storage: StorageSection::default(),
             kernel: KernelSection::default(),
+            fabric: FabricSection::default(),
         }
     }
 }

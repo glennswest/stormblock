@@ -1205,6 +1205,7 @@ pub async fn run() -> anyhow::Result<()> {
     let mut state = Arc::new(AppState::new(config.clone(), volume_manager, slab_registry, gem));
     state.start_eraser().await;
     state.start_digests();
+    mgmt::peers::start(&state);
 
     // What consumers will be told to dial, said once, before anything can be
     // attached — a derived address is a guess on a multi-homed node.
@@ -8354,6 +8355,7 @@ async fn handle_adopt_ublk(
         state.start_eraser().await;
         state.start_digests();
         state.start_scrub();
+        crate::mgmt::peers::start(&state);
         // Where a staged release's boot pallet goes (#122).
         *state.slab_paths.write().await = slab_paths.to_vec();
         // Their disks, so `/api/v1/pallets` lists and verifies the boot

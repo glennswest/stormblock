@@ -874,6 +874,41 @@ curl -X POST http://node:9090/api/v1/exports \
 # → {"nqn":"nqn.…:host:1f2e…","port":4420,"nsid":1,"dhchap_secret":"DHHC-1:01:…:",…}
 ```
 
+### A volume on another node, as a device here (#328)
+
+stormvm and the kubelet attach and clone through their own node's engine, by
+id, and open the `device_hint` that comes back. With `[fabric] peers` set, a
+volume this engine does not hold is looked for on each peer (`GET
+/api/v1/volumes/{id}`), presenting the node's certificate, which a peer's
+`[management] tls_client_ca` (the node CA) admits at the node-token tier
+(#203):
+
+- `POST /api/v1/volumes/{id}/clone` of a peer's volume is made on that peer,
+  beside its source, and its answer relayed with `"peer"`;
+- `POST /api/v1/volumes/{id}/attach` asks the peer to serve the volume over
+  NVMe/TCP to this node's host NQN (its own subsystem there, #210, with the
+  DH-HMAC-CHAP secret the peer hands out), connects with the engine's own
+  initiator and serves that namespace as a ublk device: the answer is
+  `{"transport":"ublk","device_hint":"/dev/ublkbN"}`, as for a local volume,
+  with the same mounted check and holds. No `nvme_tcp` module needed;
+- `GET …/attach` names the `peer`, `uri` and `host_nqn`; `DELETE …/attach`
+  takes the device down and releases the peer's namespace (this node's
+  holder, `peer:<node>`, only).
+
+Kept in `<data_dir>/peer_attaches.json`; a ublk device does not outlive its
+engine, so the next start releases what an earlier run left at its peers.
+
+```toml
+[fabric]
+peers = ["https://nodeA.g16.lo:9090"]
+# Defaults: [management] tls_cert / tls_key / tls_client_ca, and the host NQN
+# from /etc/nvme/hostnqn, else nqn.2026-09.lo.storm:host-<node name>.
+client_cert = "/data/stormcert/node.crt.pem"
+client_key  = "/data/stormcert/node.key.pem"
+ca          = "/data/stormcert/node-ca.pem"
+host_nqn    = "nqn.2026-09.lo.storm:host-nodeb"
+```
+
 ### Block size: 4096, or 512 when a volume asks
 
 Every volume is presented at 4096-byte logical blocks unless it says 512

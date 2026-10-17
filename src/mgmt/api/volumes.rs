@@ -869,6 +869,24 @@ async fn clone_volume_recorded(
         Ok(r) => r,
         Err(e) => return ApiError::bad_request(format!("the request: {e}")),
     };
+    // A volume a peer holds is cloned there (#328): the clone lives beside
+    // its source, and an attach of it here connects to it.
+    if crate::mgmt::peers::configured(&state) {
+        if let Err(r) = resolve_volume(&state, &id).await {
+            if r.status() != axum::http::StatusCode::NOT_FOUND {
+                return r;
+            }
+            return match crate::mgmt::peers::clone(&state, &id, &body).await {
+                Ok(Some((code, v))) => (
+                    axum::http::StatusCode::from_u16(code).unwrap_or(axum::http::StatusCode::BAD_GATEWAY),
+                    Json(v),
+                )
+                    .into_response(),
+                Ok(None) => r,
+                Err(e) => peer_error(e),
+            };
+        }
+    }
     let st = state.clone();
     crate::mgmt::creators::recorded(&state, caller.as_deref(), &body, crate::mgmt::creators::volume_in, || {
         clone_volume(State(st), Path(id), Json(req))
@@ -1789,13 +1807,7 @@ async fn attach_volume(
     Path(id): Path<String>,
     body: Option<Json<AttachRequest>>,
 ) -> Response {
-    // A UUID, or a name (#112).
-    let uuid = match volume_key(&state, &id).await {
-        Ok(v) => v.0,
-        Err(r) => return r,
-    };
     let req = body.map(|b| b.0).unwrap_or_default();
-    let vol_id = VolumeId(uuid);
     let mode = match req.mode.as_deref() {
         None => crate::volume::Access::ReadWrite,
         Some(m) => match crate::volume::Access::parse(m) {
@@ -1803,8 +1815,21 @@ async fn attach_volume(
             None => return ApiError::bad_request(format!("invalid mode '{m}' (use rw or ro)")),
         },
     };
+    // A UUID, or a name (#112).
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v.0,
+        Err(r) if r.status() == axum::http::StatusCode::NOT_FOUND && crate::mgmt::peers::configured(&state) => {
+            return attach_from_peer(&state, &id, mode != crate::volume::Access::ReadWrite, r).await;
+        }
+        Err(r) => return r,
+    };
+    let vol_id = VolumeId(uuid);
     let device = match state.volume_manager.lock().await.get_volume(&vol_id) {
         Some(d) => d,
+        None if crate::mgmt::peers::configured(&state) => {
+            let r = ApiError::not_found(format!("volume {uuid} not found"));
+            return attach_from_peer(&state, &id, mode != crate::volume::Access::ReadWrite, r).await;
+        }
         None => return ApiError::not_found(format!("volume {uuid} not found")),
     };
 
@@ -1897,9 +1922,46 @@ async fn attach_volume(
     }
 }
 
+/// A volume this node does not hold, attached from the peer that does
+/// (#328): the peer serves it over NVMe/TCP to this node, this engine
+/// connects and serves it as a ublk device, and the answer is the same
+/// `ublk` + `device_hint` a local volume gets. `not_here` is the answer when
+/// no peer holds it either.
+async fn attach_from_peer(state: &Arc<AppState>, id: &str, read_only: bool, not_here: Response) -> Response {
+    match crate::mgmt::peers::attach(state, id, read_only).await {
+        Ok(Some(path)) => Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
+        Ok(None) => not_here,
+        Err(e) => peer_error(e),
+    }
+}
+
+fn peer_error(e: crate::mgmt::peers::PeerError) -> Response {
+    match e.status {
+        400 => ApiError::bad_request(e.message),
+        409 => ApiError::conflict(e.message),
+        500 => ApiError::internal(e.message),
+        _ => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.message })),
+        )
+            .into_response(),
+    }
+}
+
 /// `GET /api/v1/volumes/{id}/attach` — how the volume is being served
 /// right now, if it is.
 async fn get_attach(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    // A peer's volume attached here (#328).
+    if let Ok(u) = id.parse::<Uuid>() {
+        if let Some(a) = state.peer_attaches.lock().await.get(&u).cloned() {
+            return Json(serde_json::json!({
+                "id": u, "attached": true,
+                "info": super::v1::AttachInfo::Ublk { device_hint: a.device_hint },
+                "peer": a.peer, "uri": a.uri, "host_nqn": a.host_nqn,
+            }))
+            .into_response();
+        }
+    }
     // A UUID, or a name (#112).
     let uuid = match volume_key(&state, &id).await {
         Ok(v) => v.0,
@@ -1983,6 +2045,11 @@ async fn detach_volume(
                 "cannot detach volume {uuid}: {dev} is mounted at {at} — unmount it first"
             ));
         }
+    }
+    // A peer's volume attached here (#328): the device goes, the peer's
+    // namespace is let go of.
+    if let Some(a) = crate::mgmt::peers::detach(&state, uuid).await {
+        return Json(serde_json::json!({ "id": uuid, "attached": false, "peer": a.peer })).into_response();
     }
     if let Some(host) = q.host_nqn.as_deref() {
         // One host's view goes; the volume stays served to anyone else.
