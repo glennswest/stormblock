@@ -224,6 +224,10 @@ pub async fn attach_lun(
     lun_id: Option<u64>,
     readonly: bool,
 ) -> Result<u64, String> {
+    // A secret volume is never an iSCSI LUN (#74), whatever else holds.
+    if let LunBacking::Volume { volume_id } = &backing {
+        state.volume_manager.lock().await.refuse_secret(&VolumeId(*volume_id), "iSCSI LUN").map_err(|e| e.to_string())?;
+    }
     let iscsi = state
         .iscsi_target
         .read()
