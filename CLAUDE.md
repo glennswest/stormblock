@@ -638,7 +638,7 @@ manager whenever the catalog was stale.
 - Found: the build VMs' clippy (1.95) fails the crate with ~100 old lints
   (none in the lines changed here): #398
 
-### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — DONE on main (16648a6)
+### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — DONE (golden-stormblock-d1797c73ee91), closed
 
 Forge holds more than stormcos (nana builds goldens there): a namespace per
 family, a Kubernetes namespace on forge's apiserver. Inert for stormcos: the
@@ -658,8 +658,9 @@ default (`stormcos`) writes nothing and keeps names non-unique, as before.
       and_its_quota`, header tests; README, auth.md, metadata-v2.md, CHANGELOG
 - [x] merged with main as wip/408-namespaces-v3; check.sh at 16648a6 ALL
       PASS (1261/1261, no warnings); main fast-forwarded
-- [ ] golden (`stormcentral component build stormblock`); stormcentral#642
-      told; #408 closed
+- [x] golden golden-stormblock-d1797c73ee91 (4003d77, stormcos#601);
+      stormcentral#642 told; closed. Metal: forge with nana's namespace, once
+      forge runs this engine
 
 ### NVMe-oF advertises the default route's address on a wildcard (2026-10-13, #417, stormcos#550) — DONE (golden-stormblock-12891c0025b2), closed
 
