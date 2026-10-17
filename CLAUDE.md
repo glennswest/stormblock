@@ -2937,19 +2937,19 @@ with the moves. Owner's suggestion, the engine-only form: a boot grace.
       #134, #305 — the erase test 3/3 alone); README, CHANGELOG
 - Not on metal until a release carries it: the Dell's reboot phases
 
-### #239's fix on metal (2026-10-07, #257, P1) — HALF VERIFIED, waits on stormcentral#503
+### #239's fix on metal (2026-10-07, #257, P1) — VERIFIED, closed (2026-10-17)
 
-From stormcentral's install records and serial logs (no install of mine):
-11.88 carries stormblock@9cbe6ca (⊇ b189b3e, 2ceec10) in engine and
-initramfs. pvetest1 (11.88) and pvetest2 (11.88-flowsdn): fresh slab,
-power cut mid flow-over, `a flow-over cut short. Finishing it from …`,
-durability 301/300, **0** ext4 errors in the full serial logs. server3's
-SOL capture dies inside stormbootx on every run (no kernel lines), so the
-blade proves nothing either way, and the 11.57 question cannot be answered.
-Not verified: `e2fsck -fn` of the service clones after the flow-over (no
-run lasts that long; pvetest1 had 2320 extents left after ~5.5 h, #282) →
-stormcentral#503 (after-settle ext4 check as a run check, blades' SOL).
-#257 proposed after it.
+- Cut short: 11.88 (stormblock@9cbe6ca ⊇ b189b3e, 2ceec10) on pvetest1 and
+  pvetest2 (2026-10-06/07): fresh slab, power cut mid flow-over, `a
+  flow-over cut short. Finishing it from …`, durability 301/300, 0 ext4
+  errors in the full serial logs
+- Fresh, with every service clone fsck'd after the flow-over
+  (stormcentral#503's `ext4` stage): pvetest1 12.30 (2026-10-15) 97 clones,
+  pvetest2 12.31-flowsdn (2026-10-17) 96 clones: no checksum problem,
+  kernel log no EXT4 error; no iget/csum line in any pvetest console log
+  2026-10-13..17
+- Since #410/#411 the install's cut comes after the flow-over has finished,
+  so the cut-short path no longer runs in installs: stormcentral#923
 
 ### Live migration of a VM disk: ANA, epoch at the target (2026-10-06, #83, P3) — DONE
 

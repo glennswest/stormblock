@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **docs:** #257: #239's fix verified on metal. Cut short: 11.88 on pvetest1/2, 0 ext4 errors after the resume. Fresh: 12.30 and 12.31-flowsdn, every service clone fsck'd after the flow-over with no checksum problem. Today's installs no longer cut mid flow-over (stormcentral#923).
 - **feat:** #328 (stormvm#46, decided as recommended: peer list, node certificate, the engine's own initiator through ublk): a volume on another node is attached through this node's engine as a local device. `[fabric] peers`, `client_cert`, `client_key`, `ca`, `host_nqn` (defaults: `[management] tls_cert`/`tls_key`/`tls_client_ca`; `/etc/nvme/hostnqn`, else `nqn.2026-09.lo.storm:host-<node>`). A clone or attach of a volume this engine does not hold is asked of each peer with the node's certificate. A clone is made on the peer and relayed with `peer`. An attach has the peer serve the volume over NVMe/TCP to this node's host NQN (with its DH-HMAC-CHAP secret when it gives one), connects with the engine's initiator and serves it as ublk: `device_hint`, as for a local volume. `GET …/attach` names the peer; `DELETE …/attach` takes the device down and releases the peer's namespace (holder `peer:<node>`). Recorded in `peer_attaches.json`, released at the peers by the next start. `src/mgmt/peers.rs`. Tests: `integration_peers::a_peers_volume_is_cloned_and_attached_through_this_nodes_engine` (two engines, mTLS, real NVMe/TCP), `mgmt::peers::tests`; `ci-peer-attach-verify.sh` (QEMU, a real ublk device). README.
 
 ### 2026-10-14
