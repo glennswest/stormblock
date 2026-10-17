@@ -196,7 +196,7 @@ The chain was built as `int/next` (merges ad33637 → ecde642, fix 8e10cc0).
 - [ ] when stormcentral#841 is live: `stormcentral component build stormblock`
       (stage of main's head) for 12.23; then shipped/close #428, #413,
       #417, #412 (closed 2026-10-14), #300, #383, #411, #415, #422/#416, #424, #384 and the merged
-      #167, #170, #160, #154, #153 (#159 stays open for EC, step 2)
+      #167, #170, #160 (closed 2026-10-17), #154, #153 (#159 stays open for EC, step 2)
 - Filed: #438 (two concurrent first-boot claims 6.4 s vs 2.9 s alone)
 
 ### Each boot agent's last claim kept (2026-10-14, #456, stormcentral#286) — DONE (golden-stormblock-0a9fe2d97cf9), closed
@@ -958,7 +958,7 @@ Built on **wip/154-drive-offer** (the 12.23 freeze):
       check.sh at 0d39fd5 ALL PASS (1148/1148)
 - [x] golden golden-stormblock-17aefc2dba61 (9453c4b); closed
 
-### Scrub: compare mirror legs and parity (2026-10-11, #160, P3) — BUILT on branch wip/160-scrub; merges after 12.23
+### Scrub: compare mirror legs and parity (2026-10-11, #160, P3) — DONE (merged 59e4fd6; in golden-stormblock-12891c0025b2 and later), closed 2026-10-17
 
 Owner (2026-10-13): (c) with (a): majority at mirror:3+, mirror:2 reported,
 parity reported and rewritten only when asked; weekly, ~10 % of the
@@ -971,8 +971,9 @@ destructive), metrics, `[scrub]`; RAID-set scrub `repair` default off.
 - [x] tests: thin scrub units (5), scrub units (2), multidrive HTTP, auth
 - [x] docs (redundancy.md, README, auth.md, raid-sets.md), CHANGELOG
 - [x] check.sh on wip/160-scrub at e781f3d ALL PASS (1222/1222)
-- [ ] after 12.23 passes pve and the Dell: merge to main, check.sh, the
-      next stage; close
+- [x] merged to main (59e4fd6, the no-freeze chain), check.sh ALL PASS since
+      (0d6fbe7: 1249/1249, every scrub test); in the 12.23 stage (4d79108)
+      and golden-stormblock-0a9fe2d97cf9; closed
 
 ### Discovery records advertise the bind address (2026-10-11, #116) — DONE (golden-stormblock-c8f8f2594866)
 
