@@ -823,13 +823,13 @@ stormcos runs kdump (recommended, then A). Nothing built.
 - [x] the built binary on a SELinux + ACL tar names /etc/f0.conf etc.;
       check.sh at 04c2959 ALL PASS; README, CHANGELOG
 
-### CSI integration test on the 4-node cluster (2026-10-11, #15, P3) — WAITING ON THE OWNER
+### CSI integration test on the 4-node cluster (2026-10-11, #15, P3) — CLOSED: A (master, 2026-10-13), with #182
 
-Nothing here runs a CSI driver. The engine's half (`/v1`, `contract/`) is
-tested in this repo. #179 (b) moved #5/#6/#7 onto stormstorage's heads, and
-stormblock-csi#38 is the live-backend run. Asked on #15 (needs-owner, same
-question as #182): A close as covered by stormblock-csi#38/#54, B move to
-stormcos_qa, C keep here. Recommended A. Nothing built.
+Nothing here runs a CSI driver; the engine's half (`/v1`, `contract/`) is
+tested here. The checks that still apply (real I/O over nvme-tcp and ublk,
+unstage leaving the engine's device, snapshot/restore/clone, expand,
+capacity of every node) were added to stormblock-csi#38 (2026-10-17);
+#5/#6/#7 run on stormstorage's heads since #179 (b). #15 and #182 closed.
 
 ### NVMe-oF always built (2026-10-11, #161) — DONE
 
