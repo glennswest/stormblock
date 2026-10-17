@@ -335,6 +335,7 @@ impl VolumeManager {
             match &m.source {
                 MemberSource::Volume { id, len } => {
                     self.refuse_unknown_scheme(id)?;
+                    self.refuse_secret(id, "pallet member")?;
                     let dev = self.get_volume(id).ok_or(VolumeError::VolumeNotFound(*id))?;
                     let cap = dev.capacity_bytes();
                     let len = len.unwrap_or(cap);
@@ -441,6 +442,7 @@ impl VolumeManager {
             }
         }
         for p in &spec.partitions {
+            self.refuse_secret(&p.volume, "composed disk")?;
             let handle = self.get_volume_handle(&p.volume).ok_or(VolumeError::VolumeNotFound(p.volume))?;
             if role.is_none() {
                 role = self.volume_role(&p.volume);
@@ -862,6 +864,7 @@ impl VolumeManager {
         let mut planned = Vec::with_capacity(spec.goldens.len());
         for g in &spec.goldens {
             self.refuse_unknown_scheme(&g.source)?;
+            self.refuse_secret(&g.source, "composed slab")?;
             let handle = self.get_volume_handle(&g.source).ok_or(VolumeError::VolumeNotFound(g.source))?;
             if !self.is_sealed(&g.source) {
                 return Err(invalid(format!(

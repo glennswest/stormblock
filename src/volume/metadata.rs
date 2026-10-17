@@ -249,6 +249,12 @@ pub struct VolumeRecord {
     /// nothing).
     #[serde(skip)]
     pub layout: crate::volume::thin::Layout,
+    /// A secret volume (#74): never cloned, snapshotted, composed, copied or
+    /// exported; attached as a local ublk device only, by one consumer;
+    /// erased on delete. Never written by bincode; a format v2 header
+    /// carries it last.
+    #[serde(skip)]
+    pub secret: bool,
 }
 
 /// Where a volume came from (#349, owner: an install drops old system
@@ -577,6 +583,7 @@ impl From<v8::VolumeMetadata> for VolumeMetadata {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                 })
                 .collect(),
         }
@@ -693,6 +700,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                 })
                 .collect(),
         }
@@ -761,6 +769,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                 })
                 .collect(),
         }
@@ -830,6 +839,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                     })
                 .collect(),
         }
@@ -894,6 +904,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                     })
                 .collect(),
         }
@@ -960,6 +971,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                     })
                 .collect(),
         }
@@ -1020,6 +1032,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                     })
                 .collect(),
         }
@@ -1083,6 +1096,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                     })
                 .collect(),
         }
@@ -1380,6 +1394,7 @@ mod tests {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                 }],
         }
     }
@@ -1522,6 +1537,7 @@ mod tests {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1613,6 +1629,7 @@ mod tests {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1842,6 +1859,7 @@ mod retention_tests {
                     digest: None,
                     scheme: None,
                     layout: Default::default(),
+                    secret: false,
                 }],
         }
     }

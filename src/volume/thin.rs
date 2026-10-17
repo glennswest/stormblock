@@ -179,6 +179,8 @@ pub enum VolumeError {
     /// Another long operation (a resync, a restripe) is running on the
     /// volume (#364): one at a time per volume.
     Busy(String),
+    /// The volume is secret (#74): it is never copied or exposed.
+    Secret { id: VolumeId, what: String },
 }
 
 impl fmt::Display for VolumeError {
@@ -219,6 +221,10 @@ impl fmt::Display for VolumeError {
                 by.join(", ")
             ),
             VolumeError::Busy(why) => write!(f, "{why}; try again when it has finished"),
+            VolumeError::Secret { id, what } => write!(
+                f,
+                "volume {id} is secret: no {what}. A secret volume is attached as a local ublk device by one consumer, and never cloned, snapshotted, composed, copied or exported (#74)"
+            ),
         }
     }
 }

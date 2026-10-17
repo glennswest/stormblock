@@ -1265,6 +1265,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     let digest = record.digest;
     let scheme = record.scheme;
     let spread = record.layout == crate::volume::thin::Layout::Spread;
+    let secret = record.secret;
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
@@ -1285,11 +1286,14 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // Then a scheme the record does not say (#159): `S`, the code, K, M;
     // then a single-copy volume's spread layout (#153): `L`, 1 (affine, the
     // default, writes nothing). After the digest, so a reader of #384 finds
-    // its digest where it looks.
-    if origin != super::metadata::Origin::Unmarked || tier.is_some() || digest.is_some() || scheme.is_some() || spread {
+    // its digest where it looks. Last, a secret volume (#74): `X`, 1. A
+    // reader before it stops at the tag it does not know, so it reads
+    // everything before; it serves the volume as an ordinary one.
+    let later = tier.is_some() || digest.is_some() || scheme.is_some() || spread || secret;
+    if origin != super::metadata::Origin::Unmarked || later {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
-        if tier.is_some() || digest.is_some() || scheme.is_some() || spread {
+        if later {
             out.push(tier.map(|t| t as u8).unwrap_or(0));
         }
         if let Some(d) = digest {
@@ -1305,9 +1309,17 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
         if spread {
             out.extend_from_slice(&[LAYOUT_TAG, 1]);
         }
+        if secret {
+            out.extend_from_slice(&[SECRET_TAG, 1]);
+        }
     }
     out
 }
+
+/// A secret volume in a header's extension (#74): last.
+const SECRET_TAG: u8 = b'X';
+/// The tag and 1.
+const SECRET_LEN: usize = 2;
 
 /// A scheme's place in a header's extension (#159): after the digest.
 const SCHEME_TAG: u8 = b'S';
@@ -1358,6 +1370,9 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
                     rec.layout = crate::volume::thin::Layout::Spread;
                 }
                 d = &d[LAYOUT_LEN..];
+            } else if d.len() >= SECRET_LEN && d[0] == SECRET_TAG {
+                rec.secret = d[1] == 1;
+                d = &d[SECRET_LEN..];
             } else {
                 break;
             }
@@ -1552,6 +1567,7 @@ mod tests {
             digest: None,
             scheme: None,
             layout: Default::default(),
+            secret: false,
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1601,6 +1617,7 @@ mod tests {
                 digest: Some(digest),
                 scheme: None,
                 layout: Default::default(),
+                secret: false,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = document_of(header_entries(id, &bytes)).unwrap();
@@ -1659,6 +1676,7 @@ mod tests {
                 digest: d,
                 scheme: Some(sc),
                 layout: Default::default(),
+                secret: false,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1704,6 +1722,7 @@ mod tests {
                 digest: d,
                 scheme: None,
                 layout,
+                secret: false,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1746,6 +1765,7 @@ mod tests {
             digest: None,
             scheme: None,
             layout: Default::default(),
+            secret: false,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -2006,6 +2026,7 @@ mod tests {
             digest: None,
             scheme: None,
             layout: Default::default(),
+            secret: false,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -2044,6 +2065,7 @@ mod tests {
             digest: None,
             scheme: None,
             layout: Default::default(),
+            secret: false,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

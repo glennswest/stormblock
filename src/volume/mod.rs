@@ -363,6 +363,8 @@ pub struct VolumeManager {
     /// Schemes carried beside a volume's record (#159): kept, and written
     /// back as they were, whether or not this engine reads them.
     schemes: HashMap<VolumeId, crate::volume::metadata::SchemeExt>,
+    /// Secret volumes (#74): never copied, never exported, deleted erased.
+    secrets: std::collections::HashSet<VolumeId>,
     /// Sealed volumes' digests and verdicts (#384).
     digests: HashMap<VolumeId, crate::volume::metadata::SealDigest>,
     /// Sealed here with no digest: the digester takes them (#384).
@@ -453,6 +455,7 @@ impl VolumeManager {
             origins: HashMap::new(),
             digests: HashMap::new(),
             schemes: HashMap::new(),
+            secrets: std::collections::HashSet::new(),
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             durability: Arc::new(std::sync::Mutex::new(None)),
@@ -490,6 +493,7 @@ impl VolumeManager {
             origins: HashMap::new(),
             digests: HashMap::new(),
             schemes: HashMap::new(),
+            secrets: std::collections::HashSet::new(),
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             durability: Arc::new(std::sync::Mutex::new(None)),
@@ -751,6 +755,30 @@ impl VolumeManager {
             Some(why) => Err(VolumeError::Busy(why)),
             None => Ok(()),
         }
+    }
+
+    /// Whether a volume is secret (#74).
+    pub fn is_secret(&self, id: &VolumeId) -> bool {
+        self.secrets.contains(id)
+    }
+
+    /// Make a volume secret (#74). One way: nothing makes it ordinary again
+    /// short of deleting it. The caller persists.
+    pub fn mark_secret(&mut self, id: VolumeId) -> Result<(), VolumeError> {
+        if !self.volumes.contains_key(&id) {
+            return Err(VolumeError::VolumeNotFound(id));
+        }
+        self.secrets.insert(id);
+        Ok(())
+    }
+
+    /// Refuse `what` (a clone, a snapshot, a copy, a composition, an
+    /// export) of a secret volume (#74).
+    pub fn refuse_secret(&self, id: &VolumeId, what: &str) -> Result<(), VolumeError> {
+        if self.secrets.contains(id) {
+            return Err(VolumeError::Secret { id: *id, what: what.to_string() });
+        }
+        Ok(())
     }
 
     /// Record a scheme beside a volume's record (#159): what an engine that
@@ -1635,6 +1663,9 @@ impl VolumeManager {
             if let Some(d) = vrec.digest {
                 self.digests.insert(vrec.id, d);
             }
+            if vrec.secret {
+                self.secrets.insert(vrec.id);
+            }
             if let Some(sc) = vrec.scheme {
                 self.schemes.insert(vrec.id, sc);
                 if !sc.known() {
@@ -1770,6 +1801,7 @@ impl VolumeManager {
         let mut sizes: Vec<u64> = Vec::new();
         for (source, at) in placements {
             self.refuse_unknown_scheme(source)?;
+            self.refuse_secret(source, "composition")?;
             let handle = self.volumes.get(source)
                 .ok_or(VolumeError::VolumeNotFound(*source))?;
             components.push(compose::Component {
@@ -2077,6 +2109,7 @@ impl VolumeManager {
         self.refuse_if_undurable().await?;
         for (source_id, _) in sources {
             self.refuse_unknown_scheme(source_id)?;
+            self.refuse_secret(source_id, "snapshot")?;
         }
         let mut params = Vec::with_capacity(sources.len());
         for (source_id, name) in sources {
@@ -2167,6 +2200,13 @@ impl VolumeManager {
         self.to_digest.remove(&id);
         self.schemes.remove(&id);
         self.retentions.remove(&id);
+        // A secret volume's slots are always overwritten (#74), whatever
+        // the node's default.
+        let erase = if self.secrets.remove(&id) {
+            Some(erase.unwrap_or(crate::drive::erase::EraseLevel::Once).max(crate::drive::erase::EraseLevel::Once))
+        } else {
+            erase
+        };
 
         // Remove all extents from GEM and dec_ref on slabs (their table
         // pages were read above, with no lock held).
@@ -2288,6 +2328,8 @@ impl VolumeManager {
     ) -> Result<VolumeId, VolumeError> {
         self.refuse_if_undurable().await?;
         self.refuse_unknown_scheme(&source_id)?;
+        // A clone, a snapshot, a template's claim, a golden: all start here.
+        self.refuse_secret(&source_id, "clone or snapshot")?;
         let source_handle = self.volumes.get(&source_id)
             .ok_or(VolumeError::VolumeNotFound(source_id))?
             .clone();
@@ -2345,6 +2387,7 @@ impl VolumeManager {
         name: &str,
         role: SlabRole,
     ) -> Result<VolumeId, VolumeError> {
+        self.refuse_secret(&source_id, "copy")?;
         let source = self
             .volumes
             .get(&source_id)
@@ -2424,6 +2467,7 @@ impl VolumeManager {
     ) -> Result<VolumeId, VolumeError> {
         let (source, dest_id, dest, extents, slot_size) = {
             let mut m = vm.lock().await;
+            m.refuse_secret(&source_id, "copy")?;
             let defer = m.defer_persists();
             let source = m.volumes.get(&source_id).ok_or(VolumeError::VolumeNotFound(source_id))?.clone();
             let virtual_size = source.lock().await.virtual_size;
@@ -3533,6 +3577,7 @@ impl VolumeManager {
                 digest: self.digests.get(id).copied(),
                 scheme: self.schemes.get(id).copied(),
                 layout: handle.layout(),
+                secret: self.secrets.contains(id),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -3599,6 +3644,7 @@ impl VolumeManager {
                 digest: self.digests.get(&id).copied(),
                 scheme: self.schemes.get(&id).copied(),
                 layout: self.volumes.get(&id).map(|h| h.layout()).unwrap_or_default(),
+                secret: self.secrets.contains(&id),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -3845,6 +3891,9 @@ impl VolumeManager {
             }
             if let Some(d) = vrec.digest {
                 self.digests.insert(vrec.id, d);
+            }
+            if vrec.secret {
+                self.secrets.insert(vrec.id);
             }
             if let Some(sc) = vrec.scheme {
                 self.schemes.insert(vrec.id, sc);
