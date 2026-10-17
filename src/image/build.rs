@@ -713,6 +713,9 @@ impl ImageBuilder {
                     .create_snapshot(golden_id, clone_name)
                     .await
                     .map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
+                if g.secret {
+                    mgr.mark_secret(clone_id).map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
+                }
                 // A clone is a filesystem — or a disk — of its own: two live ones
                 // must never claim one identity, and the golden's is the one
                 // every clone would otherwise carry (#76).

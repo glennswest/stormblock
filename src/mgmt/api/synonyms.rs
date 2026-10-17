@@ -361,7 +361,64 @@ async fn do_repoint(
             Err(e) => return err(e),
         }
     };
-    (etag(moved.version), Json(body(&state, &moved, Some(true)).await)).into_response()
+    let rotated = rotate_secrets(&state, namespace, name, &moved).await;
+    let mut v = body(&state, &moved, Some(true)).await;
+    if !rotated.is_empty() {
+        v["rotated_out"] = json!(rotated.iter().map(|i| i.0).collect::<Vec<_>>());
+    }
+    (etag(moved.version), Json(v)).into_response()
+}
+
+/// A secret's rotation (#74): the new material sealed, the synonym
+/// re-pointed at it, and the engine keeps exactly one previous copy, for a
+/// rollback. A secret volume further back in the history is deleted, erased
+/// (the delete of a secret always is), and dropped from the history, unless
+/// something still uses it: another synonym's target or its one previous, a
+/// device serving it.
+async fn rotate_secrets(state: &AppState, namespace: &str, name: &str, syn: &Synonym) -> Vec<VolumeId> {
+    let current = syn.target.volume_id();
+    let is_secret = |id: &VolumeId, vm: &crate::volume::VolumeManager| vm.is_secret(id);
+    let older: Vec<VolumeId> = {
+        let vm = state.volume_manager.lock().await;
+        if !current.is_some_and(|c| is_secret(&c, &vm)) {
+            return Vec::new();
+        }
+        syn.history.iter().skip(1).filter_map(|p| p.target.volume_id()).filter(|id| is_secret(id, &vm)).collect()
+    };
+    if older.is_empty() {
+        return Vec::new();
+    }
+    // What any synonym still keeps: its target, and its one previous.
+    let kept: std::collections::HashSet<VolumeId> = {
+        let store = state.synonyms.read().await;
+        store
+            .list(None)
+            .into_iter()
+            .flat_map(|s| s.target.volume_id().into_iter().chain(s.history.first().and_then(|p| p.target.volume_id())))
+            .collect()
+    };
+    let mut gone = Vec::new();
+    for id in older {
+        if kept.contains(&id) || gone.contains(&id) {
+            continue;
+        }
+        let r = state.volume_manager.lock().await.delete_volume(id).await;
+        match r {
+            Ok(()) => {
+                tracing::info!(volume = %id.0, synonym = %synonym::key(namespace, name), "secret rotated out: deleted, erased");
+                gone.push(id);
+            }
+            Err(crate::volume::VolumeError::VolumeNotFound(_)) => gone.push(id),
+            Err(e) => tracing::warn!(volume = %id.0, "secret rotated out but kept: {e}"),
+        }
+    }
+    if !gone.is_empty() {
+        let mut store = state.synonyms.write().await;
+        for id in &gone {
+            store.forget_previous(namespace, name, *id);
+        }
+    }
+    gone
 }
 
 async fn repoint(

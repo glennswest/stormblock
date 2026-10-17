@@ -1736,6 +1736,59 @@ mod tests {
         }
     }
 
+    /// #74: a secret rides last, after whatever comes before it; a reader
+    /// that stops at a tag it does not know (every engine before) still
+    /// reads everything before it, and the volume as an ordinary one.
+    #[test]
+    fn a_secret_rides_last_and_an_older_reader_reads_the_rest() {
+        use crate::volume::metadata::{Origin, SealDigest, Verdict};
+        use crate::volume::thin::Layout;
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let digest = SealDigest { sha256: [7; 32], verdict: Verdict::Intact, checked_at: 9 };
+        for (origin, d, layout) in [
+            (Origin::Unmarked, None, Layout::Affine),
+            (Origin::Node, Some(digest), Layout::Spread),
+        ] {
+            let rec = VolumeRecord {
+                id,
+                name: "stormcert-data".into(),
+                virtual_size: 1 << 20,
+                array_id: None,
+                extents: Default::default(),
+                retention: Default::default(),
+                redundancy: Default::default(),
+                parity: Default::default(),
+                failed_slabs: Vec::new(),
+                parent: None,
+                sealed: false,
+                template: false,
+                access: Default::default(),
+                fs: None,
+                owner: None,
+                lba: 4096,
+                extent_size: 0,
+                origin,
+                tier: None,
+                digest: d,
+                scheme: None,
+                layout,
+                secret: true,
+            };
+            let bytes = header_bytes(&rec, 1 << 20);
+            let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
+            assert!(back.secret, "read back");
+            assert_eq!((back.origin, back.digest, back.layout), (origin, d, layout));
+            assert_eq!(&bytes[bytes.len() - 2..], &[SECRET_TAG, 1], "last");
+            // An engine before #74: the same bytes without what it does not
+            // know is what it reads.
+            let mut older = rec.clone();
+            older.secret = false;
+            let before = header_bytes(&older, 1 << 20);
+            let ob = &document_of(header_entries(id, &before)).unwrap().volumes[0];
+            assert_eq!((ob.origin, ob.digest, ob.layout, ob.secret), (origin, d, layout, false));
+        }
+    }
+
     /// #349: a volume's origin rides after its header; a reader that knows
     /// only the header (every v2 engine before) decodes it as before.
     #[test]

@@ -739,6 +739,8 @@ pub struct SlabGolden {
     pub clones: Vec<String>,
     /// A blank to be cloned from rather than run (#100).
     pub template: bool,
+    /// Its clones are secret (#74); the golden stays an ordinary blank.
+    pub secret: bool,
     /// Volume size inside the slab. Defaults to the source, rounded to a slot.
     pub size: Option<u64>,
 }
@@ -900,6 +902,7 @@ impl VolumeManager {
                 source_bytes: cap,
                 size: gsize,
                 template: g.template,
+                secret: g.secret,
                 digest: self.seal_digest(&g.source),
             });
         }
@@ -1075,6 +1078,7 @@ struct Planned {
     source_bytes: u64,
     size: u64,
     template: bool,
+    secret: bool,
     /// The source's digest (#384): the composed golden is its content, so it
     /// carries it, unchecked, to every node that installs the image.
     digest: Option<crate::volume::metadata::SealDigest>,
@@ -1263,6 +1267,9 @@ impl SlabPlan {
 
             for cname in &p.clone_names {
                 let cid = nested.create_snapshot(gid, cname).await?;
+                if p.secret {
+                    nested.mark_secret(cid)?;
+                }
                 // A clone is a filesystem of its own (#76). Stamping it
                 // is the one write a clone costs: the slot the superblock
                 // sits in is copied, and the rest stays shared.
@@ -1709,6 +1716,7 @@ mod tests {
                     clone: None,
                     clones: vec!["a-two".into()],
                     template: false,
+                    secret: false,
                     size: None,
                 },
                 SlabGolden {
@@ -1718,6 +1726,7 @@ mod tests {
                     clone: Some("bee".into()),
                     clones: vec![],
                     template: true,
+                    secret: false,
                     size: None,
                 },
             ],
@@ -1834,6 +1843,7 @@ mod tests {
                     clone: None,
                     clones: vec![],
                     template: true,
+                    secret: false,
                     size: None,
                 },
                 SlabGolden {
@@ -1843,6 +1853,7 @@ mod tests {
                     clone: None,
                     clones: vec![],
                     template: false,
+                    secret: false,
                     size: None,
                 },
             ],
@@ -1915,6 +1926,7 @@ mod tests {
                 clone: None,
                 clones: vec![],
                 template: true,
+                secret: false,
                 size: None,
             }],
         };

@@ -941,6 +941,12 @@ async fn create_volume(
         return ApiError::bad_request("a clone gets an id of its own; drop id or from_template");
     }
     if let Some(key) = req.from_template.as_deref() {
+        // Never a clone of a secret volume, by whatever door (#74).
+        if let Ok(v) = volume_key(&state, key).await {
+            if let Some(r) = refuse_secret(&state, v, "clone").await {
+                return r;
+            }
+        }
         let is_template = state.fstemplates.lock().await.find(key).is_some();
         let (vol_id, fs_uuid, size_bytes) = if is_template {
             match super::fstemplates::clone_for_volume_api(&state, key, &req.name, size).await {
@@ -1755,6 +1761,9 @@ async fn clone_volume(
         Ok(u) => u.0,
         Err(r) => return r,
     };
+    if let Some(r) = refuse_secret(&state, VolumeId(uuid), "clone").await {
+        return r;
+    }
     let size = match super::fstemplates::resolve_size(&req.size, None) {
         Ok(s) => s,
         Err(e) => return ApiError::bad_request(e),
@@ -3187,6 +3196,9 @@ pub struct ComposeSlabGoldenRequest {
     pub clones: Vec<String>,
     #[serde(default)]
     pub template: bool,
+    /// Its clones are secret (#74).
+    #[serde(default)]
+    pub secret: bool,
     /// Size inside the slab. Defaults to the volume's, rounded to a slot.
     #[serde(default)]
     pub size: Option<String>,
@@ -3472,6 +3484,7 @@ async fn compose_slab(
             clone: g.clone.clone(),
             clones: g.clones.clone(),
             template: g.template,
+            secret: g.secret,
             size,
         });
     }

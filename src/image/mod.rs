@@ -289,6 +289,12 @@ pub struct GoldenSpec {
     /// (#100).
     #[serde(default)]
     pub template: bool,
+    /// Its clones are secret volumes (#74): never cloned, snapshotted,
+    /// composed, copied or exported; a local ublk device for one consumer;
+    /// erased on delete. The golden is the blank they start from and stays
+    /// an ordinary golden (stormcos's `stormcert-data`).
+    #[serde(default)]
+    pub secret: bool,
     /// Volume size. Defaults to the content, rounded up to a slot.
     #[serde(default)]
     pub size: Option<String>,

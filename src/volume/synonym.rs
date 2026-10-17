@@ -727,6 +727,17 @@ impl SynonymStore {
         Ok(self.synonyms.get(&k).unwrap())
     }
 
+    /// Drop `id` from a synonym's history (#74: a secret rotation erased it).
+    pub fn forget_previous(&mut self, namespace: &str, name: &str, id: VolumeId) {
+        if let Some(syn) = self.synonyms.get_mut(&key(namespace, name)) {
+            let before = syn.history.len();
+            syn.history.retain(|p| p.target.volume_id() != Some(id));
+            if syn.history.len() != before {
+                self.persist();
+            }
+        }
+    }
+
     /// Put a name back to what it meant before. A re-point like any other:
     /// the version goes *up*, because versions are monotonic and a client
     /// that saw the bad publish must see a change when it is undone.
