@@ -298,17 +298,25 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
 Test machines boot one shared stormbootx ISO, so the media's install-config
 (#275) never reaches them; stormcentral mints a per-node stormupdate token
 at each install (stormcentral#710) and needs a per-host channel.
-- [ ] forge: `PUT/GET/DELETE /api/v1/synonyms/boothost/<name>/install-config`
+- [x] forge: `PUT/GET/DELETE /api/v1/synonyms/boothost/<name>/install-config`
       (admin, every verb), `<data_dir>/install-configs/<host>.yaml` 0600,
       never listed or logged; follows a rename, goes with a host delete
-- [ ] claim: `install_config` in the reply, to that host only
-- [ ] boot-claim: `/run/stormblock/install-config.forge.yaml` 0600 (stale
+- [x] claim: `install_config` in the reply, to that host only
+- [x] boot-claim: `/run/stormblock/install-config.forge.yaml` 0600 (stale
       removed), never printed
-- [ ] /init: media first; forge's replaces /state's on an install (ticket or
+- [x] /init: media first; forge's replaces /state's on an install (ticket or
       INSTALL_OVER), else only when /state has none; staged copies removed
-- [ ] source (media|forge|none) in system-data records and the `installed`
+- [x] source (media|forge|none) in system-data records and the `installed`
       report (Host.install), never the bytes
-- [ ] tests (store/HTTP/auth, initramfs-install-config.sh), docs, CHANGELOG
+- [x] tests: `integration_synonyms::forge_hands_a_host_its_own_install_config_
+      at_its_claim` (admin-only every verb, alias, 0600, only its claim, in no
+      listing or synonyms.json, the installed source, rename, delete),
+      install_config units, initramfs-install-config.sh (+20, sh and busybox
+      sh), initramfs-system-data.sh; targeted 80/80; README, auth.md,
+      boot-hooks.md, CHANGELOG
+- [ ] check.sh; golden; stormcos#604 / stormcentral#710 told (PUT it with the
+      intent); close. Metal: a test install leaves the token in
+      /data/stormupdate/update-token (stormcos#604's done-when)
 
 ### Flow-over over every NIC that's up (2026-10-17, #450, P2) — ENGINE DONE; WAITING ON THE OWNER (how a 2nd NIC gets an address)
 
