@@ -1329,6 +1329,19 @@ rest without naming conventions:
   /dev/ublkbN: detach it first`, #267). The serving layer's GC of an
   ephemeral export whose volume is still a device on the node keeps the
   withdrawn row and deletes the volume once it is detached.
+- **`attachments[].remote`** (#292): the remote hosts connected right now to
+  the target serving that attachment, from the live connections rather than
+  from who may connect: `host` (host NQN or initiator IQN), `addr` (without
+  the port), `protocol` (`nvme-tcp`, `iscsi`), `target` (subsystem NQN or
+  target IQN), `connections` (an NVMe/TCP host's admin and I/O queues
+  counted together) and `since` (epoch seconds, the oldest). A host connected
+  to a subsystem reaches every namespace in it, and an iSCSI session every
+  LUN of its target, so this is per target. The engine does not record which
+  namespace a host has read. Absent when nobody is connected, and for a ublk
+  device. `GET /api/v1/exports/{id}/connections` gives the same for one
+  export. `GET /api/v1/connections` gives every remote host connected to any
+  target of this engine: what a release or storage-off guard waits to see
+  empty (stormcluster#15/#21). Discovery-only connections are not counted.
 - **`consumer`**: the volume's owner (`PUT …/owner`: a PVC, a VMI, …), else the
   mount a ublk device carries.
 - Filters: `?kind=volume|golden|blank|media|snapshot|template` (comma-separated),

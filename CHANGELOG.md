@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **feat:** who is attached right now (#292, stormcluster#15/#21, stormblock-registry#63). Every NVMe/TCP connection bound to a subsystem, and every iSCSI connection in a normal session, is recorded while it lasts (`target::remote`). Each volume attachment carries `remote[]` (`host`, `addr`, `protocol`, `target`, `connections`, `since`). New routes: `GET /api/v1/exports/{id}/connections` and `GET /api/v1/connections` (every remote host on any target of this engine). Read-only; nothing on disk changes.
+
+### 2026-10-17
 - **fix:** #438: a claim no longer holds the extent map, the slab registry and the volume manager for seconds. On forge (2026-10-17 17:39Z) one claim held the extent map (write) for 9.3 s and both pve installs fell through: their claims outlived stormbootx's read (stormbootx#158). Cause: a release golden there has more slot-table pages than the slab's 16 MiB page cache, and the cache evicts oldest-first. The prefetch before the locks warmed pages the cache evicted again, so the clone's and the delete's ref-count batches read them from the device with the GEM and registry write locks held. The delete also wrote every touched page back synchronously.
   - **The fix:** a clone and a delete read the volume's entries first into memory of their own (`VolumeManager::preread_volume`, `SlotTable::read_many`, a `Preread` with the table's write epoch, moved before and after every table write). The batches use it under the locks while the epoch is unchanged, and otherwise read as before.
   - **Decrements:** a decrement that leaves a share is written by the next sync, as `dec_ref` does (#171). Freed slots are written at once as before.
