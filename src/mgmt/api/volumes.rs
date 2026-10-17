@@ -838,6 +838,7 @@ async fn compose_volume(
         lba: vm.lba(&id).unwrap_or(crate::volume::Lba::DEFAULT),
         extent_size: vm.get_volume_handle(&id).map(|h| h.extent_size()).unwrap_or(0),
         origin: vm.origin(&id).as_str(),
+        secret: vm.is_secret(&id),
         access: crate::volume::Access::ReadWrite.to_string(),
         writable: true,
         role: vm
