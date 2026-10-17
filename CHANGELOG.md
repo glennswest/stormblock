@@ -178,6 +178,11 @@
 
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
+- **feat:** #450 (the master's A for the owner, on branch `wip/450-path-nics` until single-node is stable): the initramfs leases every other cabled port, so the flow-over has an NVMe/TCP path by each NIC. Each physical port with carrier, not the uplink and not a bond or bridge port, gets its own DHCP lease (`path.script`).
+  - **What it gets:** an address and its subnet route at metric 1024, below the uplink's; no default route, no resolv.conf, no hostname. `arp_ignore=1` and `arp_announce=2` are set.
+  - **After switch_root:** the address is kept, and the lease is handed to stormpump in `/run/stormblock/path-nics/<port>.json` to renew.
+  - **Opt-outs:** `rd.stormblock.path-skip=` per port, `rd.stormblock.path-nics=off` for all.
+  - **Tests:** `tests/initramfs-path-nics.sh` (sh and busybox sh), `ci-path-nics-verify.sh` (QEMU, real busybox DHCP on both ends). docs/storage-network.md.
 
 ## [v23.0.2] — 2026-10-22
 
