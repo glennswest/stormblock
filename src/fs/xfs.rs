@@ -450,26 +450,22 @@ async fn rewrite_superblocks(dev: &Arc<dyn BlockDevice>, edit: impl Fn(&mut Vec<
     Ok(())
 }
 
-/// Give the filesystem a new UUID, as `xfs_admin -U` does.
+/// Give the filesystem a new UUID, as `xfs_admin -U` does
+/// (`mkfs_xfs::admin::set_uuid`).
 ///
 /// On v5 the old UUID stays in `sb_meta_uuid` (the one the metadata blocks
 /// carry) and `META_UUID` is set; a filesystem that already has one keeps its
-/// metadata UUID and only `sb_uuid` changes. On v4 nothing else names the
-/// UUID, so only `sb_uuid` is written.
+/// metadata UUID and only `sb_uuid` changes. The log's record headers carry
+/// the UUID too, and the kernel refuses a log whose UUID is not the
+/// superblock's ("log has mismatched uuid - can't recover", #225), so the
+/// whole log is rewritten under the new UUID at the next cycle first: a log
+/// of writes per claim (64 MiB for a filesystem under 128 GiB, up to 2 GiB).
+/// A dirty log is refused, as `xfs_admin` refuses it.
 pub async fn stamp_uuid(dev: &Arc<dyn BlockDevice>, uuid: Uuid) -> anyhow::Result<()> {
-    rewrite_superblocks(dev, |sb| {
-        if is_v5(sb) {
-            let incompat = be32(sb, off::FEATURES_INCOMPAT);
-            if incompat & version::IN_META_UUID == 0 {
-                let old: [u8; 16] = sb[off::UUID..off::UUID + 16].try_into().unwrap();
-                sb[off::META_UUID..off::META_UUID + 16].copy_from_slice(&old);
-                sb[off::FEATURES_INCOMPAT..off::FEATURES_INCOMPAT + 4]
-                    .copy_from_slice(&(incompat | version::IN_META_UUID).to_be_bytes());
-            }
-        }
-        sb[off::UUID..off::UUID + 16].copy_from_slice(uuid.as_bytes());
-    })
-    .await
+    // Thin: the log's zeroing is a discard, as at format.
+    let d = XfsDevice::thin(dev.clone());
+    mkfs_xfs::admin::set_uuid(&d, *uuid.as_bytes()).await?;
+    Ok(())
 }
 
 /// Set the label (`sb_fname`, 12 bytes) in every superblock.
@@ -546,6 +542,20 @@ mod tests {
         assert_eq!((l3.uuid, l3.meta_uuid), (third, uuid));
         // And fio-xfs still opens and walks it.
         check(&d).await.unwrap();
+        // #225: the log's records name the new UUID (the kernel refuses a
+        // mount otherwise), at a later cycle, and the log is clean.
+        let x = XfsDevice::opaque(d.clone());
+        let sb = read_sb_sector(&x, 0).await.unwrap();
+        let logstart = u64::from_be_bytes(sb[off::LOGSTART..off::LOGSTART + 8].try_into().unwrap());
+        let (bs, agblocks, agblklog) = (be32(&sb, off::BLOCKSIZE) as u64, be32(&sb, off::AGBLOCKS) as u64, sb[off::AGBLKLOG]);
+        let at = ((logstart >> agblklog) * agblocks + (logstart & ((1 << agblklog) - 1))) * bs;
+        let mut head = vec![0u8; 512];
+        x.read_full(at, &mut head).await.unwrap();
+        use mkfs_xfs::structs::log;
+        assert_eq!(be32(&head, log::off::MAGICNO), log::HEADER_MAGIC, "a record header at the log's start");
+        assert_eq!(&head[log::off::FS_UUID..log::off::FS_UUID + 16], third.as_bytes(), "the log names the new UUID");
+        let st = mkfs_xfs::admin::log_state(&x).await.unwrap();
+        assert!(!st.dirty() && st.cycle >= 3, "clean, two cycles on from mkfs's: {st:?}");
         let _ = std::fs::remove_file(path);
     }
 

@@ -1561,8 +1561,8 @@ dependencies = [
 
 [[package]]
 name = "mkfs-xfs"
-version = "0.2.0"
-source = "git+https://github.com/glennswest/mkfs.xfs.rs?tag=v0.2.0#4abddc05f94aa1de64e0d61c0329ba516db6d075"
+version = "0.3.0"
+source = "git+https://github.com/glennswest/mkfs.xfs.rs?tag=v0.3.0#b635843c78a172d569b43e5ce5b57aee109f3bb7"
 dependencies = [
  "async-trait",
  "futures",

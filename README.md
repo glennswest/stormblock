@@ -1410,10 +1410,17 @@ checked. The crate has no checker of its own yet. Not for XFS: `features`
 (`fio-xfs` reads, it does not write yet). A claim or clone of an XFS blank
 gets a new UUID the way `xfs_admin -U` gives one: `sb_uuid` changes, the old
 UUID stays in `sb_meta_uuid` (the one the metadata blocks carry), and the
-`META_UUID` feature is set, one sector per allocation group. That matters more
-than for ext4, because the kernel refuses to mount two XFS filesystems with
-one UUID at all. `ci-xfs-verify.sh` checks blanks and claims with
-`xfs_repair -n`, `blkid` and `xfs_db` on dev.
+`META_UUID` feature is set, one sector per allocation group. The log's record
+headers name the UUID too, and the kernel refuses a log whose UUID is not the
+superblock's (#225), so the whole log is rewritten under the new UUID first
+(`mkfs_xfs::admin::set_uuid`, as `xfs_admin` does it): a claim costs a log of
+writes (64 MiB for a filesystem under 128 GiB, up to 2 GiB), where an ext4
+claim costs one sector. That matters more than for ext4, because the kernel
+refuses to mount two XFS filesystems with one UUID at all. `ci-xfs-verify.sh`
+checks blanks and claims with `xfs_repair -n`, `blkid` and `xfs_db`;
+`ci-xfs-mount-verify.sh` attaches a blank and two claims over NVMe/TCP to a
+real kernel in QEMU, which mounts all three at once, writes, remounts and
+reads back.
 
 **Every clone is stamped with its own filesystem UUID.** Without that, two
 clones of one template collide on mount-by-UUID and in the blkid cache the
