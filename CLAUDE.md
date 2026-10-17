@@ -1258,7 +1258,7 @@ format change (#354, #380, #379 only).
 - [x] serve/metrics tests 79/79; check.sh at 1230814 ALL PASS (1123/1123);
       golden golden-stormblock-8cda932880e4
 
-### A sealed volume's digest, checked in the background (2026-10-14, #384, P2, #245 step 2) — DONE here; golden waits on stormcentral#841
+### A sealed volume's digest, checked in the background (2026-10-14, #384, P2, #245 step 2) — DONE (golden-stormblock-0a9fe2d97cf9), closed
 
 Owner's A on #245. Found: the issue's wait (every rollback target carrying
 step 1) is not needed. The digest rides in the v2 header extension after
@@ -1275,7 +1275,9 @@ newest published, 9cbe6ca) reads no v2 at all. So no new key kind.
 - [x] tests (unit, metav2, local, compose, HTTP); README, metadata-v2.md,
       CHANGELOG
 - [x] check.sh at e6eca7e ALL PASS (1213/1213); commented
-- [ ] golden: held until stormcentral#841 is live; proposed after it; then close
+- [x] golden golden-stormblock-0a9fe2d97cf9 (00f3691 ⊇ e6eca7e, stormcos#601;
+      stormcentral#841 closed); closed. Metal: forge seals new goldens with
+      this engine, then a node's health `digests.intact` after its flow-over
 
 ### A boot claim timed out at 10 s and was sent again (2026-10-14, #424, P2) — DONE (golden-stormblock-12891c0025b2), closed
 
