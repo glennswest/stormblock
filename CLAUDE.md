@@ -293,7 +293,7 @@ master's record. Forge's log from then is gone (restarted at 17:07Z).
 - [x] check.sh at 9877bb8 ALL PASS (1240/1240); CHANGELOG; closed with
       the answers
 
-### Flow-over over every NIC that's up (2026-10-17, #450, P2) — IN PROGRESS
+### Flow-over over every NIC that's up (2026-10-17, #450, P2) — ENGINE DONE; WAITING ON THE OWNER (how a 2nd NIC gets an address)
 
 Owner: "can we use both nics in flowover if there up?" A path was per
 *target* address, its NIC picked from configured `[storage] interfaces`;
@@ -305,9 +305,16 @@ forge has one address, so the flow-over had one NIC.
       `nvmeof_dev::plan_paths` (address × NIC, #90's pairing kept), queue-depth
       when NICs added paths; per-path interface/source in `path_stats`, health
       `flow_over.paths`, `/metrics` `stormblock_nvme_tcp_path_{bytes,down}`
-- [ ] tests (netif, plan, integration two NICs + one dropping); README, CHANGELOG
+- [x] tests: netif, plan, `integration_nvmeof::every_nic_that_reaches_the_
+      target_carries_a_path` (two NICs on loopback addresses, one cut);
+      `ci-flow-nics-verify.sh` ALL PASS (one target address, two NICs, nothing
+      configured: 27.5/29.6 MB by eth0/eth1; skip: eth1 70 bytes; failover);
+      docs/storage-network.md, README, CHANGELOG
 - [ ] the second NIC has no address today: the initramfs addresses only its
-      uplink (in stormbr0), the running node is stormpump's. Owner question
+      uplink (in stormbr0), the running node is stormpump's. Asked on #450
+      (needs-owner): A initramfs DHCPs every other carrier port, kept across
+      switch_root (recommended; + stormpump issue), B declared only, C
+      initramfs only
 
 ### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — DONE (golden-stormblock-0a9fe2d97cf9), closed
 
