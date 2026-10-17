@@ -308,3 +308,33 @@ async fn the_initiators_flush_flushes_the_targets_device() {
     dev.flush().await.unwrap();
     assert_eq!(counted.1.load(Ordering::SeqCst), before + 1, "a flush is a SYNCHRONIZE CACHE on the target");
 }
+
+/// An initiator logged in is listed as attached to the target it reached
+/// while its session lasts (#292); a logout takes it off.
+#[tokio::test]
+async fn iscsi_an_initiator_is_listed_while_logged_in() {
+    let (_dir, vol, _vm) = common::setup_raid1_volume(64 * 1024 * 1024, 32 * 1024 * 1024).await;
+    let mut cfg = default_iscsi_config();
+    cfg.target_name = "iqn.2024.io.stormblock:test-remote-292".into();
+    let iqn = cfg.target_name.clone();
+    let (addr, server) = common::start_iscsi_target(vol, cfg).await;
+    assert!(stormblock::target::remote::on(&iqn).is_empty());
+
+    let mut init = IscsiInitiator::connect(addr).await.unwrap();
+    init.login(INITIATOR_NAME, &iqn).await.unwrap();
+    init.read(0, 1).await.unwrap();
+    let list = stormblock::target::remote::on(&iqn);
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0].host, INITIATOR_NAME);
+    assert_eq!(list[0].protocol, "iscsi");
+    assert_eq!(list[0].addr, "127.0.0.1");
+
+    init.logout().await.unwrap();
+    drop(init);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !stormblock::target::remote::on(&iqn).is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "still listed after the logout");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    server.abort();
+}

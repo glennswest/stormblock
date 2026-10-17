@@ -654,3 +654,73 @@ async fn a_drive_whose_host_has_a_secret_is_opened_with_it() {
         }
     }
 }
+
+/// stormcluster's release/storage-off guard and the registry's clone reaper
+/// (#292): who is attached right now, per volume and node-wide, from the
+/// connections themselves, not from who may connect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_hosts_connected_to_a_volume_are_listed_while_they_are_connected() {
+    let dir = TempDir::new().unwrap();
+    let n = node(&dir, false).await;
+    let c = reqwest::Client::new();
+    let (s, a) = attach(&n, n.clone_a, serde_json::json!({"transport": "nvme-tcp", "host_nqn": H1})).await;
+    assert_eq!(s, 200, "{a}");
+    let nqn = a["nqn"].as_str().unwrap().to_string();
+    let nsid = a["nsid"].as_u64().unwrap() as u32;
+    let remote_of = |v: serde_json::Value| -> Vec<serde_json::Value> {
+        v["attachments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|a| a["remote"].as_array().cloned().unwrap_or_default())
+            .collect()
+    };
+    let get = |path: String| {
+        let c = c.clone();
+        async move { c.get(path).send().await.unwrap().json::<serde_json::Value>().await.unwrap() }
+    };
+
+    // Attached but nobody connected: in use, no remote host.
+    let v = get(format!("{}/api/v1/volumes/{}", n.api, n.clone_a)).await;
+    assert_eq!(v["in_use"], true, "{v}");
+    assert!(remote_of(v.clone()).is_empty(), "nobody is connected yet: {v}");
+
+    let dev = NvmeofDevice::connect(&spec(n.nvme, &nqn, nsid, H1, None)).await.unwrap();
+    let mut buf = vec![0u8; 4096];
+    dev.read(0, &mut buf).await.unwrap();
+
+    let v = get(format!("{}/api/v1/volumes/{}", n.api, n.clone_a)).await;
+    let remote = remote_of(v.clone());
+    assert_eq!(remote.len(), 1, "one host, its queues counted together: {v}");
+    assert_eq!(remote[0]["host"], H1);
+    assert_eq!(remote[0]["addr"], "127.0.0.1");
+    assert_eq!(remote[0]["protocol"], "nvme-tcp");
+    assert_eq!(remote[0]["target"], nqn.as_str());
+    assert!(remote[0]["connections"].as_u64().unwrap() >= 1);
+    // The listing carries it too, and a volume nobody reaches carries none.
+    let list = get(format!("{}/api/v1/volumes?in_use=true", n.api)).await;
+    let mine = list["items"].as_array().unwrap().iter().find(|x| x["id"] == n.clone_a.to_string()).cloned().unwrap();
+    assert_eq!(remote_of(mine).len(), 1);
+    let other = get(format!("{}/api/v1/volumes/{}", n.api, n.clone_b)).await;
+    assert!(remote_of(other).is_empty());
+    // Node-wide: what a release guard waits to see empty.
+    let all = get(format!("{}/api/v1/connections", n.api)).await;
+    assert!(
+        all["items"].as_array().unwrap().iter().any(|r| r["host"] == H1 && r["target"] == nqn.as_str()),
+        "{all}"
+    );
+
+    // Gone with the connection.
+    drop(dev);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let all = get(format!("{}/api/v1/connections", n.api)).await;
+        if !all["items"].as_array().unwrap().iter().any(|r| r["target"] == nqn.as_str()) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "still listed after the host went: {all}");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let v = get(format!("{}/api/v1/volumes/{}", n.api, n.clone_a)).await;
+    assert!(remote_of(v.clone()).is_empty(), "{v}");
+}

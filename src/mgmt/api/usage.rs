@@ -51,6 +51,11 @@ pub struct Attachment {
     /// A wiring row's state (`active`, `draining`, …), when it came from one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// The remote hosts connected to the target serving it right now (#292):
+    /// host NQN or initiator IQN, address, how many connections and since
+    /// when. Empty for a ublk device, or a target nobody is connected to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub remote: Vec<crate::target::remote::Remote>,
 }
 
 impl Attachment {
@@ -64,6 +69,7 @@ impl Attachment {
             lun: None,
             nsid: None,
             state: None,
+            remote: Vec::new(),
         }
     }
 }
@@ -216,8 +222,30 @@ impl Context {
                 }
             }
         }
+        ctx.fill_remote(state).await;
         ctx
     }
+
+    /// Who is connected to each attachment's target (#292). A LUN on the
+    /// shared iSCSI target names no target of its own: it is that target's.
+    async fn fill_remote(&mut self, state: &AppState) {
+        #[cfg(feature = "iscsi")]
+        let shared_iqn = state.iscsi_target.read().await.as_ref().map(|t| t.target_name().to_string());
+        #[cfg(not(feature = "iscsi"))]
+        let shared_iqn: Option<String> = {
+            let _ = state;
+            None
+        };
+        for list in self.attachments.values_mut() {
+            for a in list.iter_mut() {
+                let target = a.target.clone().or_else(|| (a.transport == "iscsi").then(|| shared_iqn.clone()).flatten());
+                if let Some(t) = target {
+                    a.remote = crate::target::remote::on(&t);
+                }
+            }
+        }
+    }
+
 
     /// Feed what this context says into `h`, in an order that does not
     /// depend on how it was gathered (#218): the listing's generation moves

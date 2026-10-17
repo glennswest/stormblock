@@ -508,6 +508,9 @@ struct Session {
     /// The count this connection holds on `sub` (#188).
     #[allow(dead_code)]
     bound: Option<BoundTo>,
+    /// This connection in the list of who is attached (#292).
+    #[allow(dead_code)]
+    remote: Option<crate::target::remote::Registered>,
     hostnqn: String,
     /// The queue's DH-HMAC-CHAP exchange, when its host has a key. Until it
     /// has authenticated, nothing but Authentication Send/Receive runs.
@@ -1197,7 +1200,7 @@ impl NvmeofTarget {
         let is_discovery = connect.subnqn == discovery::DISCOVERY_NQN;
 
         let mut session =
-            Session { sub: None, bound: None, hostnqn: connect.hostnqn.clone(), auth: None, commands: 0, last: None };
+            Session { sub: None, bound: None, remote: None, hostnqn: connect.hostnqn.clone(), auth: None, commands: 0, last: None };
         if !is_discovery {
             // A subsystem this target has, or nothing.
             let Some(sub) = self.subsystem(&connect.subnqn) else {
@@ -1228,6 +1231,7 @@ impl NvmeofTarget {
             }
             session.auth = key.map(|k| auth::ControllerAuth::new(k, &connect.hostnqn, &connect.subnqn));
             session.bound = Some(BoundTo::new(sub.clone()));
+            session.remote = Some(crate::target::remote::register("nvme-tcp", &connect.subnqn, &connect.hostnqn, peer));
             session.sub = Some(sub);
         }
 

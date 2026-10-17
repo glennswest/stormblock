@@ -252,6 +252,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     #[cfg(feature = "iscsi")]
     let r = r.nest("/api/v1/sessions", sessions::router(state.clone()));
+    let r = r.nest("/api/v1/connections", exports::connections_router());
 
     #[cfg(feature = "cluster")]
     let r = r.merge(cluster::router(state.clone()));

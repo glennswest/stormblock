@@ -103,6 +103,64 @@ async fn get_export(
     }
 }
 
+/// GET /api/v1/exports/{id}/connections — the remote hosts connected to the
+/// target this export is served on, right now (#292). A host connected to a
+/// subsystem reaches every namespace in it (a session every LUN of its
+/// target), so this is the honest answer to "is anyone attached?".
+async fn export_connections(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let uuid = match id.parse::<Uuid>() {
+        Ok(u) => u,
+        Err(_) => return ApiError::bad_request(format!("invalid UUID: {id}")),
+    };
+    let e = match state.exports.read().await.iter().find(|e| e.id == uuid) {
+        Some(e) => e.clone(),
+        None => return ApiError::not_found(format!("export {uuid} not found")),
+    };
+    let target = export_target(&state, &e).await;
+    let items = target.as_deref().map(crate::target::remote::on).unwrap_or_default();
+    Json(serde_json::json!({
+        "export": uuid,
+        "volume": e.volume_id,
+        "target": target,
+        "count": items.len(),
+        "items": items,
+    }))
+    .into_response()
+}
+
+/// GET /api/v1/connections — every remote host connected to any target of
+/// this engine right now, NVMe/TCP and iSCSI (#292): what a release or
+/// storage-off guard waits to see empty (stormcluster#15/#21). Per volume the
+/// same list rides on each attachment (`attachments[].remote`).
+async fn list_connections() -> Response {
+    let items = crate::target::remote::all();
+    Json(serde_json::json!({ "count": items.len(), "items": items })).into_response()
+}
+
+pub fn connections_router() -> Router {
+    Router::new().route("/", get(list_connections))
+}
+
+/// The subsystem NQN or target IQN an export is served on.
+pub(crate) async fn export_target(state: &AppState, e: &ExportEntry) -> Option<String> {
+    if let Some(s) = e.subsystem.clone() {
+        return Some(s);
+    }
+    if !e.target_id.is_empty() {
+        return Some(e.target_id.clone());
+    }
+    match e.protocol {
+        ExportProtocol::Nvmeof => state.nvmeof_settings().map(|n| n.nqn),
+        #[cfg(feature = "iscsi")]
+        ExportProtocol::Iscsi => state.iscsi_target.read().await.as_ref().map(|t| t.target_name().to_string()),
+        #[cfg(not(feature = "iscsi"))]
+        ExportProtocol::Iscsi => None,
+    }
+}
+
 /// Path of the persisted export table, when a data dir is configured.
 fn exports_path(state: &AppState) -> Option<PathBuf> {
     state
@@ -498,5 +556,6 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(list_exports).post(create_export))
         .route("/{id}", get(get_export).delete(delete_export))
+        .route("/{id}/connections", get(export_connections))
         .with_state(state)
 }

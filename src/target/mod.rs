@@ -10,6 +10,8 @@ pub mod iscsi;
 
 pub mod nvmeof;
 
+pub mod remote;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

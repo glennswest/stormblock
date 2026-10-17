@@ -188,6 +188,17 @@ impl IscsiTarget {
             session.connection_count().await,
         );
 
+        // In the list of who is attached (#292) while it lasts; a discovery
+        // session only does SendTargets and holds no LUN.
+        let _remote = (!session_params.discovery_session).then(|| {
+            crate::target::remote::register(
+                "iscsi",
+                &session_params.target_name,
+                &session_params.initiator_name,
+                peer,
+            )
+        });
+
         // Full feature phase
         let result = self.full_feature_phase(
             &mut reader,
