@@ -1512,6 +1512,26 @@ impl Slab {
         self.table.read(slot_idx).await
     }
 
+    /// [`slot_now`](Self::slot_now), taking the device's entry from `pre`
+    /// when the table has not been written since it was read (#438): what a
+    /// batch under the registry lock reads instead of the device.
+    async fn slot_with(&self, slot_idx: u64, pre: Option<&super::slottable::Preread>) -> DriveResult<Slot> {
+        if let Some(s) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).entries.get(&slot_idx) {
+            return Ok(s.clone());
+        }
+        if let Some(p) = pre.filter(|p| p.epoch == self.table.epoch()) {
+            if let Some(s) = p.entries.get(&slot_idx) {
+                return Ok(s.clone());
+            }
+        }
+        self.table.read(slot_idx).await
+    }
+
+    /// Whether `pre` still says what the device holds (#438).
+    fn preread_valid(&self, pre: Option<&super::slottable::Preread>) -> bool {
+        pre.is_some_and(|p| p.epoch == self.table.epoch())
+    }
+
     /// Change an entry in memory; written by the next write of it.
     fn set_slot(&self, slot_idx: u64, slot: Slot) {
         self.pending.lock().unwrap_or_else(|e| e.into_inner()).entries.insert(slot_idx, slot);
@@ -1688,13 +1708,25 @@ impl Slab {
     /// it leaves neither the clone nor its references; restore raises a
     /// count below the maps it restores in any case (#171).
     pub async fn inc_ref_batch(&mut self, slot_indices: &[u64]) -> DriveResult<()> {
+        self.inc_ref_batch_with(slot_indices, None).await
+    }
+
+    /// [`inc_ref_batch`](Self::inc_ref_batch) with the entries read before
+    /// the caller took its locks (#438), used while the table is unwritten.
+    pub async fn inc_ref_batch_with(
+        &mut self,
+        slot_indices: &[u64],
+        pre: Option<&super::slottable::Preread>,
+    ) -> DriveResult<()> {
         // Validate everything before mutating, so a bad index cannot leave the
         // batch half-applied.
-        self.table.prefetch(slot_indices.iter().copied()).await;
+        if !self.preread_valid(pre) {
+            self.table.prefetch(slot_indices.iter().copied()).await;
+        }
         let mut now: Vec<(u64, Slot)> = Vec::with_capacity(slot_indices.len());
         for &slot_idx in slot_indices {
             self.in_range(slot_idx)?;
-            let slot = self.slot_now(slot_idx).await?;
+            let slot = self.slot_with(slot_idx, pre).await?;
             if !slot.state.is_owned() {
                 return Err(DriveError::Other(anyhow::anyhow!(
                     "cannot inc_ref on free slot {slot_idx}"
@@ -1721,7 +1753,19 @@ impl Slab {
     ///
     /// The header is written once at the end rather than once per freed slot.
     pub async fn dec_ref_batch(&mut self, slot_indices: &[u64]) -> DriveResult<DecRefOutcome> {
-        self.table.prefetch(slot_indices.iter().copied()).await;
+        self.dec_ref_batch_with(slot_indices, None).await
+    }
+
+    /// [`dec_ref_batch`](Self::dec_ref_batch) with the entries read before
+    /// the caller took its locks (#438), used while the table is unwritten.
+    pub async fn dec_ref_batch_with(
+        &mut self,
+        slot_indices: &[u64],
+        pre: Option<&super::slottable::Preread>,
+    ) -> DriveResult<DecRefOutcome> {
+        if !self.preread_valid(pre) {
+            self.table.prefetch(slot_indices.iter().copied()).await;
+        }
         let mut out = DecRefOutcome::default();
         let mut seen: HashSet<u64> = HashSet::with_capacity(slot_indices.len());
         let mut touched: Vec<u64> = Vec::with_capacity(slot_indices.len());
@@ -1740,19 +1784,24 @@ impl Slab {
                 out.rejected.push((slot_idx, DecRefReject::OutOfRange));
                 continue;
             }
-            let mut slot = self.slot_now(slot_idx).await?;
+            let mut slot = self.slot_with(slot_idx, pre).await?;
             if !slot.state.is_owned() || slot.ref_count == 0 {
                 out.rejected.push((slot_idx, DecRefReject::AlreadyFree));
                 continue;
             }
 
             slot.ref_count -= 1;
-            touched.push(slot_idx);
             if slot.ref_count > 0 {
+                // Written at the next `sync`, as `dec_ref` does (#171, #438):
+                // a count too high on disk leaks a share until restore
+                // recounts; nothing here is written page by page with the
+                // registry held.
                 self.set_slot(slot_idx, slot);
+                self.pending.lock().unwrap_or_else(|e| e.into_inner()).ready.insert(slot_idx);
                 out.retained += 1;
                 continue;
             }
+            touched.push(slot_idx);
 
             // Last reference: same bookkeeping as `free`, but the write is
             // deferred to the coalesced flush below.

@@ -2188,7 +2188,7 @@ impl VolumeManager {
         }
         // Its map in memory and its table pages read before anything is
         // forgotten (#155, #367): a load that fails leaves the volume as it was.
-        self.prefetch_volume(id).await?;
+        let pre = self.preread_volume(id).await?;
         let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
         self.present.remove(&id);
@@ -2216,7 +2216,7 @@ impl VolumeManager {
         // Whatever an earlier free left in the counts is not this delete's.
         let _ = reg.take_retired_for_erase();
         reg.set_erase_override(erase);
-        let res = snapshot::delete_snapshot(id, &mut gem, &mut reg).await;
+        let res = snapshot::delete_snapshot_with(id, &mut gem, &mut reg, &pre).await;
         reg.set_erase_override(None);
         let (slots, bytes) = reg.take_retired_for_erase();
         res?;
@@ -2338,15 +2338,16 @@ impl VolumeManager {
         let slot_size = source_vol.slot_size;
         drop(source_vol);
 
-        self.prefetch_volume(source_id).await?;
+        // Its entries read now, with no lock held (#438).
+        let pre = self.preread_volume(source_id).await?;
         // In-place writes held off while the slots are shared (#367).
         let _writes = source_handle.hold_writes().await;
         let snap = {
             let mut gem = self.gem.write().await;
             let mut reg = self.registry.write().await;
-            snapshot::create_snapshot(
+            snapshot::create_snapshot_with(
                 source_id, name, virtual_size, slot_size,
-                &mut gem, &mut reg,
+                &mut gem, &mut reg, &pre,
             ).await?
         };
         let snap_id = snap.id();
@@ -2657,6 +2658,37 @@ impl VolumeManager {
     /// Read the slot table pages of every slot a volume maps into their
     /// slabs' caches, holding no lock while the device is read (#155): what
     /// a delete or a clone changes next under the registry lock.
+    /// Every entry a volume's slots have, read from each slab's table with
+    /// no lock held, into memory of the caller's own (#438): a clone's or a
+    /// delete's ref-count batch under the GEM and registry write locks then
+    /// reads nothing from the device while the table is unwritten. The page
+    /// cache is bounded; a golden larger than it was read twice, the second
+    /// time with both locks held (9.3 s of a claim on forge, 2026-10-17).
+    pub async fn preread_volume(&self, id: VolumeId) -> Result<HashMap<SlabId, crate::drive::slottable::Preread>, VolumeError> {
+        gem::ensure_resident(&self.gem, id)
+            .await
+            .map_err(|e| VolumeError::Drive(DriveError::Io(std::io::Error::other(format!("volume {}: loading its extent map: {e}", id.0)))))?;
+        let by_slab: HashMap<SlabId, Vec<u64>> = {
+            let gem = self.gem.read().await;
+            let mut m: HashMap<SlabId, Vec<u64>> = HashMap::new();
+            if let Some(map) = gem.get_volume_map(&id) {
+                for leg in map.all_legs() {
+                    m.entry(leg.slab_id).or_default().push(leg.slot_idx);
+                }
+            }
+            m
+        };
+        let tables: Vec<_> = {
+            let reg = self.registry.read().await;
+            by_slab.into_iter().filter_map(|(s, idx)| reg.get(&s).map(|slab| (s, slab.table(), idx))).collect()
+        };
+        let mut out = HashMap::with_capacity(tables.len());
+        for (s, t, idx) in tables {
+            out.insert(s, t.read_many(&idx).await.map_err(VolumeError::Drive)?);
+        }
+        Ok(out)
+    }
+
     pub async fn prefetch_volume(&self, id: VolumeId) -> Result<(), VolumeError> {
         // What follows a prefetch (a delete, a clone) needs the map: a load
         // that fails stops it (#367), it does not go on to panic on a cold

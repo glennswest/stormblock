@@ -25,6 +25,21 @@ pub async fn create_snapshot(
     gem: &mut GlobalExtentMap,
     registry: &mut SlabRegistry,
 ) -> Result<ThinVolume, VolumeError> {
+    create_snapshot_with(source_id, name, virtual_size, slot_size, gem, registry, &HashMap::new()).await
+}
+
+/// [`create_snapshot`] with each slab's entries read before the locks were
+/// taken (#438): the ref counts are raised without reading the device under
+/// them while those entries are current.
+pub async fn create_snapshot_with(
+    source_id: VolumeId,
+    name: &str,
+    virtual_size: u64,
+    slot_size: u64,
+    gem: &mut GlobalExtentMap,
+    registry: &mut SlabRegistry,
+    pre: &HashMap<SlabId, crate::drive::slottable::Preread>,
+) -> Result<ThinVolume, VolumeError> {
     let snap_id = VolumeId::new();
 
     // Clone volume map in GEM (bumps ref_count in GEM entries). A volume
@@ -40,7 +55,7 @@ pub async fn create_snapshot(
         }
         for (slab_id, slots) in by_slab {
             if let Some(slab) = registry.get_mut(&slab_id) {
-                slab.inc_ref_batch(&slots).await.map_err(VolumeError::Drive)?;
+                slab.inc_ref_batch_with(&slots, pre.get(&slab_id)).await.map_err(VolumeError::Drive)?;
             }
         }
     }
@@ -73,6 +88,17 @@ pub async fn delete_snapshot(
     gem: &mut GlobalExtentMap,
     registry: &mut SlabRegistry,
 ) -> Result<(), VolumeError> {
+    delete_snapshot_with(snap_id, gem, registry, &HashMap::new()).await
+}
+
+/// [`delete_snapshot`] with each slab's entries read before the locks were
+/// taken (#438).
+pub async fn delete_snapshot_with(
+    snap_id: VolumeId,
+    gem: &mut GlobalExtentMap,
+    registry: &mut SlabRegistry,
+    pre: &HashMap<SlabId, crate::drive::slottable::Preread>,
+) -> Result<(), VolumeError> {
     // A never-written volume has no GEM map — nothing to free.
     if let Some(vmap) = gem.remove_volume(snap_id) {
         // Grouped per slab so the slot table is written by sector and the
@@ -95,7 +121,7 @@ pub async fn delete_snapshot(
                 );
                 continue;
             };
-            match slab.dec_ref_batch(&slots).await {
+            match slab.dec_ref_batch_with(&slots, pre.get(&slab_id)).await {
                 Ok(outcome) => {
                     if !outcome.rejected.is_empty() {
                         tracing::warn!(

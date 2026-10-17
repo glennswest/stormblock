@@ -72,6 +72,15 @@ impl PageCache {
     }
 }
 
+/// Moves the epoch again when a write ends, however it ends.
+struct EpochOnDrop<'a>(&'a std::sync::atomic::AtomicU64);
+
+impl Drop for EpochOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// See the module documentation.
 pub struct SlotTable {
     device: Arc<dyn BlockDevice>,
@@ -81,6 +90,18 @@ pub struct SlotTable {
     limit: u64,
     cache: std::sync::Mutex<PageCache>,
     page_io: tokio::sync::Mutex<()>,
+    /// Moved by every write of the table, before and after it (#438): a
+    /// [`Preread`] taken at one epoch is what the device holds while the
+    /// epoch is still that one.
+    epoch: std::sync::atomic::AtomicU64,
+}
+
+/// Entries read with no lock of the caller's held, and the table's epoch
+/// when the read began (#438). Valid while [`SlotTable::epoch`] is unchanged.
+#[derive(Debug, Default, Clone)]
+pub struct Preread {
+    pub epoch: u64,
+    pub entries: HashMap<u64, Slot>,
 }
 
 impl SlotTable {
@@ -91,6 +112,7 @@ impl SlotTable {
             limit: data_offset.saturating_sub(table_offset),
             cache: std::sync::Mutex::new(PageCache { pages: HashMap::new(), order: VecDeque::new(), cap: cache_pages() }),
             page_io: tokio::sync::Mutex::new(()),
+            epoch: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -137,6 +159,50 @@ impl SlotTable {
         Ok(Slot::from_bytes(&bytes[off..end]).unwrap_or_else(Slot::free))
     }
 
+    /// The table's write epoch (#438).
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The entries of `idxs`, read now into the caller's own map (not the
+    /// cache, which a large volume's pages would only cycle through), with
+    /// the epoch the read began at (#438). A change under the registry lock
+    /// then takes its entries from here instead of reading the device with
+    /// the lock held. An entry that does not check is free, as at open.
+    pub async fn read_many(&self, idxs: &[u64]) -> DriveResult<Preread> {
+        let epoch = self.epoch();
+        let mut pages: Vec<u64> = idxs.iter().map(|i| Self::page_of(*i).0).collect();
+        pages.sort_unstable();
+        pages.dedup();
+        let mut got: HashMap<u64, Arc<[u8]>> = HashMap::with_capacity(pages.len());
+        for page in pages {
+            let len = self.page_len(page);
+            if len == 0 {
+                continue;
+            }
+            let bytes = match self.cached(page) {
+                Some(b) => b,
+                None => {
+                    let mut buf = vec![0u8; len];
+                    self.device.read(self.table_offset + page * PAGE, &mut buf).await?;
+                    buf.into()
+                }
+            };
+            got.insert(page, bytes);
+        }
+        let mut entries = HashMap::with_capacity(idxs.len());
+        for &idx in idxs {
+            let (page, off) = Self::page_of(idx);
+            let end = off + SLOT_ENTRY_BYTES as usize;
+            let slot = match got.get(&page) {
+                Some(b) if end <= b.len() => Slot::from_bytes(&b[off..end]).unwrap_or_else(Slot::free),
+                _ => Slot::free(),
+            };
+            entries.insert(idx, slot);
+        }
+        Ok(Preread { epoch, entries })
+    }
+
     /// Put the pages of `idxs` in the cache, with no lock of the caller's
     /// held: what a change under the registry lock will read.
     pub async fn prefetch(&self, idxs: impl IntoIterator<Item = u64>) {
@@ -181,6 +247,10 @@ impl SlotTable {
         if !still() {
             return Ok(false);
         }
+        // Before and after (#438): a read that began before this write ended
+        // sees the epoch move, whichever side of it the read fell.
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _after = EpochOnDrop(&self.epoch);
         for (page, changes) in by_page {
             let mut buf = self.load(page).await?.to_vec();
             for (off, bytes) in changes {
