@@ -196,6 +196,14 @@ Master's decision B: last in the order, off by default,
 answers a query on the multicast group, `stormblock discover`, `/init` adds
 what answered after every other source (health-checked). Nothing built.
 
+### A privileged pod stops/deletes the node's ublk device (2026-10-17, #299, P3) — PARKED until the single-node pacing lifts
+
+stormraid's test deleted /dev/ublkb0 (fixed there, stormraid#20). To build:
+detect a served device stopped/deleted (aborted queue commands, ublkcN
+gone), ERROR + health `ublk_lost`; re-add a stopped device, fail visibly on
+a deleted one. Test-pod access to /dev/ublk-control: stormcentral#932.
+Nothing built.
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
