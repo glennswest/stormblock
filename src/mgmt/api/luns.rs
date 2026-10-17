@@ -315,6 +315,8 @@ async fn open_backing(
         }
         LunBacking::Volume { volume_id } => {
             let vm = state.volume_manager.lock().await;
+            // A secret volume is never an iSCSI LUN (#74).
+            vm.refuse_secret(&VolumeId(*volume_id), "iSCSI LUN").map_err(|e| e.to_string())?;
             vm.get_volume(&VolumeId(*volume_id))
                 .ok_or_else(|| format!("volume {volume_id} not found"))
         }

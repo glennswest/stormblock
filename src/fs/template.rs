@@ -1296,7 +1296,10 @@ async fn clone_volume_impl(
         Some(role) => Some(
             crate::volume::VolumeManager::copy_volume_unlocked(vm, source, &spec.name, role)
                 .await
-                .map_err(|e| TemplateError::Internal(format!("copying volume: {e}")))?,
+                .map_err(|e| match e {
+                    e @ crate::volume::VolumeError::Secret { .. } => TemplateError::Conflict(e.to_string()),
+                    e => TemplateError::Internal(format!("copying volume: {e}")),
+                })?,
         ),
         None => None,
     };
@@ -1311,7 +1314,10 @@ async fn clone_volume_impl(
             None => m
                 .create_snapshot_deferred(source, &spec.name)
                 .await
-                .map_err(|e| TemplateError::Internal(format!("cloning volume: {e}")))?,
+                .map_err(|e| match e {
+                    e @ crate::volume::VolumeError::Secret { .. } => TemplateError::Conflict(e.to_string()),
+                    e => TemplateError::Internal(format!("cloning volume: {e}")),
+                })?,
         };
 
         // A clone inherits the source's size; grow it if the caller asked

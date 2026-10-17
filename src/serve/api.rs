@@ -193,6 +193,11 @@ fn is_destructive(method: &Method, path: &str, query: Option<&str>) -> bool {
     if path.ends_with("/seal") {
         return true;
     }
+    if *method == Method::PUT && path.starts_with("/api/v1/volumes/") && path.trim_end_matches('/').ends_with("/secret") {
+        // Marking a volume secret is one way and takes away every copy of
+        // it (#74): the admin's.
+        return true;
+    }
     if path.starts_with("/api/v1/synonyms/boothost/") && path.trim_end_matches('/').ends_with("/install-config") {
         // A machine's install-config carries its secrets (#459): every verb,
         // the read included, is the admin's.
@@ -842,6 +847,10 @@ async fn export_volume(
         let vm = ctx.state.volume_manager.lock().await;
         if vm.get_volume(&VolumeId(volume_id)).is_none() {
             return Err(MkError::not_found(format!("volume {volume_id}")));
+        }
+        // A secret volume is never served over the network (#74).
+        if let Err(e) = vm.refuse_secret(&VolumeId(volume_id), "export") {
+            return Err(MkError::conflict(e.to_string()));
         }
     }
 

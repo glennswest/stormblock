@@ -157,6 +157,11 @@ pub struct CreateVolumeRequest {
     pub qos_class: Option<String>,
     #[serde(default)]
     pub encrypted: bool,
+    /// A secret volume (#74): attached as a local ublk device by one
+    /// consumer, never cloned, snapshotted or exported. Additive to the
+    /// CSI contract; a volume made with it on another node is refused.
+    #[serde(default)]
+    pub secret: bool,
     #[serde(default)]
     pub source: Option<VolumeSource>,
     /// Where the backing volume lives on this node (#150).
@@ -1363,10 +1368,18 @@ async fn create_volume(
                     let _ = state.volume_manager.lock().await.delete_volume(id).await;
                     return Err(V1Error::OutOfSpace(why));
                 }
+                if req.secret {
+                    let mut vm = state.volume_manager.lock().await;
+                    let _ = vm.mark_secret(id);
+                    vm.persist().await;
+                }
                 Some(id.0)
             }
             // Refused the way `/api/v1` refuses it (#151).
             Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => return Err(V1Error::Conflict(e.to_string())),
+            // A clone or snapshot of a secret volume (#74).
+            Err(e @ crate::volume::VolumeError::Secret { .. }) => return Err(V1Error::Conflict(e.to_string())),
+            Err(crate::volume::VolumeError::AllocatorError(m)) if m.contains("is secret:") => return Err(V1Error::Conflict(m)),
             Err(crate::volume::VolumeError::NoSpace) => {
                 return Err(V1Error::OutOfSpace("no slab has room for the volume".into()))
             }
@@ -1374,6 +1387,12 @@ async fn create_volume(
                 return Err(V1Error::Internal(format!("backing volume create failed: {e}")))
             }
         }
+    } else if req.secret {
+        // Enforced by the engine that holds it (#74): this one does not.
+        return Err(V1Error::Conflict(format!(
+            "a secret volume is made on the node that holds it; its master is {master}, this node is {}",
+            v1.local_node
+        )));
     } else {
         None
     };
@@ -1810,7 +1829,17 @@ async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) 
     // network (#149).
     if want != WantTransport::NvmeTcp && ublk_possible {
         if let Some(local) = local_id {
-            let device = state.volume_manager.lock().await.get_volume(&EngineVolumeId(local));
+            let (device, secret) = {
+                let vm = state.volume_manager.lock().await;
+                (vm.get_volume(&EngineVolumeId(local)), vm.is_secret(&EngineVolumeId(local)))
+            };
+            // A secret volume has one consumer at a time (#74).
+            if secret && state.ublk_exports.lock().await.is_exported(&id) {
+                forget_attachment(&state, &id, &req.node).await;
+                return Err(V1Error::Conflict(format!(
+                    "volume {id} is secret and already attached: it has one consumer at a time (#74)"
+                )));
+            }
             if let Some(device) = device {
                 if let Some(path) = crate::mgmt::ublk_export::attach(&state, &id, device).await {
                     return Ok(Json(AttachInfo::Ublk { device_hint: path }));
@@ -1876,6 +1905,10 @@ pub(crate) async fn nvme_attach(
     read_only: bool,
     holder: Option<&str>,
 ) -> Result<AttachInfo, NvmeAttachError> {
+    // A secret volume is never served over the network (#74).
+    if let Err(e) = state.volume_manager.lock().await.refuse_secret(&crate::volume::VolumeId(local), "NVMe/TCP export") {
+        return Err(NvmeAttachError::Conflict(e.to_string()));
+    }
     // No listener: nothing is served, and the answer says so by carrying no
     // NSID — what every caller got before #210.
     let Some(target) = state.nvmeof_target.read().await.as_ref().cloned() else {

@@ -88,6 +88,9 @@ async fn start_move(
         }
     };
 
+    if let Some(r) = super::volumes::refuse_secret(&state, crate::volume::VolumeId(req.volume_id), "move").await {
+        return r;
+    }
     let busy = super::what_is_serving(&state, req.volume_id).await;
     if !busy.is_empty() {
         return ApiError::conflict(format!(

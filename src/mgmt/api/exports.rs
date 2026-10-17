@@ -292,6 +292,9 @@ async fn create_export(
             return ApiError::not_found(format!("volume {} not found", req.volume_id));
         }
     }
+    if let Some(r) = super::volumes::refuse_secret(&state, vol_id, "export").await {
+        return r;
+    }
 
     let target_id = req.target_id.unwrap_or_else(|| {
         match req.protocol {

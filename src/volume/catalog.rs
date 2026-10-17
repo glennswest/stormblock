@@ -33,6 +33,8 @@ pub trait VolumeView {
     fn parent(&self, id: &VolumeId) -> Option<VolumeId>;
     fn fs_info(&self, id: &VolumeId) -> Option<&FsInfo>;
     fn origin(&self, id: &VolumeId) -> Origin;
+    /// A secret volume (#74).
+    fn is_secret(&self, id: &VolumeId) -> bool;
     fn is_template(&self, id: &VolumeId) -> bool;
     fn is_sealed(&self, id: &VolumeId) -> bool {
         self.get_volume_handle(id).map(|h| h.is_sealed()).unwrap_or(false)
@@ -66,6 +68,7 @@ struct Entry {
     fs: Option<FsInfo>,
     owner: Option<Owner>,
     origin: Origin,
+    secret: bool,
 }
 
 /// The volumes as the manager last published them.
@@ -94,6 +97,7 @@ impl Catalog {
                         fs: m.fs_info(&id).cloned(),
                         owner: m.owner(&id).cloned(),
                         origin: m.origin(&id),
+                        secret: m.is_secret(&id),
                     },
                 ))
             })
@@ -125,6 +129,9 @@ impl VolumeView for Catalog {
     }
     fn origin(&self, id: &VolumeId) -> Origin {
         self.entries.get(id).map(|e| e.origin).unwrap_or_default()
+    }
+    fn is_secret(&self, id: &VolumeId) -> bool {
+        self.entries.get(id).map(|e| e.secret).unwrap_or(false)
     }
     fn is_template(&self, id: &VolumeId) -> bool {
         self.templates.contains(id)
@@ -164,6 +171,9 @@ impl VolumeView for super::VolumeManager {
     }
     fn origin(&self, id: &VolumeId) -> Origin {
         super::VolumeManager::origin(self, id)
+    }
+    fn is_secret(&self, id: &VolumeId) -> bool {
+        super::VolumeManager::is_secret(self, id)
     }
     fn is_template(&self, id: &VolumeId) -> bool {
         super::VolumeManager::is_template(self, id)
@@ -224,6 +234,9 @@ macro_rules! view_through {
             }
             fn origin(&self, id: &VolumeId) -> Origin {
                 VolumeView::origin(&**self, id)
+            }
+            fn is_secret(&self, id: &VolumeId) -> bool {
+                VolumeView::is_secret(&**self, id)
             }
             fn is_template(&self, id: &VolumeId) -> bool {
                 VolumeView::is_template(&**self, id)

@@ -408,6 +408,12 @@ async fn copy(State(state): State<Arc<AppState>>, Json(req): Json<CopyRequest>) 
             (_, None) => return ApiError::not_found(format!("volume {} not found", req.to.volume)),
         }
     };
+    {
+        let vm = state.volume_manager.lock().await;
+        if let Err(e) = vm.refuse_secret(&VolumeId(req.from.volume), "copy") {
+            return ApiError::conflict(e.to_string());
+        }
+    }
     if dst_dev.is_sealed() {
         return ApiError::conflict(format!(
             "volume {} is sealed: a copy target must be writable",

@@ -101,6 +101,11 @@ pub struct VolumeResponse {
     /// were). An install drops a release's system volume the next release
     /// does not name, and carries the node's into the data half.
     pub origin: &'static str,
+    /// A secret volume (#74): attached as a local ublk device by one
+    /// consumer; never cloned, snapshotted, composed, copied, exported or
+    /// read out over the API; erased on delete.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secret: bool,
     /// Where the volume lives — slabs, drives, RAID partners and the state of
     /// each (#136). Always on the single-volume GET; on the listing only with
     /// `?placement=true`, since it walks the volume's extent map.
@@ -131,6 +136,7 @@ struct Described {
     fs: Option<serde_json::Value>,
     fs_uuid: Option<Uuid>,
     origin: &'static str,
+    secret: bool,
     owner: Option<crate::volume::metadata::Owner>,
 }
 
@@ -156,6 +162,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
                 fs_uuid: fs.and_then(|f| f.uuid),
                 owner: vm.owner(id).cloned(),
                 origin: vm.origin(id).as_str(),
+                secret: vm.is_secret(id),
             }
         }
         None => Described {
@@ -175,6 +182,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
             fs_uuid: None,
             owner: None,
             origin: crate::volume::metadata::Origin::Unmarked.as_str(),
+            secret: false,
         },
     }
 }
@@ -249,6 +257,11 @@ pub struct CreateVolumeRequest {
     /// a redundant volume spreads whatever this says.
     #[serde(default)]
     pub placement: Option<String>,
+    /// A secret volume (#74): attached as a local ublk device by one
+    /// consumer, and never cloned, snapshotted, composed, copied, exported
+    /// or read out over the API; erased on delete.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
@@ -509,6 +522,7 @@ async fn list_from(
             fs: d.fs,
             owner: d.owner.clone(),
             origin: d.origin,
+            secret: d.secret,
         });
         if q.placement {
             let p = super::placement::of_volume(state, vm, *id).await;
@@ -642,6 +656,7 @@ async fn get_from(
                 fs: d.fs,
                 owner: d.owner.clone(),
             origin: d.origin,
+            secret: d.secret,
             };
             Json(resp).into_response()
         }
@@ -984,6 +999,7 @@ async fn create_volume(
             fs: d.fs,
             owner: d.owner.clone(),
             origin: d.origin,
+            secret: d.secret,
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
         return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
@@ -1098,6 +1114,10 @@ async fn create_volume(
                     return ApiError::bad_request(e.to_string());
                 }
             }
+            if req.secret {
+                let _ = vm.mark_secret(vol_id);
+                vm.persist().await;
+            }
             let resp = VolumeResponse {
                 placement: None,
                 usage: Default::default(),
@@ -1120,6 +1140,7 @@ async fn create_volume(
                 lba: vm.lba(&vol_id).unwrap_or(crate::volume::Lba::DEFAULT),
                 extent_size: vm.get_volume_handle(&vol_id).map(|h| h.extent_size()).unwrap_or(0),
                 origin: vm.origin(&vol_id).as_str(),
+                secret: req.secret,
                 access: crate::volume::Access::ReadWrite.to_string(),
                 writable: true,
                 // What it was actually placed in, which is not always what
@@ -1136,6 +1157,54 @@ async fn create_volume(
         }
         Err(e) => ApiError::bad_request(format!("failed to create volume: {e}")),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SecretRequest {
+    pub secret: bool,
+}
+
+/// `PUT /api/v1/volumes/{id}/secret {"secret": true}` — make a volume
+/// secret (#74). One way: `false` is refused, since a volume that was secret
+/// and stops being so could then be cloned. Admin (`serve::api`).
+async fn set_secret(State(state): State<Arc<AppState>>, Path(id): Path<String>, Json(req): Json<SecretRequest>) -> Response {
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if !req.secret {
+        return ApiError::bad_request(
+            "a secret volume stays secret: what was in it could be cloned once it is not. Delete it (it is erased) instead",
+        );
+    }
+    let mut vm = state.volume_manager.lock().await;
+    match vm.mark_secret(uuid) {
+        Ok(()) => {
+            vm.persist().await;
+            tracing::info!(volume = %uuid.0, "volume marked secret");
+            Json(serde_json::json!({ "id": uuid.0, "secret": true })).into_response()
+        }
+        Err(e) => ApiError::not_found(e.to_string()),
+    }
+}
+
+/// `GET /api/v1/volumes/{id}/secret` — whether it is.
+async fn get_secret(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let uuid = match volume_key(&state, &id).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let vm = state.volume_manager.lock().await;
+    if vm.get_volume_handle(&uuid).is_none() {
+        return ApiError::not_found(format!("volume {} not found", uuid.0));
+    }
+    Json(serde_json::json!({ "id": uuid.0, "secret": vm.is_secret(&uuid) })).into_response()
+}
+
+/// A 409 when the volume is secret (#74): `what` is the copy or the read
+/// out it would have been.
+pub(crate) async fn refuse_secret(state: &AppState, id: VolumeId, what: &str) -> Option<Response> {
+    state.volume_manager.lock().await.refuse_secret(&id, what).err().map(|e| ApiError::conflict(e.to_string()))
 }
 
 /// `GET /api/v1/volumes/{id}/health` — the full health report.
@@ -1312,6 +1381,9 @@ async fn volume_content(
         Ok(v) => v,
         Err(r) => return r,
     };
+    if let Some(r) = refuse_secret(&state, vol_id, "read out over the API").await {
+        return r;
+    }
     let (h, dev) = {
         let vm = state.volume_manager.lock().await;
         match (vm.get_volume_handle(&vol_id), vm.get_volume(&vol_id)) {
@@ -1743,6 +1815,7 @@ async fn clone_volume(
                 fs: d.fs,
                 owner: d.owner.clone(),
             origin: d.origin,
+            secret: d.secret,
             };
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
@@ -1859,6 +1932,29 @@ async fn attach_volume(
         Err(e) => return ApiError::bad_request(e),
     };
     let key = uuid.to_string();
+
+    // A secret volume (#74): a local ublk device, one consumer at a time.
+    if state.volume_manager.lock().await.is_secret(&vol_id) {
+        if node != local_node || matches!(want, WantTransport::NvmeTcp | WantTransport::VhostUserBlk) {
+            return ApiError::conflict(format!(
+                "volume {uuid} is secret: it is attached as a local ublk device only, never over the network or to a VMM (#74)"
+            ));
+        }
+        if let Some(dev) = {
+            let u = state.ublk_exports.lock().await;
+            u.is_exported(&key).then(|| u.device_path(&key).unwrap_or_else(|| "a boot device".into()))
+        } {
+            return ApiError::conflict(format!(
+                "volume {uuid} is secret and already attached ({dev}): it has one consumer at a time (#74)"
+            ));
+        }
+        return match crate::mgmt::ublk_export::attach(&state, &key, device.clone()).await {
+            Some(path) => Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
+            None => ApiError::conflict(format!(
+                "volume {uuid} is secret: it is attached as a local ublk device only, and ublk is not available here"
+            )),
+        };
+    }
 
     // A VMM on this node (#82): the guest's virtqueues handed to the engine
     // over a socket. Asked for by name only; read-only at the device when
@@ -2616,6 +2712,7 @@ async fn create_snapshot(
                 fs: d.fs,
                 owner: d.owner.clone(),
             origin: d.origin,
+            secret: d.secret,
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -2699,6 +2796,7 @@ async fn resize_volume(
                 fs: d.fs,
                 owner: d.owner.clone(),
             origin: d.origin,
+            secret: d.secret,
             };
             Json(resp).into_response()
         }
@@ -2929,6 +3027,9 @@ async fn read_volume_file(
         Ok(v) => v.0,
         Err(r) => return r,
     };
+    if let Some(r) = refuse_secret(&state, VolumeId(uuid), "file read out over the API").await {
+        return r;
+    }
     let path = match q.get("path") {
         Some(p) => p.clone(),
         None => return ApiError::bad_request("path is required"),
@@ -3154,6 +3255,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
         fs: d.fs,
         owner: d.owner.clone(),
             origin: d.origin,
+            secret: d.secret,
     })
 }
 
@@ -3405,6 +3507,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/health", get(volume_health))
         .route("/{id}/redundancy", axum::routing::put(set_redundancy))
         .route("/{id}/owner", axum::routing::put(set_owner))
+        .route("/{id}/secret", get(get_secret).put(set_secret))
         .route("/{id}/resync", axum::routing::post(resync_volume))
         .route("/{id}/tier", axum::routing::post(retier_volume))
         .route("/{id}/restripe", axum::routing::post(restripe_volume))
