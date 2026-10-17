@@ -329,7 +329,7 @@ at each install (stormcentral#710) and needs a per-host channel.
       Metal: a test install leaves the token in /data/stormupdate/update-token
       (stormcos#604's done-when; needs stormcentral's PUT and stormpump#168)
 
-### Claims held the global locks for seconds (2026-10-17, #438) — FIXED, checks running
+### Claims held the global locks for seconds (2026-10-17, #438) — DONE (golden-stormblock-de3bd9400f81), closed; forge needs it
 
 Forge 17:39Z: a claim held the extent map (write) 9.3 s; pvetest1/2 fell
 through (stormbootx read ended, stormbootx#158). Cause: a golden larger than
@@ -342,7 +342,9 @@ under the GEM+registry write locks; the delete also wrote pages back there.
       `create/delete_snapshot_with`; retained decrements deferred to sync
 - [x] after: delete 2.79 → 0.33 s (reader ≤ 46 µs), clone 2.71 → 0.36 s,
       reads 2250 → 238; 182 related tests pass
-- [ ] check.sh; golden; close
+- [x] check.sh at e559b4a ALL PASS (1255/1255); golden
+      golden-stormblock-de3bd9400f81 (stormcos#601); closed. Forge runs it once
+      the master puts this engine there (its in-place runbook)
 
 ### Multicast discovery of the appliance (2026-10-17, #104, P3) — WAITING ON THE OWNER
 
