@@ -189,6 +189,13 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-3c3b29808089 (ec23149).
 
+### Multicast appliance discovery (2026-10-17, #104, P3) — PARKED until the single-node pacing lifts
+
+Master's decision B: last in the order, off by default,
+`rd.stormblock.discover=on`. stormbootx#159 filed. To build: forge mode
+answers a query on the multicast group, `stormblock discover`, `/init` adds
+what answered after every other source (health-checked). Nothing built.
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
