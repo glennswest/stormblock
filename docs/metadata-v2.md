@@ -172,10 +172,13 @@ on first open"), and as built:
     refuses that volume (kept, listed, written back as it was; never read,
     written, rebuilt, verified, cloned, composed or restriped) rather than
     read it as the record's `Parity`. Then a single-copy volume's spread
-    layout (#153): `L`, 1. Last, a secret volume (#74): `X`, 1. A reader
-    stops at a tag it does not know, so every engine before #74 reads all
-    that comes before the secret's tag and serves the volume as an ordinary
-    one (no data is misread; what it loses is the refusals). Kinds 4 and up are skipped by every
+    layout (#153): `L`, 1. Then a secret volume (#74): `X`, 1. Last, the
+    volume's namespace (#408): `N`, a length byte, the name (a DNS label;
+    `stormcos`, the default, is never written). A reader stops at a tag it
+    does not know, so every engine before #74 reads all that comes before
+    the secret's tag and serves the volume as an ordinary one (no data is
+    misread; what it loses is the refusals), and an engine of #74 before
+    #408 still reads a secret as one and the volume as `stormcos`'s. Kinds 4 and up are skipped by every
     reader since #245 step 1, and none is written.
   - Log record: magic, the store's nonce, sequence, length, kind (ops or
     wrap), CRC, then the ops (`Put`, `Del`, `DropVolume`), padded to pages. A

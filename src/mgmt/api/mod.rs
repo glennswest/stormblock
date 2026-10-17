@@ -215,6 +215,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/moves", moves::router(state.clone()))
         .nest("/api/v1/rebuilds", rebuilds::router(state.clone()))
         .nest("/api/v1/scrub", scrub::router(state.clone()))
+        .nest("/api/v1/namespaces", crate::mgmt::namespaces::router(state.clone()))
         .nest("/api/v1/erasures", erasures::router(state.clone()))
         .nest("/api/v1/synonyms", synonyms::router(state.clone()))
         .nest("/api/v1/boothost", boothost::router(state.clone()))

@@ -1266,6 +1266,12 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     let scheme = record.scheme;
     let spread = record.layout == crate::volume::thin::Layout::Spread;
     let secret = record.secret;
+    // The default namespace is not written: a stormcos volume's header is
+    // byte for byte what it was (#408).
+    let namespace = record
+        .namespace
+        .take()
+        .filter(|n| n != super::metadata::DEFAULT_NAMESPACE && n.len() <= 63);
     let mut out = HEADER_VERSION.to_le_bytes().to_vec();
     out.extend(
         bincode::serde::encode_to_vec(Header { extent_size, record }, bincode::config::standard()).unwrap_or_default(),
@@ -1286,10 +1292,12 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // Then a scheme the record does not say (#159): `S`, the code, K, M;
     // then a single-copy volume's spread layout (#153): `L`, 1 (affine, the
     // default, writes nothing). After the digest, so a reader of #384 finds
-    // its digest where it looks. Last, a secret volume (#74): `X`, 1. A
-    // reader before it stops at the tag it does not know, so it reads
-    // everything before; it serves the volume as an ordinary one.
-    let later = tier.is_some() || digest.is_some() || scheme.is_some() || spread || secret;
+    // its digest where it looks. Then a secret volume (#74): `X`, 1. Last,
+    // the namespace (#408): `N`, a length byte, the name. A reader before
+    // either stops at the tag it does not know, so it reads everything
+    // before: an engine of #74 still knows a secret is one, and reads the
+    // volume as `stormcos`'s.
+    let later = tier.is_some() || digest.is_some() || scheme.is_some() || spread || secret || namespace.is_some();
     if origin != super::metadata::Origin::Unmarked || later {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
@@ -1312,6 +1320,11 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
         if secret {
             out.extend_from_slice(&[SECRET_TAG, 1]);
         }
+        if let Some(n) = namespace {
+            out.push(NAMESPACE_TAG);
+            out.push(n.len() as u8);
+            out.extend_from_slice(n.as_bytes());
+        }
     }
     out
 }
@@ -1329,6 +1342,9 @@ const SCHEME_LEN: usize = 4;
 const LAYOUT_TAG: u8 = b'L';
 /// The tag and the layout (1 = spread).
 const LAYOUT_LEN: usize = 2;
+/// A volume's namespace in a header's extension (#408): the tag, a length,
+/// the name.
+const NAMESPACE_TAG: u8 = b'N';
 
 /// The digest's place in a header's extension (#384): after the tier.
 const DIGEST_TAG: u8 = b'D';
@@ -1373,6 +1389,14 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
             } else if d.len() >= SECRET_LEN && d[0] == SECRET_TAG {
                 rec.secret = d[1] == 1;
                 d = &d[SECRET_LEN..];
+            } else if d.len() >= 2 && d[0] == NAMESPACE_TAG && d.len() >= 2 + d[1] as usize {
+                let n = d[1] as usize;
+                if let Ok(name) = std::str::from_utf8(&d[2..2 + n]) {
+                    if super::metadata::valid_namespace(name) {
+                        rec.namespace = Some(name.to_string());
+                    }
+                }
+                d = &d[2 + n..];
             } else {
                 break;
             }
@@ -1568,6 +1592,7 @@ mod tests {
             scheme: None,
             layout: Default::default(),
             secret: false,
+            namespace: None,
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1618,6 +1643,7 @@ mod tests {
                 scheme: None,
                 layout: Default::default(),
                 secret: false,
+                namespace: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = document_of(header_entries(id, &bytes)).unwrap();
@@ -1677,6 +1703,7 @@ mod tests {
                 scheme: Some(sc),
                 layout: Default::default(),
                 secret: false,
+                namespace: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1723,6 +1750,7 @@ mod tests {
                 scheme: None,
                 layout,
                 secret: false,
+                namespace: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1736,11 +1764,11 @@ mod tests {
         }
     }
 
-    /// #74: a secret rides last, after whatever comes before it; a reader
+    /// #74: a secret rides after what comes before it, the namespace (#408) after it; a reader
     /// that stops at a tag it does not know (every engine before) still
     /// reads everything before it, and the volume as an ordinary one.
     #[test]
-    fn a_secret_rides_last_and_an_older_reader_reads_the_rest() {
+    fn a_secret_rides_after_the_rest_and_an_older_reader_reads_the_rest() {
         use crate::volume::metadata::{Origin, SealDigest, Verdict};
         use crate::volume::thin::Layout;
         let id = VolumeId(uuid::Uuid::new_v4());
@@ -1773,12 +1801,20 @@ mod tests {
                 scheme: None,
                 layout,
                 secret: true,
+                namespace: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
             assert!(back.secret, "read back");
             assert_eq!((back.origin, back.digest, back.layout), (origin, d, layout));
-            assert_eq!(&bytes[bytes.len() - 2..], &[SECRET_TAG, 1], "last");
+            assert_eq!(&bytes[bytes.len() - 2..], &[SECRET_TAG, 1], "last of what is set");
+            // With a namespace (#408): the secret, then the namespace.
+            let mut both = rec.clone();
+            both.namespace = Some("nana".into());
+            let bb = header_bytes(&both, 1 << 20);
+            assert!(bb.ends_with(&[SECRET_TAG, 1, NAMESPACE_TAG, 4, b'n', b'a', b'n', b'a']));
+            let back = &document_of(header_entries(id, &bb)).unwrap().volumes[0];
+            assert!(back.secret && back.namespace.as_deref() == Some("nana"));
             // An engine before #74: the same bytes without what it does not
             // know is what it reads.
             let mut older = rec.clone();
@@ -1787,6 +1823,63 @@ mod tests {
             let ob = &document_of(header_entries(id, &before)).unwrap().volumes[0];
             assert_eq!((ob.origin, ob.digest, ob.layout, ob.secret), (origin, d, layout, false));
         }
+    /// #408: a volume's namespace rides last, after the digest, the scheme
+    /// and the layout; the default (`stormcos`) writes nothing, and an
+    /// engine that does not know the tag stops there, having read the rest.
+    #[test]
+    fn a_namespace_rides_last_and_the_default_writes_nothing() {
+        use crate::volume::metadata::{Origin, SchemeExt, SealDigest, Verdict};
+        use crate::volume::thin::Layout;
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let digest = SealDigest { sha256: [5; 32], verdict: Verdict::Intact, checked_at: 7 };
+        let sc = SchemeExt { code: SchemeExt::ERASURE, data: 8, parity: 3 };
+        let make = |ns: Option<&str>, d, scheme, layout| VolumeRecord {
+            id,
+            name: "golden-x".into(),
+            virtual_size: 1 << 20,
+            array_id: None,
+            extents: Default::default(),
+            retention: Default::default(),
+            redundancy: Default::default(),
+            parity: Default::default(),
+            failed_slabs: Vec::new(),
+            parent: None,
+            sealed: false,
+            template: false,
+            access: Default::default(),
+            fs: None,
+            owner: None,
+            lba: 4096,
+            extent_size: 0,
+            origin: Origin::Unmarked,
+            tier: None,
+            digest: d,
+            scheme,
+            layout,
+            secret: false,
+            namespace: ns.map(String::from),
+        };
+        for (d, scheme, layout) in [(None, None, Layout::Affine), (Some(digest), Some(sc), Layout::Spread)] {
+            let rec = make(Some("nana"), d, scheme, layout);
+            let bytes = header_bytes(&rec, 1 << 20);
+            let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
+            assert_eq!(back.namespace.as_deref(), Some("nana"));
+            assert_eq!((back.digest, back.scheme, back.layout), (d, scheme, layout));
+            assert!(bytes.ends_with(b"N\x04nana"), "the namespace last");
+            // A reader that stops at an unknown tag keeps what came before it.
+            let mut cut = bytes.clone();
+            let at = cut.len() - 6;
+            cut[at] = b'?';
+            let back = &document_of(header_entries(id, &cut)).unwrap().volumes[0];
+            assert_eq!((back.namespace.as_deref(), back.digest, back.scheme), (None, d, scheme));
+        }
+        let plain = make(None, None, None, Layout::Affine);
+        assert_eq!(header_bytes(&make(Some("stormcos"), None, None, Layout::Affine), 1 << 20), header_bytes(&plain, 1 << 20));
+        // Not a DNS label: not taken.
+        let mut bad = header_bytes(&plain, 1 << 20);
+        bad.extend_from_slice(HEADER_EXT_TAG);
+        bad.extend_from_slice(&[Origin::Unmarked.code(), 0, NAMESPACE_TAG, 3, b'N', b'_', b'x']);
+        assert_eq!(document_of(header_entries(id, &bad)).unwrap().volumes[0].namespace, None);
     }
 
     /// #349: a volume's origin rides after its header; a reader that knows
@@ -1819,6 +1912,7 @@ mod tests {
             scheme: None,
             layout: Default::default(),
             secret: false,
+            namespace: None,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -2080,6 +2174,7 @@ mod tests {
             scheme: None,
             layout: Default::default(),
             secret: false,
+            namespace: None,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -2119,6 +2214,7 @@ mod tests {
             scheme: None,
             layout: Default::default(),
             secret: false,
+            namespace: None,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

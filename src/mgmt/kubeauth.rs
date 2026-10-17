@@ -55,9 +55,10 @@ pub struct KubeAuth {
     api_url: String,
     token_file: Option<String>,
     client: crate::http::Client,
-    /// Keyed by the bearer's digest, resource, verb and name: a review is for
-    /// one name when the role names resources (#216).
-    cache: Mutex<HashMap<(String, String, String, Option<String>), (Instant, Review)>>,
+    /// Keyed by the bearer's digest, resource, verb, name and namespace: a
+    /// review is for one name when the role names resources (#216), and in
+    /// one namespace when the volume is in one (#408).
+    cache: Mutex<HashMap<(String, String, String, Option<String>, Option<String>), (Instant, Review)>>,
 }
 
 fn non_empty(v: Option<String>) -> Option<String> {
@@ -129,13 +130,21 @@ impl KubeAuth {
     /// May `bearer` `verb` the `storage.storm.io` resource `resource` (named
     /// `name`, when there is one)?
     pub async fn review(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>) -> Review {
-        let key = (digest(bearer), resource.to_string(), verb.to_string(), name.map(str::to_string));
+        self.review_in(bearer, resource, verb, name, None).await
+    }
+
+    /// [`review`](Self::review) in a namespace (#408): a volume's, so a Role
+    /// in a family's namespace on forge's apiserver grants it that family's
+    /// volumes and no other's. `None`: the cluster-wide question.
+    pub async fn review_in(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>, namespace: Option<&str>) -> Review {
+        let key =
+            (digest(bearer), resource.to_string(), verb.to_string(), name.map(str::to_string), namespace.map(str::to_string));
         if let Some((at, r)) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             if at.elapsed() < CACHE_TTL && !matches!(r, Review::Unavailable(_)) {
                 return r.clone();
             }
         }
-        let r = self.review_uncached(bearer, resource, verb, name).await;
+        let r = self.review_uncached(bearer, resource, verb, name, namespace).await;
         if !matches!(r, Review::Unavailable(_)) {
             let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             c.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
@@ -144,7 +153,7 @@ impl KubeAuth {
         r
     }
 
-    async fn review_uncached(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>) -> Review {
+    async fn review_uncached(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>, namespace: Option<&str>) -> Review {
         let tr = match self
             .post(
                 "/apis/authentication.k8s.io/v1/tokenreviews",
@@ -168,6 +177,9 @@ impl KubeAuth {
         let mut attrs = json!({ "group": "storage.storm.io", "resource": resource, "verb": verb });
         if let Some(n) = name {
             attrs["name"] = json!(n);
+        }
+        if let Some(ns) = namespace {
+            attrs["namespace"] = json!(ns);
         }
         let sar = match self
             .post(

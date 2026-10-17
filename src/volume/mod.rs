@@ -78,6 +78,8 @@ pub struct CreateOptions {
     /// staged on a node keeps the id the release gave it, which is what
     /// `slab holds` compares (#122). `None`: a fresh id.
     pub id: Option<VolumeId>,
+    /// The namespace the volume belongs to (#408). `None`: the default.
+    pub namespace: Option<String>,
 }
 
 /// The bulk extent size (#156, owner 2026-10-05: 8 MiB rather than 64).
@@ -371,6 +373,8 @@ pub struct VolumeManager {
     to_digest: std::collections::HashSet<VolumeId>,
     /// Wakes the digester: a seal to digest, or a copy to check.
     digest_wake: Arc<tokio::sync::Notify>,
+    /// The namespace each volume belongs to (#408). Absent = the default.
+    namespaces: HashMap<VolumeId, String>,
     /// Why the last attempt to write this manager's record failed, if it did.
     ///
     /// A background persist cannot fail the call that triggered it — the
@@ -458,6 +462,7 @@ impl VolumeManager {
             secrets: std::collections::HashSet::new(),
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
+            namespaces: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -496,6 +501,7 @@ impl VolumeManager {
             secrets: std::collections::HashSet::new(),
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
+            namespaces: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -883,6 +889,45 @@ impl VolumeManager {
         self.origins.get(id).copied().unwrap_or_default()
     }
 
+    /// The namespace a volume belongs to (#408): [`metadata::DEFAULT_NAMESPACE`]
+    /// unless something said otherwise.
+    pub fn namespace(&self, id: &VolumeId) -> &str {
+        self.namespaces.get(id).map(String::as_str).unwrap_or(metadata::DEFAULT_NAMESPACE)
+    }
+
+    /// Put a volume in a namespace (#408); written at the next persist. A
+    /// sealed volume's namespace does not change. The caller checks the name
+    /// is free there.
+    pub fn set_namespace(&mut self, id: VolumeId, namespace: &str) -> Result<(), VolumeError> {
+        let h = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?;
+        if !metadata::valid_namespace(namespace) {
+            return Err(VolumeError::AllocatorError(format!("'{namespace}' is not a namespace name (a DNS-1123 label)")));
+        }
+        if h.is_sealed() && self.namespace(&id) != namespace {
+            return Err(VolumeError::AllocatorError(format!(
+                "volume {id} is sealed: its namespace ({}) does not change",
+                self.namespace(&id)
+            )));
+        }
+        if namespace == metadata::DEFAULT_NAMESPACE {
+            self.namespaces.remove(&id);
+        } else {
+            self.namespaces.insert(id, namespace.to_string());
+        }
+        Ok(())
+    }
+
+    /// The volumes named `name` in `namespace` (#408), but `except`.
+    pub async fn named_in(&self, namespace: &str, name: &str, except: Option<VolumeId>) -> Vec<VolumeId> {
+        let mut out = Vec::new();
+        for (id, h) in &self.volumes {
+            if Some(*id) != except && self.namespace(id) == namespace && h.name().await == name {
+                out.push(*id);
+            }
+        }
+        out
+    }
+
     /// Say where a volume came from (#349); written at the next persist.
     pub fn set_origin(&mut self, id: VolumeId, origin: crate::volume::metadata::Origin) {
         if origin == crate::volume::metadata::Origin::Unmarked {
@@ -1103,8 +1148,10 @@ impl VolumeManager {
         if name.is_empty() {
             return Err(VolumeError::AllocatorError("a volume needs a name".into()));
         }
+        // Unique within the volume's namespace (#408).
+        let ns = self.namespace(&id).to_string();
         for (other, h) in &self.volumes {
-            if *other != id && h.name().await == name {
+            if *other != id && self.namespace(other) == ns && h.name().await == name {
                 return Err(VolumeError::AllocatorError(format!("volume {other} is already called {name}")));
             }
         }
@@ -1437,6 +1484,11 @@ impl VolumeManager {
                 });
             }
         }
+        if let Some(ns) = &opts.namespace {
+            if !metadata::valid_namespace(ns) {
+                return Err(VolumeError::AllocatorError(format!("'{ns}' is not a namespace name (a DNS-1123 label)")));
+            }
+        }
         let placement = PlacementPolicy { role, ..opts.placement };
         let vol = match opts.id {
             Some(id) if self.volumes.contains_key(&id) => {
@@ -1460,6 +1512,9 @@ impl VolumeManager {
         self.volumes.insert(id, handle);
         self.present.insert(id);
         self.origins.insert(id, crate::volume::metadata::Origin::Node);
+        if let Some(ns) = opts.namespace.filter(|n| n != metadata::DEFAULT_NAMESPACE) {
+            self.namespaces.insert(id, ns);
+        }
         // A create whose record was not written is not reported made (#366):
         // the volume is taken back (it holds nothing yet) and the error said.
         if let Err(e) = self.persist_checked().await {
@@ -1673,6 +1728,9 @@ impl VolumeManager {
                     tracing::warn!("{why}");
                     handle.refuse(why);
                 }
+            }
+            if let Some(ns) = vrec.namespace.clone().filter(|n| n != metadata::DEFAULT_NAMESPACE) {
+                self.namespaces.insert(vrec.id, ns);
             }
             self.volumes.insert(vrec.id, handle);
             self.present.insert(vrec.id);
@@ -2199,6 +2257,7 @@ impl VolumeManager {
         self.digests.remove(&id);
         self.to_digest.remove(&id);
         self.schemes.remove(&id);
+        self.namespaces.remove(&id);
         self.retentions.remove(&id);
         // A secret volume's slots are always overwritten (#74), whatever
         // the node's default.
@@ -2401,6 +2460,7 @@ impl VolumeManager {
             role: Some(role),
             extent_size: Some(source.extent_size()),
             id: None,
+            namespace: Some(self.namespace(&source_id).to_string()),
         };
         let dest_id = self.create_volume_with(name, virtual_size, opts).await?;
         let dest = self
@@ -2478,6 +2538,7 @@ impl VolumeManager {
                 role: Some(role),
                 extent_size: Some(source.extent_size()),
                 id: None,
+                namespace: Some(m.namespace(&source_id).to_string()),
             };
             let dest_id = m.create_volume_with(name, virtual_size, opts).await?;
             let dest = m.volumes.get(&dest_id).ok_or(VolumeError::VolumeNotFound(dest_id))?.clone();
@@ -2546,6 +2607,11 @@ impl VolumeManager {
     /// filesystem-aware clone path does).
     fn record_lineage(&mut self, child: VolumeId, source: VolumeId) {
         self.parents.insert(child, source);
+        // A clone is in its source's namespace until its maker says
+        // otherwise (#408).
+        if let Some(ns) = self.namespaces.get(&source).cloned() {
+            self.namespaces.insert(child, ns);
+        }
         if let Some(fs) = self.fs_info.get(&source).cloned() {
             self.fs_info.insert(child, fs);
         }
@@ -3610,6 +3676,7 @@ impl VolumeManager {
                 scheme: self.schemes.get(id).copied(),
                 layout: handle.layout(),
                 secret: self.secrets.contains(id),
+                namespace: self.namespaces.get(id).cloned(),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -3677,6 +3744,7 @@ impl VolumeManager {
                 scheme: self.schemes.get(&id).copied(),
                 layout: self.volumes.get(&id).map(|h| h.layout()).unwrap_or_default(),
                 secret: self.secrets.contains(&id),
+                namespace: self.namespaces.get(&id).cloned(),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -3933,9 +4001,12 @@ impl VolumeManager {
                     let why = sc.refusal(&vrec.name, &vrec.id);
                     tracing::warn!("{why}");
                     if let Some(h) = self.volumes.get(&vrec.id) {
-                            h.refuse(why);
-                        }
+                        h.refuse(why);
+                    }
                 }
+            }
+            if let Some(ns) = vrec.namespace.clone().filter(|n| n != metadata::DEFAULT_NAMESPACE) {
+                self.namespaces.insert(vrec.id, ns);
             }
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);

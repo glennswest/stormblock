@@ -276,6 +276,7 @@ pub async fn start(state: &Arc<AppState>, req: Request) -> Result<Vec<Status>, (
             tls: Some(tls.clone()),
             labels: Default::default(),
             creator: None,
+            namespace: None,
             lba: None,
         };
         let job = match state.imports.write().await.start(state.clone(), spec) {

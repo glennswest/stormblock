@@ -638,7 +638,26 @@ manager whenever the catalog was stale.
 - Found: the build VMs' clippy (1.95) fails the crate with ~100 old lints
   (none in the lines changed here): #398
 
-### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — PAUSED for the merge to main; WIP on branch wip/408-namespaces-v2 (model done, compiles)
+### Volumes belong to a namespace (2026-10-13, #408, P1, stormcentral#642) — MERGING: main merged into wip/408-namespaces-v3 (2026-10-17)
+
+2026-10-17: v2 merged with main (121 commits, #74's secret among them) on
+**wip/408-namespaces-v3**. The header order: … `L`, `X` (secret), `N`
+(namespace) last, so an engine of #74 still reads a secret as one. Next:
+check.sh on v3, fast-forward main, tell stormcentral#642, close.
+
+
+Built on wip/408-namespaces-v2 (rebased on main 4d79108): the `N` header
+block, create/clone/import/rename/goldens take `namespace`, unique names
+outside `stormcos`, `?namespace=` on `{id}` routes (task-local in
+`volumes.rs`), `mgmt/namespaces.rs` (quotas.json, usage, settle,
+`/api/v1/namespaces`), SAR `review_in` with the volume's namespace and a
+bearer's list per namespace (`auth::ListNamespaces`), kube label; test
+`integration_destructive::a_familys_bearer_keeps_to_its_namespace_and_its_quota`;
+README, auth.md, CHANGELOG. First check.sh: only that test red (a test
+fault: cloned an unsealed source; fixed 02c9733, #440 filed by sc-build).
+check.sh at 02c9733 ALL PASS (1236/1236, no warnings); #440 closed by
+sc-build. Next: rebase on main, merge, check.sh on main's head, tell
+stormcentral#642, close #408.
 
 Forge holds more than stormcos (nana builds goldens there): a namespace per
 family, a Kubernetes namespace on forge's apiserver. Branch

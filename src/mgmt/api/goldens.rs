@@ -97,8 +97,14 @@ async fn list(State(state): State<Arc<AppState>>) -> Response {
     Json(json!({ "count": items.len(), "items": items })).into_response()
 }
 
-async fn get_one(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
-    match goldens::find(&state, &name).await {
+#[derive(Debug, Default, Deserialize)]
+struct NsQuery {
+    /// The golden's namespace (#408).
+    namespace: Option<String>,
+}
+
+async fn get_one(State(state): State<Arc<AppState>>, Path(name): Path<String>, Query(q): Query<NsQuery>) -> Response {
+    match goldens::find(&state, &name, q.namespace.as_deref()).await {
         Some(r) => Json(r).into_response(),
         None => ApiError::not_found(format!("no golden {name} here")),
     }
@@ -115,10 +121,11 @@ struct TicketRequest {
 async fn ticket(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    Query(q): Query<NsQuery>,
     headers: HeaderMap,
     body: Option<Json<TicketRequest>>,
 ) -> Response {
-    let Some(r) = goldens::find(&state, &name).await else {
+    let Some(r) = goldens::find(&state, &name, q.namespace.as_deref()).await else {
         return ApiError::not_found(format!("no golden {name} here"));
     };
     let secs = body.and_then(|Json(b)| b.ticket_secs);
@@ -128,6 +135,7 @@ async fn ticket(
 #[derive(Debug, Deserialize)]
 struct ContentQuery {
     ticket: Option<String>,
+    namespace: Option<String>,
 }
 
 /// `GET /api/v1/goldens/{name}/content?ticket=…`: the golden's bytes, one
@@ -147,7 +155,7 @@ async fn content(
         )
             .into_response();
     }
-    let Some(r) = goldens::find(&state, &name).await else {
+    let Some(r) = goldens::find(&state, &name, q.namespace.as_deref()).await else {
         return ApiError::not_found(format!("no golden {name} here"));
     };
     let id = crate::volume::VolumeId(r.volume_id);

@@ -168,6 +168,21 @@ before this), needs storage-admin. The audit line says `verb: delete` and
 `reason: its own: created by …`. The node and admin tokens are not touched
 by this. Losing the record only makes a delete need storage-admin again.
 
+**Namespaces (#408, stormcentral#642).** A volume belongs to a namespace:
+`stormcos` (the default, every volume made before this) or a family's
+(`nana`, …), a Kubernetes namespace on forge's apiserver. A Kubernetes
+bearer's review of a volume is asked **in the volume's namespace**
+(`resourceAttributes.namespace`): the one `?namespace=` names, else the
+volume's the path names, else the one a create's, clone's or import's body
+names, else `stormcos`. So a RoleBinding in `nana` grants `nana`'s volumes
+and nothing else, and a ClusterRoleBinding (stormcos's `storage-admin`,
+`storage-user`) still grants every namespace. A listing (`GET
+/api/v1/volumes`) is reviewed cluster-wide first; a bearer refused that is
+asked per namespace and shown the namespaces it may list. Everything that is
+not a volume (slabs, drives, forge, …) is node-wide and reviewed with no
+namespace. The node and admin tokens are not namespaced. A namespace's quota
+(`PUT /api/v1/namespaces/{ns}/quota`) is destructive.
+
 A bearer that does not review is 401, a denied one 403. With no
 `[management.kubernetes]` a bearer that is not a node or admin token is no
 credential at all, as before. The node token and the admin token are

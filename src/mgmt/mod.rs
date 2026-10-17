@@ -25,6 +25,7 @@ pub mod install_config;
 pub mod kernelopt;
 pub mod peers;
 pub mod creators;
+pub mod namespaces;
 #[cfg(feature = "ui")]
 pub mod ui;
 
@@ -354,6 +355,8 @@ pub struct AppState {
     pub creators: std::sync::Mutex<creators::Creators>,
     /// Peers' volumes attached here as ublk devices (#328).
     pub peer_attaches: tokio::sync::Mutex<peers::PeerAttaches>,
+    /// What each namespace may hold (#408), `quotas.json`.
+    pub quotas: std::sync::Mutex<namespaces::Quotas>,
     /// What each drive opened on this node held when it was opened (#154),
     /// by path: ours (adopted), blank or foreign (offered).
     pub drive_offers: std::sync::Mutex<HashMap<String, drive_offer::Offer>>,
@@ -620,6 +623,9 @@ impl AppState {
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),
             peer_attaches: tokio::sync::Mutex::new(peers::PeerAttaches::load(
+                config.management.data_dir.as_deref().map(std::path::Path::new),
+            )),
+            quotas: std::sync::Mutex::new(namespaces::Quotas::load(
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),
             serve: std::sync::OnceLock::new(),

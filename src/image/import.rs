@@ -105,6 +105,11 @@ pub struct ImportSpec {
     /// Who asked, recorded as the volume's creator (#422). Set by the engine.
     #[serde(skip)]
     pub creator: Option<String>,
+    /// The golden's namespace (#408): `stormcos` when absent. A name is
+    /// unique within a namespace other than the default, and the
+    /// namespace's quota is kept.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// The logical block the golden and its clones are presented at: 512 or
     /// 4096 (#110). Absent means what the image was authored for: a GPT at
     /// the LBA its header is at, an MBR disk or an ISO 9660 image at 512,
@@ -298,6 +303,11 @@ impl Imports {
     pub fn start(&mut self, state: Arc<AppState>, spec: ImportSpec) -> Result<Arc<RwLock<ImportStatus>>, String> {
         if spec.name.trim().is_empty() {
             return Err("name must not be empty".into());
+        }
+        if let Some(ns) = &spec.namespace {
+            if !crate::volume::metadata::valid_namespace(ns) {
+                return Err(format!("'{ns}' is not a namespace name (a DNS-1123 label)"));
+            }
         }
         let source = match (&spec.file, &spec.url) {
             (Some(f), None) => f.clone(),
@@ -591,6 +601,9 @@ async fn stream_raw(
             .await
             .map_err(|e| format!("create volume: {e}"))?
     };
+    if let Err(r) = crate::mgmt::namespaces::settle(state, vol_id, spec.namespace.as_deref()).await {
+        return Err(Fail::new(Phase::Write, r.message));
+    }
     st.write().await.volume_id = Some(vol_id.0);
     if let Some(who) = &spec.creator {
         state.creators.lock().unwrap_or_else(|e| e.into_inner()).set(
@@ -761,6 +774,7 @@ async fn record_golden(state: &Arc<AppState>, spec: &ImportSpec, vol_id: VolumeI
         provenance: spec.provenance.clone(),
         made_by: None,
         from,
+        namespace: spec.namespace.clone().filter(|n| n != crate::volume::metadata::DEFAULT_NAMESPACE),
     };
     if let Err(e) = crate::mgmt::goldens::record(state, r).await {
         tracing::warn!("import {}: not recorded as a golden: {e}", spec.name);
@@ -795,6 +809,9 @@ async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLoc
             .await
             .map_err(|e| format!("create volume: {e}"))?
     };
+    if let Err(r) = crate::mgmt::namespaces::settle(state, vol_id, spec.namespace.as_deref()).await {
+        return Err(Fail::new(Phase::Write, r.message));
+    }
     st.write().await.volume_id = Some(vol_id.0);
     if let Some(who) = &spec.creator {
         state.creators.lock().unwrap_or_else(|e| e.into_inner()).set(

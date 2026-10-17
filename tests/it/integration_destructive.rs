@@ -38,6 +38,8 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                         // storage-user once stormcos#557 adds `delete` (#422).
                         Some("tester-k8s") => Some(("system:serviceaccount:stormbootx-test:runner", vec!["storage-users-delete"])),
                         Some("other-tester-k8s") => Some(("system:serviceaccount:stormbootx-test:other", vec!["storage-users-delete"])),
+                        // A family's builder: its own namespace only (#408).
+                        Some("nana-k8s") => Some(("system:serviceaccount:nana:builder", vec!["nana-users"])),
                         _ => None,
                     };
                     Json(match user {
@@ -69,7 +71,12 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                     let viewer = in_group("storage-viewers") && matches!(verb, "get" | "list" | "watch");
                     let deleter = in_group("storage-users-delete")
                         && matches!(verb, "get" | "list" | "watch" | "create" | "update" | "delete");
-                    let ok = (in_group("storage-admins") || stormcert || user || viewer || deleter) && ra["group"] == "storage.storm.io";
+                    // A RoleBinding in `nana` (#408): the volumes of that
+                    // namespace and no other's.
+                    let nana = in_group("nana-users")
+                        && ra["namespace"] == "nana"
+                        && matches!(verb, "get" | "list" | "watch" | "create" | "update" | "delete");
+                    let ok = (in_group("storage-admins") || stormcert || user || viewer || deleter || nana) && ra["group"] == "storage.storm.io";
                     Json(json!({ "status": { "allowed": ok, "reason": if ok { "storage-admin" } else { "no RBAC policy matched" } } }))
                 }
             }),
@@ -778,4 +785,109 @@ async fn a_sealed_volumes_seal_digest_is_taken_in_the_background_and_reported() 
     let h: Value = c.get(format!("{}/health", n.base)).send().await.unwrap().json().await.unwrap();
     assert_eq!(h["digests"]["intact"], 1, "{h}");
     assert_eq!(h["digests"]["mismatch"], 0);
+}
+
+/// #408: a volume belongs to a namespace. A family's bearer (a RoleBinding
+/// in `nana` on forge's apiserver) makes, reads and lists its own
+/// namespace's volumes and no other's; a name is unique within `nana`; a
+/// namespace's quota is kept; `?namespace=` resolves a name.
+#[tokio::test]
+async fn a_familys_bearer_keeps_to_its_namespace_and_its_quota() {
+    use reqwest::Method as M;
+    const NANA: &str = "nana-k8s";
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let api = apiserver(asked.clone()).await;
+    let n = node(false, Some(api)).await;
+    let c = reqwest::Client::new();
+    let stormcos_img = volume(&n, "img", false).await;
+
+    // In its namespace: made; in the default one (nothing named): refused.
+    let r = c.post(format!("{}/volumes", n.base)).bearer_auth(NANA)
+        .json(&json!({"name": "img", "size": "4M", "namespace": "nana"})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().await.unwrap());
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["namespace"], "nana", "{v}");
+    let nana_img = v["id"].as_str().unwrap().to_string();
+    assert_eq!(call(&n, M::POST, "/volumes", Some(NANA), Some(json!({"name": "x", "size": "4M"}))).await, 403, "stormcos's namespace");
+    assert_eq!(call(&n, M::POST, "/volumes", Some(NODE), Some(json!({"name": "x", "size": "4M", "namespace": "Not_A_Label"}))).await, 400);
+
+    // A name is unique within nana; the same name in stormcos is another volume.
+    let again = c.post(format!("{}/volumes", n.base)).bearer_auth(NANA)
+        .json(&json!({"name": "img", "size": "4M", "namespace": "nana"})).send().await.unwrap();
+    assert_eq!(again.status().as_u16(), 409);
+    let body: Value = again.json().await.unwrap();
+    assert_eq!((body["code"].as_str(), body["volume"].as_str()), (Some("name_taken"), Some(nana_img.as_str())), "{body}");
+
+    // `img` is two volumes; `?namespace=` says which.
+    assert_eq!(call(&n, M::GET, "/volumes/img", Some(NODE), None).await, 409);
+    let one: Value = c.get(format!("{}/volumes/img?namespace=nana", n.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    assert_eq!(one["id"].as_str(), Some(nana_img.as_str()), "{one}");
+    let one: Value = c.get(format!("{}/volumes/img?namespace=stormcos", n.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    assert_eq!(one["id"].as_str(), Some(stormcos_img.as_str()), "{one}");
+
+    // Its own volume, by id or by name in its namespace; never stormcos's.
+    assert_eq!(call(&n, M::GET, &format!("/volumes/{nana_img}"), Some(NANA), None).await, 200);
+    assert_eq!(call(&n, M::GET, "/volumes/img?namespace=nana", Some(NANA), None).await, 200);
+    assert_eq!(call(&n, M::GET, &format!("/volumes/{stormcos_img}"), Some(NANA), None).await, 403);
+
+    // A clone is in its source's namespace (a sealed source, as every clone's).
+    {
+        let mut vm = n.state.volume_manager.lock().await;
+        vm.seal_volume(stormblock::volume::VolumeId(nana_img.parse().unwrap()), None).await.unwrap();
+    }
+    let cl = c.post(format!("{}/volumes/{nana_img}/clone", n.base)).bearer_auth(NANA)
+        .json(&json!({"name": "img-clone"})).send().await.unwrap();
+    assert_eq!(cl.status().as_u16(), 201, "{}", cl.text().await.unwrap());
+    let cl: Value = cl.json().await.unwrap();
+    assert_eq!(cl["namespace"], "nana", "{cl}");
+
+    // Its listing: what it may list, nana's only.
+    let list: Value = c.get(format!("{}/volumes", n.base)).bearer_auth(NANA).send().await.unwrap().json().await.unwrap();
+    let mut names: Vec<(String, String)> = list["items"].as_array().unwrap().iter()
+        .map(|v| (v["namespace"].as_str().unwrap().to_string(), v["name"].as_str().unwrap().to_string())).collect();
+    names.sort();
+    assert_eq!(names, vec![("nana".into(), "img".into()), ("nana".into(), "img-clone".into())], "{list}");
+    // The node token: every namespace.
+    let all: Value = c.get(format!("{}/volumes", n.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    assert_eq!(all["items"].as_array().unwrap().len(), 3);
+
+    // A quota: the admin's to set; past it, nothing more is made.
+    assert_eq!(call(&n, M::PUT, "/namespaces/nana/quota", Some(NODE), Some(json!({"max_volumes": 2}))).await, 401, "destructive");
+    assert_eq!(call(&n, M::PUT, "/namespaces/nana/quota", Some(ADMIN), Some(json!({"max_volumes": 2}))).await, 200);
+    let over = c.post(format!("{}/volumes", n.base)).bearer_auth(NANA)
+        .json(&json!({"name": "third", "size": "4M", "namespace": "nana"})).send().await.unwrap();
+    assert_eq!(over.status().as_u16(), 403);
+    let body: Value = over.json().await.unwrap();
+    assert_eq!(body["code"], "quota_exceeded", "{body}");
+    assert_eq!(body["usage"]["volumes"], 3, "the refused one counted, then undone: {body}");
+    let ns: Value = c.get(format!("{}/namespaces/nana", n.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    assert_eq!((ns["usage"]["volumes"].as_u64(), ns["quota"]["max_volumes"].as_u64()), (Some(2), Some(2)), "{ns}");
+    let listed: Value = c.get(format!("{}/namespaces", n.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    let rows: Vec<&str> = listed["namespaces"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(rows, vec!["nana", "stormcos"], "{listed}");
+    // Kept across a restart of the store.
+    assert_eq!(
+        stormblock::mgmt::namespaces::Quotas::load(Some(n.dir.path())).get("nana").and_then(|q| q.max_volumes),
+        Some(2)
+    );
+    assert_eq!(call(&n, M::DELETE, "/namespaces/nana/quota", Some(ADMIN), None).await, 204);
+    assert_eq!(call(&n, M::POST, "/volumes", Some(NANA), Some(json!({"name": "third", "size": "4M", "namespace": "nana"}))).await, 201);
+
+    // Moved to another namespace by the admin: an unsealed volume, a free name.
+    let r = c.patch(format!("{}/volumes/third?namespace=nana", n.base)).bearer_auth(ADMIN)
+        .json(&json!({"namespace": "stormcos", "name": "img"})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 409, "img is stormcos's already: {}", r.text().await.unwrap());
+    let r = c.patch(format!("{}/volumes/third?namespace=nana", n.base)).bearer_auth(ADMIN)
+        .json(&json!({"namespace": "stormcos"})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200, "{}", r.text().await.unwrap());
+    let moved: Value = c.get(format!("{}/volumes/third", n.base)).bearer_auth(NODE).send().await.unwrap().json().await.unwrap();
+    assert_eq!(moved["namespace"], "stormcos", "{moved}");
+
+    // Every review of nana's bearer named a namespace when it was about one volume.
+    let sar: Vec<Value> = asked.lock().unwrap().iter()
+        .filter(|b| b["kind"] == "SubjectAccessReview" && b["spec"]["user"] == "system:serviceaccount:nana:builder")
+        .map(|b| b["spec"]["resourceAttributes"].clone()).collect();
+    assert!(sar.iter().any(|ra| ra["verb"] == "create" && ra["namespace"] == "nana"), "{sar:?}");
+    assert!(sar.iter().any(|ra| ra["verb"] == "get" && ra["namespace"] == "stormcos"), "{sar:?}");
+    assert!(sar.iter().any(|ra| ra["verb"] == "list" && ra["namespace"].is_null()), "the cluster-wide list first: {sar:?}");
 }
