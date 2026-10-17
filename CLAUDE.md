@@ -225,6 +225,15 @@ connection), `attachments[].remote`, `GET /api/v1/exports/{id}/connections`,
       stormblock-registry#63 told; closed. No separate golden (master: ac1d550
       rode into the current wave; b355da7 is lint-only)
 
+### Release an array with no write to its members (2026-10-17, #296, P3) — PARKED until the single-node pacing lifts
+
+For a live RAID-head handover (stormstorage#33; failover already works).
+To build on a wip/ branch: `POST /api/v1/arrays/{id}/release[?force]`
+(409 while a consumer holds a volume, #292's connections; withdraw exports;
+drop slab + volumes from memory with no persist/erase; stop the array with
+no superblock/bitmap/flush write; forget the members); test: assemble on a
+second engine, every member byte unchanged. Nothing built.
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
