@@ -511,6 +511,39 @@ exit 0
 DHCPSCRIPT
 chmod 755 "$INITRD_DIR/usr/share/udhcpc/default.script"
 
+# A path NIC's lease (#450): a port other than the uplink, with carrier,
+# leased only so the engine's NVMe/TCP connections to the appliance can leave
+# by it too. An address and its subnet route, nothing else: no default route,
+# no resolv.conf, no name; the subnet route below the uplink's (metric 1024),
+# so nothing that is not bound to this port leaves by it. The lease is handed
+# to stormpump in /run/stormblock/path-nics/<port>.json, since nothing in the
+# initramfs survives switch_root to renew it.
+cat > "$INITRD_DIR/usr/share/udhcpc/path.script" << 'PATHSCRIPT'
+#!/bin/sh
+RUN="${STORM_RUN:-/run/stormblock}"
+case "$1" in
+    bound|renew)
+        ip addr flush dev "$interface" 2>/dev/null
+        ip addr add "$ip/${mask:-24}" dev "$interface" || exit 1
+        _net=$(ip route show dev "$interface" 2>/dev/null | awk '$1 ~ /\// && / src / {print $1; exit}')
+        if [ -n "$_net" ]; then
+            ip route del "$_net" dev "$interface" 2>/dev/null
+            ip route add "$_net" dev "$interface" src "$ip" metric 1024 2>/dev/null
+        fi
+        [ -n "${mtu:-}" ] && ip link set "$interface" mtu "$mtu" 2>/dev/null
+        mkdir -p "$RUN/path-nics"
+        printf '{"interface": "%s", "address": "%s", "prefix": %s, "server": "%s", "lease_secs": %s, "leased_at": %s}\n' \
+            "$interface" "$ip" "${mask:-24}" "${serverid:-}" "${lease:-0}" "$(date +%s)" > "$RUN/path-nics/$interface.json"
+        ;;
+    deconfig)
+        ip addr flush dev "$interface" 2>/dev/null
+        rm -f "$RUN/path-nics/$interface.json"
+        ;;
+esac
+exit 0
+PATHSCRIPT
+chmod 755 "$INITRD_DIR/usr/share/udhcpc/path.script"
+
 # Minimal /etc
 cat > "$INITRD_DIR/etc/mdev.conf" << 'MDEV'
 ublk[bc].* 0:0 0660
@@ -737,6 +770,8 @@ for param in $(cat /proc/cmdline); do
         # comma-separated). Every other NIC that is up and reaches the
         # appliance carries a path of the flow-over.
         rd.stormblock.path-skip=*)   export STORMBLOCK_PATH_SKIP="${param#*=}" ;;
+        # `off`: no address on the other ports for the flow-over (#450).
+        rd.stormblock.path-nics=*)   PATH_NICS_MODE="${param#*=}" ;;
         rd.stormblock.tag=*)         BOOTTAG="${param#*=}" ;;
         # What to call ourselves on every NVMe connect. stormbootx composed
         # this from SMBIOS and presented it to load the kernel; presenting the
@@ -2278,6 +2313,51 @@ NETADDR="$(ip addr show "$IFACE" | grep 'inet ' | awk '{print $2}')"
 if [ -n "$NETADDR" ]; then
     echo "Network: $IFACE $NETADDR $(ip route show default | head -1)"
     stamp "network up"
+
+    # --- BEGIN path nics (covered by tests/initramfs-path-nics.sh)
+    # Every other port that is up gets an address too (#450, the master's A
+    # for the owner: "use both nics in flowover if they're up"), so the
+    # engine's NVMe/TCP connections to the appliance have a path by each NIC
+    # on its subnet. Not a bond or bridge port, not one `rd.stormblock.
+    # path-skip=` names, only one with carrier; `rd.stormblock.path-nics=off`
+    # turns it off. Two NICs on one subnet answer ARP each for its own
+    # address only (arp_ignore=1, arp_announce=2, #90's rule). No hostname is
+    # sent: the node's name is its uplink's.
+    PATH_NICS=""
+    _pn_sysctl="${STORM_SYSCTL_NET:-/proc/sys/net/ipv4/conf}"
+    _pn_script="${STORM_PATH_SCRIPT:-/usr/share/udhcpc/path.script}"
+    if [ "${PATH_NICS_MODE:-on}" = off ]; then
+        netsay "  path NICs: off (rd.stormblock.path-nics=off)"
+    else
+        _pn_cand=""
+        for _p in $ALL_PHYS; do
+            [ "$_p" = "${LEASED:-}" ] && continue
+            [ "$_p" = "$IFACE" ] && continue
+            [ -e "$NET_SYSFS/$_p/master" ] && continue
+            case ",${STORMBLOCK_PATH_SKIP:-}," in
+                *",$_p,"*) netsay "  path NIC $_p: skipped (rd.stormblock.path-skip)"; continue ;;
+            esac
+            [ "$(net_carrier "$_p")" = 1 ] || continue
+            _pn_cand="$_pn_cand $_p"
+        done
+        if [ -n "$_pn_cand" ]; then
+            for _f in all $_pn_cand ${IFACE}; do
+                [ -d "$_pn_sysctl/$_f" ] || continue
+                echo 1 > "$_pn_sysctl/$_f/arp_ignore" 2>/dev/null
+                echo 2 > "$_pn_sysctl/$_f/arp_announce" 2>/dev/null
+            done
+        fi
+        for _p in $_pn_cand; do
+            if udhcpc -i "$_p" -O mtu -s "$_pn_script" -q -n -t 3 >/dev/null 2>&1; then
+                _pa=$(ip -4 -o addr show dev "$_p" 2>/dev/null | awk '{print $4}' | head -1)
+                netsay "  path NIC $_p: ${_pa:-leased} (an NVMe/TCP path to the appliance when it is on its subnet)"
+                PATH_NICS="$PATH_NICS $_p"
+            else
+                netsay "  path NIC $_p: no lease - not used"
+            fi
+        done
+    fi
+    # --- END path nics
 
     # A name, so this node is distinguishable from the next one.
     #
