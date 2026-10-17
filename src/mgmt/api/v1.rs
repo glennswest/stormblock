@@ -159,8 +159,9 @@ pub struct CreateVolumeRequest {
     pub encrypted: bool,
     /// A secret volume (#74): attached as a local ublk device by one
     /// consumer, never cloned, snapshotted or exported. Additive to the
-    /// CSI contract; a volume made with it on another node is refused.
-    #[serde(default)]
+    /// CSI contract (left out when false, so the wire is as it was); a
+    /// volume made with it on another node is refused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub secret: bool,
     #[serde(default)]
     pub source: Option<VolumeSource>,
