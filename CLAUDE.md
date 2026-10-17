@@ -265,6 +265,12 @@ semver says v21.0.0. Asked on #353 (needs-owner): A v21.0.0 now + a tag per
 staged golden (recommended), B 20.1.0 as asked, C after the pacing.
 Consumers: stormuefi#39 (#205's fix), stormblock-test#4 (>= #274).
 
+### Carry mkfs-ext4 with #9/#10 for 64 TiB–1 PiB blanks (2026-10-17, #289) — CLOSED: done by #300
+
+mkfs-ext4 v4.1.1 + fio-ext4 v1.8.1 (559984e), 1 PiB template verified
+(a1c99f5), in golden-stormblock-12891c0025b2. `P` suffix not added (the node
+sends MiB).
+
 ### No freeze: everything on main, the stage takes main's head (owner via master, 2026-10-14) — IN PROGRESS
 
 The 12.23 freeze is off. Merged to main, each after a green check.sh: the
