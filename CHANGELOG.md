@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### 2026-10-17
+- **feat:** #450 (the master's A for the owner, on branch `wip/450-path-nics` until single-node is stable): the initramfs leases every other cabled port, so the flow-over has an NVMe/TCP path by each NIC. Each physical port with carrier, not the uplink and not a bond or bridge port, gets its own DHCP lease (`path.script`).
+  - **What it gets:** an address and its subnet route at metric 1024, below the uplink's; no default route, no resolv.conf, no hostname. `arp_ignore=1` and `arp_announce=2` are set.
+  - **After switch_root:** the address is kept, and the lease is handed to stormpump in `/run/stormblock/path-nics/<port>.json` to renew.
+  - **Opt-outs:** `rd.stormblock.path-skip=` per port, `rd.stormblock.path-nics=off` for all.
+  - **Tests:** `tests/initramfs-path-nics.sh` (sh and busybox sh), `ci-path-nics-verify.sh` (QEMU, real busybox DHCP on both ends). docs/storage-network.md.
 - **feat:** #74 (decision A): **secret volumes**, what stormcos's `stormcert-data` (the node CA's private key) becomes. Until now anything holding the node token could clone it and attach the copy.
   - **Made secret:** on create (`/api/v1` and `/v1` `secret: true`), by an image's golden (`[[slab.golden]] secret = true`, `compose/slab`'s `secret`: its clones are secret), or by the admin with `PUT /api/v1/volumes/{id}/secret` (one way). It is kept in the volume's format-2 header, last (`X`); an older engine reads it as an ordinary volume.
   - **Never copied:** clone, snapshot, group snapshot, template claims, goldens, every composition, cross-role copy, moves and StormFS copy are refused (409) in the volume manager.

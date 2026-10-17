@@ -2079,6 +2079,8 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.portal=`, `iqn=`, `port=`, `layout=` | port `3260` | the old iSCSI boot (`boot-iscsi`: formats a blank target, reopens its own slab, #162) |
 | `ip=<addr>::<gw>:<mask>::<device>:none` | DHCP | a static address, on `<device>` when it is given and present (else the selected uplink); the mask a prefix or dotted. Wins over the node's declaration. `ip=dhcp` or none means DHCP unless the node declares a static boot-NIC address (#229, below) |
 | `rd.stormblock.declared-net=off` | on | ignore the node's declared `[network]` for the boot NIC (#229) |
+| `rd.stormblock.path-nics=off` | on | no address on the other cabled ports for the flow-over's NVMe/TCP paths (#450) |
+| `rd.stormblock.path-skip=<port>[,…]` | none | ports that get no path address, and that no NVMe/TCP connection leaves by (#450) |
 | `console=` | — | every one that exists gets the boot messages (#237) |
 
 Bounded waits, overridable in the environment (for tests): `STORM_NETDEV_WAIT`
