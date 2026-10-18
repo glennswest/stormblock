@@ -130,6 +130,55 @@ On a spinning disk, one overwrite of an addressable sector is enough for any
 practical recovery. Reallocated sectors are the exception, and only a sanitize
 reaches those.
 
+## A release erase: everything a node holds for its cluster (#291)
+
+stormcluster#14's release (a node leaves its cluster and comes back as a new
+SNO) is one call, `POST /api/v1/release {erase?, force?, dry_run?}`
+(destructive). A running node cannot erase its own service data: `fastetcd-data`,
+`stormcert-data` and the kubelet's are ublk devices mounted at boot, and the
+engine never deletes what it serves (#267). So the call records a **ticket**
+and the node reboots (decided on #291, 1B):
+
+1. **Asked.** The answer is the plan (what is kept, laid again and erased)
+   and the ticket, written into the data directory and captured to
+   `stormblock-state` before the answer. Refused (409) on an engine with no
+   state volume (`not_a_node`), while a flow-over is still moving
+   (`flow_over_running`), and while a remote host has a volume it would erase
+   attached (#292, `attached`, unless `force`). `dry_run` answers the plan
+   only. `GET /api/v1/release` shows the ticket and the last report;
+   `DELETE` cancels it. Health says `release: pending` meanwhile.
+2. **Run.** At the next boot from the node's own disk, `boot-local` reads the
+   ticket from `stormblock-state` and runs it after the slabs are open and
+   before the root is resolved, so nothing is exported or mounted:
+   - **kept:** every sealed golden of origin `release` (#349): the release's
+     system images and PVC blanks; and `system-data`, the machine record;
+   - **laid again:** every unsealed volume of origin `release` cloned from a
+     kept golden (`fastetcd-data`, `stormcert-data`, `stormcos-state`,
+     `stormblock-state`, …): deleted, then a fresh clone of its golden with a
+     new filesystem identity, as an install lays it, with no image copy;
+   - **erased:** everything else: claims, VM disks, the node's goldens
+     (customer images), unmarked volumes;
+   - **the node's declaration** is carried into the fresh `stormcos-state`:
+     `/config/stormcos.toml` with only its `[node]` and `[network]` tables
+     (the role, `[cluster]`, is not carried), `install-node.toml`,
+     `install-config.yaml` and `ssh/authorized_keys`. It is saved in the
+     ticket before anything is deleted.
+3. **Overwritten.** Every slot a deleted volume frees is `Erasing` at least
+   at the ticket's level (`once` by default, never less), and the
+   successor's eraser overwrites it when it opens the slab; progress is
+   `/api/v1/erasures`, and the release is done when nothing is pending.
+   Slots a kept golden still shares are not freed, so not erased.
+4. **Reported.** `release-report.json` in the fresh `stormblock-state`: what
+   was kept, laid again and erased, slots and bytes queued, the files
+   carried, and anything that did not go as planned (each also a console
+   WARNING).
+
+A cut part-way runs the ticket again at the next boot: `stormblock-state` is
+laid again last, under a temporary name, and the old one, with the ticket,
+is there until the end. A cut between its delete and the rename is finished
+by the next boot. A volume of origin `release` that has no golden to lay it
+from is erased and named in the report.
+
 ## Crypto-erase (designed, not built)
 
 Crypto-erase covers a single volume on flash.
