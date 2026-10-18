@@ -2188,18 +2188,24 @@ values nothing writes.
       #361 (needs-owner: one slab per class? which service state survives a
       demote? factory wipe? existing volumes? who sets the class?)
 
-### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — IN PROGRESS (2026-10-17, the owner's ask; a check script only, nothing that ships)
+### An engine-made XFS blank and claims, mounted by a real kernel (2026-10-08, #225, P2) — DONE (the owner's ask, 2026-10-17), closed
 
 #147 checked XFS with xfsprogs on files only. Needed before any PVC class
 defaults to XFS (stormcos#91).
-- [ ] `ci-xfs-mount-verify.sh`: the engine makes an XFS template and two
-      claims, attaches all three to one host over NVMe/TCP; dev's kernel in
-      QEMU mounts all three at once (blank ro), writes, unmounts, remounts,
-      `xfs_repair -n`, no XFS error in dmesg, UUIDs distinct, meta_uuid kept
-- [ ] run on dev: the third run reached the guest and found its own bug
-      (native NVMe multipath: /sys/block lists the hidden path node
-      nvme0c0n3, the device is nvme0n3); fixed, not rerun. Then CHANGELOG,
-      README
+- [x] `ci-xfs-mount-verify.sh`: the engine makes an XFS template and two
+      claims, attaches all three to one host over NVMe/TCP; the build VM's
+      kernel in QEMU mounts all three at once (blank ro), writes, unmounts,
+      remounts, `xfs_repair -n`, no XFS error in dmesg, UUIDs distinct,
+      meta_uuid kept
+- [x] found by its first full run (kernel 7.2.11): both claims refused,
+      "log has mismatched uuid - can't recover": the stamp left the log's
+      record headers naming the blank's UUID (`xfs_repair -n` passes it).
+      Fix: `xfs::stamp_uuid` = `mkfs_xfs::admin::set_uuid` (mkfs-xfs
+      v0.3.0: the log rewritten under the new UUID at the next cycle, as
+      `xfs_admin -U`); a claim costs a log of writes (64 MiB under 128 GiB)
+- [x] at 1d097ee: ci-xfs-mount-verify.sh ALL PASS (12 guest checks),
+      ci-xfs-verify.sh PASS, check.sh ALL PASS (1261/1261); README,
+      CHANGELOG; golden; stormcos#91 told
 
 ### system-data: the node's kept record of itself (2026-10-08, #355, P0) — DONE here, metal pending
 
