@@ -202,9 +202,9 @@ A release wave takes every component's newest golden, so main is the next
 release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 #74 (secret volumes) and #450's engine half stay on main (master's A): both
 are inert until used, and an unmarked volume's record is byte-identical to
-the format before #74. Newest golden: golden-stormblock-3c3b29808089 (ec23149).
+the format before #74. Newest golden: golden-stormblock-b18302ba6cea (5062192, v21.1.0).
 
-### The system drive is known, never guessed (2026-10-17, #351, P0) — DONE (v21.1.0, golden pending)
+### The system drive is known, never guessed (2026-10-17, #351, P0) — DONE (v21.1.0, golden-stormblock-b18302ba6cea), closed
 
 Owner's install rules 3–5 (#349). Already built before: install-over (#311),
 the named drive (#273), stormdrive's designation outranking install-over
@@ -229,8 +229,8 @@ the named drive (#273), stormdrive's designation outranking install-over
 - [x] check.sh at e243364 ALL PASS (1263/1263, every initramfs test under sh
       and busybox sh, no warnings); v21.1.0 tagged (9c7bedb, `stormblock
       21.1.0` from `cargo run --locked`)
-- [ ] golden (`stormcentral component build stormblock`); then close.
-      Not on metal: the X9 blades (SSD + HDD) and the Dell with its shelf
+- [x] golden golden-stormblock-b18302ba6cea (5062192 ⊇ 9c7bedb,
+      stormcos#601); closed. Not on metal: the X9 blades (SSD + HDD) and the Dell with its shelf
 
 ### System pair and moving the system (2026-10-17, #350, P2) — DECIDED 1B + 2A; AFTER #351 and the pacing
 
