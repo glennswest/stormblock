@@ -171,7 +171,7 @@ pub fn declaration_toml(text: &str) -> Option<String> {
             out.push('\n');
         }
     }
-    if out.trim().is_empty() || toml::from_str::<toml::Table>(&out).is_err() {
+    if out.trim().is_empty() || toml::from_str::<serde_json::Value>(&out).is_err() {
         return None;
     }
     Some(out)
@@ -416,12 +416,12 @@ servers = [\"192.168.8.252\"]
 token = \"secret\"
 ";
         let kept = declaration_toml(text).unwrap();
-        let t: toml::Table = toml::from_str(&kept).unwrap();
+        let t: serde_json::Value = toml::from_str(&kept).unwrap();
         assert_eq!(t["node"]["hostname"].as_str(), Some("stormblock1"));
         assert_eq!(t["network"]["mode"].as_str(), Some("static"));
         assert!(t["network"]["addresses"].as_array().is_some_and(|a| a.len() == 1));
-        assert!(t["network"]["dns"].is_table());
-        assert!(!t.contains_key("cluster") && !t.contains_key("kube"), "{kept}");
+        assert!(t["network"]["dns"].is_object());
+        assert!(t.get("cluster").is_none() && t.get("kube").is_none(), "{kept}");
         assert!(!kept.contains("master") && !kept.contains("secret"));
         assert_eq!(declaration_toml("[cluster]\nrole = \"sno\"\n"), None, "nothing of the node's");
     }

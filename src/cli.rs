@@ -14057,6 +14057,174 @@ mod slab_cat_tests {
     }
 }
 
+/// A release erase (#291) as `boot-local` runs it, on a node laid as an
+/// install leaves one.
+#[cfg(test)]
+mod release_erase_tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::slab::SlabFormat;
+    use crate::fs::files::{exists, read_file, write_files, SeedFile};
+    use crate::release_erase::{Ticket, REPORT, TICKET};
+    use crate::volume::metadata::Origin;
+
+    const SLOT: u64 = 64 * 1024;
+    const SIZE: u64 = 16 * 1024 * 1024;
+
+    async fn ext4(mgr: &mut VolumeManager, name: &str, files: &[(&str, &str)]) -> VolumeId {
+        let id = mgr.create_volume_any(name, SIZE).await.unwrap();
+        let dev = mgr.get_volume(&id).unwrap();
+        crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default()).await.unwrap();
+        let seeds: Vec<SeedFile> = files.iter().map(|(p, c)| SeedFile::new(*p, *c)).collect();
+        write_files(&dev, &seeds).await.unwrap();
+        dev.flush().await.unwrap();
+        id
+    }
+
+    async fn golden(mgr: &mut VolumeManager, name: &str, files: &[(&str, &str)], origin: Origin) -> VolumeId {
+        let id = ext4(mgr, name, files).await;
+        let fs = crate::fs::disk::probe(&mgr.get_volume(&id).unwrap()).await;
+        mgr.seal_volume(id, fs).await.unwrap();
+        mgr.set_origin(id, origin);
+        id
+    }
+
+    async fn clone_of(mgr: &mut VolumeManager, g: VolumeId, name: &str, origin: Origin, files: &[(&str, &str)]) -> VolumeId {
+        let id = mgr.create_snapshot(g, name).await.unwrap();
+        mgr.set_origin(id, origin);
+        let fs = mgr.fs_info(&g).cloned();
+        mgr.set_fs_info(id, fs).await.unwrap();
+        if !files.is_empty() {
+            let dev = mgr.get_volume(&id).unwrap();
+            let seeds: Vec<SeedFile> = files.iter().map(|(p, c)| SeedFile::new(*p, *c)).collect();
+            write_files(&dev, &seeds).await.unwrap();
+            dev.flush().await.unwrap();
+        }
+        id
+    }
+
+    async fn names(mgr: &VolumeManager) -> Vec<String> {
+        let mut v = Vec::new();
+        for id in mgr.volume_ids() {
+            v.push(mgr.get_volume_handle(&id).unwrap().name().await);
+        }
+        v.sort();
+        v
+    }
+
+    async fn file(mgr: &VolumeManager, vol: &str, path: &str) -> Option<String> {
+        let id = mgr.find_volume(vol).await?;
+        let dev = mgr.get_volume(&id)?;
+        if !exists(&dev, path).await.unwrap_or(false) {
+            return None;
+        }
+        read_file(&dev, path).await.ok().map(|b| String::from_utf8(b).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_release_keeps_the_releases_goldens_and_the_record_and_lays_the_rest_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.slab").display().to_string();
+        let declared = "[node]\nhostname = \"stormblock1\"\n\n[cluster]\nrole = \"master\"\n\n[network]\nmode = \"static\"\n";
+        let (old_etcd, old_uuid);
+        {
+            let dev = Arc::new(FileDevice::open_with_capacity(&path, 512 * 1024 * 1024).await.unwrap()) as Arc<dyn BlockDevice>;
+            let slab = Slab::format_with(
+                dev,
+                SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::Data).with_metadata(8 * 1024 * 1024),
+            )
+            .await
+            .unwrap();
+            let sid = slab.slab_id();
+            let mut mgr = VolumeManager::new(SLOT);
+            mgr.add_slab(slab).await;
+            mgr.keep_metadata_in_first(&[sid]);
+            // The release's: goldens and the clones an install laid of them.
+            let g_state = golden(&mut mgr, "stormcos-state.golden", &[("/config/stormcos.toml", "[node]\n")], Origin::Release).await;
+            let g_engine = golden(&mut mgr, "stormblock-state.golden", &[("/engine/.keep", "")], Origin::Release).await;
+            let g_etcd = golden(&mut mgr, "fastetcd-data.golden", &[("/README", "empty")], Origin::Release).await;
+            let g_pvc = golden(&mut mgr, "pvc-ext4j-64m.golden", &[], Origin::Release).await;
+            clone_of(
+                &mut mgr,
+                g_state,
+                "stormcos-state",
+                Origin::Release,
+                &[("/config/stormcos.toml", declared), ("/config/install-config.yaml", "sshKey: ssh-ed25519 AAAA\n"), ("/config/joined", "cluster-x")],
+            )
+            .await;
+            let engine = clone_of(&mut mgr, g_engine, "stormblock-state", Origin::Release, &[]).await;
+            old_etcd = clone_of(&mut mgr, g_etcd, "fastetcd-data", Origin::Release, &[("/member/db", "the cluster's etcd")]).await;
+            old_uuid = mgr.fs_info(&old_etcd).and_then(|f| f.uuid);
+            // The node's and the cluster's.
+            clone_of(&mut mgr, g_pvc, "pvc-0001", Origin::Node, &[("/data", "a workload's")]).await;
+            golden(&mut mgr, "golden-customer-app", &[("/app", "customer image")], Origin::Node).await;
+            ext4(&mut mgr, "old-unmarked", &[("/x", "from before #349")]).await;
+            let rec = ext4(&mut mgr, "system-data", &[("/history/boots", "kept")]).await;
+            mgr.set_origin(rec, Origin::Node);
+            // The ticket, as the live call leaves it in stormblock-state.
+            let store = crate::state::StateStore::open_volume(mgr.get_volume(&engine).unwrap()).await;
+            let t = Ticket {
+                id: "t-1".into(),
+                erase: crate::drive::erase::EraseLevel::Once,
+                asked_at: 1,
+                asked_by: "admin".into(),
+                force: false,
+                state: "pending".into(),
+                declaration: None,
+            };
+            store.put(TICKET, serde_json::to_vec(&t).unwrap()).await.unwrap();
+            mgr.persist().await;
+        }
+
+        let paths = vec![path.clone()];
+        let (mgr, _) = open_slabs_resuming(&paths, None, true).await.unwrap();
+        let mgr = run_release_ticket(mgr).await.unwrap();
+        let want = [
+            "fastetcd-data",
+            "fastetcd-data.golden",
+            "pvc-ext4j-64m.golden",
+            "stormblock-state",
+            "stormblock-state.golden",
+            "stormcos-state",
+            "stormcos-state.golden",
+            "system-data",
+        ];
+        assert_eq!(names(&mgr).await, want);
+        // Laid fresh: a new volume, a new identity, nothing of the cluster's.
+        let etcd = mgr.find_volume("fastetcd-data").await.unwrap();
+        assert_ne!(etcd, old_etcd);
+        assert_eq!(mgr.origin(&etcd), Origin::Release);
+        assert!(mgr.fs_info(&etcd).and_then(|f| f.uuid).is_some_and(|u| Some(u) != old_uuid));
+        assert_eq!(file(&mgr, "fastetcd-data", "/member/db").await, None);
+        assert_eq!(file(&mgr, "fastetcd-data", "/README").await.as_deref(), Some("empty"));
+        // The declaration back, the role not; nothing else of /state.
+        let toml = file(&mgr, "stormcos-state", "/config/stormcos.toml").await.unwrap();
+        assert!(toml.contains("stormblock1") && toml.contains("static") && !toml.contains("master"), "{toml}");
+        assert!(file(&mgr, "stormcos-state", "/config/install-config.yaml").await.unwrap().contains("sshKey"));
+        assert_eq!(file(&mgr, "stormcos-state", "/config/joined").await, None);
+        assert_eq!(file(&mgr, "system-data", "/history/boots").await.as_deref(), Some("kept"));
+        // The fresh state volume: the report, no ticket.
+        let st = crate::state::StateStore::open_volume(mgr.get_volume(&mgr.find_volume("stormblock-state").await.unwrap()).unwrap()).await;
+        assert!(st.get(TICKET).await.is_none(), "the ticket went with the old state volume");
+        let r: crate::release_erase::Report = serde_json::from_slice(&st.get(REPORT).await.unwrap()).unwrap();
+        assert_eq!(r.ticket, "t-1");
+        for gone in ["pvc-0001", "golden-customer-app", "old-unmarked"] {
+            assert!(r.erased.iter().any(|n| n == gone), "{gone} erased: {r:?}");
+        }
+        assert!(r.relaid.iter().any(|n| n == "stormblock-state") && r.relaid.iter().any(|n| n == "fastetcd-data"));
+        assert!(r.slots > 0 && r.failed.is_empty(), "{r:?}");
+        assert!(r.carried.iter().any(|p| p == "/config/stormcos.toml"));
+        drop(mgr);
+
+        // From the disk alone: the same, and no second run.
+        let (mgr, _) = open_slabs_resuming(&paths, None, true).await.unwrap();
+        assert_eq!(names(&mgr).await, want);
+        let again = run_release_ticket(mgr).await.unwrap();
+        assert_eq!(names(&again).await, want);
+        assert_eq!(file(&again, "stormcos-state", "/config/install-config.yaml").await.is_some(), true);
+    }
+}
+
 /// `clone` and `golden --from-volume` (#87): a golden into a slab with no
 /// engine, a CoW clone of it written as a consumer would, and the result out
 /// again as a golden image.
