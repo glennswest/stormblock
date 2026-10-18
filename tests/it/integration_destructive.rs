@@ -978,7 +978,7 @@ async fn a_release_erase_is_planned_recorded_for_the_next_boot_and_refused_where
     };
 
     // Destructive: never the node token.
-    assert_eq!(call(&n, M::POST, "/release", Some(NODE), Some(json!({"dry_run": true}))).await, 403);
+    assert_eq!(call(&n, M::POST, "/release", Some(NODE), Some(json!({"dry_run": true}))).await, 401);
     let (code, dry) = ask(ADMIN, json!({"dry_run": true})).await;
     assert_eq!(code, 200, "{dry}");
     let plan = &dry["plan"];
@@ -1015,7 +1015,7 @@ async fn a_release_erase_is_planned_recorded_for_the_next_boot_and_refused_where
     assert_eq!(get("/health").await["release"], "pending");
 
     // Cancelled: written, not removed (the state store keeps files).
-    assert_eq!(call(&n, M::DELETE, "/release", Some(NODE), None).await, 403);
+    assert_eq!(call(&n, M::DELETE, "/release", Some(NODE), None).await, 401);
     assert_eq!(call(&n, M::DELETE, "/release", Some(ADMIN), None).await, 200);
     let kept: Value = serde_json::from_slice(&std::fs::read(state_dir.path().join("release-ticket.json")).unwrap()).unwrap();
     assert_eq!(kept["state"], "cancelled");
