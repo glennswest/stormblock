@@ -14066,6 +14066,7 @@ mod release_erase_tests {
     use crate::drive::slab::SlabFormat;
     use crate::fs::files::{exists, read_file, write_files, SeedFile};
     use crate::release_erase::{Ticket, REPORT, TICKET};
+    use crate::volume::VolumeId;
     use crate::volume::metadata::Origin;
 
     const SLOT: u64 = 64 * 1024;
