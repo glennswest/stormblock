@@ -8372,6 +8372,9 @@ async fn handle_adopt_ublk(
         let slab_registry = mgr.registry().clone();
         let gem = mgr.gem().clone();
         let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));
+        if let Some(store) = &state_store {
+            let _ = state.state_store.set(store.clone());
+        }
         state.start_eraser().await;
         state.start_digests();
         state.start_scrub();
@@ -8998,6 +9001,27 @@ pub(crate) const SYSTEM_DATA_DEV_FILE: &str = "/run/stormblock/system-data.dev";
 /// `system-data`, made (ext4, in the data half) when this boot has a local
 /// data half and the volume is not there yet. `None` on a diskless boot: its
 /// data half is the appliance's clone, thrown away at the next boot.
+/// A pending release ticket in `stormblock-state` (#291), run on the
+/// manager: lent to the shared lock the clone path takes, then given back.
+/// A release that fails part-way stops the boot: the ticket is still there,
+/// and the next boot runs it again.
+async fn run_release_ticket(mgr: crate::volume::VolumeManager) -> anyhow::Result<crate::volume::VolumeManager> {
+    let Some((store, ticket)) = crate::release_erase::pending_ticket(&mgr).await else {
+        return Ok(mgr);
+    };
+    let vm = Arc::new(crate::fs::template::VmLock::new(mgr));
+    let ran = crate::release_erase::run(&vm, &store, ticket).await;
+    let mgr = Arc::try_unwrap(vm)
+        .ok()
+        .and_then(crate::lockwatch::TrackedMutex::into_inner)
+        .ok_or_else(|| anyhow::anyhow!("release: the volume manager is still held"))?;
+    let report = ran.map_err(|e| anyhow::anyhow!("release: {e}; the ticket stays, the next boot runs it again"))?;
+    for f in &report.failed {
+        tracing::warn!("release: {f}");
+    }
+    Ok(mgr)
+}
+
 pub(crate) async fn ensure_system_data(
     mgr: &mut crate::volume::VolumeManager,
 ) -> anyhow::Result<Option<crate::volume::VolumeId>> {
@@ -9082,6 +9106,11 @@ async fn handle_boot_local(
     if resumed.is_none() && !slab_paths.is_empty() && slab_paths.iter().all(|p| is_fabric_uri(p)) {
         let n = mgr.mark_all(crate::volume::metadata::Origin::Release);
         tracing::info!("{n} volume(s) of the claimed release image marked as the release's (#349)");
+    }
+    // A release asked for on the running node (#291): run here, from the
+    // node's own disk, before anything is resolved, exported or mounted.
+    if resumed.is_none() && !check && !slab_paths.is_empty() && slab_paths.iter().all(|p| !is_fabric_uri(p)) {
+        mgr = run_release_ticket(mgr).await?;
     }
     // Booting from the machine's own disk is the disk taken (#344, #345): the
     // verdict says so, keeping the initramfs's inventory. A boot from the

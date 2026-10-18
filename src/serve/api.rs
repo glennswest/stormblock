@@ -390,6 +390,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge" {
         return true;
     }
+    // A release erase (#291): everything the node holds for its cluster,
+    // erased at the next boot.
+    if matches!(*method, Method::POST | Method::DELETE) && p == "/api/v1/release" {
+        return true;
+    }
     // Forge's CA and bootstrap token, which every node that boots from it is
     // handed (#381): set by forge's stormcert, never by a node.
     if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge/trust" {

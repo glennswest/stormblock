@@ -250,6 +250,12 @@ impl Context {
     /// Feed what this context says into `h`, in an order that does not
     /// depend on how it was gathered (#218): the listing's generation moves
     /// when it changes.
+    /// What serves volume `id` (#291: a release refuses one a remote host
+    /// has attached).
+    pub fn attachments_of(&self, id: &Uuid) -> &[Attachment] {
+        self.attachments.get(id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
     pub fn fingerprint(&self, h: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         let mut vols: Vec<(&Uuid, Vec<String>)> = self

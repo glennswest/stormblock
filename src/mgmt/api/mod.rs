@@ -14,6 +14,7 @@ pub mod legs;
 pub mod rebuilds;
 pub mod scrub;
 pub mod erasures;
+pub mod release_erase;
 pub mod usage;
 #[cfg(feature = "stormfs-data")]
 pub mod stormfs;
@@ -104,6 +105,11 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// must not read as settled mid-move.
         #[serde(skip_serializing_if = "Option::is_none")]
         flow_over_remaining: Option<u64>,
+        /// `pending` while a release erase waits for the next boot (#291);
+        /// left out otherwise. The plan and the last report:
+        /// `/api/v1/release`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        release: Option<&'static str>,
         /// How the flow-over is going (#401), when this engine runs one:
         /// extents moved, extents found all zeros and unmapped instead of
         /// copied, bytes copied, seconds since it began, MB/s, extents per
@@ -188,6 +194,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         auth: if state.auth_enforced() { "required" } else { "none" },
         raid,
         flow_over_remaining,
+        release: release_erase::pending_here(&state).then_some("pending"),
         flow_over,
         flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         slabs: super::slab_report::for_health(&state),
@@ -217,6 +224,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/scrub", scrub::router(state.clone()))
         .nest("/api/v1/namespaces", crate::mgmt::namespaces::router(state.clone()))
         .nest("/api/v1/erasures", erasures::router(state.clone()))
+        .nest("/api/v1/release", release_erase::router(state.clone()))
         .nest("/api/v1/synonyms", synonyms::router(state.clone()))
         .nest("/api/v1/boothost", boothost::router(state.clone()))
         .nest("/api/v1/releases", releases::router(state.clone()))

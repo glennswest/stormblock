@@ -290,6 +290,9 @@ pub struct AppState {
     /// process that serves until it is killed wants anyway, but it is a cycle
     /// and worth saying so.
     pub serve: std::sync::OnceLock<Arc<crate::serve::ctx::ServeContext>>,
+    /// `stormblock-state`, where the data directory is captured: set by
+    /// `adopt-ublk` (#291: a release ticket reaches the next boot through it).
+    pub state_store: std::sync::OnceLock<Arc<crate::state::StateStore>>,
     /// Stable names that point at volumes, and can be re-pointed at a new
     /// version. Persisted as `<data_dir>/synonyms.json`; kept apart from the
     /// volume because a volume is extents and a synonym is a binding.
@@ -629,6 +632,7 @@ impl AppState {
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),
             serve: std::sync::OnceLock::new(),
+            state_store: std::sync::OnceLock::new(),
             pool_pressure: None,
             kube_auth: kubeauth::KubeAuth::from_config(config.management.kubernetes.as_ref()).map(Arc::new),
             audit_log: config
