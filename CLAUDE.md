@@ -204,6 +204,28 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-3c3b29808089 (ec23149).
 
+### The system drive is known, never guessed (2026-10-17, #351, P0) — IN PROGRESS
+
+Owner's install rules 3–5 (#349). Already built: install-over (#311, the
+probe's INSTALL_OVER / the drive with a data slab), the named drive (#273),
+stormdrive's designation outranking install-over (#402, A), shelves by
+position (#347). Left, and built here:
+- [ ] survey: no "first takeable drive". The drive this boot runs from is
+      the system drive (nothing else taken); else one drive on the machine's
+      own shelves, or a single drive in all (an external shelf withdrawn as
+      a refusal, #347's "external only when named"); anything else STOPS:
+      every drive named by shelf, bay, model, serial; verdict `ambiguous`,
+      then #427's diskless FATAL. Counted physically (every non-removable
+      drive with media), not "takeable" ones. Two drives with data slabs
+      (not one node's pair) stop too. Every drive in /sys/block (sd*, not sd?)
+- [ ] identity: the initramfs passes `--local-disk-id` / `--system-disk-id`
+      (wwn, serial, model, size), and writes it in local-disk.json;
+      boot-local proves the device it is about to write is that drive
+      (`identity::check`), else writes nothing
+- [ ] tests: boot-hook survey (ambiguity, 100-drive external shelf, the
+      identity passed); identity matcher units; an install among 100 file
+      drives changes only the system drive's bytes; docs, CHANGELOG
+
 ### System pair and moving the system (2026-10-17, #350, P2) — DECIDED 1B + 2A; AFTER #351 and the pacing
 
 Two system drives laid together (the system half identical on both,
