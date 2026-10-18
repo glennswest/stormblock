@@ -301,17 +301,16 @@ drop slab + volumes from memory with no persist/erase; stop the array with
 no superblock/bitmap/flush write; forget the members); test: assemble on a
 second engine, every member byte unchanged. Nothing built.
 
-### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P3; stormcluster#21, P1) — WAITING ON THE OWNER
+### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P3; stormcluster#21, P1) — BUILT on wip/291-release-erase; merge asked on #291
 
-stormcluster#14's release (gone: workloads, claims, etcd, certs, role,
-customer images, overwritten once; kept: release system images; new SNO).
-The node's own service volumes are mounted ublk devices (held, #267), so a
-live call cannot erase them. Asked on #291 (needs-owner): A live call that
-refuses while anything is attached; B a ticket run by boot-local at the next
-boot before anything is exported (recommended); C a same-release install
-with a fresh data half. Keep set: sealed origin-release goldens, system-data,
-stormcos-state's network/install-config; unmarked volumes erased. Nothing
-built; with the pacing, the build goes on a wip/ branch.
+Decided (master, 2026-10-17): 1B, a ticket then a reboot; the initramfs
+engine erases and re-lays before anything is mounted. Keep: sealed release
+goldens, `system-data`, the node's declaration. Erase: everything else.
+Built at the owner's ask on **wip/291-release-erase** (32a63f6):
+`src/release_erase.rs`, `POST/GET/DELETE /api/v1/release`, the run in
+`boot-local`; check.sh on the branch ALL PASS (1264/1264). The work plan in
+full is on the branch. Merge asked on #291 (needs-owner): A now, B after the
+single-node pacing (recommended). Then a golden, stormcluster#21 told, close.
 
 ### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — PARKED until the single-node pacing lifts
 
