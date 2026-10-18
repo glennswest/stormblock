@@ -1,6 +1,20 @@
 # Changelog
 
 ## [Unreleased]
+<!-- New unreleased changes go here -->
+
+## [v21.0.0] — 2026-10-17
+
+Major, for what callers see (#353, decided A):
+- **BREAKING (security, #274):** destructive verbs need the admin token or a Kubernetes bearer a SubjectAccessReview allows; the node token keeps only the ordinary verbs. Every destructive call is audited.
+- **BREAKING (roles, #382):** destructive verbs are reviewed as `destroy`, which only a role granted all of `storage.storm.io` holds.
+- **BREAKING (build, #161):** `nvmeof` is no longer a cargo feature; NVMe-oF/TCP is always built.
+- **BREAKING (RAID sets, #160):** a RAID set's scrub reports by default and repairs only with `repair: true`.
+- **BREAKING (format, #158):** metadata format 2 is the default; an engine before #158 refuses slabs written in it.
+- **BREAKING (installs, #311):** an install keeps the node's data half and lays only the system half again (supersedes #261's install = wipe).
+- **BREAKING (fencing, #83/#6):** an attach after a fence must carry its `epoch`.
+
+Every golden since v20.0.0 reported 20.0.0. From this release on, a tag goes with each staged golden. Unreleased work on `wip/` branches is not in it (#291, #450's initramfs half, #159 step 2).
 
 ### 2026-10-17
 - **chore:** #225 closed: golden-stormblock-8aea27e4f973 (stormcos#601); stormcos#91 told.
