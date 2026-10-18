@@ -14217,9 +14217,13 @@ mod release_erase_tests {
         assert!(r.carried.iter().any(|p| p == "/config/stormcos.toml"));
         drop(mgr);
 
-        // From the disk alone: the same, and no second run.
+        // From the disk alone: the same, and no second run. What was freed
+        // is still waiting to be overwritten (#286): the successor's eraser
+        // takes it from the slot table.
         let (mgr, _) = open_slabs_resuming(&paths, None, true).await.unwrap();
         assert_eq!(names(&mgr).await, want);
+        let waiting: u64 = mgr.registry().read().await.iter().map(|(_, s)| s.erasing_slots()).sum();
+        assert_eq!(waiting, r.slots, "every freed slot queued for overwrite, across a reopen");
         let again = run_release_ticket(mgr).await.unwrap();
         assert_eq!(names(&again).await, want);
         assert_eq!(file(&again, "stormcos-state", "/config/install-config.yaml").await.is_some(), true);
