@@ -204,27 +204,33 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-3c3b29808089 (ec23149).
 
-### The system drive is known, never guessed (2026-10-17, #351, P0) — IN PROGRESS
+### The system drive is known, never guessed (2026-10-17, #351, P0) — DONE (v21.1.0, golden pending)
 
-Owner's install rules 3–5 (#349). Already built: install-over (#311, the
-probe's INSTALL_OVER / the drive with a data slab), the named drive (#273),
-stormdrive's designation outranking install-over (#402, A), shelves by
-position (#347). Left, and built here:
-- [ ] survey: no "first takeable drive". The drive this boot runs from is
-      the system drive (nothing else taken); else one drive on the machine's
-      own shelves, or a single drive in all (an external shelf withdrawn as
-      a refusal, #347's "external only when named"); anything else STOPS:
-      every drive named by shelf, bay, model, serial; verdict `ambiguous`,
-      then #427's diskless FATAL. Counted physically (every non-removable
-      drive with media), not "takeable" ones. Two drives with data slabs
-      (not one node's pair) stop too. Every drive in /sys/block (sd*, not sd?)
-- [ ] identity: the initramfs passes `--local-disk-id` / `--system-disk-id`
-      (wwn, serial, model, size), and writes it in local-disk.json;
-      boot-local proves the device it is about to write is that drive
-      (`identity::check`), else writes nothing
-- [ ] tests: boot-hook survey (ambiguity, 100-drive external shelf, the
-      identity passed); identity matcher units; an install among 100 file
-      drives changes only the system drive's bytes; docs, CHANGELOG
+Owner's install rules 3–5 (#349). Already built before: install-over (#311),
+the named drive (#273), stormdrive's designation outranking install-over
+(#402, A), shelves by position (#347). Built here (e243364):
+- [x] survey: no "first takeable drive". The drive this boot runs from is
+      the system drive (nothing else taken); else the named drive; else one
+      drive on the machine's own shelves, or the single drive in all (an
+      external shelf's too: #347's "external only when named" withdrawn);
+      anything else STOPS naming every drive by shelf, bay, model, serial
+      (verdict `ambiguous`, then #427's diskless FATAL). Counted physically
+      (every non-removable drive with media). Several data-slab drives stop
+      unless exactly one also holds the system half (or is a #402 pair).
+      Every drive in /sys/block (sd*, not sd?)
+- [x] identity: `--local-disk-id` / `--system-disk-id` (wwn, serial, model,
+      size) from the initramfs, in local-disk.json; boot-local
+      `prove_chosen` → `identity::prove` (WWN, else model+serial, and size)
+      before writing; not that drive = not written
+- [x] tests: boot-hook survey (+27: ambiguity, two data slabs, 100-drive
+      JBOD, identities), `identity` proof unit, an install beside a
+      100-drive shelf changes only the system drive's bytes; docs
+      (boot-hooks.md, README), CHANGELOG
+- [x] check.sh at e243364 ALL PASS (1263/1263, every initramfs test under sh
+      and busybox sh, no warnings); v21.1.0 tagged (9c7bedb, `stormblock
+      21.1.0` from `cargo run --locked`)
+- [ ] golden (`stormcentral component build stormblock`); then close.
+      Not on metal: the X9 blades (SSD + HDD) and the Dell with its shelf
 
 ### System pair and moving the system (2026-10-17, #350, P2) — DECIDED 1B + 2A; AFTER #351 and the pacing
 
