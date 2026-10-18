@@ -260,6 +260,107 @@ fn vpd_serial(page: &[u8]) -> String {
     String::from_utf8_lossy(body).trim().trim_matches('\0').to_string()
 }
 
+/// The drive an install chose, as the initramfs saw it (#351, the owner's
+/// install rule 5: "proves it before writing, matching the drive's identity
+/// to what was chosen"). Spelled `wwn=..;serial=..;model=..;size=<bytes>`,
+/// any field empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Expected {
+    pub wwn: String,
+    pub serial: String,
+    pub model: String,
+    pub size: Option<u64>,
+}
+
+impl Expected {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let mut e = Expected::default();
+        for part in s.split(';').filter(|p| !p.trim().is_empty()) {
+            let (k, v) = part.split_once('=').ok_or_else(|| format!("'{part}' is not key=value"))?;
+            let v = v.trim().to_string();
+            match k.trim() {
+                "wwn" => e.wwn = v,
+                "serial" => e.serial = v,
+                "model" => e.model = v,
+                "size" if v.is_empty() => {}
+                "size" => e.size = Some(v.parse().map_err(|_| format!("size '{v}' is not a number"))?),
+                other => return Err(format!("unknown identity field '{other}'")),
+            }
+        }
+        Ok(e)
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "wwn {}, model {}, serial {}, {} bytes",
+            or_none(&self.wwn),
+            or_none(&self.model),
+            or_none(&self.serial),
+            self.size.map(|s| s.to_string()).unwrap_or_else(|| "?".into())
+        )
+    }
+}
+
+fn or_none(s: &str) -> &str {
+    if s.is_empty() { "none" } else { s }
+}
+
+/// Compared without whitespace, NULs or case: the initramfs and the engine
+/// read the same sysfs files and clean them differently.
+fn same(a: &str, b: &str) -> bool {
+    let n = |s: &str| s.chars().filter(|c| !c.is_whitespace() && *c != '\0').collect::<String>().to_ascii_lowercase();
+    n(a) == n(b)
+}
+
+/// Prove the block device at `path` is the drive `want` describes, from the
+/// live `/sys`: by WWN when one was chosen by it, else by model and serial
+/// together (a serial alone is not unique), and by size always. `Ok` says
+/// how it was proved; `Err` why it is not that drive. Nothing is written by
+/// a caller holding an `Err`.
+pub fn prove(path: &str, want: &Expected) -> Result<String, String> {
+    let dev = std::fs::canonicalize(path).map_err(|e| format!("{path}: {e}"))?;
+    let name = dev.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+    prove_in(Path::new("/sys"), &name, want).map_err(|e| format!("{path}: {e}"))
+}
+
+/// [`prove`] under a sysfs root (tests).
+pub fn prove_in(sys: &Path, name: &str, want: &Expected) -> Result<String, String> {
+    let class = sys.join("class/block").join(name);
+    let node = std::fs::canonicalize(&class).unwrap_or(class);
+    if !node.exists() {
+        return Err(format!("not a block device in sysfs, so it cannot be proved to be {}", want.describe()));
+    }
+    let got = of_in(sys, name).unwrap_or_default();
+    let disk = if node.join("partition").exists() { node.parent().map(PathBuf::from).unwrap_or(node) } else { node };
+    let size = std::fs::read_to_string(disk.join("size")).ok().and_then(|s| s.trim().parse::<u64>().ok()).map(|s| s * 512);
+    let have = Expected { wwn: got.wwn.clone(), serial: got.serial.clone(), model: got.model.clone(), size };
+    let refuse = |why: &str| Err(format!("{why}: chosen {}, this device is {}", want.describe(), have.describe()));
+    if let Some(w) = want.size {
+        if size != Some(w) {
+            return refuse("its size differs from the drive chosen");
+        }
+    }
+    if !want.wwn.is_empty() {
+        if !same(&want.wwn, &got.wwn) {
+            return refuse("its WWN is not the drive chosen");
+        }
+        return Ok(format!("WWN {}", got.wwn));
+    }
+    if !want.serial.is_empty() {
+        if !same(&want.serial, &got.serial) || !same(&want.model, &got.model) {
+            return refuse("its model and serial are not the drive chosen");
+        }
+        return Ok(format!("model {} serial {}", got.model, got.serial));
+    }
+    if !got.wwn.is_empty() || !got.serial.is_empty() {
+        return refuse("the drive chosen had no WWN or serial, and this device has one");
+    }
+    match want.size {
+        Some(_) => Ok("size alone: the drive has no WWN or serial".into()),
+        None => refuse("nothing was chosen to prove it by"),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -426,5 +527,39 @@ mod tests {
         }
         println!("{checked} disk(s) with an identity checked");
     }
-}
 
+    #[test]
+    fn a_chosen_drive_is_proved_by_wwn_else_model_and_serial_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tree(root);
+        std::fs::write(root.join("devices/pci0/host0/block/sda/size"), "3907029168\n").unwrap();
+        std::fs::write(root.join("devices/pci1/nvme/nvme0/nvme0n1/size"), "500118192\n").unwrap();
+        let sda = 3907029168u64 * 512;
+        // What the initramfs passes for sda (#351), case and padding its own.
+        let want = Expected::parse(&format!(
+            "wwn=NAA.50014EE2B5D3A1F0;serial=WD-WX11D28JFS6T;model=WDC WD20EFRX-68E;size={sda}"
+        ))
+        .unwrap();
+        assert!(prove_in(root, "sda", &want).unwrap().starts_with("WWN"));
+        // A partition of it is the same drive.
+        assert!(prove_in(root, "sda2", &want).is_ok());
+        // Another drive is refused, naming both.
+        let e = prove_in(root, "nvme0n1", &want).unwrap_err();
+        assert!(e.contains("size differs") && e.contains("WD-WX11D28JFS6T") && e.contains("S4EWNX0R123456"), "{e}");
+        let e = prove_in(root, "nvme0n1", &Expected { size: None, ..want.clone() }).unwrap_err();
+        assert!(e.contains("WWN is not"), "{e}");
+        // No WWN chosen: model and serial together.
+        let by_serial = Expected { wwn: String::new(), ..want.clone() };
+        assert!(prove_in(root, "sda", &by_serial).unwrap().starts_with("model"));
+        let wrong_model = Expected { model: "OTHER".into(), ..by_serial.clone() };
+        assert!(prove_in(root, "sda", &wrong_model).unwrap_err().contains("model and serial"));
+        // Chosen with no identity at all: a drive that has one is not it.
+        let bare = Expected { size: Some(sda), ..Expected::default() };
+        assert!(prove_in(root, "sda", &bare).unwrap_err().contains("no WWN or serial"));
+        // Not in sysfs: never proved.
+        assert!(prove_in(root, "sdz", &want).is_err());
+        assert!(Expected::parse("colour=blue").is_err());
+        assert_eq!(Expected::parse("wwn=;serial=;model=;size=").unwrap(), Expected::default());
+    }
+}

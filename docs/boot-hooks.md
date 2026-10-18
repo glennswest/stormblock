@@ -59,27 +59,59 @@ background, after root is up. `/init` picks that drive today from
 | `off` | nothing |
 | `force` | a drive even when it is one of ours, destroying the identity on it; a drive with a foreign signature only when it is the named one (below) |
 
-Whatever the policy, three rules decide which drives are candidates at all
-(#273: a NetApp shelf on the Dell, for stormraid):
+Whatever the policy, the system drive is **known, never guessed** (#351,
+the owner's install rules 3–5; #273's NetApp shelf on the Dell, for
+stormraid). In order:
 
-1. **The named drive only.** When the drive `rd.stormblock.slab=` names (its
-   disk, for a partition) is on this machine, it is the only drive the survey
-   or an install may take; every other drive is left alone and the console
-   says so. A machine without it (NVMe-only, while the line names
-   `/dev/sda`) falls back to the scan under the next two rules.
-2. **By the shelf's position, never by being on a shelf (#347, owner).**
-   Every SES enclosure is a shelf, with its own id (the enclosure's logical
-   id), position and bays. A server has several:
+1. **The drive that already holds this node** (install-over): the disk the
+   probe ruled an install over, else the one drive carrying this node's data
+   slab, else the drive this boot runs from (no other drive is taken beside
+   it). Several drives with data slabs are not "this node's": of them, the one
+   whose drive (or #402 partner) also holds the system half, when it is the
+   only one; otherwise the install **stops**, naming them.
+2. **The named drive, or the designated one.** When the drive
+   `rd.stormblock.slab=` names (its disk, for a partition) is on this
+   machine, it is the only drive the survey or an install may take, wherever
+   it is. stormdrive's designation (`<system-data>/stormdrive/system-drives.json`)
+   decides where the system half goes (#402: the system drive block below);
+   it outranks install-over.
+3. **Else only when unambiguous:** the one drive on the machine's own shelves
+   (internal, front, rear), or the single drive the machine has, an external
+   shelf's included ("the system may live on an external shelf": #347's
+   "external only when named" is withdrawn). Drives are counted as drives -
+   every non-removable drive with media - not as the ones an install could
+   write: two drives are two choices.
+4. **Anything else stops.** No drive is taken, the verdict is `ambiguous`,
+   and the console names every drive by shelf, bay, model and serial, e.g.
+
+   ```
+   STOP: the system drive is not known (#351): 3 drive(s) on this machine's
+   own shelves, 0 on external ones, and none of them holds this node, is
+   named (rd.stormblock.slab=) or is designated system in stormdrive. An install
+   never picks one. No drive is taken. The drives:
+       /dev/sda: internal shelf, bay none, SSDSC2KB240G8, serial PHYF0123, 240 GB
+       /dev/sdb: front shelf 500056b3a1b2c3d4, bay Slot 04, ST2000NM0055, serial ZBS1A2B3, 2000 GB
+   ```
+
+   then #427's diskless refusal (a FATAL, unless `rd.stormblock.diskless=1`
+   or `assimilate=off`). It never picks one out of hundreds.
+
+Of the drive chosen, "nobody's" means blank (first and last MiB zeros) or one
+of ours; anything else is somebody's and left. **And it is proved before a
+byte is written** (rule 5): the survey passes the drive's identity
+(`--local-disk-id`, `--system-disk-id`: `wwn=..;serial=..;model=..;size=..`,
+read from sysfs) to `boot-local`, which checks the device by WWN, else model
+and serial together (never a serial alone), and size, and writes nothing to a
+device that is not that drive (`Install: … is the drive chosen (WWN …)` on the
+console; `local-disk.json` keeps the `identity`).
+
+Shelves (#347, owner): every SES enclosure is a shelf, with its own id (the
+enclosure's logical id), position and bays. A server has several:
    - `internal`: inside the chassis (a mid-plane, an M.2 carrier; a drive in
      no enclosure is internal too);
    - `front`: the outward-facing hot-plug bays;
    - `rear`: the back bays some models have;
    - `external`: a JBOD or disk shelf on its own IOMs (the NetApp).
-
-   The system half may go on the machine's own shelves (internal, front,
-   rear) with nothing named. An external shelf's drives are taken only when
-   `rd.stormblock.slab=` names them, and the install's search for this
-   node's data slab skips them.
 
    How position is told:
    - an enclosure not behind a SAS expander is the machine's own (the Dell
@@ -91,7 +123,7 @@ Whatever the policy, three rules decide which drives are candidates at all
      name says so, else `front`;
    - a drive behind an expander in no enclosure is external.
 
-   `rd.stormblock.allow-external=1` takes an external shelf's drive as the
+   `rd.stormblock.allow-external=1` counts an external shelf's drive as the
    machine's own. #344's first fix ("a shelf is only behind an expander") was
    the wrong model and is replaced by this.
 
@@ -121,6 +153,7 @@ in the engine's health as `slabs.local_disk`, with the drive's `shelf` (`id`,
 `position`, `bay`, `identity`, #347) and the boot's storage inventory
 (`controllers`, `drives`, #345). It records:
 - `taken` and the drive;
+- `ambiguous`: the system drive is not known (#351, above), with why;
 - `refused`: a drive carrying stormblock slabs that this boot left alone,
   with why (behind an expander, not the named drive, the release on it
   cannot be told, the policy). The console says `WARNING: this node runs from

@@ -472,6 +472,15 @@ enum SubCommand {
         /// was on --local-disk is retired.
         #[arg(long)]
         system_disk: Option<String>,
+        /// Who --local-disk must be (#351): `wwn=..;serial=..;model=..;size=..`
+        /// as the initramfs read it when it chose the drive. Proved (WWN, else
+        /// model and serial, and size) before anything is written; a device
+        /// that is not that drive is not written at all.
+        #[arg(long)]
+        local_disk_id: Option<String>,
+        /// Who --system-disk must be (#351), as --local-disk-id.
+        #[arg(long)]
+        system_disk_id: Option<String>,
         /// Validate the artifact and resolve the boot volume, then exit
         /// without exporting (no ublk needed)
         #[arg(long)]
@@ -1142,7 +1151,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier,
-                local_disk_force, system_disk, check,
+                local_disk_force, system_disk, local_disk_id, system_disk_id, check,
             } => {
                 return handle_boot_local(
                     slab,
@@ -1155,6 +1164,7 @@ pub async fn run() -> anyhow::Result<()> {
                     local_tier,
                     *local_disk_force,
                     system_disk.as_deref(),
+                    (local_disk_id.as_deref(), system_disk_id.as_deref()),
                     *check,
                 ).await;
             }
@@ -9040,6 +9050,33 @@ pub(crate) async fn ensure_system_data(
     Ok(Some(id))
 }
 
+/// Prove each drive boot-local is about to write is the one the initramfs
+/// chose (#351), by the identity it passed. A drive passed with no identity
+/// (an operator's `--local-disk` by hand) is taken as named, its identity
+/// said.
+fn prove_chosen(
+    disk: &str,
+    system_disk: Option<&str>,
+    (disk_id, system_id): (Option<&str>, Option<&str>),
+) -> anyhow::Result<()> {
+    for (path, want) in [(Some(disk), disk_id), (system_disk, system_id)] {
+        let Some(path) = path else { continue };
+        let Some(want) = want else {
+            if let Some(id) = crate::drive::identity::of(path) {
+                println!("Install: {path} is {} {} (wwn {}), taken as named", id.model, id.serial, id.wwn);
+            }
+            continue;
+        };
+        let want = crate::drive::identity::Expected::parse(want)
+            .map_err(|e| anyhow::anyhow!("the identity given for {path} does not read: {e}"))?;
+        match crate::drive::identity::prove(path, &want) {
+            Ok(how) => println!("Install: {path} is the drive chosen ({how})"),
+            Err(e) => anyhow::bail!("not writing {path}: it is not the drive chosen — {e} (#351)"),
+        }
+    }
+    Ok(())
+}
+
 async fn handle_boot_local(
     slab_paths: &[String],
     meta: Option<&str>,
@@ -9051,6 +9088,7 @@ async fn handle_boot_local(
     local_tier: &str,
     local_disk_force: bool,
     system_disk: Option<&str>,
+    disk_ids: (Option<&str>, Option<&str>),
     check: bool,
 ) -> anyhow::Result<()> {
     // A node disk's data half takes any space the drive has gained, before
@@ -9148,8 +9186,14 @@ async fn handle_boot_local(
         //
         // — a failure that names the root device and says nothing about the
         // local disk, for a node whose root was reachable the whole time.
-        let flow_over =
-            take_local_disks(&mut mgr, disk, system_disk, local_tier, local_disk_force, Some(&root_name)).await;
+        // The drives written are the drives chosen (#351, rule 5): proved by
+        // their identity before the first byte, or not written at all.
+        let flow_over = match prove_chosen(disk, system_disk, disk_ids) {
+            Ok(()) => {
+                take_local_disks(&mut mgr, disk, system_disk, local_tier, local_disk_force, Some(&root_name)).await
+            }
+            Err(e) => Err(e),
+        };
         match flow_over {
             Ok((f, report)) => {
                 // Laid, updated or already current: the disk carries this
@@ -9844,6 +9888,76 @@ file = "{state}"
     /// that kept its table, a lay cut off before its data slab) is laid fresh,
     /// both halves, with no force. A data slab that is there (magic present)
     /// and does not open is still refused, the drive untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_install_beside_a_hundred_drive_shelf_writes_only_the_system_drive() {
+        // The owner's rule 5 (#351): "never destroy hundreds of drives". A
+        // shelf of 100 drives, each with bytes of its own, and the system
+        // drive: an install writes the system drive and nothing else; a
+        // system drive that is not the drive chosen is not written at all.
+        use sha2::Digest;
+        let dir = tempfile::tempdir().unwrap();
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        let root = p("root.img");
+        std::fs::write(&root, vec![0x5Au8; 8 * MIB as usize]).unwrap();
+        let state = p("state.img");
+        std::fs::write(&state, vec![0xA5u8; 8 * MIB as usize]).unwrap();
+        let spec = format!(
+            r#"
+name = "install-351"
+size = "1G"
+[slab]
+size = "rest"
+[[slab.golden]]
+name = "root"
+file = "{root}"
+[data_slab]
+size = "256M"
+[[data_slab.golden]]
+name = "state"
+file = "{state}"
+"#
+        );
+        let image = p("image.raw");
+        crate::image::ImageBuilder::new(crate::image::ImageSpec::from_toml(&spec).unwrap())
+            .build(std::path::Path::new(&image))
+            .await
+            .unwrap();
+        let shelf: Vec<String> = (0..100).map(|i| p(&format!("shelf-{i:03}.raw"))).collect();
+        let digest = |path: &str| hex::encode(sha2::Sha256::digest(std::fs::read(path).unwrap()));
+        let mut before = Vec::new();
+        for (i, d) in shelf.iter().enumerate() {
+            let mut bytes = vec![(i as u8).wrapping_mul(37) | 1; 2 * MIB as usize];
+            bytes[..8].copy_from_slice(b"STORMRD1");
+            std::fs::write(d, bytes).unwrap();
+            before.push(digest(d));
+        }
+        let disk = p("system.raw");
+        std::fs::File::create(&disk).unwrap().set_len(80 * 1024 * MIB).unwrap();
+        let head = |path: &str| {
+            let mut f = std::fs::File::open(path).unwrap();
+            let mut b = vec![0u8; MIB as usize];
+            std::io::Read::read_exact(&mut f, &mut b).unwrap();
+            b
+        };
+
+        // Chosen as a drive with an identity this device does not have: not
+        // written, the error naming why.
+        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let wrong = "wwn=naa.5000c500deadbeef;serial=SER-X;model=MODEL-X;size=1";
+        let e = super::prove_chosen(&disk, None, (Some(wrong), None)).unwrap_err().to_string();
+        assert!(e.contains("not the drive chosen") && e.contains("#351"), "{e}");
+        assert!(head(&disk).iter().all(|b| *b == 0), "a drive not proved is not written");
+
+        // The install, as boot-local runs it with the drive named.
+        super::prove_chosen(&disk, None, (None, None)).unwrap();
+        super::take_local_disks(&mut mgr, &disk, None, "hot", false, None).await.unwrap();
+        drop(mgr);
+        assert!(head(&disk).iter().any(|b| *b != 0), "the system drive was laid");
+        for (d, b) in shelf.iter().zip(&before) {
+            assert_eq!(&digest(d), b, "{d} changed: an install writes only the system drive");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_node_table_with_an_empty_data_partition_is_laid_fresh() {
         let dir = tempfile::tempdir().unwrap();

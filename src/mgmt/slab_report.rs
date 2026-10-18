@@ -55,7 +55,9 @@ pub struct SlabReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LocalDisk {
     /// `taken`, `refused` (a drive with slabs that was not taken), `failed`
-    /// (taken, and `boot-local` could not use it) or `none`.
+    /// (taken, and `boot-local` could not use it), `ambiguous` (the system
+    /// drive is not known: several drives could take it, none is named or
+    /// holds this node, #351) or `none`.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drive: Option<String>,
@@ -66,6 +68,10 @@ pub struct LocalDisk {
     /// `identity` (the SES vendor and model).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shelf: Option<serde_json::Value>,
+    /// Who the drive is (#351): `wwn=..;serial=..;model=..;size=..`, as the
+    /// survey read it and `boot-local` proved it before writing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
     /// `initramfs` (the survey) or `boot-local`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -100,12 +106,15 @@ pub fn read_local_disk() -> Option<LocalDisk> {
 pub fn update_local_disk(state: &str, drive: Option<&str>, reason: Option<String>, from: &str) {
     let old = read_local_disk();
     // The shelf the survey named, when it is the same drive (#347).
-    let shelf = old.as_ref().filter(|o| o.drive.as_deref() == drive).and_then(|o| o.shelf.clone());
+    let same = old.as_ref().filter(|o| o.drive.as_deref() == drive);
+    let shelf = same.and_then(|o| o.shelf.clone());
+    let identity = same.and_then(|o| o.identity.clone());
     write_local_disk(&LocalDisk {
         state: state.to_string(),
         drive: drive.map(str::to_string),
         reason,
         shelf,
+        identity,
         from: Some(from.to_string()),
         controllers: old.as_ref().map(|o| o.controllers.clone()).unwrap_or_default(),
         drives: old.map(|o| o.drives).unwrap_or_default(),

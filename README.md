@@ -642,9 +642,11 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     absent means unknown.
   - `local_disk` (#344): what this boot did with the machine's own disk, as
     the initramfs and `boot-local` recorded it. `state` is `taken`,
-    `refused`, `failed` or `none`, with `drive`, `reason` and the drive's
-    `shelf` (`id`, `position` internal/front/rear/external, `bay`,
-    `identity`, #347). A diskless node whose drive carries slabs says which
+    `refused`, `failed`, `ambiguous` (the system drive is not known, #351)
+    or `none`, with `drive`, `reason`, the drive's `shelf` (`id`, `position`
+    internal/front/rear/external, `bay`, `identity`, #347) and its own
+    `identity` (`wwn=..;serial=..;model=..;size=..`, proved by `boot-local`
+    before writing, #351). A diskless node whose drive carries slabs says which
     drive and why. `controllers` and `drives` are the boot's storage
     inventory (#345) (`docs/boot-hooks.md`).
   And `"ublk_stuck"` (#337): every request a ublk device was handed and has
@@ -2082,9 +2084,9 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.tag=<name>` | the firmware's `StormBootTag`, else this, else SMBIOS serial/UUID | the name claimed as (`boothost/<name>`); a firmware name that differs wins, with a warning (#249) |
 | `rd.stormblock.hostnqn=<nqn>` | the firmware's `StormBootHostNqn` | the NQN presented on every NVMe/TCP connect |
 | `rd.stormblock.trust-smbios=1` | off | let a name guessed from SMBIOS install over a disk (#249) |
-| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any` (a blank drive, or this node's own layout), `blank`, `off`, `force`; only the drive `rd.stormblock.slab=` names when it is present, and a drive on an external shelf only when named; the machine's own shelves (internal, front, rear) unnamed (#347: by the shelf's position, never by being on a shelf; `docs/boot-hooks.md`). **A boot from the appliance that takes no local drive stops** (#427, the flow-over is mandatory): a FATAL naming every drive left and why. `off` runs it diskless, said |
+| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any` (a blank drive, or this node's own layout), `blank`, `off`, `force`; the system drive is **known, never guessed** (#351): the drive holding this node, else the one `rd.stormblock.slab=` names (stormdrive's designation places the system half, #402), else the one drive on the machine's own shelves (internal, front, rear, #347) or the single drive it has; anything else takes nothing and names every drive by shelf, bay, model and serial; the drive chosen is proved by WWN/serial/size before it is written (`docs/boot-hooks.md`). **A boot from the appliance that takes no local drive stops** (#427, the flow-over is mandatory): a FATAL naming every drive left and why. `off` runs it diskless, said |
 | `rd.stormblock.diskless=1` | unset | run from the appliance on purpose: a boot that takes no local drive goes on, said, where it would stop (#427) |
-| `rd.stormblock.allow-external=1` | off | let the survey take a drive on an external shelf as the machine's own (#273, #347) |
+| `rd.stormblock.allow-external=1` | off | count a drive on an external shelf as the machine's own (#273, #347, #351) |
 | `rd.stormblock.wipe=<dev>` | — | clear that disk's partition table and slab headers once, before the survey |
 | `rd.stormblock.slab=<dev\|file\|nvme-tcp://…>` | — | boot from a local (or named) slab instead of claiming |
 | `rd.stormblock.system=<drive>` | stormdrive's designation, else the drive holding the system half | at an install, the drive for the system half when it is not the data drive (#402): laid as a boot area and one system slab sized to it; the data half stays on (or is laid on) the drive the survey takes. For a fresh pair nothing has designated yet |
