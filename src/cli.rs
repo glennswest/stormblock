@@ -9005,7 +9005,8 @@ pub(crate) const SYSTEM_DATA_DEV_FILE: &str = "/run/stormblock/system-data.dev";
 /// manager: lent to the shared lock the clone path takes, then given back.
 /// A release that fails part-way stops the boot: the ticket is still there,
 /// and the next boot runs it again.
-async fn run_release_ticket(mgr: crate::volume::VolumeManager) -> anyhow::Result<crate::volume::VolumeManager> {
+async fn run_release_ticket(mut mgr: crate::volume::VolumeManager) -> anyhow::Result<crate::volume::VolumeManager> {
+    crate::release_erase::finish_interrupted(&mut mgr).await;
     let Some((store, ticket)) = crate::release_erase::pending_ticket(&mgr).await else {
         return Ok(mgr);
     };
@@ -14224,7 +14225,14 @@ mod release_erase_tests {
         assert_eq!(names(&mgr).await, want);
         let waiting: u64 = mgr.registry().read().await.iter().map(|(_, s)| s.erasing_slots()).sum();
         assert_eq!(waiting, r.slots, "every freed slot queued for overwrite, across a reopen");
-        let again = run_release_ticket(mgr).await.unwrap();
+        let mut again = run_release_ticket(mgr).await.unwrap();
+        assert_eq!(names(&again).await, want);
+        // A cut between the old state volume's delete and the rename: the
+        // next boot gives the fresh one its name.
+        let st = again.find_volume("stormblock-state").await.unwrap();
+        again.rename_volume(st, "stormblock-state.release-new").await.unwrap();
+        again.persist().await;
+        let again = run_release_ticket(again).await.unwrap();
         assert_eq!(names(&again).await, want);
         assert_eq!(file(&again, "stormcos-state", "/config/install-config.yaml").await.is_some(), true);
     }
