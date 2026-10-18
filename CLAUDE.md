@@ -232,7 +232,7 @@ the named drive (#273), stormdrive's designation outranking install-over
 - [x] golden golden-stormblock-b18302ba6cea (5062192 ⊇ 9c7bedb,
       stormcos#601); closed. Not on metal: the X9 blades (SSD + HDD) and the Dell with its shelf
 
-### System pair and moving the system (2026-10-17, #350, P2) — DECIDED 1B + 2A; AFTER #351 and the pacing
+### System pair and moving the system (2026-10-17, #350, P2) — DECIDED 1B + 2A; #351 DONE, WAITS ON THE PACING
 
 Two system drives laid together (the system half identical on both,
 checked by digest), the changing part mirrored, either drive boots alone;
@@ -240,7 +240,10 @@ stormdrive's `move-system` with a pointer left on the old drive and "set
 BIOS boot order". Master's decision on #350 (2026-10-17): **1B** build
 after #351 (the pair is chosen by its known-location rules) and after the
 single-node pacing lifts; **2A** the pair's whole data half per-volume
-`mirror:2` across the two drives' data slabs. Proposed after #351. To
+`mirror:2` across the two drives' data slabs. #351 closed (v21.1.0); the
+pacing is still on (stormcentral settings `pacing: true`), so parked with
+`wait-owner --until` the pacing lifts (asked on #350: A start on a wip/
+branch now, B wait, recommended). To
 build then: install lays the system half on both (digest-checked), a data
 slab on each, data volumes `mirror:2`; a missing partner = degraded in
 `local_disk` and health; `POST /api/v1/system/move {to}` (admin) writes a
