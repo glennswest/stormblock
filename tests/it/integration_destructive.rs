@@ -891,3 +891,83 @@ async fn a_familys_bearer_keeps_to_its_namespace_and_its_quota() {
     assert!(sar.iter().any(|ra| ra["verb"] == "get" && ra["namespace"] == "stormcos"), "{sar:?}");
     assert!(sar.iter().any(|ra| ra["verb"] == "list" && ra["namespace"].is_null()), "the cluster-wide list first: {sar:?}");
 }
+
+/// A release erase (#291): asked of the running node with the admin token,
+/// planned, recorded as a ticket in the state volume before the answer, and
+/// refused where it cannot run.
+#[tokio::test]
+async fn a_release_erase_is_planned_recorded_for_the_next_boot_and_refused_where_it_cannot_run() {
+    use reqwest::Method as M;
+    use stormblock::volume::metadata::Origin;
+    let n = node(false, None).await;
+    {
+        let mut vm = n.state.volume_manager.lock().await;
+        let g = vm.create_volume_any("fastetcd-data.golden", 4 * MIB).await.unwrap();
+        vm.seal_volume(g, None).await.unwrap();
+        vm.set_origin(g, Origin::Release);
+        let c = vm.create_snapshot(g, "fastetcd-data").await.unwrap();
+        vm.set_origin(c, Origin::Release);
+        let p = vm.create_volume_any("pvc-0001", 4 * MIB).await.unwrap();
+        vm.set_origin(p, Origin::Node);
+        vm.create_volume_any("system-data", 4 * MIB).await.unwrap();
+    }
+    let ask = |tok: &'static str, body: Value| {
+        let base = n.base.clone();
+        async move {
+            let r = reqwest::Client::new().post(format!("{base}/release")).bearer_auth(tok).json(&body).send().await.unwrap();
+            let code = r.status().as_u16();
+            (code, r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let names = |v: &Value, k: &str| -> Vec<String> {
+        let mut x: Vec<String> = v[k].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap().to_string()).collect();
+        x.sort();
+        x
+    };
+
+    // Destructive: never the node token.
+    assert_eq!(call(&n, M::POST, "/release", Some(NODE), Some(json!({"dry_run": true}))).await, 403);
+    let (code, dry) = ask(ADMIN, json!({"dry_run": true})).await;
+    assert_eq!(code, 200, "{dry}");
+    let plan = &dry["plan"];
+    assert_eq!(names(plan, "keep"), ["fastetcd-data.golden", "system-data"]);
+    assert_eq!(names(plan, "relay"), ["fastetcd-data"]);
+    assert_eq!(names(plan, "erased"), ["pvc-0001"]);
+    assert_eq!(plan["erase"], "once");
+
+    // An engine with no state volume is not a node a release runs on.
+    let (code, body) = ask(ADMIN, json!({})).await;
+    assert_eq!((code, body["code"].as_str()), (409, Some("not_a_node")), "{body}");
+
+    let state_dir = TempDir::new().unwrap();
+    let _ = n.state.state_store.set(Arc::new(stormblock::state::StateStore::in_dir(state_dir.path())));
+    // Not while a flow-over is still moving the node onto its disk.
+    n.state.flow_over_remaining.store(5, std::sync::atomic::Ordering::Relaxed);
+    let (code, body) = ask(ADMIN, json!({})).await;
+    assert_eq!((code, body["code"].as_str()), (409, Some("flow_over_running")), "{body}");
+    n.state.flow_over_remaining.store(-1, std::sync::atomic::Ordering::Relaxed);
+
+    // Recorded: in the data directory and captured to the state volume
+    // before the answer; never below `once`.
+    let (code, body) = ask(ADMIN, json!({"erase": "none"})).await;
+    assert_eq!(code, 202, "{body}");
+    assert_eq!(body["ticket"]["erase"], "once");
+    assert_eq!(body["ticket"]["state"], "pending");
+    let kept: Value = serde_json::from_slice(&std::fs::read(state_dir.path().join("release-ticket.json")).unwrap()).unwrap();
+    assert_eq!(kept["id"], body["ticket"]["id"]);
+    let get = |p: &'static str| {
+        let base = n.base.clone();
+        async move { reqwest::Client::new().get(format!("{base}{p}")).bearer_auth(ADMIN).send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    assert_eq!(get("/release").await["pending"], true);
+    assert_eq!(get("/health").await["release"], "pending");
+
+    // Cancelled: written, not removed (the state store keeps files).
+    assert_eq!(call(&n, M::DELETE, "/release", Some(NODE), None).await, 403);
+    assert_eq!(call(&n, M::DELETE, "/release", Some(ADMIN), None).await, 200);
+    let kept: Value = serde_json::from_slice(&std::fs::read(state_dir.path().join("release-ticket.json")).unwrap()).unwrap();
+    assert_eq!(kept["state"], "cancelled");
+    assert_eq!(get("/release").await["pending"], false);
+    assert!(get("/health").await.get("release").is_none());
+    assert_eq!(call(&n, M::DELETE, "/release", Some(ADMIN), None).await, 404);
+}
