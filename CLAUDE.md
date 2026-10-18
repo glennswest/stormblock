@@ -204,15 +204,20 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-3c3b29808089 (ec23149).
 
-### System pair and moving the system (2026-10-17, #350, P2) — WAITING ON THE OWNER
+### System pair and moving the system (2026-10-17, #350, P2) — DECIDED 1B + 2A; AFTER #351 and the pacing
 
 Two system drives laid together (the system half identical on both,
 checked by digest), the changing part mirrored, either drive boots alone;
 stormdrive's `move-system` with a pointer left on the old drive and "set
-BIOS boot order". Asked on #350 (needs-owner): 1 when (A now on
-`wip/350-system-pair`, B after #351 and the pacing, recommended); 2 what is
-mirrored (A the pair's whole data half, per-volume `mirror:2`,
-recommended; B only our services' state; C wait for #361). Nothing built.
+BIOS boot order". Master's decision on #350 (2026-10-17): **1B** build
+after #351 (the pair is chosen by its known-location rules) and after the
+single-node pacing lifts; **2A** the pair's whole data half per-volume
+`mirror:2` across the two drives' data slabs. Proposed after #351. To
+build then: install lays the system half on both (digest-checked), a data
+slab on each, data volumes `mirror:2`; a missing partner = degraded in
+`local_disk` and health; `POST /api/v1/system/move {to}` (admin) writes a
+pointer into the old drive's system-data; /init follows it and raises "set
+BIOS boot order to <drive>". Nothing built.
 
 ### Multicast appliance discovery (2026-10-17, #104, P3) — PARKED until the single-node pacing lifts
 
