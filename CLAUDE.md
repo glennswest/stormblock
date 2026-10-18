@@ -145,11 +145,16 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v20.0.0** (2026-09-28): boot intent (#148), the build/test split (#209,
-`cluster` opt-in — BREAKING) and per-host NVMe/TCP subsystems with DH-HMAC-CHAP
-(#210 — BREAKING: the shared subsystem is closed by default); before it
-v19.4.0 (universal boot #200, boothost names #199). Unreleased since v20.0.0
-(Cargo still says 20.0.0; goldens staged for the P0s through stormcos#168):
+**v21.0.0** (2026-10-17, #353, f23b508, golden-stormblock-595bf69e5baa):
+version and changelog only, over everything below; breaking for callers:
+#274/#382 (destructive verbs need the admin token or a `destroy` review),
+#161 (`nvmeof` feature gone), #160 (RAID-set scrub reports by default),
+#158 (metadata format 2 default), #311, #83/#6. **From here on a tag
+(patch/minor) goes with each staged golden**, so a golden's version names a
+tag. Before it, **v20.0.0** (2026-09-28): boot intent (#148), the build/test
+split (#209, `cluster` opt-in) and per-host NVMe/TCP subsystems (#210).
+What v21.0.0 carries since v20.0.0 (goldens staged through stormcos#168 and
+#601 reported 20.0.0):
 RAID sets on a shelf with hot spares, reassembly, bitmap, rebuild, scrub
 (#252, #168, #175, #215);
 per-volume LBA 512|4096, metadata V9 (#228); the install stopgap and
@@ -324,12 +329,16 @@ a restart. stormcluster PUTs a copy until then. Nothing built.
 stormupdate#13 (owner, 2026-10-09): the release's data-volumes file, applied
 at stage (#122), is the only data policy; no copy/fresh/drop API. Nothing built.
 
-### No tag since v20.0.0 (2026-10-17, #353, P3) — CUTTING v21.0.0 (master: A, 2026-10-17)
+### No tag since v20.0.0 (2026-10-17, #353, P3) — DONE: v21.0.0 tagged, closed
 
-1119 commits since v20.0.0 with breaking changes (#274, #382, #161, #160):
-semver says v21.0.0. Asked on #353 (needs-owner): A v21.0.0 now + a tag per
-staged golden (recommended), B 20.1.0 as asked, C after the pacing.
-Consumers: stormuefi#39 (#205's fix), stormblock-test#4 (>= #274).
+Master for the owner (2026-10-17): A. `chore(release): v21.0.0` (f23b508):
+Cargo.toml/Cargo.lock 21.0.0, README and the deck's version line, the
+changelog's Unreleased moved under `[v21.0.0]` with the breaking changes
+first; no code. check.sh at f23b508 ALL PASS twice (1261/1261), the built
+binary says `stormblock 21.0.0`; tagged and pushed; the compare API: v21.0.0
+is ahead of bdcdbf7 (#205). Golden golden-stormblock-595bf69e5baa
+(stormcos#601). stormuefi#39 (pin v21.0.0) and stormblock-test#4 (`>= 21`)
+told. **Rule from here:** a patch/minor bump and tag with each staged golden.
 
 ### Carry mkfs-ext4 with #9/#10 for 64 TiB–1 PiB blanks (2026-10-17, #289) — CLOSED: done by #300
 
