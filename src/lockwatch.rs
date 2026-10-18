@@ -298,6 +298,12 @@ impl<T> TrackedMutex<T> {
         TrackedMutex { inner: Arc::new(tokio::sync::Mutex::new(value)), state: LockState::new(name_of::<T>()) }
     }
 
+    /// The value back, when nothing else holds the lock (#291: `boot-local`
+    /// lends its manager to the shared-lock paths and takes it back).
+    pub fn into_inner(self) -> Option<T> {
+        Arc::try_unwrap(self.inner).ok().map(tokio::sync::Mutex::into_inner)
+    }
+
     pub async fn lock(&self) -> TrackedMutexGuard<'_, T> {
         let wait = self.state.wait(true);
         let guard = self.inner.lock().await;
