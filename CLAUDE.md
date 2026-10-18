@@ -2205,7 +2205,8 @@ defaults to XFS (stormcos#91).
       `xfs_admin -U`); a claim costs a log of writes (64 MiB under 128 GiB)
 - [x] at 1d097ee: ci-xfs-mount-verify.sh ALL PASS (12 guest checks),
       ci-xfs-verify.sh PASS, check.sh ALL PASS (1261/1261); README,
-      CHANGELOG; golden; stormcos#91 told
+      CHANGELOG; golden golden-stormblock-8aea27e4f973 (stormcos#601);
+      stormcos#91 told; closed
 
 ### system-data: the node's kept record of itself (2026-10-08, #355, P0) — DONE here, metal pending
 
