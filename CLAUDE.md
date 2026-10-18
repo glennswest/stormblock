@@ -199,6 +199,16 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-3c3b29808089 (ec23149).
 
+### System pair and moving the system (2026-10-17, #350, P2) — WAITING ON THE OWNER
+
+Two system drives laid together (the system half identical on both,
+checked by digest), the changing part mirrored, either drive boots alone;
+stormdrive's `move-system` with a pointer left on the old drive and "set
+BIOS boot order". Asked on #350 (needs-owner): 1 when (A now on
+`wip/350-system-pair`, B after #351 and the pacing, recommended); 2 what is
+mirrored (A the pair's whole data half, per-volume `mirror:2`,
+recommended; B only our services' state; C wait for #361). Nothing built.
+
 ### Multicast appliance discovery (2026-10-17, #104, P3) — PARKED until the single-node pacing lifts
 
 Master's decision B: last in the order, off by default,
