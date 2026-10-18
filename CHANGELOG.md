@@ -4,8 +4,15 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-17
-- **fix:** #351 (P0, the owner's install rules 3–5): the system drive is known, never guessed. The initramfs survey no longer takes "the first takeable drive": it takes the drive holding this node (install-over, the one data-slab drive, the drive the boot runs from), else the one `rd.stormblock.slab=` names, else the one drive on the machine's own shelves or the single drive it has (an external shelf's too: #347's "external only when named" withdrawn); anything else STOPS, naming every drive by shelf, bay, model and serial (verdict `ambiguous`, then #427's diskless refusal). Several drives with data slabs stop too unless exactly one also holds the system half. Every drive in `/sys/block` is looked at (`sd*`, not `sd?`). The chosen drives' identity (`--local-disk-id`, `--system-disk-id`: WWN, serial, model, size) goes to `boot-local`, which proves the device (`identity::prove`: WWN, else model and serial together, and size) before writing a byte and writes nothing to one that is not that drive; `local-disk.json` keeps the `identity`. Tests: the boot-hook survey (ambiguity, a 100-drive external shelf, identities), `identity` proof units, an install beside a 100-drive shelf changes only the system drive's bytes. A blank drive beside the drive a boot runs from is no longer taken.
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
+
+## [v21.1.0] — 2026-10-17
+
+### Changed
+- A machine with several drives and nothing that says which is the system drive (no install-over, no name, no designation) now stops instead of taking the first: name one (`rd.stormblock.slab=`) or designate it in stormdrive (#351, the owner's rule 3). `boot-local` takes `--local-disk-id` / `--system-disk-id`.
+
+### Fixed
+- #351 (P0, the owner's install rules 3–5): the system drive is known, never guessed. The initramfs survey no longer takes "the first takeable drive": it takes the drive holding this node (install-over, the one data-slab drive, the drive the boot runs from), else the one `rd.stormblock.slab=` names, else the one drive on the machine's own shelves or the single drive it has (an external shelf's too: #347's "external only when named" withdrawn); anything else STOPS, naming every drive by shelf, bay, model and serial (verdict `ambiguous`, then #427's diskless refusal). Several drives with data slabs stop too unless exactly one also holds the system half. Every drive in `/sys/block` is looked at (`sd*`, not `sd?`). The chosen drives' identity (`--local-disk-id`, `--system-disk-id`: WWN, serial, model, size) goes to `boot-local`, which proves the device (`identity::prove`: WWN, else model and serial together, and size) before writing a byte and writes nothing to one that is not that drive; `local-disk.json` keeps the `identity`. Tests: the boot-hook survey (ambiguity, a 100-drive external shelf, identities), `identity` proof units, an install beside a 100-drive shelf changes only the system drive's bytes. A blank drive beside the drive a boot runs from is no longer taken.
 
 ## [v21.0.0] — 2026-10-17
 
