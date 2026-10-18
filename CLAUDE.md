@@ -301,7 +301,7 @@ drop slab + volumes from memory with no persist/erase; stop the array with
 no superblock/bitmap/flush write; forget the members); test: assemble on a
 second engine, every member byte unchanged. Nothing built.
 
-### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P3; stormcluster#21, P1) — BUILDING on wip/291-release-erase (owner's ask; master: 1B, keep list as asked; merges after the single-node pacing)
+### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P3; stormcluster#21, P1) — BUILT on wip/291-release-erase (32a63f6, check.sh ALL PASS); merge asked on #291 (needs-owner: A now, B after the pacing, recommended)
 
 stormcluster#14's release: gone: workloads, claims, etcd, certs, role,
 customer images, overwritten once; kept: release system images; a new SNO.
@@ -310,25 +310,31 @@ initramfs engine erases and re-lays before anything is mounted. Keep:
 sealed release goldens, `system-data`, the node's declaration in
 stormcos-state. Erase: everything else, unmarked included.
 Plan (engine, `src/release_erase.rs`):
-- [ ] plan: keep (sealed `release`, `system-data`), re-lay (unsealed
+- [x] plan: keep (sealed `release`, `system-data`), re-lay (unsealed
       `release` whose parent is a kept golden: a fresh stamped clone, same
       name), erase (the rest). `stormblock-state` last, through a temporary
       name, so a cut leaves the old one and its ticket (the run repeats)
-- [ ] the declaration carried: `/config/stormcos.toml` with only `[node]` and
+- [x] the declaration carried: `/config/stormcos.toml` with only `[node]` and
       `[network]` (the role, `[cluster]`, goes), `install-node.toml`,
       `install-config.yaml`, `ssh/authorized_keys`; saved into the ticket
       before anything is deleted, written into the fresh stormcos-state
-- [ ] live: `POST /api/v1/release {erase, force, dry_run}` (destructive):
+- [x] live: `POST /api/v1/release {erase, force, dry_run}` (destructive):
       the plan; 409 with no state volume, a flow-over running, or a remote
       host on a volume it erases (unless `force`); the ticket written and
       captured to `stormblock-state` before the answer. `GET` (ticket, last
       report), `DELETE` (cancel). Health `release`
-- [ ] boot: `boot-local` from the local disk alone reads the ticket from
+- [x] boot: `boot-local` from the local disk alone reads the ticket from
       `stormblock-state` and runs it before the root is resolved; slots
       freed `Erasing` (at least the ticket's level), overwritten by the
       successor's eraser (`/api/v1/erasures`); `release-report.json` in the
       fresh state volume
-- [ ] tests, docs, CHANGELOG; stormcluster#21 told
+- [x] tests `cli::release_erase_tests::…` (run through boot-local's hook,
+      reopened from disk, freed slots still queued, a cut before the last
+      rename finished), `integration_destructive::a_release_erase_is_…`,
+      the declaration unit; docs/erase.md, README, auth.md, CHANGELOG;
+      check.sh on the branch at 32a63f6 ALL PASS (1264/1264, no warnings)
+- [ ] merge (after the owner's answer), golden, stormcluster#21 told, close.
+      Not run: a real node through a reboot
 
 ### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — PARKED until the single-node pacing lifts
 
