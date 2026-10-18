@@ -232,6 +232,22 @@ pub async fn pending_ticket(m: &VolumeManager) -> Option<(Arc<crate::state::Stat
     t.pending().then_some((store, t))
 }
 
+/// A release cut between its last delete and its last rename leaves the
+/// fresh state volume under its temporary name and none under the real one:
+/// give it the name. Answers whether it did.
+pub async fn finish_interrupted(m: &mut VolumeManager) -> bool {
+    if m.find_volume(STATE_VOLUME).await.is_some() {
+        return false;
+    }
+    let Some(new) = m.find_volume(STATE_NEW).await else { return false };
+    if m.rename_volume(new, STATE_VOLUME).await.is_err() {
+        return false;
+    }
+    m.persist().await;
+    println!("RELEASE: finished a release cut short: {STATE_NEW} is {STATE_VOLUME}");
+    true
+}
+
 /// Run a ticket on a node whose volumes nothing serves yet: `boot-local`,
 /// before the root is resolved.
 pub async fn run(vm: &Arc<crate::fs::template::VmLock>, store: &crate::state::StateStore, mut t: Ticket) -> anyhow::Result<Report> {
@@ -333,25 +349,26 @@ pub async fn run(vm: &Arc<crate::fs::template::VmLock>, store: &crate::state::St
         match lay(vm, STATE_NEW, &from).await {
             Ok(new) => {
                 r.relaid.push(STATE_VOLUME.to_string());
-                let mut done = r.clone();
-                done.ran_at = now();
-                let dev = vm.lock().await.get_volume(&new);
-                if let Some(dev) = dev {
-                    let fresh = crate::state::StateStore::open_volume(dev).await;
-                    if let Err(e) = fresh.put(REPORT, serde_json::to_vec_pretty(&done)?).await {
-                        r.failed.push(format!("the report not written: {e}"));
-                    }
-                }
                 let mut m = vm.lock().await;
                 match m.delete_volume_erasing(old, level).await {
                     Ok(s) => {
                         r.slots += s.slots;
                         r.bytes += s.bytes;
-                        if let Err(e) = m.rename_volume(new, STATE_VOLUME).await {
-                            r.failed.push(format!("{STATE_NEW}: not renamed: {e}"));
-                        }
                     }
                     Err(e) => r.failed.push(format!("{STATE_VOLUME}: not deleted: {e}")),
+                }
+                // The report once everything is counted, then the name: a cut
+                // before the rename is finished by the next boot
+                // ([`finish_interrupted`]).
+                r.ran_at = now();
+                if let Some(dev) = m.get_volume(&new) {
+                    let fresh = crate::state::StateStore::open_volume(dev).await;
+                    if let Err(e) = fresh.put(REPORT, serde_json::to_vec_pretty(&r)?).await {
+                        r.failed.push(format!("the report not written: {e}"));
+                    }
+                }
+                if let Err(e) = m.rename_volume(new, STATE_VOLUME).await {
+                    r.failed.push(format!("{STATE_NEW}: not renamed: {e}"));
                 }
                 m.persist().await;
             }
