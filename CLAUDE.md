@@ -202,9 +202,10 @@ A release wave takes every component's newest golden, so main is the next
 release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 #74 (secret volumes) and #450's engine half stay on main (master's A): both
 are inert until used, and an unmarked volume's record is byte-identical to
-the format before #74. Newest golden: golden-stormblock-b18302ba6cea (5062192, v21.1.0).
+the format before #74. Newest golden: golden-stormblock-b18302ba6cea (5062192, v21.1.0); v21.2.0's
+stage (#466) requested 2026-10-20.
 
-### The engine reports its commit (2026-10-20, #466, P2, stormcentral#998) — MERGED to main (master's A, 2026-10-20); v21.2.0 + golden next
+### The engine reports its commit (2026-10-20, #466, P2, stormcentral#998) — DONE (v21.2.0, d94520a; stage 53e5e1bb9d06 requested), closed
 
 stormcentral's perf gate fingerprints forge's engine. `version` was already
 on the open health, but it moves only at a tag (goldens between tags all
@@ -220,7 +221,11 @@ read the same), so a change is seen only with the commit.
       the binary). Whole-crate clippy still fails on #398's old lints, none
       in these lines
 - [x] merge: master's A on #466 (2026-10-20); main fast-forwarded to 52a544d
-- [ ] check.sh on main; v21.2.0 tagged; golden; stormcentral#998 told; close
+- [x] check.sh on main at 074259d ALL PASS; v21.2.0 tagged (d94520a: the
+      build VM's `cargo run --locked` says `stormblock 21.2.0`, the binary
+      carries `d94520a036b2`); stage requested (53e5e1bb9d06, --no-wait);
+      stormcentral#998 told; closed. Forge reports its commit once it runs
+      this engine
 
 ### The system drive is known, never guessed (2026-10-17, #351, P0) — DONE (v21.1.0, golden-stormblock-b18302ba6cea), closed
 
