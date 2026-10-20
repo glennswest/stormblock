@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-b18302ba6cea (5062192, v21.1.0).
 
-### The engine reports its commit (2026-10-20, #466, P2, stormcentral#998) — BUILT on wip/466-version; merge asked on #466
+### The engine reports its commit (2026-10-20, #466, P2, stormcentral#998) — MERGED to main (master's A, 2026-10-20); v21.2.0 + golden next
 
 stormcentral's perf gate fingerprints forge's engine. `version` was already
 on the open health, but it moves only at a tag (goldens between tags all
@@ -219,9 +219,8 @@ read the same), so a change is seen only with the commit.
       (1264/1264); a build VM stamps `4d738d862bcf` (build script output and
       the binary). Whole-crate clippy still fails on #398's old lints, none
       in these lines
-- [ ] merge: the pacing is on (P0/P1 only); asked on #466 (A merge now,
-      recommended: two constants, writes nothing; B after the pacing). Then
-      a golden, stormcentral#998 told, close
+- [x] merge: master's A on #466 (2026-10-20); main fast-forwarded to 52a544d
+- [ ] check.sh on main; v21.2.0 tagged; golden; stormcentral#998 told; close
 
 ### The system drive is known, never guessed (2026-10-17, #351, P0) — DONE (v21.1.0, golden-stormblock-b18302ba6cea), closed
 
