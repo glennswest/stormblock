@@ -211,6 +211,9 @@ call is logged as one `enforce` (the default) would refuse.
   lock (the worst RAID set's state, #252; the extents a flow-over still has
   to move, #260): what a supervisor holding no token needs to tell a settled
   node from one still busy.
+* `GET /api/v1/version` — the version and the commit the binary was built
+  from (#466), both already on health: what stormcentral compares to see that
+  forge's engine changed. Two constants, nothing about the node's state.
 * `/serve/v1/health`, `/serve/v1/ready` — supervisor probes, and the same two
   under the deprecated `/mk/v1` prefix.
 * `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —

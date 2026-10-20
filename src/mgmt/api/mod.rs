@@ -80,6 +80,9 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         status: &'static str,
         service: &'static str,
         version: &'static str,
+        /// The commit this engine was built from (#466): `version` moves
+        /// only at a tag, so this is what changes on every new golden.
+        commit: &'static str,
         auth: &'static str,
         /// Why the volume records are not being written (#428): `status` is
         /// then `degraded`, and nothing new is made until they are. forge ran
@@ -184,7 +187,8 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         durability,
         digests,
         service: "stormblock",
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::version::VERSION,
+        commit: crate::version::COMMIT,
         auth: if state.auth_enforced() { "required" } else { "none" },
         raid,
         flow_over_remaining,
@@ -198,10 +202,23 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     .into_response()
 }
 
+/// Which build this engine is (#466): `{service, version, commit}`. Open,
+/// like health, and cheaper: nothing read but two constants, for a caller
+/// (stormcentral's performance gate) that only wants to see a change.
+async fn version() -> Response {
+    Json(serde_json::json!({
+        "service": "stormblock",
+        "version": crate::version::VERSION,
+        "commit": crate::version::COMMIT,
+    }))
+    .into_response()
+}
+
 /// Build the complete API router.
 pub fn router(state: Arc<AppState>) -> Router {
     let r = Router::new()
         .route("/api/v1/health", axum::routing::get(health).with_state(state.clone()))
+        .route("/api/v1/version", axum::routing::get(version))
         .nest("/api/v1/drives", drives::router(state.clone()))
         .nest("/api/v1/arrays", arrays::router(state.clone()))
         .nest("/api/v1/shelves", shelves::shelves_router(state.clone()))

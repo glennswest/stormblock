@@ -119,6 +119,41 @@ async fn probes_stay_public_and_health_reports_the_mode() {
     server.abort();
 }
 
+/// Which build this is (#466): the version and the commit, open on health and
+/// on `/api/v1/version` on a closed node, and as `stormblock_build_info` on
+/// `/metrics` (which keeps its token).
+#[tokio::test]
+async fn the_engine_says_which_build_it_is() {
+    let dir = TempDir::new().unwrap();
+    let state = state_with(&dir, config_with_token("sekrit")).await;
+    let (base, server) = serve(state).await;
+    let c = reqwest::Client::new();
+    let commit = stormblock::version::COMMIT;
+    assert!(!commit.is_empty());
+    assert!(commit == "unknown" || (commit.len() == 12 && commit.bytes().all(|b| b.is_ascii_hexdigit())), "{commit}");
+
+    let v = c.get(format!("{base}/api/v1/version")).send().await.unwrap();
+    assert_eq!(v.status().as_u16(), 200, "/api/v1/version is open");
+    let v: serde_json::Value = v.json().await.unwrap();
+    assert_eq!(v["service"], "stormblock");
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["commit"], commit);
+
+    let h: serde_json::Value =
+        c.get(format!("{base}/api/v1/health")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["version"], v["version"]);
+    assert_eq!(h["commit"], v["commit"]);
+
+    stormblock::mgmt::metrics::init_metrics();
+    stormblock::mgmt::metrics::register_metrics();
+    assert_eq!(c.get(format!("{base}/metrics")).send().await.unwrap().status().as_u16(), 401);
+    let text = c.get(format!("{base}/metrics")).bearer_auth("sekrit").send().await.unwrap().text().await.unwrap();
+    let want = format!("stormblock_build_info{{commit=\"{commit}\",version=\"{}\"}} 1", env!("CARGO_PKG_VERSION"));
+    assert!(text.lines().any(|l| l == want), "{want} not in:\n{text}");
+
+    server.abort();
+}
+
 /// `flow_over_remaining` (#260): absent with no flow-over, then whatever the
 /// flow-over last counted, 0 included — open, like the rest of health.
 #[tokio::test]

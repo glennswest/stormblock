@@ -141,6 +141,9 @@ fn is_public(path: &str) -> bool {
             | "/mk/v1/ready"
             | "/mk/v1/health"
             | "/api/v1/health"
+            // Which build this is (#466): the version and the commit, both
+            // already on health.
+            | "/api/v1/version"
             // What the engine is doing when its API stops answering (#269):
             // read-only, no volume data, asked by a supervisor that holds
             // no node token.
@@ -704,7 +707,8 @@ fn flag(q: &HashMap<String, String>, key: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 async fn health() -> Response {
-    Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") })).into_response()
+    Json(json!({ "status": "ok", "version": crate::version::VERSION, "commit": crate::version::COMMIT }))
+        .into_response()
 }
 
 /// 200 only when a consumer attaching right now would get what it expects —
@@ -730,7 +734,8 @@ async fn status(State(ctx): State<Arc<ServeContext>>) -> MkResult {
         ctx.state.fstemplates.lock().await.templates.iter().map(|t| t.json()).collect();
     let mut body = ctx.status.json();
     if let Some(obj) = body.as_object_mut() {
-        obj.insert("version".into(), json!(env!("CARGO_PKG_VERSION")));
+        obj.insert("version".into(), json!(crate::version::VERSION));
+        obj.insert("commit".into(), json!(crate::version::COMMIT));
         obj.insert("advertise_addr".into(), json!(ctx.cfg.advertise_addr));
         obj.insert("default_protocol".into(), json!(WireProto::default().api_name()));
         obj.insert("shared_nqn".into(), json!(ctx.cfg.nqn));

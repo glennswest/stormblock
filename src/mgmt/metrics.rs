@@ -343,6 +343,10 @@ pub fn register_metrics() {
         "stormblock_nvme_tcp_path_bytes",
         "Bytes a remote slab's NVMe/TCP path has carried, by target address and local interface (#450)"
     );
+    metrics::describe_gauge!(
+        "stormblock_build_info",
+        "1, labelled with the engine's version and the commit it was built from (#466)"
+    );
     metrics::describe_gauge!("stormblock_nvme_tcp_path_down", "1 while a remote slab's NVMe/TCP path is skipped after a failure (#450)");
 }
 
@@ -467,6 +471,7 @@ async fn refresh_drive_gauges(state: &crate::mgmt::AppState) {
 async fn handle_metrics(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<crate::mgmt::AppState>>,
 ) -> impl IntoResponse {
+    metrics::gauge!("stormblock_build_info", "version" => crate::version::VERSION, "commit" => crate::version::COMMIT).set(1.0);
     refresh_capacity_gauges(&state).await;
     refresh_drive_gauges(&state).await;
     match REGISTRY.get() {

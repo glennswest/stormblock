@@ -152,7 +152,7 @@ impl CallerSlot {
 fn is_probe(path: &str) -> bool {
     matches!(
         path,
-        "/api/v1/health" | "/serve/v1/health" | "/serve/v1/ready" | "/mk/v1/health" | "/mk/v1/ready" | "/metrics"
+        "/api/v1/health" | "/api/v1/version" | "/serve/v1/health" | "/serve/v1/ready" | "/mk/v1/health" | "/mk/v1/ready" | "/metrics"
     ) || path.starts_with("/debug/")
 }
 

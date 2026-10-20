@@ -584,7 +584,8 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
 ## Health, readiness and metrics
 
 - `GET /api/v1/health` — public, never waits on a lock, no I/O:
-  `{"status":"ok","service":"stormblock","version":…,"auth":"required"|"none"}`,
+  `{"status":"ok","service":"stormblock","version":…,"commit":…,"auth":"required"|"none"}`
+  (`commit`: the 12-hex commit the binary was built from, or `unknown`, #466),
   `status` is `degraded` with `"durability"` (the reason) while volume
   records cannot be written; nothing new is made until they can (#428);
   plus `"raid"` (the worst RAID set's state) on a node that has sets, and
@@ -708,11 +709,18 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
   listening, exports wired), else 503 with the blockers.
+- `GET /api/v1/version` — public, two constants: `{"service":"stormblock",
+  "version":…,"commit":…}` (#466). `version` moves only at a tag; `commit`
+  changes with every build, so a caller compares it to see an engine
+  upgraded. `build.rs` stamps it: `$STORMBLOCK_COMMIT` when set, else
+  `git rev-parse --short=12 HEAD`, else `unknown`. Also on `/serve/v1/health`
+  and `/serve/v1/status`.
 - `GET /metrics` — Prometheus text, **needs the token**, on the daemon and on a
   node's engine (`adopt-ublk`, `boot-local`, `boot-iscsi`; it answered 500 there
   before #413). `GET /api/v1/discovery` (and its `cluster` verbs) answers 404 on
   an engine that runs no discovery, as a node's does (#413). Slab and drive gauges
-  are refreshed at scrape time: `stormblock_slab_{capacity,allocated,free}_bytes{slab,tier}`
+  are refreshed at scrape time: `stormblock_build_info{commit,version} 1` (#466),
+  `stormblock_slab_{capacity,allocated,free}_bytes{slab,tier}`
   and their `_total`s, `stormblock_drive_{capacity_bytes,healthy,media_errors,temperature_celsius,available_spare_pct,power_on_hours}{drive,serial}`;
   plus `stormblock_api_requests_total{endpoint,method}`, `stormblock_volumes_total`,
   `stormblock_{drives,arrays,slabs,exports,luns}_total`, `stormblock_capacity_bytes`,
@@ -732,7 +740,8 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
 Everything is on the management port, behind one bearer-token check
 (`docs/auth.md`). The token is required by default: the engine takes
 `api_token`, `$STORMBLOCK_API_TOKEN` or the token file, and mints one into the
-token file if there is none. Open without a token: `/api/v1/health`, the
+token file if there is none. Open without a token: `/api/v1/health`,
+`/api/v1/version` (#466), the
 `/serve/v1` (and legacy `/mk/v1`) `health` and `ready` probes, and
 `POST /api/v1/synonyms/boothost/<tag>/claim`, and beside it the boot intent's
 `GET …/<tag>/intent` and `POST …/<tag>/installed` (#148). With an

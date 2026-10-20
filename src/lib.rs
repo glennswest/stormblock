@@ -22,6 +22,7 @@ pub mod fglat;
 pub mod flowhot;
 pub mod flowprogress;
 pub mod retry;
+pub mod version;
 pub mod netif;
 pub mod image;
 pub mod pallet;
