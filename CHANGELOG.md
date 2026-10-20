@@ -9,6 +9,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.2.0] — 2026-10-20
+
+### Added
+- #466: the engine says which build it is. `GET /api/v1/version` `{service, version, commit}` (open, like health); `commit` on `/api/v1/health`, `/serve/v1/health` and `/serve/v1/status`; `stormblock_build_info{commit,version} 1` on `/metrics`. `build.rs` stamps the commit (`$STORMBLOCK_COMMIT`, else `git rev-parse --short=12 HEAD`, else `unknown`). Compare `commit`, not `version`: the version moves only at a tag.
+
 ## [v21.1.0] — 2026-10-17
 
 ### Changed
