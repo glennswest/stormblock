@@ -204,6 +204,18 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-b18302ba6cea (5062192, v21.1.0).
 
+### The engine reports its commit (2026-10-20, #466, P2, stormcentral#998) — IN PROGRESS on wip/466-version
+
+stormcentral's perf gate fingerprints forge's engine. `version` was already
+on the open health, but it moves only at a tag (goldens between tags all
+read the same), so a change is seen only with the commit.
+- [ ] `build.rs`: `STORMBLOCK_COMMIT` (env, else `git rev-parse --short=12
+      HEAD`, else `unknown`); `stormblock::version::{VERSION, COMMIT}`
+- [ ] health `commit`; open `GET /api/v1/version` `{service, version,
+      commit}`; `/metrics` `stormblock_build_info{version, commit} 1`
+- [ ] tests; README, CHANGELOG; check.sh on the branch
+- [ ] merge: the pacing is on (P0/P1 only), so asked on #466
+
 ### The system drive is known, never guessed (2026-10-17, #351, P0) — DONE (v21.1.0, golden-stormblock-b18302ba6cea), closed
 
 Owner's install rules 3–5 (#349). Already built before: install-over (#311),
