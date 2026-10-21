@@ -6,42 +6,26 @@ use std::sync::Arc;
 
 use crate::drive::BlockDevice;
 
-/// NVMe admin opcodes.
-pub const ADMIN_IDENTIFY: u8 = 0x06;
-pub const ADMIN_GET_LOG_PAGE: u8 = 0x02;
-pub const ADMIN_ABORT: u8 = 0x08;
-pub const ADMIN_SET_FEATURES: u8 = 0x09;
-pub const ADMIN_GET_FEATURES: u8 = 0x0A;
-pub const ADMIN_ASYNC_EVENT_REQ: u8 = 0x0C;
-pub const ADMIN_KEEP_ALIVE: u8 = 0x18;
-
-/// Feature identifier: Number of Queues (NVMe 1.4 §5.21.1.7).
-///
-/// The host asks how many I/O queue pairs it may create; the controller
-/// answers in completion DW0. Both the request and the reply are 0-based.
-pub const FEAT_NUM_QUEUES: u8 = 0x07;
-
-/// Identify CNS values.
-pub const CNS_NAMESPACE: u8 = 0x00;
-pub const CNS_CONTROLLER: u8 = 0x01;
-pub const CNS_ACTIVE_NS_LIST: u8 = 0x02;
-pub const CNS_NS_DESC_LIST: u8 = 0x03;
+// Every field both targets report the same way is the portable crate's
+// (#474); what is the engine's alone (ANA, #83) is added here.
+pub use stormblock_nvmeof::identify::{
+    active_ns_list, changed_ns_list, ADMIN_ABORT, ADMIN_ASYNC_EVENT_REQ, ADMIN_GET_FEATURES,
+    ADMIN_GET_LOG_PAGE, ADMIN_IDENTIFY, ADMIN_KEEP_ALIVE, ADMIN_SET_FEATURES, CNS_ACTIVE_NS_LIST,
+    CNS_CONTROLLER, CNS_NAMESPACE, CNS_NS_DESC_LIST, FEAT_NUM_QUEUES, NSATTR_OFFSET,
+    NSATTR_WRITE_PROTECTED, NS_LIST_OVERFLOW,
+};
 
 /// Namespace Identification Descriptor list (CNS 0x03): one UUID descriptor
-/// then a zero terminator. The Linux initiator issues this during namespace
-/// scan and aborts the namespace when it errors.
+/// then a zero terminator.
 pub fn identify_ns_desc_list(uuid: &[u8; 16]) -> Vec<u8> {
-    let mut data = vec![0u8; 4096];
-    data[0] = 0x03; // NIDT = UUID
-    data[1] = 16; // NIDL
-    data[4..20].copy_from_slice(uuid);
-    data
+    stormblock_nvmeof::identify::ns_desc_list(uuid)
 }
 
 /// Build Identify Controller data (4096 bytes).
 ///
 /// `discovery` selects CNTRLTYPE (the kernel refuses `nvme discover` against
-/// a controller that doesn't identify as a discovery controller).
+/// a controller that doesn't identify as a discovery controller). MDTS is the
+/// default transfer; the target overwrites it with its own (#407).
 pub fn identify_controller(
     subnqn: &str,
     serial: &str,
@@ -50,49 +34,15 @@ pub fn identify_controller(
     max_namespaces: u32,
     discovery: bool,
 ) -> Vec<u8> {
-    let mut data = vec![0u8; 4096];
-
-    // VID (vendor ID) - PCI, 0 for fabric
-    data[0..2].copy_from_slice(&0u16.to_le_bytes());
-    // SSVID
-    data[2..4].copy_from_slice(&0u16.to_le_bytes());
-
-    // Serial Number (bytes 4-23, 20 bytes, ASCII, space-padded)
-    let sn = serial.as_bytes();
-    let sn_len = sn.len().min(20);
-    data[4..4 + sn_len].copy_from_slice(&sn[..sn_len]);
-    for b in &mut data[4 + sn_len..24] { *b = b' '; }
-
-    // Model Number (bytes 24-63, 40 bytes, ASCII, space-padded)
-    let mn = model.as_bytes();
-    let mn_len = mn.len().min(40);
-    data[24..24 + mn_len].copy_from_slice(&mn[..mn_len]);
-    for b in &mut data[24 + mn_len..64] { *b = b' '; }
-
-    // Firmware Revision (bytes 64-71, 8 bytes)
-    let fw = firmware.as_bytes();
-    let fw_len = fw.len().min(8);
-    data[64..64 + fw_len].copy_from_slice(&fw[..fw_len]);
-    for b in &mut data[64 + fw_len..72] { *b = b' '; }
-
-    // MDTS (Maximum Data Transfer Size) — log2 of 4 KiB pages. The target
-    // overwrites it with its configured transfer size (#407).
-    data[77] = super::mdts_for(super::DEFAULT_MAX_TRANSFER);
-
-    // CNTLID (assigned during connect, filled by caller)
-    // data[78..80] set externally
-
-    // VER = NVMe 1.4
-    data[80..84].copy_from_slice(&0x00010400u32.to_le_bytes());
-
-    // OAES (Optional Asynchronous Events Supported), bit 8 = Namespace
-    // Attribute Changed notices. Without this the host will not arm for the
-    // event, and a hot-added namespace stays invisible until it reconnects.
-    data[92..96].copy_from_slice(&(1u32 << 8).to_le_bytes());
-
-    // CNTRLTYPE (byte 111): 1 = I/O controller, 2 = discovery controller
-    data[111] = if discovery { 2 } else { 1 };
-
+    let mut data = stormblock_nvmeof::identify::controller(
+        subnqn,
+        serial,
+        model,
+        firmware,
+        max_namespaces,
+        discovery,
+        super::mdts_for(super::DEFAULT_MAX_TRANSFER),
+    );
     if !discovery {
         // Asymmetric Namespace Access (#83). CMIC: the subsystem may have
         // several ports and controllers (bits 0, 1) and reports ANA (bit 3)
@@ -109,147 +59,20 @@ pub fn identify_controller(
         // controller whose MNAN is zero or above NN.
         data[540..544].copy_from_slice(&max_namespaces.to_le_bytes());
     }
-
-    // OACS (Optional Admin Command Support) — none for now
-    data[256..258].copy_from_slice(&0u16.to_le_bytes());
-
-    // KAS (bytes 320-321): Keep Alive granularity in 100 ms units.
-    // Mandatory nonzero for fabrics — the Linux initiator rejects the
-    // controller outright otherwise ("keep-alive support is mandatory").
-    data[320..322].copy_from_slice(&10u16.to_le_bytes());
-
-    // ACLS (Abort Command Limit) = 3
-    data[258] = 3;
-
-    // AERL (Async Event Request Limit) = 3
-    data[259] = 3;
-
-    // FRMW (Firmware Updates) — slot 1, no commit
-    data[260] = 0x01;
-
-    // SQES: min=6(64B), max=6(64B)
-    data[512] = 0x66;
-    // CQES: min=4(16B), max=4(16B)
-    data[513] = 0x44;
-
-    // MAXCMD
-    data[514..516].copy_from_slice(&256u16.to_le_bytes());
-
-    // NN (Number of Namespaces)
-    data[516..520].copy_from_slice(&max_namespaces.to_le_bytes());
-
-    // ONCS (Optional NVM Command Support) — Write Zeroes, Dataset Management
-    data[520..522].copy_from_slice(&0x0004u16.to_le_bytes()); // Dataset Management
-
-    // VWC: a volatile write cache is present (#366). A write is acknowledged
-    // before its slot is synced; with VWC clear a host takes every completed
-    // write as durable and never sends a Flush or sets FUA, so an fsync on
-    // the host made nothing durable here. The I/O controller only.
-    if !discovery {
-        data[525] = 0x01;
-    }
-
-    // SGLS: SGLs supported (bit 0) + SGL data block in capsule (bit 20).
-    // Mandatory nonzero for fabrics — the Linux initiator refuses the
-    // controller with "Mandatory sgls are not supported!" otherwise.
-    data[536..540].copy_from_slice(&((1u32 << 0) | (1u32 << 20)).to_le_bytes());
-
-    // SUBNQN (bytes 768-1023, 256 bytes)
-    let nqn = subnqn.as_bytes();
-    let nqn_len = nqn.len().min(256);
-    data[768..768 + nqn_len].copy_from_slice(&nqn[..nqn_len]);
-
-    // NVMe-oF specific (bytes 1792+), all mandatory for fabrics:
-    // IOCCSZ: I/O command capsule size in 16-byte units — 64B SQE + 8 KB
-    // in-capsule data. Writes larger than 8 KB use the R2T/H2CData flow.
-    data[1792..1796].copy_from_slice(&(((64 + 8192) / 16) as u32).to_le_bytes());
-    // IORCSZ: I/O response capsule size (one 16-byte CQE).
-    data[1796..1800].copy_from_slice(&1u32.to_le_bytes());
-    // ICDOFF = 0, FCATT = 0 (dynamic controller model)
-    // MSDBD: one SGL data block descriptor per command.
-    data[1803] = 1;
-
     data
 }
 
-/// Identify Namespace: NSATTR's offset, and its write-protected bit. A host
-/// that reads it set makes the block device read-only (Linux: `set_disk_ro`).
-pub const NSATTR_OFFSET: usize = 99;
-pub const NSATTR_WRITE_PROTECTED: u8 = 1 << 0;
-
-/// Build Identify Namespace data (4096 bytes).
+/// Build Identify Namespace data (4096 bytes): the volume's size and block,
+/// its id as the NGUID, and its ANA group on this node (#83).
 pub fn identify_namespace(device: &Arc<dyn BlockDevice>) -> Vec<u8> {
-    let mut data = vec![0u8; 4096];
-
     let bs = device.block_size();
-    let total_blocks = device.capacity_bytes() / bs as u64;
-
-    // NSZE (Namespace Size in LBAs)
-    data[0..8].copy_from_slice(&total_blocks.to_le_bytes());
-    // NCAP (Namespace Capacity)
-    data[8..16].copy_from_slice(&total_blocks.to_le_bytes());
-    // NUSE (Namespace Utilization)
-    data[16..24].copy_from_slice(&total_blocks.to_le_bytes());
-
-    // NSFEAT (Namespace Features)
-    data[24] = 0x04; // Deallocate (TRIM) supported
-
-    // NLBAF (Number of LBA Formats) — 0 = 1 format
-    data[25] = 0;
-
-    // FLBAS (Formatted LBA Size) — format 0, no metadata
-    data[26] = 0;
-
-    // DPS (Data Protection) — none
-    data[29] = 0;
-
-    // NMIC bit 0: the namespace may be reached through several controllers
-    // (Linux refuses a second path to an "unshared" namespace), and its ANA
-    // group: the group of its state on this node (#83).
-    data[30] = 0x01;
     let uuid = device.id().uuid;
-    data[92..96].copy_from_slice(&super::ana::state_of(uuid).group().to_le_bytes());
-
-    // NGUID (16 bytes at offset 104)
-    data[104..120].copy_from_slice(uuid.as_bytes());
-
-    // LBA Format 0 (offset 128): LBADS = log2(block_size), RP=0 (best perf)
-    let lbads = (bs as f64).log2() as u8; // 512->9, 4096->12
-    data[128..132].copy_from_slice(&0u32.to_le_bytes());
-    data[130] = lbads;
-
-    data
-}
-
-/// Sentinel in the Changed Namespace List meaning "more changed than fit —
-/// rescan everything".
-pub const NS_LIST_OVERFLOW: u32 = 0xFFFF_FFFF;
-
-/// Build the Changed Namespace List log page (4096 bytes, up to 1024 NSIDs).
-///
-/// `overflow` reports that more namespaces changed than could be tracked; the
-/// spec's sentinel then tells the host to rescan everything rather than trust
-/// a partial list.
-pub fn changed_ns_list(nsids: &[u32], overflow: bool) -> Vec<u8> {
-    let mut data = vec![0u8; 4096];
-    if overflow || nsids.len() > 1024 {
-        data[0..4].copy_from_slice(&NS_LIST_OVERFLOW.to_le_bytes());
-        return data;
-    }
-    for (i, &nsid) in nsids.iter().enumerate() {
-        data[i * 4..(i + 1) * 4].copy_from_slice(&nsid.to_le_bytes());
-    }
-    data
-}
-
-/// Build Active Namespace ID list (4096 bytes, up to 1024 NSIDs).
-pub fn active_ns_list(nsids: &[u32]) -> Vec<u8> {
-    let mut data = vec![0u8; 4096];
-    for (i, &nsid) in nsids.iter().enumerate() {
-        if i >= 1024 { break; }
-        data[i * 4..(i + 1) * 4].copy_from_slice(&nsid.to_le_bytes());
-    }
-    data
+    stormblock_nvmeof::identify::namespace(
+        device.capacity_bytes() / bs as u64,
+        bs,
+        uuid.as_bytes(),
+        super::ana::state_of(uuid).group(),
+    )
 }
 
 #[cfg(test)]

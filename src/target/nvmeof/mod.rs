@@ -2,12 +2,11 @@
 //!
 //! Handles ICReq/ICResp handshake, fabric Connect, then admin or I/O commands.
 
-pub mod pdu;
-pub mod fabric;
+// The wire half is the portable crate's (#474): the laptop's boot server and
+// the engine speak it from one copy, so the two cannot drift.
+pub use stormblock_nvmeof::{auth, discovery, fabric, pdu};
 pub mod admin;
 pub mod io;
-pub mod discovery;
-pub mod auth;
 pub mod ana;
 pub mod nsid;
 
@@ -92,7 +91,7 @@ pub const DEFAULT_MAX_TRANSFER: usize = 8 << 20;
 
 /// The most a target may be told to take: NLB is 16 bits, so 65536 blocks
 /// of 512 bytes is the most a command can name on a 512-byte namespace.
-pub const MAX_TRANSFER_CEILING: usize = 32 << 20;
+pub const MAX_TRANSFER_CEILING: usize = stormblock_nvmeof::MAX_TRANSFER_CEILING;
 
 /// `STORMBLOCK_NVME_MAX_TRANSFER` (bytes, a power of two from 4096 to
 /// 32 MiB), else [`DEFAULT_MAX_TRANSFER`]. For measuring before and after:
@@ -114,9 +113,7 @@ pub fn default_max_transfer() -> usize {
 }
 
 /// MDTS for a transfer size: log2 of it in 4 KiB pages (CAP.MPSMIN = 0).
-pub fn mdts_for(bytes: usize) -> u8 {
-    (bytes.max(4096) / 4096).trailing_zeros() as u8
-}
+pub use stormblock_nvmeof::identify::mdts_for;
 
 /// The controller-ID range a target gets unless its config says otherwise:
 /// `[management] nvme_cntlid_range` for the whole node (#83). Packed

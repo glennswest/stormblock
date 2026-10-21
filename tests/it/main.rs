@@ -12,6 +12,7 @@
 mod common;
 
 mod boot_iscsi;
+mod integration_bootserve;
 mod contract_v1_wire;
 mod crash_recovery;
 mod integration_array_pin;

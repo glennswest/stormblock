@@ -283,10 +283,10 @@ const _H2C_DATA_HLEN: u8 = 24;
 const R2T_HLEN: u8 = 24;
 
 /// The largest PDU a target reads (#407): the largest transfer a command may
-/// carry ([`super::MAX_TRANSFER_CEILING`]) and its headers. A PDU's length
+/// carry ([`crate::MAX_TRANSFER_CEILING`]) and its headers. A PDU's length
 /// is the peer's word, read before anything is authenticated; without a
 /// bound, one header could make the target allocate 4 GiB.
-pub const MAX_PDU_BYTES: usize = super::MAX_TRANSFER_CEILING + 4096;
+pub const MAX_PDU_BYTES: usize = crate::MAX_TRANSFER_CEILING + 4096;
 
 /// Read a complete NVMe-oF/TCP PDU from a stream.
 pub async fn read_pdu<R: AsyncReadExt + Unpin>(stream: &mut R) -> std::io::Result<NvmeofPdu> {

@@ -2528,6 +2528,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "socket2",
+ "stormblock-nvmeof",
  "stormblock-pallet-format",
  "tempfile",
  "tokio",
@@ -2549,6 +2550,24 @@ dependencies = [
  "stormblock",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "stormblock-nvmeof"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "clap",
+ "crc32fast",
+ "hex",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

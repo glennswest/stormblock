@@ -2,7 +2,7 @@
 # The pallet format's decode side is its own crate so firmware and the engine
 # can share one reader rather than maintaining two that must stay
 # bit-compatible forever (#53).
-members = ["crates/pallet-format", "tests-runtime", "benches"]
+members = ["crates/pallet-format", "crates/nvmeof-target", "tests-runtime", "benches"]
 
 [package]
 name = "stormblock"
@@ -29,6 +29,8 @@ name = "stormblock"
 path = "src/main.rs"
 
 [dependencies]
+# The NVMe/TCP wire half, shared with the portable boot server (#474).
+stormblock-nvmeof = { path = "crates/nvmeof-target" }
 # Async runtime
 # `taskdump` (with --cfg tokio_unstable, .cargo/config.toml): where every task
 # is parked, for /debug/tasks when the API stops answering (#269).
