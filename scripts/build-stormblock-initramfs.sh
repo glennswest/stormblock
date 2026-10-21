@@ -4034,7 +4034,8 @@ if [ "$BOOT_MODE" = "local" ]; then
     LOCAL_DISK=""
     # The disk the probe found bootable and ruled an install over: that is
     # the one to install onto, not whichever drive the scan meets first.
-    if [ -n "$INSTALL_FRESH" ] && [ -n "${INSTALL_OVER:-}" ] && [ -e "$INSTALL_OVER" ]; then
+    if [ -n "$INSTALL_FRESH" ] && [ -n "${INSTALL_OVER:-}" ] \
+       && { [ -e "$INSTALL_OVER" ] || [ -e "$SURVEY_DEV/${INSTALL_OVER#/dev/}" ]; }; then
         LOCAL_DISK="$INSTALL_OVER"
         echo "  installing over $INSTALL_OVER, the disk this machine booted from until now"
     fi
@@ -4170,7 +4171,11 @@ $1|$_svp|$3"
                        && [ "$ASSIMILATE" != blank ]; then
                         SV_TAKEOVER="$dev"
                         sv_cand "$dev" "$d" "$dev carries $sig (an old install, partitions) - taken over (#478)"
-                    elif [ -n "$sig" ] && ! { [ "$ASSIMILATE" = force ] && [ "${d##*/}" = "$NAMED_DISK" ]; }; then
+                    # `force` clears anything else only on a drive named
+                    # outright (rd.stormblock.slab=, system_drive), never on
+                    # the first drive or the node's by default (#478).
+                    elif [ -n "$sig" ] && ! { [ "$ASSIMILATE" = force ] && [ "${d##*/}" = "$NAMED_DISK" ] \
+                            && { [ "$CHOSEN_BY" = named ] || [ "$CHOSEN_BY" = system_drive ]; }; }; then
                         echo "  $dev carries $sig - not ours and not blank, leaving it (#273)"
                         ld_skip "$dev" "carries $sig, not ours and not blank (#273)"
                         if [ -z "$LD_ODRIVE" ]; then
