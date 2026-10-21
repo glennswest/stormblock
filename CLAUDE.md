@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### server1's clones 10–20 s after the 12.37 reboot (2026-10-21, #475, P0) — IN PROGRESS
+### server1's clones 10–20 s after the 12.37 reboot (2026-10-21, #475, P0) — DONE (v21.2.2, cf7e8a3), closed; metal pending
 
 stormcos#626: on X9 server1 (SMR HDD) after the reboot, every root clone
 10–20 s, deletes 11–21 s ("waits on no tracked lock"), one delete waited
@@ -220,8 +220,17 @@ and logged neither start nor end.
       window, duty on rotating disks, 30 s cap; check waits for boot quiet
 - [x] digester/check: start/end lines with volumes, MB, s, MB/s; health
       `digests.reading`; README, CHANGELOG
-- [ ] tests on a build VM (bgio units, digest, locks, serve, fstemplates);
-      check.sh; a golden; stormcos#626 told; close
+- [x] test `integration_locks::a_clone_and_a_delete_read_their_table_pages_
+      without_the_volume_manager` (5 ms reads, 24,000-extent golden): the
+      manager waits ≤ 37 ms with the fix; negative controls on throwaway
+      branches fail it (clone 847 ms, delete 818 ms); bgio units
+- [x] check.sh at cf7e8a3 ALL PASS (1253/1253, no warnings; also removed
+      #474's unused test import); v21.2.2 tagged; stage 0f20c999834e
+      requested (`component build` first said "unchanged" naming
+      stormblock@ee2a0e367abe, not a commit here); #475 closed. Metal:
+      server1's next reboot — clones back to seconds, `golden check:
+      started/ended … MB/s` lines, health `digests.reading`
+- Resume #474 next (its work plan below)
 
 ### server8's 12.37 install stalled behind its own console (2026-10-21, #476, P1) — DONE (v21.2.1, 7528cc5), shipped; metal pending
 
