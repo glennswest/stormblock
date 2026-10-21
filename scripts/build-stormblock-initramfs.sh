@@ -700,7 +700,8 @@ fi
 # The install path's log over the network (#477). A BMC's serial-over-LAN
 # that dies mid-install (server8, #476) took the installer's output with it.
 # `stormblock logcast` follows /init's lines (init.log, above) and every line
-# the engine writes (its whole log, not the console's collapsed view), keeps
+# the engine writes (its whole log, not the console's collapsed view, whose
+# copy in init.log it drops), keeps
 # them until a NIC can reach somewhere, and sends each as a stormcast frame:
 # to the group 239.255.42.1:5514 always, and to the collector
 # `stormpump.syslog=<host[:port]>` names, else `syslog:` in the media's or
@@ -716,6 +717,7 @@ logcast_start() {
     "$_lcb" logcast \
         --follow "$INIT_LOG=stormblock-init" \
         --follow "${STORM_ENGINE_LOG:-/run/stormblock/engine.log}=stormblock" \
+        --console-copy stormblock \
         --status "${INIT_LOG%/*}/logcast.status" \
         </dev/null >/dev/null 2>&1 &
     LOGCAST_PID=$!
@@ -772,13 +774,11 @@ engine_follow_filter() { # stdin: the engine's log as it grows -> stdout: the co
     END { said() }'
 }
 
-engine_follow_start() { # follow the engine's log onto the consoles, not into init.log
-    if [ -n "$CONSOLE_FANOUT_PID" ] && [ -n "$INIT_LOG" ] \
-       && console_reader "${STORM_ENGINE_FIFO:-/run/engine-console.fifo}" $CONSOLE_TARGETS; then
-        tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter > "${STORM_ENGINE_FIFO:-/run/engine-console.fifo}" &
-    else
-        tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter &
-    fi
+# Onto the consoles through /init's own fan-out, so its lines and the
+# engine's never split each other. They land in init.log too; logcast drops
+# those copies, having sent the engine's log whole (#477).
+engine_follow_start() {
+    tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter &
     FOLLOW_PID=$!
 }
 # --- END engine follower

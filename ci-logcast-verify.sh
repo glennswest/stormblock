@@ -171,7 +171,7 @@ early = [m for m in init if m.startswith("early line ")]
 check(early == [f"early line {i} of 300, before the network" for i in range(1, 301)],
       f"all 300 lines from before the network, in order, once ({len(early)})")
 check(eng == [f"engine: extent {i} moved" for i in range(1, 51)], f"all 50 engine lines as APP-NAME stormblock, once ({len(eng)})")
-check(not any(m.startswith("engine: ") for m in init), "the engine's lines are not also in /init's (the console's copy)")
+check(not any(m.startswith("engine: ") for m in init), "the console's copy of the engine's lines (in init.log) is not sent again")
 check("late line, after the network" in init, "a line after the network")
 check(all(h == host for (_, _, h, _, _) in parsed), f"HOSTNAME is the node's name, {host}")
 err = [p for (p, _, _, _, m) in parsed if m.startswith("ERROR: a line")]

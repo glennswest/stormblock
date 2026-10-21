@@ -249,6 +249,11 @@ pub struct Options {
     pub drain: Duration,
     /// How often the files are read.
     pub tick: Duration,
+    /// The APP-NAME of a file whose lines the console also shows, and so
+    /// /init's own log holds a copy of (the engine follower writes through
+    /// /init's fan-out): those copies, and the follower's `... and N more
+    /// line(s) like that` notes, are not sent again.
+    pub console_copy: Option<String>,
 }
 
 impl Default for Options {
@@ -265,6 +270,7 @@ impl Default for Options {
             status: Some("/run/stormblock/logcast.status".into()),
             drain: Duration::from_secs(3),
             tick: Duration::from_millis(250),
+            console_copy: None,
         }
     }
 }
@@ -283,8 +289,22 @@ pub struct Logcast {
     cmdline: String,
     host: Option<String>,
     reachable_since: Option<Instant>,
+    /// Lines of the `console_copy` file whose copy in another file is still
+    /// to come (oldest first, at most [`COPIES_KEPT`]), and how many of each.
+    copies: VecDeque<String>,
+    copies_by: std::collections::HashMap<String, usize>,
     /// Stand-in for [`routes`] (tests).
     pub route: fn(SocketAddr) -> bool,
+}
+
+/// Copies waited for at most: the console shows a flood as three lines and
+/// a count, so most of a flood's lines never come back.
+const COPIES_KEPT: usize = 4096;
+
+/// The engine follower's note for a collapsed run (the console's, not the
+/// engine's).
+fn follower_note(line: &str) -> bool {
+    line.starts_with("  ... and ") && line.contains(" more line(s) like that")
 }
 
 impl Logcast {
@@ -302,6 +322,8 @@ impl Logcast {
             cmdline,
             host: None,
             reachable_since: None,
+            copies: VecDeque::new(),
+            copies_by: std::collections::HashMap::new(),
             route: routes,
         };
         let off = matches!(cmdline_target(&lc.cmdline), Some(Target::Off));
@@ -376,14 +398,48 @@ impl Logcast {
 
     /// Read what the files added; `last`: the end of each counts as a line.
     pub fn read(&mut self, last: bool) {
+        let copied = self.opts.console_copy.clone();
+        // The copied file first: its lines are written before their copy.
+        let mut order: Vec<usize> = (0..self.files.len()).collect();
+        order.sort_by_key(|i| Some(&self.files[*i].tag) != copied.as_ref());
         let mut new = Vec::new();
-        for f in &mut self.files {
+        for i in order {
+            let f = &mut self.files[i];
             for l in f.read(last) {
                 new.push((f.tag.clone(), l));
             }
         }
         for (tag, l) in new {
+            if let Some(c) = copied.as_ref() {
+                if tag == *c {
+                    self.copies.push_back(l.clone());
+                    *self.copies_by.entry(l.clone()).or_default() += 1;
+                    while self.copies.len() > COPIES_KEPT {
+                        if let Some(old) = self.copies.pop_front() {
+                            self.forget_copy(&old);
+                        }
+                    }
+                } else if follower_note(&l) {
+                    continue;
+                } else if self.copies_by.get(&l).is_some_and(|n| *n > 0) {
+                    // The console's copy of a line already kept.
+                    self.forget_copy(&l);
+                    if let Some(i) = self.copies.iter().position(|c| *c == l) {
+                        self.copies.remove(i);
+                    }
+                    continue;
+                }
+            }
             self.push(tag, l);
+        }
+    }
+
+    fn forget_copy(&mut self, l: &str) {
+        if let Some(n) = self.copies_by.get_mut(l) {
+            *n -= 1;
+            if *n == 0 {
+                self.copies_by.remove(l);
+            }
         }
     }
 
@@ -565,6 +621,7 @@ mod tests {
             status: Some(dir.path().join("status")),
             drain: Duration::from_millis(300),
             tick: Duration::from_millis(10),
+            console_copy: None,
         });
         lc.route = net;
         NET.store(false, Ordering::Relaxed);
@@ -621,6 +678,7 @@ mod tests {
             status: None,
             drain: Duration::from_millis(100),
             tick: Duration::from_millis(10),
+            console_copy: None,
         };
         let mut lc = Logcast::new(opts.clone());
         lc.route = routes;
@@ -640,5 +698,57 @@ mod tests {
         lc.read(false);
         lc.send();
         assert!(lc.sent().is_empty(), "off: no destination at all, the group included");
+    }
+
+    /// #477: the engine's lines reach /init's log too (the follower writes
+    /// through the fan-out), collapsed: they are sent once, from the
+    /// engine's log, whole; /init's own lines all go.
+    #[test]
+    fn the_consoles_copy_of_the_engines_lines_is_not_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.log");
+        let engine = dir.path().join("engine.log");
+        let host = dir.path().join("hostname");
+        std::fs::write(&host, "blade3").unwrap();
+        let (col, at) = collector();
+        let cmdline = dir.path().join("cmdline");
+        std::fs::write(&cmdline, format!("stormpump.syslog={at}")).unwrap();
+        // The engine floods; the console showed three and a count. /init
+        // printed one line of its own, the same text as none of them.
+        let flood: Vec<String> = (1..=10).map(|i| format!("slab {i} not attached")).collect();
+        std::fs::write(&engine, flood.join("\n") + "\nengine: done\n").unwrap();
+        std::fs::write(
+            &init,
+            "INSTALL: over sda\nslab 1 not attached\nslab 2 not attached\nslab 3 not attached\n  ... and 7 more line(s) like that (all of them in /run/stormblock/engine.log)\nengine: done\nslab 1 not attached\n",
+        )
+        .unwrap();
+        let mut lc = Logcast::new(Options {
+            follow: vec![(init, "stormblock-init".into()), (engine, "stormblock".into())],
+            cmdline,
+            install_configs: vec![],
+            group: "off".into(),
+            hostname: host,
+            status: None,
+            drain: Duration::from_millis(100),
+            tick: Duration::from_millis(10),
+            console_copy: Some("stormblock".into()),
+        });
+        lc.route = routes;
+        lc.read(false);
+        lc.send();
+        let got: Vec<(String, String)> = frames(&col)
+            .iter()
+            .map(|f| {
+                let mut it = f.splitn(8, ' ');
+                let tag = it.nth(3).unwrap().to_string();
+                (tag, f.split(" - - - ").nth(1).unwrap().to_string())
+            })
+            .collect();
+        let engine_lines: Vec<&str> = got.iter().filter(|(t, _)| t == "stormblock").map(|(_, m)| m.as_str()).collect();
+        let init_lines: Vec<&str> = got.iter().filter(|(t, _)| t == "stormblock-init").map(|(_, m)| m.as_str()).collect();
+        assert_eq!(engine_lines.len(), 11, "the engine's log whole: {engine_lines:?}");
+        // A second "slab 1 not attached" in /init's log has no engine line
+        // left to be a copy of: it is /init's.
+        assert_eq!(init_lines, vec!["INSTALL: over sda", "slab 1 not attached"]);
     }
 }

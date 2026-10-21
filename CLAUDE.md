@@ -215,8 +215,9 @@ network is up; offline = group only.
       ring of 100k lines/16 MiB, per-destination cursor, hostname wait,
       SIGTERM drain); `stormcast` dependency (rev 3cec734)
 - [x] /init: fan-out always tees `/run/stormblock/init.log`; block `logcast`
-      (start after the fan-out, `logcast_stop` before switch_root); the
-      engine follower onto the consoles alone (`engine_follow_start`)
+      (start after the fan-out, `logcast_stop` before switch_root). The
+      follower stays on the one fan-out (two tees split lines on a tty, found
+      by the QEMU check); logcast drops init.log's copies (`--console-copy`)
 - [x] tests: `logcast::tests`, initramfs-logcast.sh, initramfs-console.sh;
       `ci-logcast-verify.sh` (QEMU); README, boot-hooks.md, CHANGELOG
 - [ ] on a build VM: those, ci-logcast-verify.sh ALL PASS, check.sh; a

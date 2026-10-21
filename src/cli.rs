@@ -419,6 +419,11 @@ enum SubCommand {
         /// How long a stop waits for the network to send what is left.
         #[arg(long, default_value_t = 3)]
         drain_secs: u64,
+        /// The APP-NAME of a followed file the console also shows, so another
+        /// followed file (/init's log) holds a copy of its lines: the copies
+        /// are not sent again.
+        #[arg(long)]
+        console_copy: Option<String>,
     },
     BootClaim {
         /// The appliance, e.g. http://192.168.31.202:9090
@@ -1178,12 +1183,13 @@ pub async fn run() -> anyhow::Result<()> {
                     &cli.config, *version_mismatch,
                 ).await;
             }
-            SubCommand::Logcast { follow, install_config, group, status, drain_secs } => {
+            SubCommand::Logcast { follow, install_config, group, status, drain_secs, console_copy } => {
                 let mut opts = crate::logcast::Options {
                     follow: follow.clone(),
                     group: group.clone(),
                     status: Some(status.clone()),
                     drain: std::time::Duration::from_secs(*drain_secs),
+                    console_copy: console_copy.clone(),
                     ..Default::default()
                 };
                 if !install_config.is_empty() {

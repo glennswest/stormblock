@@ -2183,8 +2183,11 @@ stormcast group, but nothing in the initramfs did. Now `/init` starts
 `stormblock logcast` right after the console fan-out. It follows
 `/run/stormblock/init.log` (APP-NAME `stormblock-init`) and every line of the
 engine's `/run/stormblock/engine.log` (APP-NAME `stormblock`). That is the
-whole log, not the console's collapsed view: the engine follower writes to
-the consoles alone, so no engine line is sent twice. Each line is sent as a
+whole log, not the console's collapsed view. The engine follower writes
+through `/init`'s one fan-out, so the two never split each other's lines on a
+console, and its copy lands in `init.log` too. logcast drops those copies
+(`--console-copy stormblock`) and the follower's `... and N more` notes, so
+no engine line is sent twice. Each line is sent as a
 stormcast frame (RFC 5424, `local0`, severity read from the line):
 - **to the group** `239.255.42.1:5514` always (TTL 4), and **to a collector**
   when one is named, because multicast does not leave the subnet (the X9

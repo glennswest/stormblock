@@ -1,10 +1,10 @@
 #!/bin/sh
 # The install path's log over the network (#477): /init keeps its own lines
 # in init.log (through the console fan-out), starts `stormblock logcast` on
-# init.log and the engine's log from its first lines, follows the engine's
-# log onto the consoles alone (so the network has the engine's lines once,
-# whole, not also the console's collapsed copy), and stops logcast before
-# switch_root.
+# init.log and the engine's log from its first lines, telling it that
+# init.log holds the console's copy of the engine's lines (the follower
+# writes through the one fan-out, so lines never split each other), and
+# stops logcast before switch_root.
 #
 # Runs the real blocks, extracted from the init script this repo generates;
 # logcast is a stand-in that records how it was started and stopped (the
@@ -48,7 +48,7 @@ chmod +x "$WORK/stormblock"
 
 (
     STORM_CONSOLE_DEV="$DEV" STORM_CMDLINE="$WORK/cmdline" STORM_CONSOLE_SYS="$WORK/nosys"
-    STORM_CONSOLE_FIFO="$RUN/console.fifo" STORM_ENGINE_FIFO="$RUN/engine-console.fifo"
+    STORM_CONSOLE_FIFO="$RUN/console.fifo"
     STORM_INIT_LOG="$RUN/init.log" STORM_ENGINE_LOG="$RUN/engine.log" ENGINE_LOG="$RUN/engine.log"
     STORM_LOGCAST_BIN="$WORK/stormblock"
     export LC_ARGS="$WORK/args" LC_STOPPED="$WORK/stopped"
@@ -78,7 +78,9 @@ check "and forgotten" "" "$(cat "$WORK/pid-after")"
 check "init.log has /init's lines" 2 "$(grep -c '^INSTALL: a release\|^before switch_root' "$RUN/init.log" || true)"
 check "the console has /init's lines" 2 "$(grep -c '^INSTALL: a release\|^before switch_root' "$DEV/ttyS0" || true)"
 check "the console has the engine's lines" 1 "$(grep -c '^Flow-over: 3 extents moved' "$DEV/ttyS0" || true)"
-check "init.log does not have the engine's lines (engine.log has them)" 0 "$(grep -c '^Flow-over: 3 extents moved' "$RUN/init.log" || true)"
+check "the follower goes through the one fan-out (init.log has its copy)" 1 "$(grep -c '^Flow-over: 3 extents moved' "$RUN/init.log" || true)"
+check "logcast is told which lines are the console's copies" 1 "$(grep -c '^--console-copy$' "$WORK/args" || true)"
+check "of the engine's" 1 "$(grep -A1 '^--console-copy$' "$WORK/args" | grep -c '^stormblock$' || true)"
 check "nothing on the old stdout" "" "$(cat "$WORK/stdout")"
 
 # No stormblock (a test, an image without it): no logcast, nothing else changes.
