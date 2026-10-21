@@ -37,7 +37,8 @@ if [ "${1:-}" = build ]; then
     shift
     ENGINES=
     for rev in "$@"; do
-        git cat-file -e "$rev^{commit}" 2>/dev/null || git fetch -q "${REPO_URL:-https://github.com/glennswest/stormblock}" main
+        git cat-file -e "$rev^{commit}" 2>/dev/null || { url=${REPO_URL:-https://github.com/glennswest/stormblock}
+            if [ "$(git rev-parse --is-shallow-repository)" = true ]; then git fetch -q --unshallow "$url" main; else git fetch -q "$url" main; fi; }
         sha=$(git rev-parse --short "$rev")
         tree="$W/src-$sha"
         rm -rf "$tree"; git worktree prune
