@@ -37,7 +37,7 @@ if [ "${1:-}" = build ]; then
     shift
     ENGINES=
     for rev in "$@"; do
-        git cat-file -e "$rev^{commit}" 2>/dev/null || git fetch -q --unshallow origin 2>/dev/null || git fetch -q origin main
+        git cat-file -e "$rev^{commit}" 2>/dev/null || git fetch -q "${REPO_URL:-https://github.com/glennswest/stormblock}" main
         sha=$(git rev-parse --short "$rev")
         tree="$W/src-$sha"
         rm -rf "$tree"; git worktree prune
