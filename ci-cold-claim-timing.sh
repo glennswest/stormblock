@@ -9,7 +9,7 @@
 #   lookup  GET /api/v1/volumes, GET /api/v1/slabs, GET /api/v1/volumes
 #   blank   GET /api/v1/fstemplates/{name}, POST /api/v1/fstemplates/{id}/clone
 #
-# Each engine is given the same node: a RAID-1 slab on two files, the size-
+# Each engine is given the same node: two data slabs on files, the size-
 # class blanks, $V volumes beside them (a node carries ~150). Then, $R times:
 # stop it, start it, wait for health, run one claim (cold), then $N more
 # (warm). The medians per call, per engine, are printed side by side.
@@ -53,8 +53,9 @@ fi
 ENGINES=${ENGINES:-new=${CARGO_TARGET_DIR:-target}/release/stormblock}
 
 start() {
-    RUST_LOG=stormblock=warn "$BIN" --config "$W/node/stormblock.toml" --device "$W/node/d1.img" --device "$W/node/d2.img" \
-        --raid raid1 --data-dir "$W/node/data" --no-iscsi --nvmeof-addr 127.0.0.1:4437 \
+    # $DEVS: none on the first start (the slabs are made through the API),
+    # both files after it (the daemon adopts the slabs it finds on them).
+    RUST_LOG=stormblock=warn "$BIN" --config "$W/node/stormblock.toml" $DEVS --data-dir "$W/node/data" --no-iscsi --nvmeof-addr 127.0.0.1:4437 \
         --nvmeof-nqn nqn.2026-10.lo.test:cold >>"$W/engine.log" 2>&1 &
     ENGINE=$!
     for _ in $(seq 1 1200); do
@@ -98,9 +99,15 @@ admin_token = "t"
 node_name = "ci-cold"
 discovery_disabled = true
 EOF
-    start
+    DEVS=; start
+    for d in d1 d2; do
+        ms -m 300 -X POST "$API/slabs" -d "{\"device_path\":\"$W/node/$d.img\",\"role\":\"data\"}" >/dev/null || fail "slab $d: $(cat "$W/last")"
+    done
+    DEVS="--device $W/node/d1.img --device $W/node/d2.img"
+    stop; start
+    ms "$API/slabs" >/dev/null; echo "  slabs after a restart: $(j 'len(d["items"])')"
     for sz in 64m 256m 1g; do
-        ms -m 300 -X POST "$API/fstemplates" -d "{\"name\":\"pvc-ext4j-$sz\",\"size\":\"${sz^^}\",\"role\":\"data\"}" >/dev/null || fail "template $sz"
+        ms -m 300 -X POST "$API/fstemplates" -d "{\"name\":\"pvc-ext4j-$sz\",\"size\":\"${sz^^}\",\"role\":\"data\"}" >/dev/null || fail "template $sz: $(cat "$W/last")"
     done
     ms "$API/fstemplates/pvc-ext4j-64m" >/dev/null; tid=$(j 'd.get("id") or d["template"]["id"]')
     for i in $(seq 1 "$V"); do
