@@ -26,6 +26,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 sed -n '/# --- BEGIN root fallback/,/# --- END root fallback/p' "$GEN" > "$WORK/fallback.sh"
 [ -s "$WORK/fallback.sh" ] || { echo "FAIL: could not extract the root fallback block"; exit 1; }
+# The follower the fallback starts again filters through this (#476).
+sed -n '/# --- BEGIN engine follower/,/# --- END engine follower/p' "$GEN" > "$WORK/follow.sh"
+[ -s "$WORK/follow.sh" ] || { echo "FAIL: could not extract the engine follower"; exit 1; }
 
 fail=0
 check() { # name expected actual
@@ -76,6 +79,7 @@ run() {
         OLD_ENGINE=$STORMBLOCK_PID
         sleep 300 &
         FOLLOW_PID=$!
+        . "$WORK/follow.sh"
         . "$WORK/fallback.sh"
         rc=0
         root_fallback "${WHY:-root device would not mount}" > "$WORK/out" 2>&1 || rc=$?
