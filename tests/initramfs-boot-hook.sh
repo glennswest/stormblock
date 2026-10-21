@@ -57,6 +57,12 @@ check() { # name expected actual
         echo "  ok    $1"
     else
         echo "  FAIL  $1: expected '$2', got '$3'"
+        # SURVEY_DEBUG=1: the survey's own words for the first failure.
+        if [ -n "${SURVEY_DEBUG:-}" ] && [ "$fail" = 0 ]; then
+            for _l in "$WORK/msurvey.log" "$WORK/survey.log"; do
+                [ -s "$_l" ] && { echo "  --- $_l"; tail -40 "$_l" | sed 's/^/  | /'; }
+            done
+        fi
         fail=1
     fi
 }
