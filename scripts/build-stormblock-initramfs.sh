@@ -3667,10 +3667,18 @@ if [ "$BOOT_MODE" = "local" ]; then
         fi
         return 0
     }
-    may_take() { # /sys/block/X dev -> 0 when rules 1 and 2 allow the drive
+    chosen_how() { # -> how the chosen drive was chosen, for the console
+        case "${CHOSEN_BY:-named}" in
+        system_drive) echo "the drive system_drive names" ;;
+        first) echo "this machine's first drive" ;;
+        node) echo "the drive holding this node" ;;
+        *) echo "the drive rd.stormblock.slab= names" ;;
+        esac
+    }
+    may_take() { # /sys/block/X dev -> 0 when the drive is the one chosen (#478)
         if [ -n "$NAMED_DISK" ] && [ "${1##*/}" != "$NAMED_DISK" ]; then
-            echo "  $2 is not the drive rd.stormblock.slab= names (/dev/$NAMED_DISK) - leaving it (#273)"
-            ld_refused "$2" "not the drive rd.stormblock.slab= names (/dev/$NAMED_DISK)"
+            echo "  $2 is not $(chosen_how) (/dev/$NAMED_DISK) - leaving it (#273, #478)"
+            ld_refused "$2" "not $(chosen_how) (/dev/$NAMED_DISK)"
             return 1
         fi
         # A drive on an external shelf is not refused for being there (#351,
@@ -3705,6 +3713,167 @@ if [ "$BOOT_MODE" = "local" ]; then
             "${_ddbay:-none}" "${_ddm:-model unknown}" "${_dds:-unknown}" \
             "$(( $(cat "$1/size" 2>/dev/null || echo 0) / 1953125 ))"
     }
+    # --- BEGIN system drive choice (covered by tests/initramfs-boot-hook.sh, tests/initramfs-system-drive.sh)
+    # Which drive an install takes (#478, the owner's rules of 2026-10-21,
+    # replacing #351's "never guessed"), in order:
+    #
+    #   1. `system_drive:` in this machine's install-config (the boot media's,
+    #      else forge's per-host one, #459): a mapping of `serial`, `wwn`,
+    #      `model` and `shelf` + `bay`, every key given matching. Exactly one
+    #      drive must match; none or several STOPS, naming every drive. It
+    #      outranks everything below, the drive this node is on now included:
+    #      it is how the system is moved to another drive, and it is the only
+    #      drive taken (no #402 split). Never a /dev name: they move.
+    #   2. The drive rd.stormblock.slab= names (release-wide; stormcos drops
+    #      it once every machine can say system_drive).
+    #   3. The drive that holds this node: the probe's install-over, or the one
+    #      drive with this node's data slab (an install goes over an existing
+    #      install).
+    #   4. The machine's first drive: the first non-removable, non-USB drive
+    #      by controller and port order (the by-path order), the machine's own
+    #      shelves before external ones, then the lowest bay. Not `/dev/sda`:
+    #      a name is the order the kernel met them in.
+    #
+    # Old stormcos installs, slabs and partitions on the chosen drive are
+    # taken over (its data half kept, #311). A RAID member (stormraid, md,
+    # ZFS) is not an old install and is left, said why.
+    SD_KEYS="serial wwn model shelf bay"
+    sd_spec() { # install-config -> "key=value" lines of its top-level system_drive mapping
+        awk -v q="'" '
+            /^system_drive:/ {
+                v = $0; sub(/^system_drive:[ \t]*/, "", v); sub(/[ \t]+#.*$/, "", v); sub(/^#.*$/, "", v)
+                if (v != "") { print "=" v; exit }
+                ins = 1; next
+            }
+            ins && /^[^ \t#]/ { exit }
+            ins && /^[ \t]+[A-Za-z_]+:/ {
+                l = $0; sub(/^[ \t]+/, "", l)
+                k = l; sub(/:.*/, "", k)
+                v = l; sub(/^[^:]*:[ \t]*/, "", v); sub(/[ \t]+#.*$/, "", v)
+                if (v ~ /^".*"$/ || v ~ ("^" q ".*" q "$")) v = substr(v, 2, length(v) - 2)
+                print tolower(k) "=" v
+            }' "$1" 2>/dev/null
+    }
+    sd_norm() { tr 'A-Z' 'a-z' | sed 's/^ *//; s/ *$//'; }
+    sd_digits() { printf '%s' "$1" | tr -cd '0-9' | sed 's/^0*//'; }
+    sd_matches() { # /sys/block/X spec-lines -> 0 when every key given matches the drive
+        printf '%s\n' "$2" | while IFS= read -r _kv; do
+            [ -n "$_kv" ] || continue
+            _k=${_kv%%=*}; _v=$(printf '%s' "${_kv#*=}" | sd_norm)
+            case "$_k" in
+            serial) [ "$(drive_serial "$1" | sd_norm)" = "$_v" ] || exit 1 ;;
+            model)  [ "$(drive_model "$1" | sd_norm)" = "$_v" ] || exit 1 ;;
+            wwn)
+                _w=$(drive_wwn "$1" | sd_norm); _v=${_v#0x}
+                [ -n "$_w" ] || exit 1
+                case "$_w" in "$_v"|*".$_v"|*"$_v") ;; *) exit 1 ;; esac ;;
+            shelf)
+                _s=$(shelf_of "$1"); _sid=$(printf '%s' "${_s%%|*}" | sd_norm); _s=${_s#*|}
+                [ "$_sid" = "$_v" ] || [ "${_s%%|*}" = "$_v" ] || exit 1 ;;
+            bay)
+                _s=$(shelf_of "$1"); _s=${_s#*|}; _s=${_s#*|}; _b=$(printf '%s' "${_s%%|*}" | sd_norm)
+                [ -n "$_b" ] || exit 1
+                [ "$_b" = "$_v" ] || { [ -n "$(sd_digits "$_v")" ] && [ "$(sd_digits "$_b")" = "$(sd_digits "$_v")" ]; } || exit 1 ;;
+            esac
+        done
+    }
+    sd_drives() { # every drive with media: /sys/block paths (removable ones too: a name may mean one)
+        for _d in "$SURVEY_SYS"/sd* "$SURVEY_SYS"/nvme*n*; do
+            [ -e "$_d" ] || continue
+            [ "$(cat "$_d/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
+            echo "$_d"
+        done
+    }
+    sd_list() { # every drive, described, one a line
+        for _d in $(sd_drives); do echo "    $(drive_desc "$_d" "/dev/${_d##*/}")"; done
+    }
+    first_drive() { # -> the machine's first drive (rule 4), and why, as "dev|why"
+        for _d in $(sd_drives); do
+            [ "$(cat "$_d/removable" 2>/dev/null)" = 1 ] && continue
+            _p=$(readlink -f "$_d" 2>/dev/null); [ -n "$_p" ] || _p="$_d"
+            case "$_p" in */usb*) continue ;; esac
+            if drive_external "$_d"; then _x=1; else _x=0; fi
+            _s=$(shelf_of "$_d"); _s=${_s#*|}; _s=${_s#*|}
+            printf '%s %s %s\t/dev/%s\t%s\n' "$_x" "$_p" "${_s%%|*}" "${_d##*/}" "$_p"
+        done | awk -F '\t' '
+            # PCI addresses are hex, every other number decimal: each made a
+            # fixed-width decimal so that a plain sort is controller, port
+            # and bay order (ata2 before ata10, 00:1f.2 after 00:02.0).
+            function hex(h,   i, n) { n = 0; h = tolower(h)
+                for (i = 1; i <= length(h); i++) n = n * 16 + index("0123456789abcdef", substr(h, i, 1)) - 1
+                return n }
+            { k = $1; out = ""
+              while (match(k, /[0-9a-f][0-9a-f][0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]\.[0-7]/)) {
+                  pre = substr(k, 1, RSTART - 1); b = substr(k, RSTART, RLENGTH); k = substr(k, RSTART + RLENGTH)
+                  out = out pre sprintf("%05d%03d%03d%02d", hex(substr(b, 1, 4)), hex(substr(b, 6, 2)), hex(substr(b, 9, 2)), substr(b, 12, 1) + 0)
+              }
+              k = out k; out = ""
+              while (match(k, /[0-9]+/)) { out = out substr(k, 1, RSTART - 1) sprintf("%012d", substr(k, RSTART, RLENGTH) + 0); k = substr(k, RSTART + RLENGTH) }
+              print out k "\t" $2 "\t" $3 }' | sort | head -n 1 | cut -f 2-
+    }
+    # Why this boot could not say which drive is the system drive (#478).
+    SV_WHY=""
+    SD_FROM=""          # which install-config gave the system_drive
+    SD_SPEC=""
+    SD_CHOSEN=""        # the drive system_drive names
+    CHOSEN_BY=""        # system_drive | named | node | first
+    for _icf in "${INSTALL_CONFIG_STAGED:-}" "${INSTALL_CONFIG_FORGE:-${STORM_RUN:-/run/stormblock}/install-config.forge.yaml}"; do
+        [ -n "$_icf" ] && [ -f "$_icf" ] || continue
+        # Only this one key is read and said: the file carries secrets (#275).
+        SD_SPEC=$(sd_spec "$_icf")
+        if [ -n "$SD_SPEC" ]; then SD_FROM="$_icf"; break; fi
+    done
+    SD_STOP=""
+    if [ -n "$SD_SPEC" ]; then
+        _sd_said=$(printf '%s\n' "$SD_SPEC" | grep . | tr '\n' ' ' | sed 's/ $//')
+        case "$SD_SPEC" in
+        =*) SD_STOP="system_drive in ${SD_FROM##*/} is '${SD_SPEC#=}': it is a mapping of serial, wwn, model or shelf + bay, never a device name (they move)" ;;
+        esac
+        if [ -z "$SD_STOP" ]; then
+            for _kv in $(printf '%s\n' "$SD_SPEC" | cut -d= -f1); do
+                case " $SD_KEYS " in *" $_kv "*) ;; *) SD_STOP="system_drive in ${SD_FROM##*/} has '$_kv', which is none of: $SD_KEYS" ;; esac
+            done
+        fi
+        if [ -z "$SD_STOP" ]; then
+            _sdm=""
+            for _d in $(sd_drives); do
+                sd_matches "$_d" "$SD_SPEC" && _sdm="$_sdm /dev/${_d##*/}"
+            done
+            case "$(echo $_sdm | wc -w)" in
+            1) SD_CHOSEN="${_sdm# }" ;;
+            0) SD_STOP="system_drive ($_sd_said, from ${SD_FROM##*/}) matches no drive on this machine" ;;
+            *) SD_STOP="system_drive ($_sd_said, from ${SD_FROM##*/}) matches more than one drive:$_sdm" ;;
+            esac
+        fi
+    fi
+    if [ -n "$SD_STOP" ] && [ "$OVERRIDE" != recovery ] && [ "${ASSIMILATE:-}" != off ]; then
+        echo "  STOP: $SD_STOP (#478). No drive is taken. The drives:"
+        sd_list
+        SV_WHY="$SD_STOP"
+        for _d in $(sd_drives); do ld_skip "/dev/${_d##*/}" "system_drive names it not, or not it alone (#478)"; done
+        ASSIMILATE=ambiguous
+    elif [ -n "$SD_CHOSEN" ]; then
+        if [ -n "$NAMED_DISK" ] && [ "/dev/$NAMED_DISK" != "$SD_CHOSEN" ]; then
+            echo "  system_drive names $SD_CHOSEN; rd.stormblock.slab= names /dev/$NAMED_DISK - this machine's own setting wins (#478)"
+        fi
+        NAMED_DISK="${SD_CHOSEN##*/}"
+        CHOSEN_BY=system_drive
+        echo "  SYSTEM DRIVE: $SD_CHOSEN, as system_drive ($_sd_said) in ${SD_FROM##*/} names it (#478)"
+        if [ -n "${INSTALL_OVER:-}" ] && [ "$(disk_of "$INSTALL_OVER")" != "$SD_CHOSEN" ]; then
+            echo "  this node is on $INSTALL_OVER now; system_drive moves the install to $SD_CHOSEN"
+            INSTALL_OVER=""
+        fi
+        for _d in $(sd_drives); do
+            [ "/dev/${_d##*/}" = "$SD_CHOSEN" ] && continue
+            if "$SURVEY_SB" slab list "/dev/${_d##*/}" 2>/dev/null | grep -q "role=data"; then
+                echo "  /dev/${_d##*/} carries a data half; it is left as it is. Move what it holds with"
+                echo "  stormdrive's move-system (stormdrive#62) - this install does not take it"
+            fi
+        done
+    elif [ -n "$NAMED_DISK" ]; then
+        CHOSEN_BY=named
+    fi
+    # --- END system drive choice
     # The drive that already holds this node's data half (#351, rule 1),
     # found once: the named drive's, else one on the machine's own shelves,
     # else (no own drive carries one) an external shelf's. Two of them at
@@ -3750,6 +3919,33 @@ if [ "$BOOT_MODE" = "local" ]; then
         esac
         break
     done
+    # Rule 4 (#478): nothing names a drive and none holds this node - or
+    # several hold a node and none can be told this one - the machine's first
+    # drive. Not when this boot runs from a local disk: that is the system
+    # drive, and nothing else is taken.
+    case "$SLAB" in /dev/*) _sd_local="$(disk_of "$SLAB")" ;; *) _sd_local="" ;; esac
+    if [ -z "$NAMED_DISK" ] && [ -z "${INSTALL_OVER:-}" ] && [ -z "$DATA_SLAB_DRIVE" ] && [ -z "$_sd_local" ] \
+       && [ "${ASSIMILATE:-}" != ambiguous ]; then
+        _fd=$(first_drive)
+        if [ -n "$_fd" ]; then
+            NAMED_DISK="${_fd%%	*}"; NAMED_DISK="${NAMED_DISK##*/}"
+            CHOSEN_BY=first
+            if [ -n "$DATA_SLAB_MANY" ]; then
+                echo "  more than one drive carries a stormblock data slab ($DATA_SLAB_MANY) and none"
+                echo "  can be told this node's; the first drive is taken, the others left (#478)"
+                case " $DATA_SLAB_MANY " in *" /dev/$NAMED_DISK "*) DATA_SLAB_DRIVE="/dev/$NAMED_DISK" ;; esac
+                DATA_SLAB_MANY=""
+            fi
+            echo "  SYSTEM DRIVE: /dev/$NAMED_DISK, this machine's first drive (no system_drive in its"
+            echo "  install-config; first by controller and port order: ${_fd#*	}) (#478)"
+        fi
+    fi
+    # Rule 3: the drive holding this node is the one considered, so a blank
+    # drive beside it is never taken in its place.
+    if [ -z "$NAMED_DISK" ] && [ -n "$DATA_SLAB_DRIVE" ] && [ -z "$_sd_local" ]; then
+        NAMED_DISK="${DATA_SLAB_DRIVE##*/}"
+        CHOSEN_BY=node
+    fi
     local_data_slab() { # -> the one local drive that carries this node's data slab
         [ -n "$DATA_SLAB_DRIVE" ] && echo "$DATA_SLAB_DRIVE"
     }
@@ -3787,19 +3983,6 @@ if [ "$BOOT_MODE" = "local" ]; then
     INSTALL_FRESH=""
     KEPT=""
     RELEASE_ON=""
-    # Why this boot could not say which drive is the system drive (#351).
-    SV_WHY=""
-    if [ -n "$DATA_SLAB_MANY" ] && [ -z "${INSTALL_OVER:-}" ] && [ "$OVERRIDE" != recovery ] \
-       && [ "${ASSIMILATE:-}" != off ]; then
-        echo "  STOP: more than one drive carries a stormblock data slab ($DATA_SLAB_MANY):"
-        echo "  nothing says which one is this node's, so no drive is taken (#351)"
-        for _m in $DATA_SLAB_MANY; do
-            echo "    $(drive_desc "$SURVEY_SYS/${_m##*/}" "$_m")"
-            ld_skip "$_m" "carries a data slab, one of several: which is this node's is not known (#351)"
-        done
-        SV_WHY="more than one drive carries a data slab ($DATA_SLAB_MANY): which is this node's is not known; name it (rd.stormblock.slab=)"
-        ASSIMILATE=ambiguous
-    fi
     if [ "${ASSIMILATE:-}" = ambiguous ] || [ -n "$GUESSED" ] || [ "$OVERRIDE" = recovery ]; then
         :
     elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
@@ -3869,6 +4052,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         # choice is made once all are known (#351): never the first one the
         # bus happened to list.
         SV_CANDS=""
+        SV_TAKEOVER=""
         SV_OWN=0
         SV_EXT=0
         SV_DRIVES=""
@@ -3907,7 +4091,7 @@ $1|$_svp|$3"
             # slabs only, no identity" is true of the SSD and its partner holds
             # the identity. An install of such a node takes its data drive
             # above and finds the system drive by the pairing.
-            if _sv_pp=$(partner_of "$dev"); then
+            if [ "$CHOSEN_BY" != system_drive ] && _sv_pp=$(partner_of "$dev"); then
                 echo "  $dev holds one half of this node, $_sv_pp the other - not taken by the scan (#402)"
                 ld_skip "$dev" "one half of this node on two drives, with $_sv_pp (#402)"
                 continue
@@ -3978,7 +4162,15 @@ $1|$_svp|$3"
                     # `force` may still clear the drive the command line
                     # names, whatever it carries; never another.
                     sig=$(drive_signature "$SURVEY_DEV/${d##*/}" "$d")
-                    if [ -n "$sig" ] && ! { [ "$ASSIMILATE" = force ] && [ "${d##*/}" = "$NAMED_DISK" ]; }; then
+                    # The chosen drive is taken over when what it carries is a
+                    # partition table, a filesystem or an old install (#478,
+                    # owner: "an install must go over an existing system
+                    # install"). A RAID member is not one: left.
+                    if [ "$sig" = "data in its first MiB" ] && [ "${d##*/}" = "$NAMED_DISK" ] \
+                       && [ "$ASSIMILATE" != blank ]; then
+                        SV_TAKEOVER="$dev"
+                        sv_cand "$dev" "$d" "$dev carries $sig (an old install, partitions) - taken over (#478)"
+                    elif [ -n "$sig" ] && ! { [ "$ASSIMILATE" = force ] && [ "${d##*/}" = "$NAMED_DISK" ]; }; then
                         echo "  $dev carries $sig - not ours and not blank, leaving it (#273)"
                         ld_skip "$dev" "carries $sig, not ours and not blank (#273)"
                         if [ -z "$LD_ODRIVE" ]; then
@@ -3997,35 +4189,22 @@ $1|$_svp|$3"
         # The choice (#351): the named drive; else the one drive on the
         # machine's own shelves; else the single drive in all. Never with
         # this boot running from a local disk: that disk is the system drive.
+        # The choice was made above (#478): the one drive considered is the
+        # one taken, when it may be. Nothing else is ever taken in its place.
         SV_PICK=""
-        if [ -z "$LOCAL_DISK" ] && [ -z "$RUNNING_FROM" ] && [ -n "$SV_CANDS" ]; then
-            if [ -n "$NAMED_DISK" ]; then
-                SV_PICK=$(printf '%s\n' "$SV_CANDS" | grep . | head -n 1)
-            elif [ "$SV_OWN" -eq 1 ]; then
-                SV_PICK=$(printf '%s\n' "$SV_CANDS" | grep '^[^|]*|own|' | head -n 1)
-            elif [ "$SV_OWN" -eq 0 ] && [ "$SV_EXT" -eq 1 ]; then
-                SV_PICK=$(printf '%s\n' "$SV_CANDS" | grep . | head -n 1)
-            fi
+        if [ -z "$LOCAL_DISK" ] && [ -z "$RUNNING_FROM" ] && [ -n "$SV_CANDS" ] && [ -n "$NAMED_DISK" ]; then
+            SV_PICK=$(printf '%s\n' "$SV_CANDS" | grep . | head -n 1)
             if [ -n "$SV_PICK" ]; then
                 LOCAL_DISK="${SV_PICK%%|*}"
                 echo "  ${SV_PICK##*|}"
-                if [ -z "$NAMED_DISK" ]; then
-                    if [ "$SV_OWN" -eq 1 ]; then
-                        echo "  (the one drive on this machine's own shelves, #351)"
-                    else
-                        echo "  (the single drive this machine has, #351)"
-                    fi
+                echo "  ($(chosen_how), #478)"
+                if [ "$SV_TAKEOVER" = "$LOCAL_DISK" ] && [ "$ASSIMILATE" != force ]; then
+                    ASSIMILATE=force
                 fi
-            else
-                SV_WHY="the system drive is not known: $SV_OWN drive(s) on this machine's own shelves and $SV_EXT on external ones, and none holds this node, is named (rd.stormblock.slab=) or designated system in stormdrive"
-                echo "  STOP: the system drive is not known (#351): $SV_OWN drive(s) on this machine's"
-                echo "  own shelves, $SV_EXT on external ones, and none of them holds this node, is"
-                echo "  named (rd.stormblock.slab=) or is designated system in stormdrive. An install"
-                echo "  never picks one. No drive is taken. The drives:$SV_DRIVES"
-                for _c in $(printf '%s\n' "$SV_CANDS" | grep . | cut -d'|' -f1); do
-                    ld_skip "$_c" "could take the system half, one of several: not known which (#351)"
-                done
             fi
+        fi
+        if [ -z "$LOCAL_DISK" ] && [ -z "$RUNNING_FROM" ] && [ -n "$NAMED_DISK" ]; then
+            echo "  /dev/$NAMED_DISK ($(chosen_how)) cannot be taken; no other drive is taken in its place"
         fi
         if [ -z "$LOCAL_DISK" ] && [ -n "$RUNNING_FROM" ]; then
             # Not diskless: the boot runs from the node's own disk (#427).
@@ -4157,8 +4336,12 @@ $1|$_svp|$3"
     # None of them: one drive takes both halves, as before. A system drive
     # that carries a data half is never laid over (the engine refuses too).
     SYSTEM_DISK=""
-    if [ -n "$LOCAL_DISK" ]; then
-        _sd_from=""
+    if [ -n "$LOCAL_DISK" ] && [ "${CHOSEN_BY:-}" = system_drive ]; then
+        # system_drive names the only drive taken (#478): both halves on it,
+        # whatever stormdrive designated or a partner holds.
+        :
+    elif [ -n "$LOCAL_DISK" ]; then
+        _sd_from="
         if [ -n "${SYSTEM_NAMED:-}" ]; then
             SYSTEM_DISK=$(disk_of "$SYSTEM_NAMED")
             _sd_from="rd.stormblock.system="
