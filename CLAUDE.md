@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### Portable boot-serving crate for storminstall (2026-10-21, #474, P2, storminstall#20) — WAITING ON THE OWNER (pacing)
+### Portable boot-serving crate for storminstall (2026-10-21, #474, P2, storminstall#20) — DECIDED B: PARKED until the single-node pacing lifts
 
 The laptop as forge for an install: a portable NVMe/TCP target (tokio only,
 no io-uring/netif/pinning; Linux, macOS, Windows) the engine also uses, the
@@ -213,7 +213,12 @@ Answered on #474: the boot path writes to the claimed clone (stormuefi's
 `tries_left`, a diskless node, forge's stamp, #412's discards after
 validation), so each host needs a copy-on-write overlay (sparse scratch file)
 over the read-only image. Asked (needs-owner): A start now on
-`wip/474-portable-target`, B after the pacing lifts (recommended). Nothing built.
+`wip/474-portable-target`, B after the pacing lifts (recommended). Master's
+decision (2026-10-21): **B**, wait; don't fork the engine's NVMe/TCP target
+(every node's boot path) during the pacing. Parked with `wait-owner --until`
+the pacing lifts, as #350. To build then: the portable crate, the engine's
+`src/target/nvmeof` onto it, the per-host overlay, the boothost router.
+Nothing built.
 
 ### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — DONE (not the engine's calls), closed
 
