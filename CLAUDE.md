@@ -204,6 +204,25 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### server1's clones 10–20 s after the 12.37 reboot (2026-10-21, #475, P0) — IN PROGRESS
+
+stormcos#626: on X9 server1 (SMR HDD) after the reboot, every root clone
+10–20 s, deletes 11–21 s ("waits on no tracked lock"), one delete waited
+14 s on the manager held 10.5 s by the serve reconciler; the cilium agent's
+7 init roots took 12.5 min; the install's settle failed. By reading: clone
+and delete read slot-table pages under the manager (`preread_volume`);
+the reconciler's ephemeral delete persisted (flushes) under it; #384's
+golden check read every golden beside them, yielding only one read's time,
+and logged neither start nor end.
+- [x] `preread_unlocked` before the manager in clone, API delete,
+      reconciler delete; the reconciler's persist deferred and detached
+- [x] `volume::bgio`: API mutations (`track`) hold background reads; clear
+      window, duty on rotating disks, 30 s cap; check waits for boot quiet
+- [x] digester/check: start/end lines with volumes, MB, s, MB/s; health
+      `digests.reading`; README, CHANGELOG
+- [ ] tests on a build VM (bgio units, digest, locks, serve, fstemplates);
+      check.sh; a golden; stormcos#626 told; close
+
 ### server8's 12.37 install stalled behind its own console (2026-10-21, #476, P1) — DONE (v21.2.1, 7528cc5), shipped; metal pending
 
 From server8's full SOL log (`console/server8/sol.log`): the survey took

@@ -180,6 +180,10 @@ pub async fn track(State(state): State<Arc<AppState>>, mut req: Request, next: N
         InFlight { method: method.clone(), path: path.clone(), name: name.clone(), since, reported: None },
     );
     let guard = Registered { id, name: name.clone(), since, done: false };
+    // A call that changes something holds background reads off the disk
+    // until it is answered (#475): the golden check waits, not the clone.
+    let _foreground = (!matches!(req.method(), &axum::http::Method::GET | &axum::http::Method::HEAD) && !is_probe(&path))
+        .then(crate::volume::bgio::begin);
     let activity = crate::lockwatch::Activity::request(name.clone());
     let mut resp = crate::lockwatch::scope(activity.clone(), next.run(req)).await;
     // The persist the request's changes owe, made now that its handler has

@@ -1926,8 +1926,24 @@ it). `slab holds` reads only the verdicts. An unseal forgets the digest.
 `GET /api/v1/volumes/{id}/digest` answers `seal` (`sha256`, `scheme`,
 `verdict`, `checked_at`) beside #271's whole-capacity `sha256`, and health
 `digests` counts `intact`, `mismatch` (with their ids), `unchecked` and the
-seals still waiting. Volumes sealed before this, and images from engines
-before it, have no digest: today's answer.
+seals still waiting, and `reading` says what the check or the digester is
+reading (or last read): `what`, `running`, `started_at`, `finished_at`,
+`volumes`, `bytes`, `reading_ms`, `yielded_ms`, `mb_per_s`. Volumes sealed
+before this, and images from engines before it, have no digest: today's
+answer.
+
+**Background reads give way to the API (#475).** The check waits, after it
+is asked for, until the node's volume I/O has been still for 10 s (at most
+`STORMBLOCK_GOLDEN_CHECK_GRACE_SECS`, 120). Before each read it waits while
+an API call that changes something (any method but GET/HEAD) is being
+served, and for `STORMBLOCK_BG_CLEAR_MS` after the last one ended (1000 on a
+rotating disk, 100 otherwise; never more than 30 s at a time). On a rotating
+disk it takes `STORMBLOCK_BG_DUTY_PERCENT` of the disk's time (25). Each run
+logs its start, and its end with volumes, MB, seconds and MB/s. A clone and
+a delete read the volume's slot-table pages before taking the volume
+manager, and the serve reconciler's delete of an ephemeral volume persists
+after letting it go, so neither holds the API's other calls behind a slow
+disk.
 
 **Old system volumes are disposable; the node's are not (#349, owner).**
 Every volume records where it came from: `origin` is `release`, `node` or

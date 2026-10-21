@@ -1303,6 +1303,13 @@ async fn clone_volume_impl(
         ),
         None => None,
     };
+    // The source's slot-table entries, read before the manager is taken
+    // (#475): on a busy spinning disk that read is the slow part of a clone,
+    // and under the manager it held every other API call behind it.
+    let pre = match copied {
+        Some(_) => None,
+        None => crate::volume::VolumeManager::preread_unlocked(vm, source).await.ok(),
+    };
     let (id, size) = {
         let mut m = vm.lock().await;
         // Persists inside are owed, made below or by the mint's own
@@ -1312,7 +1319,7 @@ async fn clone_volume_impl(
             Some(id) => id,
             // One metadata write for the whole mint, at the end (#137).
             None => m
-                .create_snapshot_deferred(source, &spec.name)
+                .create_snapshot_deferred_preread(source, &spec.name, pre)
                 .await
                 .map_err(|e| match e {
                     e @ crate::volume::VolumeError::Secret { .. } => TemplateError::Conflict(e.to_string()),

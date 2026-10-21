@@ -2719,8 +2719,10 @@ async fn delete_volume(
         ));
     }
 
+    // Its slot-table entries read before the manager is taken (#475).
+    let pre = crate::volume::VolumeManager::preread_unlocked(&state.volume_manager, vol_id).await.ok();
     let mut vm = state.volume_manager.lock().await;
-    match vm.delete_volume_erasing(vol_id, erase).await {
+    match vm.delete_volume_preread(vol_id, erase, pre).await {
         Ok(scrubbed) => {
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             drop(vm);

@@ -25,6 +25,7 @@ pub mod versioned;
 pub mod gc;
 pub mod extable;
 pub mod erase;
+pub mod bgio;
 pub mod digest;
 #[cfg(test)]
 mod scheme_tests;
@@ -2236,6 +2237,18 @@ impl VolumeManager {
         id: VolumeId,
         erase: Option<crate::drive::erase::EraseLevel>,
     ) -> Result<Scrubbed, VolumeError> {
+        self.delete_volume_preread(id, erase, None).await
+    }
+
+    /// [`delete_volume_erasing`](Self::delete_volume_erasing) with the
+    /// volume's table entries read beforehand by
+    /// [`preread_unlocked`](Self::preread_unlocked) (#475).
+    pub async fn delete_volume_preread(
+        &mut self,
+        id: VolumeId,
+        erase: Option<crate::drive::erase::EraseLevel>,
+        pre: Option<HashMap<SlabId, crate::drive::slottable::Preread>>,
+    ) -> Result<Scrubbed, VolumeError> {
         // Never under something serving it (#267): a ublk device mounted
         // under running containers read zeros and other volumes' data once
         // its volume was deleted and its slots reused.
@@ -2248,7 +2261,10 @@ impl VolumeManager {
         }
         // Its map in memory and its table pages read before anything is
         // forgotten (#155, #367): a load that fails leaves the volume as it was.
-        let pre = self.preread_volume(id).await?;
+        let pre = match pre {
+            Some(p) => p,
+            None => self.preread_volume(id).await?,
+        };
         let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
         self.present.remove(&id);
@@ -2387,6 +2403,18 @@ impl VolumeManager {
         source_id: VolumeId,
         name: &str,
     ) -> Result<VolumeId, VolumeError> {
+        self.create_snapshot_deferred_preread(source_id, name, None).await
+    }
+
+    /// [`create_snapshot_deferred`](Self::create_snapshot_deferred) with the
+    /// source's table entries read beforehand by
+    /// [`preread_unlocked`](Self::preread_unlocked) (#475).
+    pub async fn create_snapshot_deferred_preread(
+        &mut self,
+        source_id: VolumeId,
+        name: &str,
+        pre: Option<HashMap<SlabId, crate::drive::slottable::Preread>>,
+    ) -> Result<VolumeId, VolumeError> {
         self.refuse_if_undurable().await?;
         self.refuse_unknown_scheme(&source_id)?;
         // A clone, a snapshot, a template's claim, a golden: all start here.
@@ -2399,8 +2427,12 @@ impl VolumeManager {
         let slot_size = source_vol.slot_size;
         drop(source_vol);
 
-        // Its entries read now, with no lock held (#438).
-        let pre = self.preread_volume(source_id).await?;
+        // Its entries: read before the manager was taken (#475), else now
+        // (with the manager held, but neither map lock, #438).
+        let pre = match pre {
+            Some(p) => p,
+            None => self.preread_volume(source_id).await?,
+        };
         // In-place writes held off while the slots are shared (#367).
         let _writes = source_handle.hold_writes().await;
         let snap = {
@@ -2733,11 +2765,36 @@ impl VolumeManager {
     /// cache is bounded; a golden larger than it was read twice, the second
     /// time with both locks held (9.3 s of a claim on forge, 2026-10-17).
     pub async fn preread_volume(&self, id: VolumeId) -> Result<HashMap<SlabId, crate::drive::slottable::Preread>, VolumeError> {
-        gem::ensure_resident(&self.gem, id)
+        Self::preread_with(&self.gem, &self.registry, id).await
+    }
+
+    /// [`preread_volume`](Self::preread_volume) with the manager held only
+    /// to take the map and registry handles (#475): the table pages are read
+    /// with no lock of the caller's, so a clone or a delete waiting on a
+    /// busy disk does not hold every other API call behind the manager.
+    /// What the read finds is checked again under the locks (its epoch,
+    /// #438), so a table written in between is read again there.
+    pub async fn preread_unlocked(
+        vm: &crate::lockwatch::TrackedMutex<VolumeManager>,
+        id: VolumeId,
+    ) -> Result<HashMap<SlabId, crate::drive::slottable::Preread>, VolumeError> {
+        let (gem, registry) = {
+            let m = vm.lock().await;
+            (m.gem.clone(), m.registry.clone())
+        };
+        Self::preread_with(&gem, &registry, id).await
+    }
+
+    async fn preread_with(
+        gem_arc: &Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
+        registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
+        id: VolumeId,
+    ) -> Result<HashMap<SlabId, crate::drive::slottable::Preread>, VolumeError> {
+        gem::ensure_resident(gem_arc, id)
             .await
             .map_err(|e| VolumeError::Drive(DriveError::Io(std::io::Error::other(format!("volume {}: loading its extent map: {e}", id.0)))))?;
         let by_slab: HashMap<SlabId, Vec<u64>> = {
-            let gem = self.gem.read().await;
+            let gem = gem_arc.read().await;
             let mut m: HashMap<SlabId, Vec<u64>> = HashMap::new();
             if let Some(map) = gem.get_volume_map(&id) {
                 for leg in map.all_legs() {
@@ -2747,7 +2804,7 @@ impl VolumeManager {
             m
         };
         let tables: Vec<_> = {
-            let reg = self.registry.read().await;
+            let reg = registry.read().await;
             by_slab.into_iter().filter_map(|(s, idx)| reg.get(&s).map(|slab| (s, slab.table(), idx))).collect()
         };
         let mut out = HashMap::with_capacity(tables.len());

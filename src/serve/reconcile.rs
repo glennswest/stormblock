@@ -488,9 +488,23 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
     };
     for row in withdrawn {
         if row.ephemeral {
+            // Read its table entries first and persist after the manager is
+            // let go (#475): the reconciler is no API request, so a persist
+            // inside the delete flushed every slab with the manager held
+            // (10.5 s on server1's SMR disk, every clone queued behind it).
+            let id = VolumeId(row.volume_id);
+            let pre = crate::volume::VolumeManager::preread_unlocked(&ctx.state.volume_manager, id).await.ok();
             let mut vm = ctx.state.volume_manager.lock().await;
-            match vm.delete_volume(VolumeId(row.volume_id)).await {
+            let defer = vm.defer_persists();
+            let res = vm.delete_volume_preread(id, None, pre).await.map(|_| ());
+            let owed = defer.owed();
+            drop(vm);
+            if owed {
+                crate::volume::VolumeManager::persist_detached(&ctx.state.volume_manager).await;
+            }
+            match res {
                 Ok(()) => {
+                    ctx.state.eraser.kick();
                     ctx.status.bump(&ctx.status.volumes_gc);
                     tracing::info!("gc: ephemeral volume {} deleted", row.volume_id);
                 }
@@ -501,7 +515,6 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
                 // deletes the volume once it is detached — dropping the row
                 // here would leak it, deleting it took the containers' files.
                 Err(crate::volume::thin::VolumeError::InUse { by, .. }) => {
-                    drop(vm);
                     if ctx.blocked_reported.lock().await.insert(row.export_id.clone()) {
                         tracing::warn!(
                             "gc: ephemeral volume {} of withdrawn export {} is still in use by {} — \

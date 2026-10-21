@@ -42,15 +42,126 @@ pub const CHUNK: u64 = 64 * 1024;
 /// The longest the reader gives way to the node's own I/O at a time.
 const YIELD_MAX: Duration = Duration::from_millis(250);
 
+/// What one read of a volume cost (#475): logged, and kept for health.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Read {
+    pub sha256: [u8; 32],
+    /// Bytes read off the disk.
+    pub bytes: u64,
+    /// Time spent reading.
+    pub reading: Duration,
+    /// Time spent leaving the disk to the node (its I/O, its API, the duty).
+    pub yielded: Duration,
+}
+
+/// The check or digester running now, for health and the log (#475).
+#[derive(Debug, Default)]
+struct Progress {
+    running: std::sync::atomic::AtomicBool,
+    what: std::sync::Mutex<&'static str>,
+    started_at: std::sync::atomic::AtomicU64,
+    finished_at: std::sync::atomic::AtomicU64,
+    volumes: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
+    reading_ms: std::sync::atomic::AtomicU64,
+    yielded_ms: std::sync::atomic::AtomicU64,
+    elapsed_ms: std::sync::atomic::AtomicU64,
+}
+
+fn progress() -> &'static Progress {
+    static P: std::sync::OnceLock<Progress> = std::sync::OnceLock::new();
+    P.get_or_init(Progress::default)
+}
+
+fn mb_per_s(bytes: u64, d: Duration) -> f64 {
+    let s = d.as_secs_f64();
+    if s <= 0.0 {
+        0.0
+    } else {
+        (bytes as f64 / 1_000_000.0 / s * 10.0).round() / 10.0
+    }
+}
+
+/// A run of the check or the digester: said when it starts and ends, with
+/// what it read and how fast (#475), and kept for health.
+struct Run {
+    what: &'static str,
+    t: std::time::Instant,
+    volumes: u64,
+    bytes: u64,
+    reading: Duration,
+    yielded: Duration,
+}
+
+impl Run {
+    fn start(what: &'static str, volumes: usize) -> Run {
+        let p = progress();
+        p.running.store(true, Relaxed);
+        *p.what.lock().unwrap_or_else(|e| e.into_inner()) = what;
+        p.started_at.store(now(), Relaxed);
+        for a in [&p.volumes, &p.bytes, &p.reading_ms, &p.yielded_ms, &p.elapsed_ms] {
+            a.store(0, Relaxed);
+        }
+        tracing::info!(volumes, "{what}: started (#475)");
+        Run { what, t: std::time::Instant::now(), volumes: 0, bytes: 0, reading: Duration::ZERO, yielded: Duration::ZERO }
+    }
+
+    fn add(&mut self, r: &Read) {
+        self.volumes += 1;
+        self.bytes += r.bytes;
+        self.reading += r.reading;
+        self.yielded += r.yielded;
+        let p = progress();
+        p.volumes.store(self.volumes, Relaxed);
+        p.bytes.store(self.bytes, Relaxed);
+        p.reading_ms.store(self.reading.as_millis() as u64, Relaxed);
+        p.yielded_ms.store(self.yielded.as_millis() as u64, Relaxed);
+        p.elapsed_ms.store(self.t.elapsed().as_millis() as u64, Relaxed);
+    }
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        let p = progress();
+        let took = self.t.elapsed();
+        p.elapsed_ms.store(took.as_millis() as u64, Relaxed);
+        p.finished_at.store(now(), Relaxed);
+        p.running.store(false, Relaxed);
+        tracing::info!(
+            volumes = self.volumes,
+            mb = self.bytes / 1_000_000,
+            secs = took.as_secs(),
+            reading_secs = self.reading.as_secs(),
+            yielded_secs = self.yielded.as_secs(),
+            mb_per_s = mb_per_s(self.bytes, took),
+            "{}: ended: {} volume(s), {} MB in {:.0} s ({} MB/s; {:.0} s reading, {:.0} s left to the node)",
+            self.what,
+            self.volumes,
+            self.bytes / 1_000_000,
+            took.as_secs_f64(),
+            mb_per_s(self.bytes, took),
+            self.reading.as_secs_f64(),
+            self.yielded.as_secs_f64(),
+        );
+    }
+}
+
 /// The sha256 of a sealed volume's content (see the module). Reads with no
 /// lock held but the volume manager's, briefly, to find the volume.
-pub async fn compute(vm: &TrackedMutex<VolumeManager>, id: VolumeId) -> anyhow::Result<[u8; 32]> {
+///
+/// A background read (#475): before each extent it waits for the API's
+/// changes to be answered ([`bgio::wait_clear`](crate::volume::bgio)), after
+/// it gives way to the node's own volume I/O, and on a rotating disk it keeps
+/// to its share of the disk's time.
+pub async fn compute(vm: &TrackedMutex<VolumeManager>, id: VolumeId) -> anyhow::Result<Read> {
+    use crate::volume::bgio;
     let (dev, extent_size, capacity, gem) = {
         let m = vm.lock().await;
         let h = m.get_volume_handle(&id).ok_or_else(|| anyhow::anyhow!("volume {} is gone", id.0))?;
         let dev: Arc<dyn BlockDevice> = h.clone();
         (dev, h.extent_size(), h.capacity_bytes(), m.gem().clone())
     };
+    let rotational = dev.rotational();
     let _pin = gem.read().await.pin();
     crate::volume::gem::ensure_resident(&gem, id).await.map_err(|e| anyhow::anyhow!("loading its extent map: {e}"))?;
     let mut extents: Vec<u64> = {
@@ -62,16 +173,20 @@ pub async fn compute(vm: &TrackedMutex<VolumeManager>, id: VolumeId) -> anyhow::
     hash.update(SCHEME.as_bytes());
     hash.update(b"\n");
     let mut buf = vec![0u8; extent_size as usize];
+    let mut out = Read::default();
     for e in extents {
         let off = e * extent_size;
         if off >= capacity {
             continue;
         }
         let len = extent_size.min(capacity - off) as usize;
+        out.yielded += bgio::wait_clear(rotational).await;
         let before = crate::volume::thin::FOREGROUND_IO.load(Relaxed);
         let t = std::time::Instant::now();
         dev.read(off, &mut buf[..len]).await.map_err(|err| anyhow::anyhow!("reading at {off}: {err}"))?;
         let took = t.elapsed();
+        out.reading += took;
+        out.bytes += len as u64;
         for (i, chunk) in buf[..len].chunks(CHUNK as usize).enumerate() {
             if chunk.iter().all(|b| *b == 0) {
                 continue;
@@ -81,12 +196,19 @@ pub async fn compute(vm: &TrackedMutex<VolumeManager>, id: VolumeId) -> anyhow::
         }
         // Our own read counts once; anything more is the node's (#269's
         // signal, as the flow-over reads it): give it the disk for as long
-        // as one of our reads takes.
+        // as one of our reads takes. On a rotating disk, keep to the
+        // reader's share of it besides (#475).
+        let mut pause = bgio::duty_pause(took, rotational);
         if crate::volume::thin::FOREGROUND_IO.load(Relaxed).saturating_sub(before) > 1 {
-            tokio::time::sleep(took.min(YIELD_MAX)).await;
+            pause = pause.max(took.min(YIELD_MAX));
+        }
+        if !pause.is_zero() {
+            tokio::time::sleep(pause).await;
+            out.yielded += pause;
         }
     }
-    Ok(hash.finalize().into())
+    out.sha256 = hash.finalize().into();
+    Ok(out)
 }
 
 fn now() -> u64 {
@@ -112,14 +234,19 @@ async fn record(vm: &TrackedMutex<VolumeManager>, id: VolumeId, d: SealDigest) {
 /// Digest every volume sealed here that waits for one.
 pub async fn digest_sealed(vm: &TrackedMutex<VolumeManager>) -> usize {
     let ids = vm.lock().await.take_to_digest();
+    if ids.is_empty() {
+        return 0;
+    }
+    let mut run = Run::start("digester", ids.len());
     let mut done = 0;
     for id in ids {
         match compute(vm, id).await {
-            Ok(sha) => {
+            Ok(r) => {
+                run.add(&r);
                 // Taken of this copy just now: intact here. A copy of it
                 // elsewhere carries it unchecked (`SealDigest::unchecked`).
-                let d = SealDigest { verdict: Verdict::Intact, checked_at: now(), ..SealDigest::new(sha) };
-                tracing::info!(volume = %id.0, digest = %d.hex(), "sealed volume's digest taken (#384)");
+                let d = SealDigest { verdict: Verdict::Intact, checked_at: now(), ..SealDigest::new(r.sha256) };
+                tracing::info!(volume = %id.0, digest = %d.hex(), mb = r.bytes / 1_000_000, mb_per_s = mb_per_s(r.bytes, r.reading + r.yielded), "sealed volume's digest taken (#384)");
                 record(vm, id, d).await;
                 done += 1;
             }
@@ -148,21 +275,33 @@ pub async fn check_unchecked(vm: &TrackedMutex<VolumeManager>) -> Checked {
         v
     };
     let mut out = Checked::default();
+    if todo.is_empty() {
+        return out;
+    }
+    let mut run = Run::start("golden check", todo.len());
     for (id, d) in todo {
         let handle = vm.lock().await.get_volume_handle(&id);
         let name = match handle {
             Some(h) => h.name().await,
             None => continue,
         };
-        match compute(vm, id).await {
-            Ok(sha) if sha == d.sha256 => {
+        let r = compute(vm, id).await;
+        if let Ok(r) = &r {
+            run.add(r);
+        }
+        match r {
+            Ok(r) if r.sha256 == d.sha256 => {
                 out.intact += 1;
-                tracing::info!(volume = %id.0, name, "golden intact: its content is the digest it was sealed with");
+                tracing::info!(
+                    volume = %id.0, name, mb = r.bytes / 1_000_000,
+                    reading_ms = r.reading.as_millis() as u64, yielded_ms = r.yielded.as_millis() as u64,
+                    "golden intact: its content is the digest it was sealed with"
+                );
                 record(vm, id, SealDigest { verdict: Verdict::Intact, checked_at: now(), ..d }).await;
             }
-            Ok(sha) => {
+            Ok(r) => {
                 out.mismatch += 1;
-                let got: String = sha.iter().map(|b| format!("{b:02x}")).collect();
+                let got: String = r.sha256.iter().map(|b| format!("{b:02x}")).collect();
                 tracing::error!(
                     volume = %id.0,
                     name,
@@ -197,10 +336,40 @@ pub async fn summary(vm: &TrackedMutex<VolumeManager>) -> Option<serde_json::Val
         }
     }
     let waiting = m.digests_waiting();
+    let p = progress();
+    let (bytes, elapsed) = (p.bytes.load(Relaxed), Duration::from_millis(p.elapsed_ms.load(Relaxed)));
+    let started = p.started_at.load(Relaxed);
+    let reading = if started == 0 {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({
+            "what": *p.what.lock().unwrap_or_else(|e| e.into_inner()),
+            "running": p.running.load(Relaxed),
+            "started_at": started,
+            "finished_at": if p.running.load(Relaxed) { 0 } else { p.finished_at.load(Relaxed) },
+            "volumes": p.volumes.load(Relaxed),
+            "bytes": bytes,
+            "reading_ms": p.reading_ms.load(Relaxed),
+            "yielded_ms": p.yielded_ms.load(Relaxed),
+            "mb_per_s": mb_per_s(bytes, elapsed),
+        })
+    };
     Some(serde_json::json!({
         "intact": intact, "mismatch": mismatch, "unchecked": unchecked,
-        "to_digest": waiting, "mismatched": bad,
+        "to_digest": waiting, "mismatched": bad, "reading": reading,
     }))
+}
+
+/// How long the node's volume I/O must be still before the golden check
+/// starts (#475).
+const CHECK_QUIET: Duration = Duration::from_secs(10);
+
+/// The most the golden check waits for the node to settle (#475):
+/// `STORMBLOCK_GOLDEN_CHECK_GRACE_SECS`, 120 by default, 0 = no wait.
+fn check_grace() -> Duration {
+    Duration::from_secs(
+        std::env::var("STORMBLOCK_GOLDEN_CHECK_GRACE_SECS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(120),
+    )
 }
 
 /// The digester: digests what is sealed here when woken by a seal, and
@@ -214,6 +383,17 @@ pub fn spawn(vm: Arc<TrackedMutex<VolumeManager>>, check: Arc<tokio::sync::Notif
             tokio::select! {
                 _ = wake.notified() => {}
                 _ = check.notified() => {
+                    // Not while the node boots (#475): the check is asked
+                    // for at the start (or after a flow-over), when every
+                    // unit reads its volumes and the kubelet clones roots.
+                    let (waited, quiet) = crate::volume::bgio::wait_for_quiet(check_grace(), CHECK_QUIET).await;
+                    if !waited.is_zero() {
+                        tracing::info!(
+                            "golden check: waited {:.0} s for the node's I/O to settle ({})",
+                            waited.as_secs_f64(),
+                            if quiet { "it did" } else { "it did not; checking anyway, paced" }
+                        );
+                    }
                     let c = check_unchecked(&vm).await;
                     if c != Checked::default() {
                         tracing::info!(intact = c.intact, mismatch = c.mismatch, unreadable = c.unreadable, "goldens checked against their digests (#384)");
