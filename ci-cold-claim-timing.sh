@@ -100,7 +100,7 @@ discovery_disabled = true
 EOF
     start
     for sz in 64m 256m 1g; do
-        ms -m 300 -X POST "$API/fstemplates" -d "{\"name\":\"pvc-ext4j-$sz\",\"size\":\"${sz^^}\"}" >/dev/null || fail "template $sz"
+        ms -m 300 -X POST "$API/fstemplates" -d "{\"name\":\"pvc-ext4j-$sz\",\"size\":\"${sz^^}\",\"role\":\"data\"}" >/dev/null || fail "template $sz"
     done
     ms "$API/fstemplates/pvc-ext4j-64m" >/dev/null; tid=$(j 'd.get("id") or d["template"]["id"]')
     for i in $(seq 1 "$V"); do
