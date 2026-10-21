@@ -231,21 +231,36 @@ switch_root and nothing reported `laid`.
       requested; #476 answered and shipped. Metal: server8 installs a
       release built from >= 7528cc5 onto sda and reboots from it
 
-### Portable boot-serving crate for storminstall (2026-10-21, #474, P2, storminstall#20) — DECIDED B: PARKED until the single-node pacing lifts
+### Portable boot-serving crate for storminstall (2026-10-21, #474, P1, storminstall#20) — IN PROGRESS (decision changed: start now)
 
-The laptop as forge for an install: a portable NVMe/TCP target (tokio only,
-no io-uring/netif/pinning; Linux, macOS, Windows) the engine also uses, the
-boothost intent/claim handlers as a router, one image to named host NQNs.
-Answered on #474: the boot path writes to the claimed clone (stormuefi's
-`tries_left`, a diskless node, forge's stamp, #412's discards after
-validation), so each host needs a copy-on-write overlay (sparse scratch file)
-over the read-only image. Asked (needs-owner): A start now on
-`wip/474-portable-target`, B after the pacing lifts (recommended). Master's
-decision (2026-10-21): **B**, wait; don't fork the engine's NVMe/TCP target
-(every node's boot path) during the pacing. Parked with `wait-owner --until`
-the pacing lifts, as #350. To build then: the portable crate, the engine's
-`src/target/nvmeof` onto it, the per-host overlay, the boothost router.
-Nothing built.
+Master for the owner (2026-10-21, on #474): start now, P1. A crate that
+builds for macOS, Windows and Linux (cargo zigbuild for darwin, windows-gnu)
+with a read-only NVMe/TCP target and the boothost intent/claim API, and a
+small CLI the owner runs on a Mac or Windows box to serve one golden or ISO
+image to a node, offline (a local file, no forge). Also serves machines
+that boot stormbootx (stormbootx#164: the app makes their media with its
+address as the boothost). Earlier answer kept: the boot path writes to the
+claimed clone, so each host gets a copy-on-write overlay over the image.
+- [ ] `crates/nvmeof-target` (`stormblock-nvmeof`): the wire half the
+      engine and the laptop share — `pdu`, `fabric`, `discovery`, `auth`
+      (DH-HMAC-CHAP) moved out of `src/target/nvmeof`; the engine re-exports
+      them, so they cannot drift (its own tests run against the crate's code)
+- [ ] the portable target: tokio only, an `Image` (a read-only file) and a
+      per-host `Overlay` (sparse scratch file, 4 KiB blocks), subsystems by
+      host NQN, admin (Identify, log pages, features, keep-alive), I/O
+      (read, write, flush, DSM, write zeroes) into the host's overlay
+- [ ] the boothost surface (axum router): health, intent, claim, installed,
+      in the shape stormbootx reads
+- [ ] `stormboot-serve` CLI: `--image`, `--host name[=nqn]`, `--intent`,
+      ports, `--scratch`
+- [ ] tests: the engine's NVMe/TCP initiator against the portable target
+      (attach, read the image, writes land in the overlay only, a second
+      host sees the image unchanged, unknown host refused), the boothost
+      routes; cross builds for x86_64/aarch64-apple-darwin and
+      x86_64-pc-windows-gnu on a build VM
+- [ ] docs (crate README, README), CHANGELOG; check.sh; storminstall#20 told
+- Not in this step: moving the engine's admin/I/O/server loop onto the
+  crate (every node's boot path; follow-up issue)
 
 ### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — DONE (not the engine's calls), closed
 
