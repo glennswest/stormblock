@@ -15011,4 +15011,50 @@ mod boot_claim_wait_tests {
         assert_eq!(asked.load(Ordering::SeqCst), 1, "a second claim was sent behind the first");
         server.abort();
     }
+
+    /// #474: the initramfs's `boot-claim` against a laptop's
+    /// `stormboot-serve` as against forge. The claim answers the URI with
+    /// this machine's host NQN in it, and the engine's initiator opens it
+    /// as `boot-local` does: the image's bytes, and a write that stays in
+    /// the node's own overlay.
+    #[tokio::test]
+    async fn a_node_claims_and_opens_its_image_from_stormboot_serve() {
+        use stormblock_nvmeof::boothost::{Boothost, Intent, Policy};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("release.img");
+        let bytes: Vec<u8> = (0..(1usize << 20) + 2048).map(|i| (i * 13 % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let image = Arc::new(stormblock_nvmeof::image::Image::open(&path, 4096).unwrap());
+        let target = stormblock_nvmeof::server::BootTarget::new(image, dir.path().join("o"), "nqn.2026-10.lo.storm:t", 1 << 20);
+        let nvme = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let nvme_port = nvme.local_addr().unwrap().port();
+        tokio::spawn(target.clone().run(nvme));
+        let boot = Boothost::new(
+            target,
+            Policy { hosts: vec![("server8".into(), None)], any_host: false, intent: Intent::Install, nvme_port, advertise: None },
+        );
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = http.local_addr().unwrap();
+        let app = boot.router().into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let server = tokio::spawn(async move { axum::serve(http, app).await.unwrap() });
+
+        let uri = super::claim_boot_uri(&addr.to_string(), "server8", "boothost", 10, None).await.unwrap();
+        assert!(uri.starts_with(&format!("nvme-tcp://127.0.0.1:{nvme_port}/nqn.2026-10.lo.storm:t:host:server8?nsid=1")), "{uri}");
+        assert!(uri.ends_with("&hostnqn=nqn.2026-09.lo.storm:host-server8"), "{uri}");
+        let dev = crate::drive::open_path(&uri, false).await.unwrap();
+        assert_eq!(dev.capacity_bytes(), (bytes.len() as u64).div_ceil(4096) * 4096);
+        let mut got = vec![0u8; bytes.len()];
+        dev.read(0, &mut got).await.unwrap();
+        assert_eq!(got, bytes, "the node reads the image");
+        dev.write(8192, &[0xAB; 4096]).await.unwrap();
+        dev.flush().await.unwrap();
+        let mut back = vec![0u8; 4096];
+        dev.read(8192, &mut back).await.unwrap();
+        assert_eq!(back, vec![0xAB; 4096]);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "the image file is never written");
+        // A name the laptop does not serve: no image, said as forge says it.
+        let err = super::claim_boot_uri(&addr.to_string(), "server9", "boothost", 1, None).await.unwrap_err();
+        assert!(err.to_string().contains("no image is assigned"), "{err}");
+        server.abort();
+    }
 }

@@ -2087,6 +2087,47 @@ on slabs it does not have, from either source or with no source at all, it
 bringing up a root of holes (PID 1 SIGSEGV on server3). See `docs/durability.md` for what survives a
 power cut and why.
 
+### Booting nodes from a laptop: `stormboot-serve` (#474)
+
+The owner's laptop (macOS, Windows or Linux) can be the forge for an
+install, offline. `stormboot-serve` (crate `crates/nvmeof-target`,
+`stormblock-nvmeof`) serves one local image file, a golden's raw disk or an
+ISO, to named nodes over NVMe/TCP. It also answers the boothost calls
+stormbootx and the initramfs's `boot-claim` make: health, intent, claim and
+installed. There is no forge, no kernel module, and no administrator rights
+beyond opening two ports.
+
+```
+stormboot-serve --image release.img --host server8 [--host server7=<mac>] [--any-host]
+                [--intent install|local|auto] [--nvme-port 4420] [--http-port 9090]
+                [--advertise <address>] [--scratch <dir>] [--block-size 4096|512]
+```
+
+- **The image is never written.** Each claim gets its own copy-on-write
+  overlay: a scratch file holding only the blocks that node wrote. Write
+  Zeroes and Deallocate take no room, and a stop removes the overlays. The
+  boot path does write to the disk it is handed: stormuefi's boot count, a
+  diskless node's data, and an install's discards of what it moved.
+- **One subsystem per host,** `<nqn>:host:<name>`. It admits only
+  `nqn.2026-09.lo.storm:host-<name>`, the NQN stormbootx and the initramfs
+  present. Discovery shows a host only its own subsystem, and a claim's reply
+  is the one forge gives (`attach` first, `host_nqns`, `intent`, `volume`).
+- **The engine speaks the same wire code.** PDUs, fabric, discovery,
+  DH-HMAC-CHAP and the Identify data live in the crate, and
+  `src/target/nvmeof` re-exports them. `ci-nvmeof-identify-same.sh` checks
+  that every Identify answer the engine gives is the same bytes as before the
+  move. The engine's command loop stays its own (ANA, the reactor, storage
+  NICs): #488.
+
+Checked by `tests/it/integration_bootserve.rs` (the engine's initiator) and
+the `boot-claim` client in `cli::boot_claim_wait_tests`.
+`ci-bootserve-verify.sh` uses the Linux kernel's nvme-tcp in QEMU as the
+node: it is refused under another host's NQN, reads every byte of the image,
+writes, flushes and deallocates, and the file stays unchanged.
+`ci-bootserve-cross.sh` builds for x86_64 and aarch64 macOS (cargo
+zigbuild) and x86_64 Windows (windows-gnu). The crate's own README has the
+rest.
+
 ### Booting: who decides where
 
 The initramfs decides where a node boots from, and `docs/boot-hooks.md`

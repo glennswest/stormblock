@@ -284,53 +284,34 @@ switch_root and nothing reported `laid`.
       requested; #476 answered and shipped. Metal: server8 installs a
       release built from >= 7528cc5 onto sda and reboots from it
 
-### Portable boot-serving crate for storminstall (2026-10-21, #474, P1, storminstall#20) — IN PROGRESS (decision changed: start now)
+### Portable boot-serving crate for storminstall (2026-10-21, #474, P1, storminstall#20) — BUILT on wip/474-portable-target; merge after check.sh
 
 Master for the owner (2026-10-21, on #474): start now, P1. A crate that
-builds for macOS, Windows and Linux (cargo zigbuild for darwin, windows-gnu)
-with a read-only NVMe/TCP target and the boothost intent/claim API, and a
-small CLI the owner runs on a Mac or Windows box to serve one golden or ISO
-image to a node, offline (a local file, no forge). Also serves machines
-that boot stormbootx (stormbootx#164: the app makes their media with its
-address as the boothost). Earlier answer kept: the boot path writes to the
-claimed clone, so each host gets a copy-on-write overlay over the image.
-- [ ] `crates/nvmeof-target` (`stormblock-nvmeof`): the wire half the
-      engine and the laptop share — `pdu`, `fabric`, `discovery`, `auth`
-      (DH-HMAC-CHAP) moved out of `src/target/nvmeof`; the engine re-exports
-      them, so they cannot drift (its own tests run against the crate's code)
-- [ ] the portable target: tokio only, an `Image` (a read-only file) and a
-      per-host `Overlay` (sparse scratch file, 4 KiB blocks), subsystems by
-      host NQN, admin (Identify, log pages, features, keep-alive), I/O
-      (read, write, flush, DSM, write zeroes) into the host's overlay
-- [ ] the boothost surface (axum router): health, intent, claim, installed,
-      in the shape stormbootx reads
-- [ ] `stormboot-serve` CLI: `--image`, `--host name[=nqn]`, `--intent`,
-      ports, `--scratch`
-- [ ] tests: the engine's NVMe/TCP initiator against the portable target
-      (attach, read the image, writes land in the overlay only, a second
-      host sees the image unchanged, unknown host refused), the boothost
-      routes; cross builds for x86_64/aarch64-apple-darwin and
-      x86_64-pc-windows-gnu on a build VM
-- [ ] docs (crate README, README), CHANGELOG; check.sh; storminstall#20 told
-- Not in this step: moving the engine's admin/I/O/server loop onto the
-  crate (every node's boot path; follow-up issue)
-- **Paused 2026-10-21 for P0 #475** (stormcentral handed it over). State:
-  everything above is written and pushed as WIP (6210ac0 + the crc32c
-  fix): the four wire modules moved (`git mv`) into the crate and
-  re-exported by the engine, `admin.rs` built on `identify`, `mdts_for`
-  re-exported, Cargo.lock edited by hand (the new package + its edge).
-  The first sc-build failed only on the missing `crc32c` dependency (pdu
-  digests); not yet built past that. Next: `sc-build 'cargo test --locked
-  -p stormblock-nvmeof && cargo clippy --locked -p stormblock-nvmeof
-  --all-targets -- -D warnings && cargo test --locked --test it
-  integration_bootserve && cargo test --locked --lib target::nvmeof'`, fix
-  what it finds, then the cross builds (zigbuild darwin, windows-gnu), the
-  docs and CHANGELOG, check.sh, and tell storminstall#20 / stormbootx#164.
-  Contract notes (from stormbootx's source): it finds the first `"key"` in a
-  reply body (attach first; no `address`/`nqn`/`port`/`nsid` before it),
-  needs health `version` > 19.3.0, always writes through R2T, never Flushes,
-  KATO 0, one command in flight; the initramfs reads `attach.uri`,
-  `attach.host_nqns`, `volume.{id,name}`, `intent`, `host.name`.
+builds for macOS, Windows and Linux, with a read-only NVMe/TCP target, the
+boothost intent/claim API, and a CLI the owner runs on a Mac or Windows box
+to serve one golden or ISO image to a node, offline. It also serves machines
+that boot stormbootx (stormbootx#164). The boot path writes to the claimed
+clone, so each claim gets a copy-on-write overlay. Master (2026-10-21):
+unfinished work stays on wip/; main is the next release.
+- On main since 6210ac0/c2fdcce (shipped in 12.39): the wire half moved
+  into the crate and re-exported by the engine, plus the crate's unused
+  portable target, boothost and CLI.
+- [x] `crates/nvmeof-target` (`stormblock-nvmeof`): pdu, fabric,
+      discovery, auth (moved), identify (the engine builds its own on it)
+- [x] image (read-only), overlay (append-only scratch per claim), server
+      (per-host subsystems, admin, I/O with R2T, DSM), boothost router,
+      `stormboot-serve`
+- [x] tests: the crate's own 21, integration_bootserve (the engine's
+      initiator), `cli::boot_claim_wait_tests::a_node_claims_and_opens_its_
+      image_from_stormboot_serve` (the initramfs's boot-claim client)
+- [x] `ci-bootserve-verify.sh` ALL PASS (kernel 7.2.11 nvme-tcp: 10/10;
+      the image file unchanged, overlay 308 blocks, removed at stop)
+- [x] `ci-bootserve-cross.sh`: darwin x86_64/aarch64 (Mach-O), windows-gnu
+      (PE32+). The VM has no macOS SDK, so rustc warns: stormcentral#1077
+- [ ] `ci-nvmeof-identify-same.sh` vs 8f23f72 (fetch by URL); check.sh on
+      the branch; merge to main; answer the master on #474 (what is on main,
+      wire unchanged); close. The engine's loop onto the crate: #488.
+      The owner tests on his Mac and Windows machines
 
 ### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — DONE (not the engine's calls), closed
 
