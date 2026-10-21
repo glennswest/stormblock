@@ -11,7 +11,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use stormblock::drive::BlockDevice;
 use stormblock_nvmeof::boothost::{Boothost, Intent, Policy};
 use stormblock_nvmeof::image::Image;
 use stormblock_nvmeof::server::BootTarget;
