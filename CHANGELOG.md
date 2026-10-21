@@ -19,6 +19,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.4.0] — 2026-10-21
+
+### Added
+- #474: `stormboot-serve` and the `stormblock-nvmeof` crate. A laptop (macOS, Windows, Linux) boots nodes from one local image file over NVMe/TCP, offline. Each named host gets its own subsystem and a copy-on-write overlay per claim (the image is never written). It answers the boothost health/intent/claim/installed calls the way forge does. The engine's NVMe/TCP wire code lives in the crate; its Identify answers are byte for byte those before the move. The engine's own behaviour is unchanged.
+
 ## [v21.3.0] — 2026-10-21
 
 ### Added
