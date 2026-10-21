@@ -4341,7 +4341,7 @@ $1|$_svp|$3"
         # whatever stormdrive designated or a partner holds.
         :
     elif [ -n "$LOCAL_DISK" ]; then
-        _sd_from="
+        _sd_from=""
         if [ -n "${SYSTEM_NAMED:-}" ]; then
             SYSTEM_DISK=$(disk_of "$SYSTEM_NAMED")
             _sd_from="rd.stormblock.system="
