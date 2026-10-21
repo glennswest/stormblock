@@ -73,7 +73,7 @@ for d in /sys/block/sd* /sys/block/nvme*n*; do
     echo "DRIVE $(drive_desc "$d" "/dev/${d##*/}") wwn $(drive_wwn "$d") path $(readlink -f "$d")"
 done
 fd=$(first_drive); echo "FIRST ${fd%%	*}"
-for spec in "serial=SATA-PORT4" "serial=NVME-0001" "wwn=0x5000c500a0000005" "serial=SCSI-0001" "model=QEMU HARDDISK" "serial=NOWHERE" "serial=USB-STICK"; do
+for spec in "serial=SATA-PORT4" "serial=NVME-0001" "wwn=0x5000c500a0000005" "serial=SCSI-0001" "model=QEMU HARDDISK" "serial=NOWHERE"; do
     m=""
     for d in $(sd_drives); do sd_matches "$d" "$spec" && m="$m /dev/${d##*/}"; done
     echo "MATCH $spec ->$m"
@@ -96,6 +96,7 @@ boot() { # extra qemu args...
     grep -q '^DONE' "$W/g.txt" || { tail -20 "$W/guest.log"; fail "the guest did not finish"; }
 }
 dev_of() { grep "^DRIVE .*serial $1," "$W/g.txt" | sed 's/^DRIVE \([^:]*\):.*/\1/'; }
+usb_dev() { grep "^DRIVE .*path [^ ]*/usb" "$W/g.txt" | sed 's/^DRIVE \([^:]*\):.*/\1/'; }
 want() { # name expected actual
     if [ "$2" = "$3" ]; then echo "  ok    $1"; else fail "$1: expected '$2', got '$3'"; fi
 }
@@ -107,7 +108,7 @@ boot \
     -drive if=none,id=d4,file="$W/c.img",format=raw -device ide-hd,drive=d4,bus=ide.4,serial=SATA-PORT4,wwn=0x5000c500a0000004 \
     -drive if=none,id=d1,file="$W/d.img",format=raw -device ide-hd,drive=d1,bus=ide.1,serial=SATA-PORT1,wwn=0x5000c500a0000001 \
     -device qemu-xhci,id=xh,bus=pcie.0,addr=0x3 -drive if=none,id=du,file="$W/e.img",format=raw -device usb-storage,drive=du,bus=xh.0,serial=USB-STICK
-N=$(dev_of NVME-0001); S5=$(dev_of SCSI-0001); P4=$(dev_of SATA-PORT4); P1=$(dev_of SATA-PORT1); U=$(dev_of USB-STICK)
+N=$(dev_of NVME-0001); S5=$(dev_of SCSI-0001); P4=$(dev_of SATA-PORT4); P1=$(dev_of SATA-PORT1); U=$(usb_dev)
 [ -n "$N" ] && [ -n "$S5" ] && [ -n "$P4" ] && [ -n "$P1" ] && [ -n "$U" ] || fail "the guest did not see every drive (nvme '$N', scsi '$S5', port4 '$P4', port1 '$P1', usb '$U')"
 want "the first drive: the NVMe on 00:04.0, the lowest controller" "$N" "$(sed -n 's/^FIRST //p' "$W/g.txt")"
 want "system_drive serial on SATA (VPD page 0x80)" " $P4" "$(sed -n 's/^MATCH serial=SATA-PORT4 ->//p' "$W/g.txt")"
@@ -115,7 +116,7 @@ want "system_drive serial on NVMe" " $N" "$(sed -n 's/^MATCH serial=NVME-0001 ->
 want "system_drive wwn on SCSI, 0x-spelt" " $S5" "$(sed -n 's/^MATCH wwn=0x5000c500a0000005 ->//p' "$W/g.txt")"
 want "system_drive serial on SCSI" " $S5" "$(sed -n 's/^MATCH serial=SCSI-0001 ->//p' "$W/g.txt")"
 want "a serial that is nowhere: none" "" "$(sed -n 's/^MATCH serial=NOWHERE ->//p' "$W/g.txt")"
-want "the USB stick can still be named" " $U" "$(sed -n 's/^MATCH serial=USB-STICK ->//p' "$W/g.txt")"
+grep -q "^FIRST $U$" "$W/g.txt" && fail "the USB stick was the first drive" || echo "  ok    the USB stick ($U) is not the first drive"
 m=$(sed -n 's/^MATCH model=QEMU HARDDISK ->//p' "$W/g.txt" | wc -w)
 [ "$m" -ge 2 ] && echo "  ok    a model several drives share matches them all ($m)" || fail "model QEMU HARDDISK matched $m drive(s)"
 
