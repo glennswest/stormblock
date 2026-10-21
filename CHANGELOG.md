@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-21
+- **docs:** #471 answered (stormcentral#545): only slabs, an ESP and `kind = boot` pallets reach a node's disk, and nothing reads the release disk's system/kube/data pallets. stormcentral may compose the slim layout. No code change.
+
 ### 2026-10-20
 - **chore:** #466: v21.2.0 tagged (d94520a); check.sh on main ALL PASS; golden golden-stormblock-53e5e1bb9d06 (its binary carries d94520a036b2); stormcentral#998 told.
 - **feat:** #466: the engine says which build it is. `build.rs` stamps the commit (`$STORMBLOCK_COMMIT`, else `git rev-parse --short=12 HEAD`, else `unknown`; `stormblock::version::COMMIT`). `commit` on `/api/v1/health`, `/serve/v1/health` and `/serve/v1/status`; `GET /api/v1/version` `{service, version, commit}`, open like health; `stormblock_build_info{commit,version} 1` on `/metrics`. The crate version moves only at a tag, so the commit is what tells stormcentral's performance gate (stormcentral#998) that forge's engine changed. Test `integration_auth::the_engine_says_which_build_it_is`.

@@ -204,6 +204,14 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### Release disk's non-boot pallets: carried or read? (2026-10-21, #471, P3, stormcentral#545) — ANSWERED, closed
+
+No. Flow-over moves slab extents; local boot and staging copy the ESP and
+`kind = boot` pallets only (`local_boot::boot_pallets`); #402 retires
+pallets. Initramfs, boot-local, adopt-ublk, `slab holds` read slabs
+(`slabs_in_partitions`), never a pallet; `/api/v1/pallets` over boot_disks
+only lists them. stormcentral may build the slim layout. No code change.
+
 ### The engine reports its commit (2026-10-20, #466, P2, stormcentral#998) — DONE (v21.2.0, d94520a; golden-stormblock-53e5e1bb9d06), closed
 
 stormcentral's perf gate fingerprints forge's engine. `version` was already
