@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### The initramfs's log over the network (2026-10-21, #477, P1) — IN PROGRESS
+### The initramfs's log over the network (2026-10-21, #477, P1) — DONE (v21.3.0), closed; metal pending
 
 Master: a dead SOL (server8, #476) lost the installer's output; stormbootx
 did its half (stormbootx#162). Here: every line /init and the initramfs
@@ -220,8 +220,15 @@ network is up; offline = group only.
       by the QEMU check); logcast drops init.log's copies (`--console-copy`)
 - [x] tests: `logcast::tests`, initramfs-logcast.sh, initramfs-console.sh;
       `ci-logcast-verify.sh` (QEMU); README, boot-hooks.md, CHANGELOG
-- [ ] on a build VM: those, ci-logcast-verify.sh ALL PASS, check.sh; a
-      golden; close. Metal: an X9 install with SOL dead, `stormcentral logs`
+- [x] on build VMs at f49f756: the shell tests under sh and busybox sh,
+      `logcast::tests` 4/4, `ci-logcast-verify.sh` ALL PASS (kernel 7.2.11:
+      360/360 lines at a host collector via slirp, in order, once each, the
+      300 pre-network lines also to the group in the guest's pcap, `off`
+      nothing on the wire); check.sh ALL PASS (1257/1257, no warnings);
+      v21.3.0 tagged; stage requested; closed. Metal: an X9 install with SOL
+      dead, its installer log in `stormcentral logs` (stormcos's cmdlines or
+      install-config must name the collector: `stormpump.syslog=` or
+      `syslog:`)
 
 ### server1's clones 10–20 s after the 12.37 reboot (2026-10-21, #475, P0) — DONE (v21.2.2, cf7e8a3), closed; metal pending
 

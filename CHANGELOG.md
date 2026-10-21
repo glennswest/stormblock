@@ -17,6 +17,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.3.0] — 2026-10-21
+
+### Added
+- #477: the initramfs's log over the network. `stormblock logcast` follows /init's lines (`/run/stormblock/init.log`) and the engine's whole log from the first line, keeps them until the network is up and the node is named, and sends every line as a stormcast frame to the group 239.255.42.1:5514 and to the collector `stormpump.syslog=` (or install-config's `syslog:`) names. `off` sends nothing. It stops before switch_root after sending what is left. A dead serial-over-LAN no longer loses the installer's output.
+
 ## [v21.2.2] — 2026-10-21
 
 ### Fixed
