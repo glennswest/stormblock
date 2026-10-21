@@ -38,6 +38,7 @@ run() ( # -> console in sd.out
     STORM_SYSTEM_DATA_WAIT=0; STORM_SYSTEM_DATA_KEEP="${KEEP:-500}"
     MOUNTS="cilium:/p/cilium,kubelet-data:/var/lib/kubelet"; MOUNTS_FROM="/etc/stormblock/mounts in stormpump"
     BOOTTAG=C2NR0Q2
+    LOCAL_DISK="${LD:-}"; LOCAL_DISK_ID="${LDID:-}"; CHOSEN_BY="${CB:-}"; SYSTEM_DISK=""; SYSTEM_DISK_ID=""
     mount() { [ "${MOUNT_FAILS:-}" = 1 ] && { echo "mount: wrong fs type" >&2; return 1; }; return 0; }
     sync() { :; }
     . "$WORK/sd.sh" > "$WORK/sd.out" 2>&1
@@ -70,12 +71,31 @@ print(b["release"], b["tag"], "stormblock.volume=stormpump" in b["cmdline"], b["
     check "the boot record is JSON with what the boot knew" "11.97 C2NR0Q2 True taken 11.97 none" "$r"
 fi
 
+# #478: the drive an install chose, recorded as stormdrive's designation,
+# once: stormdrive's own file is never rewritten.
+check "no drive identity: no designation written" "no" "$([ -e "$WORK/sd/stormdrive/system-drives.json" ] && echo yes || echo no)"
+LD=/dev/sdb LDID="wwn=naa.5002538e40a1b2c3;serial=TF512A;model=TEAM T253X2512G;size=512110190592" CB=system_drive run
+contains "an install records its drive for stormdrive" "/dev/sdb recorded as the system drive for stormdrive (#478)" "$(cat "$WORK/sd.out")"
+if command -v python3 >/dev/null 2>&1; then
+    r=$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))["drives"][0]
+print(d["wwn"], d["serial"], d["model"], d["path"], d["chosen_by"])
+' "$WORK/sd/stormdrive/system-drives.json" 2>&1)
+    check "  in stormdrive's format (#402's reader takes wwn, serial, model)" "naa.5002538e40a1b2c3 TF512A TEAM T253X2512G /dev/sdb system_drive" "$r"
+fi
+echo '{"version": 1, "by": "stormdrive", "drives": []}' > "$WORK/sd/stormdrive/system-drives.json"
+sleep 1
+LD=/dev/sda LDID="wwn=naa.1;serial=X;model=Y;size=1" CB=first run
+check "  stormdrive's own file is never rewritten" '{"version": 1, "by": "stormdrive", "drives": []}' "$(cat "$WORK/sd/stormdrive/system-drives.json")"
+
 # A boot that did not install: a boot record, no install record.
 echo '{"slabs": ["/dev/sda"]}' > "$WORK/run/handover.json"
 sleep 1
 run
-check "a second boot adds a boot record" 2 "$(ls "$WORK/sd/history/boots" | wc -l)"
-check "and no install record" 1 "$(ls "$WORK/sd/history/installs" | wc -l)"
+# (Three installing boots above: three boot records, three install records.)
+check "a boot that did not install adds a boot record" 4 "$(ls "$WORK/sd/history/boots" | wc -l)"
+check "and no install record" 3 "$(ls "$WORK/sd/history/installs" | wc -l)"
 
 # Pruning: the newest N.
 for t in 20200101T000000Z 20200102T000000Z 20200103T000000Z; do echo '{}' > "$WORK/sd/history/boots/$t.json"; done

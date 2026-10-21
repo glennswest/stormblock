@@ -4907,6 +4907,22 @@ if [ -s "$SD_DEV_FILE" ]; then
         if grep -q '"installed"' "$SD_RUN/handover.json" 2>/dev/null; then
             cp "$sd_boot" "$SD_DIR/history/installs/$sd_at.json"
             echo "  system-data: install recorded ($sd_at, ${sd_release:-release unknown})"
+            # The drive this install chose, as stormdrive's designation (#478),
+            # so the node keeps it: stormdrive shows it as the system drive,
+            # and the next install's #402 rules read it. Written only when
+            # stormdrive has none: the file is stormdrive's, never rewritten
+            # under it.
+            sd_des="$SD_DIR/stormdrive/system-drives.json"
+            sd_id="${SYSTEM_DISK_ID:-${LOCAL_DISK_ID:-}}"
+            if [ -n "$sd_id" ] && [ ! -e "$sd_des" ]; then
+                sd_f() { printf '%s' "$sd_id" | tr ';' '\n' | sed -n "s/^$1=//p" | head -1; }
+                mkdir -p "$SD_DIR/stormdrive"
+                printf '{"version": 1, "node": %s, "updated": "%s", "by": "stormblock-initramfs", "drives": [{"wwn": %s, "serial": %s, "model": %s, "path": %s, "chosen_by": %s}]}\n' \
+                    "$(sd_str "${BOOTTAG:-}")" "$sd_at" "$(sd_str "$(sd_f wwn)")" "$(sd_str "$(sd_f serial)")" \
+                    "$(sd_str "$(sd_f model)")" "$(sd_str "${SYSTEM_DISK:-${LOCAL_DISK:-}}")" \
+                    "$(sd_str "${CHOSEN_BY:-}")" > "$sd_des.tmp" && mv "$sd_des.tmp" "$sd_des"
+                echo "  system-data: ${SYSTEM_DISK:-$LOCAL_DISK} recorded as the system drive for stormdrive (#478)"
+            fi
         fi
         # The newest $SD_KEEP boot records.
         _sn=$(ls "$SD_DIR/history/boots" 2>/dev/null | wc -l)
