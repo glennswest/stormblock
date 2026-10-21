@@ -59,51 +59,82 @@ background, after root is up. `/init` picks that drive today from
 | `off` | nothing |
 | `force` | a drive even when it is one of ours, destroying the identity on it; a drive with a foreign signature only when it is the named one (below) |
 
-Whatever the policy, the system drive is **known, never guessed** (#351,
-the owner's install rules 3–5; #273's NetApp shelf on the Dell, for
-stormraid). In order:
+Whatever the policy, **which drive an install takes** follows the owner's
+rules of 2026-10-21 (#478). They replace #351's "known, never guessed", and
+**the default changed**: with nothing named, the machine's first drive is
+taken, where #351 stopped. In order:
 
-1. **The drive that already holds this node** (install-over): the disk the
-   probe ruled an install over, else the one drive carrying this node's data
-   slab, else the drive this boot runs from (no other drive is taken beside
-   it). Several drives with data slabs are not "this node's": of them, the one
-   whose drive (or #402 partner) also holds the system half, when it is the
-   only one; otherwise the install **stops**, naming them.
-2. **The named drive, or the designated one.** When the drive
-   `rd.stormblock.slab=` names (its disk, for a partition) is on this
-   machine, it is the only drive the survey or an install may take, wherever
-   it is. stormdrive's designation (`<system-data>/stormdrive/system-drives.json`)
-   decides where the system half goes (#402: the system drive block below);
-   it outranks install-over.
-3. **Else only when unambiguous:** the one drive on the machine's own shelves
-   (internal, front, rear), or the single drive the machine has, an external
-   shelf's included ("the system may live on an external shelf": #347's
-   "external only when named" is withdrawn). Drives are counted as drives -
-   every non-removable drive with media - not as the ones an install could
-   write: two drives are two choices.
-4. **Anything else stops.** No drive is taken, the verdict is `ambiguous`,
-   and the console names every drive by shelf, bay, model and serial, e.g.
+1. **`system_drive:` in this machine's install-config.** That is the boot
+   media's (#275), else forge's per-host one (`PUT
+   /api/v1/synonyms/boothost/<name>/install-config`, #459). It is a mapping,
+   and every key given must match:
 
-   ```
-   STOP: the system drive is not known (#351): 3 drive(s) on this machine's
-   own shelves, 0 on external ones, and none of them holds this node, is
-   named (rd.stormblock.slab=) or is designated system in stormdrive. An install
-   never picks one. No drive is taken. The drives:
-       /dev/sda: internal shelf, bay none, SSDSC2KB240G8, serial PHYF0123, 240 GB
-       /dev/sdb: front shelf 500056b3a1b2c3d4, bay Slot 04, ST2000NM0055, serial ZBS1A2B3, 2000 GB
+   ```yaml
+   system_drive:
+     serial: TF512A2210000123     # the drive's serial (device/serial, VPD page 0x80)
+     wwn: naa.5002538e40a1b2c3    # or its WWN; any case, the naa./eui. prefix or 0x optional
+     model: TEAM T253X2512G       # its model: only useful when unique on the machine
+     shelf: front                 # a shelf's id or position (internal, front, rear, external)
+     bay: 4                       # with shelf: the bay (4 matches "Slot 04")
    ```
 
-   then #427's diskless refusal (a FATAL, unless `rd.stormblock.diskless=1`
-   or `assimilate=off`). It never picks one out of hundreds.
+   Exactly one drive must match. If none does, or several do, the boot
+   **STOPS** (verdict `ambiguous`) and names every drive by shelf, bay, model,
+   serial and size. A device name (`system_drive: /dev/sdb`) or an unknown
+   key is a STOP too, because names move. The console lines also reach the
+   network (#477). The match outranks everything below, including the drive
+   this node is on now: that is how the system moves to another drive. It is
+   **the only drive taken**: both halves go on it, with no #402 split. A data
+   half left on another drive is said (`move it with stormdrive's
+   move-system`, stormdrive#62), never taken. Only that key of the
+   install-config is read or printed; the file carries secrets.
+2. **The drive `rd.stormblock.slab=` names** (release-wide; stormcos drops it
+   once machines say `system_drive`), when it is on this machine.
+3. **The drive that holds this node.** That is the disk the probe ruled an
+   install over, else the one drive with this node's data slab. Of several
+   with data slabs, it is the one whose drive (or #402 partner) also holds
+   the system half, when only one does. An install goes over an existing
+   install, keeping its data half (#311). A boot that runs from a local disk
+   takes nothing else.
+4. **The machine's first drive.** That is the first non-removable, non-USB
+   drive in controller and port order: the by-path order, PCI addresses read
+   as hex and every other number as a number, so `ata2` comes before `ata10`
+   and `00:02.0` before `00:1f.2`. The machine's own shelves come before
+   external ones, then the lowest bay. It is never "`/dev/sda`", which is
+   only the order the kernel met the drives in. The console says which drive
+   and why:
 
-Of the drive chosen, "nobody's" means blank (first and last MiB zeros) or one
-of ours; anything else is somebody's and left. **And it is proved before a
-byte is written** (rule 5): the survey passes the drive's identity
-(`--local-disk-id`, `--system-disk-id`: `wwn=..;serial=..;model=..;size=..`,
-read from sysfs) to `boot-local`, which checks the device by WWN, else model
-and serial together (never a serial alone), and size, and writes nothing to a
-device that is not that drive (`Install: … is the drive chosen (WWN …)` on the
-console; `local-disk.json` keeps the `identity`).
+   ```
+   SYSTEM DRIVE: /dev/sdb, this machine's first drive (no system_drive in its
+   install-config; first by controller and port order: /sys/devices/pci0000:00/0000:00:1f.2/ata2/…) (#478)
+   ```
+
+   Several drives holding older installs that cannot be told apart (server8)
+   come here too: the first drive is taken and the others are left.
+
+Only the drive chosen is ever considered, and nothing else is taken in its
+place. **Old stormcos installs, slabs and partitions on it are taken over**
+(owner: "an install must go over an existing system install"). A partition
+table, filesystem or old layout is laid over (`force`). A node data half on
+it is kept (#311), and `boot-local` still refuses one whose slab is present
+but will not open (#346), whatever `force` says. A **RAID member** (a
+stormraid superblock, or md/ZFS metadata at the drive's end) is not an old
+install and is left, with the reason said. The node then runs from the
+appliance and #427's refusal follows. `force` clears it only on a drive
+named outright (`system_drive`, `rd.stormblock.slab=`).
+
+**After the install the choice is kept** (#478): the system-data block
+writes it as stormdrive's designation
+(`<system-data>/stormdrive/system-drives.json`: `wwn`, `serial`, `model`,
+`path`, `chosen_by`) when stormdrive has none, never over stormdrive's own.
+
+The drive chosen **is proved before a byte is written** (#351, rule 5). The
+survey passes the drive's identity (`--local-disk-id`, `--system-disk-id`:
+`wwn=..;serial=..;model=..;size=..`, read from sysfs) to `boot-local`. That
+checks the device by WWN, else model and serial together (never a serial
+alone), and size, and writes nothing to a device that is not that drive
+(`Install: … is the drive chosen (WWN …)` on the console; `local-disk.json`
+keeps the `identity`).
 
 Shelves (#347, owner): every SES enclosure is a shelf, with its own id (the
 enclosure's logical id), position and bays. A server has several:
@@ -153,7 +184,7 @@ in the engine's health as `slabs.local_disk`, with the drive's `shelf` (`id`,
 `position`, `bay`, `identity`, #347) and the boot's storage inventory
 (`controllers`, `drives`, #345). It records:
 - `taken` and the drive;
-- `ambiguous`: the system drive is not known (#351, above), with why;
+- `ambiguous`: `system_drive` matched no drive or several (#478, above), with why;
 - `refused`: a drive carrying stormblock slabs that this boot left alone,
   with why (behind an expander, not the named drive, the release on it
   cannot be told, the policy). The console says `WARNING: this node runs from

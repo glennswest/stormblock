@@ -204,6 +204,27 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — BUILT on wip/478-system-drive
+
+Owner (2026-10-21), replacing #351's "never guessed": install-config
+`system_drive:` (serial, wwn, model, shelf + bay) names the drive; a STOP
+only when it matches none or several; without it the machine's **first
+drive** (by-path order); old installs, slabs, partitions on it taken over;
+the choice recorded as stormdrive's designation.
+- [x] /init `drive choice` block (sd_spec, sd_matches, first_drive), the
+      survey takes only the chosen drive; take-over of partitions (RAID
+      members left, `force` clears them only when named outright); #402
+      split off under system_drive; system-data writes the designation
+- [x] tests: boot-hook (+30, under sh and busybox sh), system-data (+4),
+      `ci-first-drive-verify.sh` (QEMU, real sysfs) ALL PASS; boot-hooks.md,
+      README, CHANGELOG
+- [ ] check.sh on the branch; merge; v22.0.0 (the default changed); golden;
+      stormcos (drop `rd.stormblock.slab=/dev/sda`) and storminstall
+      (install-config's `system_drive` key) told; close. Metal: server8
+      (two older installs; system_drive = its SSD)
+- WIP f2134f6 reached main by mistake and was reverted there (2a205cc);
+  the branch re-applies it
+
 ### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — v21.6.0 (the split, the overlap); WAITS ON THE OWNER (the read-back)
 
 server1 (X9, ST2000DM008) 12.40: 3025 + 727 extents at 22–23 MB/s; the
