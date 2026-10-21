@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### server8's 12.37 install stalled behind its own console (2026-10-21, #476, P1) — IN PROGRESS
+### server8's 12.37 install stalled behind its own console (2026-10-21, #476, P1) — DONE (v21.2.1, 7528cc5), shipped; metal pending
 
 From server8's full SOL log (`console/server8/sol.log`): the survey took
 sda, the named drive (`Install: /dev/sda is the drive chosen`; sdb left
@@ -218,12 +218,18 @@ console through /init's fan-out fifo. The console (two serial ports + VGA,
 SOL dropping) drained them at ~3 lines/s until the power-off at 18:13;
 /init's own echoes wait in the same fifo, so PID 1 never reached
 switch_root and nothing reported `laid`.
-- [ ] restore: "slab not attached, mapping dropped" said once per slab
-      (extents, volumes), per extent at debug; stale-record drops capped
-- [ ] /init: the engine-log follower collapses runs of same-shaped lines,
-      so a flood cannot hold PID 1 behind a slow console
-- [ ] tests (restore summary, initramfs follower), CHANGELOG, docs
-- [ ] check.sh; golden; answer #476 (its three questions)
+- [x] restore and adopt_slabs: "slab … not attached" once per slab
+      (extents, volumes), per extent at debug; stale drops after 20 counted
+      (`volume::Dropped`, 8a9b44d)
+- [x] /init: `engine_follow_filter` (block `engine follower`): a run of
+      same-shaped lines shown 3 times, then counted; the log keeps all
+- [x] tests `volume::tests::mappings_dropped_are_said_once_a_slab`,
+      tests/initramfs-engine-follow.sh (root-fallback test sources it);
+      README, boot-hooks.md, CHANGELOG
+- [x] check.sh at e0eaec0 ALL PASS (1265/1265); v21.2.1 tagged (7528cc5,
+      `stormblock 21.2.1` from a build VM's `--locked` build); golden
+      requested; #476 answered and shipped. Metal: server8 installs a
+      release built from >= 7528cc5 onto sda and reboots from it
 
 ### Portable boot-serving crate for storminstall (2026-10-21, #474, P2, storminstall#20) — DECIDED B: PARKED until the single-node pacing lifts
 
