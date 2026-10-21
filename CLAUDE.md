@@ -204,6 +204,17 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### Portable boot-serving crate for storminstall (2026-10-21, #474, P2, storminstall#20) — WAITING ON THE OWNER (pacing)
+
+The laptop as forge for an install: a portable NVMe/TCP target (tokio only,
+no io-uring/netif/pinning; Linux, macOS, Windows) the engine also uses, the
+boothost intent/claim handlers as a router, one image to named host NQNs.
+Answered on #474: the boot path writes to the claimed clone (stormuefi's
+`tries_left`, a diskless node, forge's stamp, #412's discards after
+validation), so each host needs a copy-on-write overlay (sparse scratch file)
+over the read-only image. Asked (needs-owner): A start now on
+`wip/474-portable-target`, B after the pacing lifts (recommended). Nothing built.
+
 ### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — DONE (not the engine's calls), closed
 
 Dell 12.14 → 12.37, the first claim after boot: kubelet `lookup` 119 → 161
