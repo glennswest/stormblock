@@ -204,16 +204,22 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — IN PROGRESS
+### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — DONE (not the engine's calls), closed
 
 Dell 12.14 → 12.37, the first claim after boot: kubelet `lookup` 119 → 161
-ms, `blank` 146 → 206 ms (warm fine). Engine 7911dd9 → 5062192 (506
-commits); rustkube-node's claim path unchanged. lookup = GET volumes, GET
-slabs, GET volumes (+ apiserver); blank = GET fstemplates/{name}, POST
-fstemplates/{id}/clone (verify).
-- [ ] `ci-cold-claim-timing.sh`: those calls, cold (first after an engine
-      start) and warm, on 7911dd9, 5062192 and main, ~150 volumes
-- [ ] find what costs it; fix if it is the engine (P2: wip/ unless fit to ship)
+ms, `blank` 146 → 206 ms (warm fine). Engine 7911dd9 → 5062192; the
+kubelet's claim path unchanged. lookup = GET volumes, GET slabs, GET
+volumes (+ apiserver); blank = GET fstemplates/{name}, POST …/clone.
+- [x] `ci-cold-claim-timing.sh` (build VM, 153 volumes, 5 starts): lookup
+      4.5 / 4.0 / 3.8 ms, blank 172.8 / 61.4 / 30.7 ms on 7911dd9 / 5062192 /
+      main, cold and warm alike: the engine got faster
+- [x] cause by reading: after the flow-over's validation, #384's
+      `check_goldens` reads every carried golden (the Dell: 24, health
+      `digests.intact 24`) off the HDD while the cold probes run; nothing
+      waits for it (12.14 had no check). stormcentral#1052: settle on
+      `digests.unchecked`/`to_digest` 0. No engine change. Gentler pacing of
+      the check is possible (it yields only after a read, half the disk)
+      but needs metal to tune; not built under the pacing
 
 ### Release disk's non-boot pallets: carried or read? (2026-10-21, #471, P3, stormcentral#545) — ANSWERED, closed
 

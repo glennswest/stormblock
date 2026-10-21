@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-21
+- **test:** #472: `ci-cold-claim-timing.sh` times the engine calls a kubelet's PVC claim makes (lookup: GET volumes, slabs, volumes; blank: GET the template, POST its clone), cold (the first claim after an engine start) and warm, on any set of commits (`build <rev>…` builds each in a worktree). On a build VM, 153 volumes, medians: lookup 4.5 / 4.0 / 3.8 ms and blank 172.8 / 61.4 / 30.7 ms on 7911dd9 (12.14) / 5062192 (12.37) / main. The Dell's slower cold claim on 12.37 is not the engine's calls: it ran while #384's golden check read the release's 24 goldens off the Dell's HDD after the flow-over, which stormcentral's settle does not wait for (stormcentral#1052). No engine change.
 - **docs:** #471 answered (stormcentral#545): only slabs, an ESP and `kind = boot` pallets reach a node's disk, and nothing reads the release disk's system/kube/data pallets. stormcentral may compose the slim layout. No code change.
 
 ### 2026-10-20
