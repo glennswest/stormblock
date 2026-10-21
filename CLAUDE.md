@@ -284,7 +284,7 @@ switch_root and nothing reported `laid`.
       requested; #476 answered and shipped. Metal: server8 installs a
       release built from >= 7528cc5 onto sda and reboots from it
 
-### Portable boot-serving crate for storminstall (2026-10-21, #474, P1, storminstall#20) — BUILT on wip/474-portable-target; merge after check.sh
+### Portable boot-serving crate for storminstall (2026-10-21, #474, P1, storminstall#20) — DONE (v21.4.0, 4947c7d), closed; the owner's Mac/Windows run pending
 
 Master for the owner (2026-10-21, on #474): start now, P1. A crate that
 builds for macOS, Windows and Linux, with a read-only NVMe/TCP target, the
@@ -308,10 +308,17 @@ unfinished work stays on wip/; main is the next release.
       the image file unchanged, overlay 308 blocks, removed at stop)
 - [x] `ci-bootserve-cross.sh`: darwin x86_64/aarch64 (Mach-O), windows-gnu
       (PE32+). The VM has no macOS SDK, so rustc warns: stormcentral#1077
-- [ ] `ci-nvmeof-identify-same.sh` vs 8f23f72 (fetch by URL); check.sh on
-      the branch; merge to main; answer the master on #474 (what is on main,
-      wire unchanged); close. The engine's loop onto the crate: #488.
-      The owner tests on his Mac and Windows machines
+- [x] `ci-nvmeof-identify-same.sh` ALL PASS: 29 Identify answers byte for
+      byte those of 8f23f72 (the commit before the move)
+- [x] check.sh on the branch at 194258e ALL PASS (1258/1258); main
+      fast-forwarded; v21.4.0 tagged (4947c7d). No golden: the engine binary
+      is unchanged but for its version
+- [x] binaries (macOS arm64/x86_64, Windows x86_64, Linux x86_64) from
+      4947c7d carried off a build VM (`SC_BUILD_OUT`) onto a **draft**
+      GitHub release v21.4.0 (not published: the repo is public); the
+      master answered on #474; storminstall#20, stormbootx#164 told; closed.
+      The engine's loop onto the crate: #488. The owner runs it on his Mac
+      and Windows machines
 
 ### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — DONE (not the engine's calls), closed
 
