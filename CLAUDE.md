@@ -261,6 +261,23 @@ claimed clone, so each host gets a copy-on-write overlay over the image.
 - [ ] docs (crate README, README), CHANGELOG; check.sh; storminstall#20 told
 - Not in this step: moving the engine's admin/I/O/server loop onto the
   crate (every node's boot path; follow-up issue)
+- **Paused 2026-10-21 for P0 #475** (stormcentral handed it over). State:
+  everything above is written and pushed as WIP (6210ac0 + the crc32c
+  fix): the four wire modules moved (`git mv`) into the crate and
+  re-exported by the engine, `admin.rs` built on `identify`, `mdts_for`
+  re-exported, Cargo.lock edited by hand (the new package + its edge).
+  The first sc-build failed only on the missing `crc32c` dependency (pdu
+  digests); not yet built past that. Next: `sc-build 'cargo test --locked
+  -p stormblock-nvmeof && cargo clippy --locked -p stormblock-nvmeof
+  --all-targets -- -D warnings && cargo test --locked --test it
+  integration_bootserve && cargo test --locked --lib target::nvmeof'`, fix
+  what it finds, then the cross builds (zigbuild darwin, windows-gnu), the
+  docs and CHANGELOG, check.sh, and tell storminstall#20 / stormbootx#164.
+  Contract notes (from stormbootx's source): it finds the first `"key"` in a
+  reply body (attach first; no `address`/`nqn`/`port`/`nsid` before it),
+  needs health `version` > 19.3.0, always writes through R2T, never Flushes,
+  KATO 0, one command in flight; the initramfs reads `attach.uri`,
+  `attach.host_nqns`, `volume.{id,name}`, `intent`, `host.name`.
 
 ### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — DONE (not the engine's calls), closed
 

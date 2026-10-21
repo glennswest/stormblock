@@ -2559,6 +2559,7 @@ dependencies = [
  "axum",
  "base64",
  "clap",
+ "crc32c",
  "crc32fast",
  "hex",
  "rand 0.8.8",
