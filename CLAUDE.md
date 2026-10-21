@@ -204,6 +204,27 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### server8's 12.37 install stalled behind its own console (2026-10-21, #476, P1) — IN PROGRESS
+
+From server8's full SOL log (`console/server8/sol.log`): the survey took
+sda, the named drive (`Install: /dev/sda is the drive chosen`; sdb left
+alone, #273/#351 held). sda was a whole node disk laid by the 2026-10-13
+install, whose flow-over was cut short: its records still name forge's
+clone slabs of that release, 5353f460 (data) and **e77ec45a** (system).
+The install's read of the old release's `/etc/os-release` off sda
+(`volume_file_on_slabs`) restored those records and warned once per
+extent: 4822 lines, written in 0.1 s to engine.log and followed onto the
+console through /init's fan-out fifo. The console (two serial ports + VGA,
+SOL dropping) drained them at ~3 lines/s until the power-off at 18:13;
+/init's own echoes wait in the same fifo, so PID 1 never reached
+switch_root and nothing reported `laid`.
+- [ ] restore: "slab not attached, mapping dropped" said once per slab
+      (extents, volumes), per extent at debug; stale-record drops capped
+- [ ] /init: the engine-log follower collapses runs of same-shaped lines,
+      so a flood cannot hold PID 1 behind a slow console
+- [ ] tests (restore summary, initramfs follower), CHANGELOG, docs
+- [ ] check.sh; golden; answer #476 (its three questions)
+
 ### Portable boot-serving crate for storminstall (2026-10-21, #474, P2, storminstall#20) — DECIDED B: PARKED until the single-node pacing lifts
 
 The laptop as forge for an install: a portable NVMe/TCP target (tokio only,
