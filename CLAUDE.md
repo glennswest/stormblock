@@ -226,9 +226,8 @@ network is up; offline = group only.
       300 pre-network lines also to the group in the guest's pcap, `off`
       nothing on the wire); check.sh ALL PASS (1257/1257, no warnings);
       v21.3.0 tagged; stage requested; closed. Metal: an X9 install with SOL
-      dead, its installer log in `stormcentral logs` (stormcos's cmdlines or
-      install-config must name the collector: `stormpump.syslog=` or
-      `syslog:`)
+      dead, its installer log in `stormcentral logs`, once stormcentral#1075
+      names the collector in the per-host install-config (`syslog:`)
 
 ### server1's clones 10–20 s after the 12.37 reboot (2026-10-21, #475, P0) — DONE (v21.2.2, cf7e8a3), closed; metal pending
 
