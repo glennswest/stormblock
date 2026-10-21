@@ -808,6 +808,8 @@ async fn a_clone_and_a_delete_read_their_table_pages_without_the_volume_manager(
     let spec = stormblock::fs::CloneSpec { name: "root-clone".into(), ..Default::default() };
     let clone = stormblock::fs::template::clone_volume(&vm, golden, &spec).await.unwrap().volume_id;
     let clone_took = t.elapsed();
+    // The probe records a wait once it has the lock: let it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let clone_worst = std::mem::take(&mut *worst.lock().unwrap());
     let reads_clone = reads.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -815,6 +817,7 @@ async fn a_clone_and_a_delete_read_their_table_pages_without_the_volume_manager(
     let pre = VolumeManager::preread_unlocked(&vm, clone).await.ok();
     vm.lock().await.delete_volume_preread(clone, None, pre).await.unwrap();
     let delete_took = t.elapsed();
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let delete_worst = *worst.lock().unwrap();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     probe.await.unwrap();
