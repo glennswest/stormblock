@@ -20,9 +20,17 @@ for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-gnu; do
     rustup target add "$t" >/dev/null 2>&1 || true
     echo "== $t"
     if cargo zigbuild --release --locked -p stormblock-nvmeof --bin stormboot-serve --target "$t" > "${TMPDIR:-/tmp}/cross.out" 2>&1; then
-        # Zero warnings, on every target (stormcentral#193).
-        if grep -q '^warning' "${TMPDIR:-/tmp}/cross.out"; then
-            grep -A12 '^warning' "${TMPDIR:-/tmp}/cross.out" | head -40
+        # Zero warnings, on every target (stormcentral#193). One is the build
+        # VM's, not this code's: no macOS SDK there (stormcentral#1077), so
+        # rustc says it could not ask xcrun for one. Named, not counted.
+        c="${TMPDIR:-/tmp}/cross.out"
+        if grep -q 'xcrun.*to find MacOSX.sdk failed' "$c"; then
+            echo "  note  $t: the build VM has no macOS SDK (stormcentral#1077); zig's libSystem stubs linked it"
+            # The note and the summary line that counts it.
+            sed -i '/^warning: invoking `"xcrun"/,/^$/d; /generated 1 warning$/d' "$c"
+        fi
+        if grep -q '^warning' "$c"; then
+            grep -A12 '^warning' "$c" | head -40
             fail "$t: the build warns"
         fi
         b="$OUT/$t/release/stormboot-serve"
