@@ -204,6 +204,24 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### The initramfs's log over the network (2026-10-21, #477, P1) — IN PROGRESS
+
+Master: a dead SOL (server8, #476) lost the installer's output; stormbootx
+did its half (stormbootx#162). Here: every line /init and the initramfs
+engine print, to the stormcast group and a unicast collector
+(`stormpump.syslog=`, else install-config `syslog:`), buffered until the
+network is up; offline = group only.
+- [x] `src/logcast.rs` + `stormblock logcast` (follow files from their start,
+      ring of 100k lines/16 MiB, per-destination cursor, hostname wait,
+      SIGTERM drain); `stormcast` dependency (rev 3cec734)
+- [x] /init: fan-out always tees `/run/stormblock/init.log`; block `logcast`
+      (start after the fan-out, `logcast_stop` before switch_root); the
+      engine follower onto the consoles alone (`engine_follow_start`)
+- [x] tests: `logcast::tests`, initramfs-logcast.sh, initramfs-console.sh;
+      `ci-logcast-verify.sh` (QEMU); README, boot-hooks.md, CHANGELOG
+- [ ] on a build VM: those, ci-logcast-verify.sh ALL PASS, check.sh; a
+      golden; close. Metal: an X9 install with SOL dead, `stormcentral logs`
+
 ### server1's clones 10–20 s after the 12.37 reboot (2026-10-21, #475, P0) — DONE (v21.2.2, cf7e8a3), closed; metal pending
 
 stormcos#626: on X9 server1 (SMR HDD) after the reboot, every root clone

@@ -2162,8 +2162,11 @@ which `/init` and the engine write to, is only the last. So when two or more
 consoles are there (`console=tty0 console=ttyS0,115200n8`), `/init` sends its
 output and the engine's through a fifo to a `tee` onto each of them: the screen
 sees the install, the flow-over and a FATAL as well as serial (#237). A console
-that is not there or will not open is skipped; with one console nothing
-changes, and serial is untouched either way. A serial port with no UART
+that is not there or will not open is skipped. Serial is untouched either
+way. With one console (or none named: the kernel's `/dev/console`) the tee
+still runs, because `/init`'s lines are also kept in `/run/stormblock/init.log`
+for the network (#477); `STORM_INIT_LOG=` (empty) keeps no file and leaves one
+console as it was. A serial port with no UART
 behind it (sysfs `type` 0: it opens, and every write is EIO) is skipped. The
 emergency shell runs on `/dev/console` as before and on each other console
 too; which console `/dev/console` is comes from
@@ -2171,6 +2174,49 @@ too; which console `/dev/console` is comes from
 ports share the 8250 driver's one console, and the first wins).
 `tests/initramfs-console.sh` pins the block; `ci-console-verify.sh` boots
 dev's kernel in QEMU with it as PID 1 and two serial ports as the consoles.
+
+### The initramfs's log over the network (#477)
+
+A BMC's serial-over-LAN that dies mid-install (server8, #476) used to take the
+installer's output with it: stormpump and stormd put their lines on the
+stormcast group, but nothing in the initramfs did. Now `/init` starts
+`stormblock logcast` right after the console fan-out. It follows
+`/run/stormblock/init.log` (APP-NAME `stormblock-init`) and every line of the
+engine's `/run/stormblock/engine.log` (APP-NAME `stormblock`). That is the
+whole log, not the console's collapsed view: the engine follower writes to
+the consoles alone, so no engine line is sent twice. Each line is sent as a
+stormcast frame (RFC 5424, `local0`, severity read from the line):
+- **to the group** `239.255.42.1:5514` always (TTL 4), and **to a collector**
+  when one is named, because multicast does not leave the subnet (the X9
+  blades are on g16, stormcentral on g8). The collector is
+  `stormpump.syslog=<host[:port]>` on the kernel command line (the key
+  stormpump reads), else a top-level `syslog:` in the install-config the boot
+  media or forge handed down (as stormbootx reads it). The port is 514 when
+  bare. `off` sends nothing at all. A collector given by name is looked up
+  once the network has a DNS server.
+- **from the first line**: lines wait in memory (at most 100,000 lines,
+  16 MiB, the oldest dropped with a count) until a destination has a route
+  and the node has its name, or for 15 s after a route with no name. Then the
+  backlog goes first, in order, each line with the time it was read (`-`
+  while the clock reads before 2020). Each destination keeps its own place,
+  so a collector named late (forge's install-config comes with the claim)
+  still gets the boot from its first line.
+- **HOSTNAME** is the kernel's hostname when the line is sent (DHCP's,
+  DNS's or `storm-<mac>`, #238).
+- **It stops before `switch_root`** (`logcast_stop`, at most
+  `STORM_LOGCAST_STOP`, 5 s): it reads to the end, sends what is left
+  (waiting up to 3 s for a route) and exits. From there stormpump carries the
+  node's log. It never writes to a console; what it did is in
+  `/run/stormblock/logcast.status`, and sent too (APP-NAME
+  `stormblock-logcast`).
+
+`tests/initramfs-logcast.sh` pins the blocks with a stand-in logcast. The
+unit tests `logcast::tests` cover the follower on loopback. `ci-logcast-verify.sh`
+boots the build VM's kernel in QEMU with the shipped blocks and this commit's
+`stormblock` as PID 1: a collector on the host receives every line from
+before the network and after it, in order and once each, the guest's pcap
+holds the same lines sent to the group, and `stormpump.syslog=off` sends
+nothing.
 
 ### The system half on a drive of its own (#402)
 

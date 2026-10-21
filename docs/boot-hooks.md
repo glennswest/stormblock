@@ -261,7 +261,11 @@ is true of a reboot as much as an install. Until intents can be used:
     and quoted names three times, then counts the rest (`... and N more
     line(s) like that`): /init's own lines wait behind the follower's on a
     slow console, and a flood once held server8's install short of
-    `switch_root` for half an hour (#476). The log keeps every line.
+    `switch_root` for half an hour (#476). The log keeps every line, and
+    `stormblock logcast` sends every line of it, with `/init`'s own, over
+    the network: to the stormcast group, and to the collector
+    `stormpump.syslog=` or the install-config's `syslog:` names (#477;
+    README "The initramfs's log over the network").
 - `rd.stormblock.assimilate=off` still means no, to both.
 - Not covered: reinstalling the **same** release fresh. Assign another
   release first, or use the `install` intent once the appliance serves them.
