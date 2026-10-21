@@ -2131,7 +2131,11 @@ a volume the release mounts stops the boot with a FATAL naming the volume and
 the release on the disk (its root volume's os-release). A disk that can boot
 does, with `RELEASE CHECK SKIPPED` on the console. The engine's output is
 kept in `/run/stormblock/engine.log`, and its last 25 lines follow a
-`FATAL: root device … not found`. `tests/initramfs-no-appliance.sh` pins the
+`FATAL: root device … not found`. On the console, a run of
+same-shaped lines is shown three times and then counted (#476: 4822
+per-extent warnings on a three-lines-a-second SOL held /init for half an
+hour); the restore itself says a slab that is not attached once, with its
+extents and volumes, not once an extent. `tests/initramfs-no-appliance.sh` pins the
 blocks; `ci-no-appliance-verify.sh` boots the shipped initramfs in QEMU with
 no network.
 

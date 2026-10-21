@@ -257,6 +257,11 @@ is true of a reboot as much as an install. Until intents can be used:
   - **The engine's output goes to `/run/stormblock/engine.log`**, followed
     onto the console. Its last 25 lines are repeated after
     `FATAL: root device … not found`.
+    The follower shows a run of lines that differ only in numbers, ids
+    and quoted names three times, then counts the rest (`... and N more
+    line(s) like that`): /init's own lines wait behind the follower's on a
+    slow console, and a flood once held server8's install short of
+    `switch_root` for half an hour (#476). The log keeps every line.
 - `rd.stormblock.assimilate=off` still means no, to both.
 - Not covered: reinstalling the **same** release fresh. Assign another
   release first, or use the `install` intent once the appliance serves them.

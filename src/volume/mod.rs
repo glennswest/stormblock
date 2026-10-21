@@ -1652,6 +1652,7 @@ impl VolumeManager {
         };
         let mut absorbed: HashSet<VolumeId> = HashSet::new();
         let mut reclaim: Vec<Reclaim> = Vec::new();
+        let mut dropped = Dropped::default();
 
         for (vrec, home) in records {
             if self.volumes.contains_key(&vrec.id) {
@@ -1663,7 +1664,7 @@ impl VolumeManager {
             // attached is dropped (and said so) by the reconciliation.
             {
                 let reg = self.registry.read().await;
-                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live, &parent_of, &mut reclaim);
+                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live, &parent_of, &mut reclaim, &mut dropped);
                 for (stripe, g) in &vrec.parity {
                     rebuilt.insert_parity(vrec.id, *stripe, g.clone());
                 }
@@ -1746,6 +1747,7 @@ impl VolumeManager {
             reclaim_slots(&mut reg, &reclaim).await;
             raise_shares(&mut reg, &view, &mut gem).await;
         }
+        dropped.report();
 
         // An adopted slab keeps its own record from here on. Storage that
         // arrived as a file has no data directory of its own, and a store
@@ -3878,6 +3880,7 @@ impl VolumeManager {
         };
         let mut rebuilt = GlobalExtentMap::rebuild_from_view(&view);
         let mut reclaim: Vec<Reclaim> = Vec::new();
+        let mut dropped = Dropped::default();
 
         // Which volumes a record may legitimately share a slot with: its
         // ancestors (#171). Every live volume, to tell a slot another volume
@@ -3923,7 +3926,7 @@ impl VolumeManager {
             // snapshot's shared slots (#13).
             {
                 let reg = self.registry.read().await;
-                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live, &parent_of, &mut reclaim);
+                reconcile_record(&reg, &view, &mut rebuilt, &vrec, &lineage(vrec.id), &live, &parent_of, &mut reclaim, &mut dropped);
             }
 
             // Parity groups: the record is authoritative — it knows the
@@ -4018,6 +4021,7 @@ impl VolumeManager {
             reclaim_slots(&mut reg, &reclaim).await;
             raise_shares(&mut reg, &view, &mut rebuilt).await;
         }
+        dropped.report();
 
         *self.gem.write().await = rebuilt;
 
@@ -4052,6 +4056,71 @@ impl VolumeManager {
 /// to the volume after the restore.
 type Reclaim = (gem::Leg, VolumeId, u64);
 
+/// What a reconciliation dropped, said once a slab rather than once an
+/// extent (#476). A disk whose flow-over was cut short names the old clone's
+/// slabs for thousands of extents; a line each was 4822 lines on server8, and
+/// /init followed them onto a console that drained three a second while PID 1
+/// waited behind them. Each extent is still logged, at debug.
+#[derive(Default)]
+struct Dropped {
+    /// Slab not attached → volume name → extents dropped.
+    missing: std::collections::BTreeMap<uuid::Uuid, std::collections::BTreeMap<String, usize>>,
+    /// Records older than the slot table: said one by one up to a bound.
+    stale: usize,
+}
+
+/// Stale-record drops said one by one before the rest are only counted.
+const STALE_SAID: usize = 20;
+
+impl Dropped {
+    fn missing(&mut self, volume: &str, vext: u64, slab: SlabId) {
+        tracing::debug!("Volume '{volume}' extent {vext}: slab {} not attached, mapping dropped", slab.0);
+        *self.missing.entry(slab.0).or_default().entry(volume.to_string()).or_default() += 1;
+    }
+
+    fn stale(&mut self, volume: &str, vext: u64, slab: SlabId, slot: u64, why: &str) {
+        self.stale += 1;
+        let line = format!(
+            "Volume '{volume}' extent {vext}: the record's slot {}:{slot} {why}; \
+             the record is older than the slot table, mapping dropped",
+            slab.0
+        );
+        if self.stale <= STALE_SAID {
+            tracing::warn!("{line}");
+        } else {
+            tracing::debug!("{line}");
+        }
+    }
+
+    /// One line per slab not attached, naming its volumes; one for the stale
+    /// records past the bound.
+    fn report(&self) {
+        for (slab, vols) in &self.missing {
+            let extents: usize = vols.values().sum();
+            let mut names: Vec<String> = vols.iter().take(8).map(|(n, c)| format!("{n} ({c})")).collect();
+            if vols.len() > 8 {
+                names.push(format!("and {} more", vols.len() - 8));
+            }
+            tracing::warn!(
+                "slab {slab} not attached: {extents} extent(s) of {} volume(s) recorded on it, mapping dropped: {}",
+                vols.len(),
+                names.join(", ")
+            );
+        }
+        if self.stale > STALE_SAID {
+            tracing::warn!(
+                "{} more mapping(s) dropped the same way (records older than the slot table); each at debug",
+                self.stale - STALE_SAID
+            );
+        }
+    }
+
+    #[cfg(test)]
+    fn missing_extents(&self) -> usize {
+        self.missing.values().flat_map(|v| v.values()).sum()
+    }
+}
+
 fn reconcile_record(
     reg: &SlabRegistry,
     view: &gem::SlotView,
@@ -4061,6 +4130,7 @@ fn reconcile_record(
     live: &HashSet<VolumeId>,
     parent_of: &HashMap<VolumeId, VolumeId>,
     reclaim: &mut Vec<Reclaim>,
+    dropped: &mut Dropped,
 ) {
     // Does `v` descend from the volume being restored?
     let descends = |mut v: VolumeId| -> bool {
@@ -4129,19 +4199,12 @@ fn reconcile_record(
                         Some(_) => None,
                     };
                     if let Some(why) = why {
-                        tracing::warn!(
-                            "Volume '{}' extent {vext}: the record's slot {}:{} {why}; \
-                             the record is older than the slot table, mapping dropped",
-                            vrec.name, loc.slab_id.0, loc.slot_idx
-                        );
+                        dropped.stale(&vrec.name, *vext, loc.slab_id, loc.slot_idx, &why);
                         continue;
                     }
                     rebuilt.restore_mapping(vrec.id, *vext, loc.clone());
                 } else {
-                    tracing::warn!(
-                        "Volume '{}' extent {vext}: slab {} not attached, mapping dropped",
-                        vrec.name, loc.slab_id.0
-                    );
+                    dropped.missing(&vrec.name, *vext, loc.slab_id);
                 }
             }
             Some(rloc) => {
@@ -4326,6 +4389,56 @@ async fn raise_shares(reg: &mut SlabRegistry, view: &gem::SlotView, rebuilt: &mu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #476: a disk whose records name a slab that is not attached drops
+    /// thousands of mappings; that is said once for the slab (with its
+    /// volumes), not once an extent, and stale records past a bound only
+    /// counted.
+    #[test]
+    fn mappings_dropped_are_said_once_a_slab() {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(move || w.clone())
+            .finish();
+        let (gone, other) = (SlabId::new(), SlabId::new());
+        let mut d = Dropped::default();
+        tracing::subscriber::with_default(sub, || {
+            for v in 0..40u64 {
+                for e in 0..120u64 {
+                    d.missing(&format!("vol-{v:02}"), e, gone);
+                }
+            }
+            d.missing("pod-logs", 7, other);
+            for e in 0..(STALE_SAID as u64 + 5) {
+                d.stale("busybox", e, other, e, "has been freed");
+            }
+            d.report();
+        });
+        assert_eq!(d.missing_extents(), 40 * 120 + 1);
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // 20 stale lines said, one count of the rest, one line per slab.
+        assert_eq!(lines.len(), STALE_SAID + 1 + 2, "{text}");
+        let g = lines.iter().find(|l| l.contains(&gone.0.to_string())).unwrap();
+        assert!(g.contains("4800 extent(s) of 40 volume(s)"), "{g}");
+        assert!(g.contains("vol-00 (120)") && g.contains("and 32 more"), "{g}");
+        assert!(g.contains("mapping dropped"), "{g}");
+        assert!(text.contains("5 more mapping(s) dropped"), "{text}");
+    }
 
     /// #358: a persist in progress is listed with its phase and whether its
     /// caller holds the manager, and is gone once it ends.

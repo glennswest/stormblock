@@ -679,6 +679,43 @@ CONSOLES=$(console_list "$(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null)" |
 console_fanout $CONSOLES
 # --- END console fan-out
 
+# The engine's log is followed onto the console (#294), and a console drains
+# little: a 115200-baud port about sixty lines a second, server8's SOL three
+# (#476). /init's own lines go to the same consoles after the follower's, so
+# a flood from the engine holds PID 1 until the consoles have shown it — 4822
+# per-extent warnings held server8's install short of switch_root for half an
+# hour. A run of lines that differ only in their numbers, ids and quoted
+# names is shown STORM_FOLLOW_KEEP (3) times, then counted, and the count is
+# said when the run ends. Nothing is dropped from the log itself.
+# --- BEGIN engine follower (covered by tests/initramfs-engine-follow.sh)
+engine_follow_filter() { # stdin: the engine's log as it grows -> stdout: the console
+    awk -v keep="${STORM_FOLLOW_KEEP:-3}" -v logf="$ENGINE_LOG" -v q="'" '
+    function shape(s) {
+        gsub(q "[^" q "]*" q, "Q", s)
+        gsub(/[0-9a-fA-F:.-]*[0-9][0-9a-fA-FTZ:.-]*/, "N", s)
+        return s
+    }
+    function said() {
+        if (held > 0) print "  ... and " held " more line(s) like that (all of them in " logf ")"
+        held = 0
+    }
+    {
+        k = shape($0)
+        if (k == last) {
+            run++
+            if (run > keep) { held++; next }
+        } else {
+            said()
+            run = 1
+            last = k
+        }
+        print
+        fflush()
+    }
+    END { said() }'
+}
+# --- END engine follower
+
 # Parse kernel cmdline parameters
 PORTAL=""
 IQN=""
@@ -4177,8 +4214,9 @@ else
     ROOTDEV=/dev/ublkb2   # partition index 2 = root
 fi
 STORMBLOCK_PID=$!
-# The engine's output on the console as it comes (and kept in the log).
-tail -n +1 -f "$ENGINE_LOG" 2>/dev/null &
+# The engine's output on the console as it comes (and kept in the log), with
+# floods collapsed (#476): see the engine follower above.
+tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter &
 FOLLOW_PID=$!
 
 # Long enough for a first boot that is also doing work.
@@ -4315,7 +4353,7 @@ root_fallback() { # why
     LOCAL_ROOT_SLAB=""
     launch_local
     STORMBLOCK_PID=$!
-    tail -n +1 -f "$ENGINE_LOG" 2>/dev/null &
+    tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter &
     FOLLOW_PID=$!
     return 0
 }
