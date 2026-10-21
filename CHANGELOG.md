@@ -15,6 +15,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.2.1] — 2026-10-21
+
+### Fixed
+- #476: a restore says a slab that is not attached once (`slab … not attached: N extent(s) of M volume(s) recorded on it, mapping dropped: …`), not once an extent; stale-record drops past 20 are counted. The initramfs's engine follower collapses a run of same-shaped lines to three and a count. server8's 12.37 install sat half an hour behind 4822 per-extent warnings on its console, short of `switch_root`.
+
 ## [v21.2.0] — 2026-10-20
 
 ### Added
