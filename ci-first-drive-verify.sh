@@ -59,7 +59,7 @@ SURVEY=$(sed -n '/# --- BEGIN assimilate survey/,/# --- END assimilate survey/p'
     echo 'export PATH=/bin'
     echo 'mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev'
     echo 'for m in $(cat /lib/mods/order); do insmod /lib/mods/$m 2>/dev/null; done'
-    echo 'sleep 3'
+    echo 'sleep 3; dmesg -n 1; echo'
     sed -n '/# --- BEGIN shelves/,/# --- END shelves/p' "$GEN"
     # The survey's helpers and the drive choice, as functions only: the
     # survey's own flow is the boot-hook test's.
