@@ -3713,7 +3713,7 @@ if [ "$BOOT_MODE" = "local" ]; then
             "${_ddbay:-none}" "${_ddm:-model unknown}" "${_dds:-unknown}" \
             "$(( $(cat "$1/size" 2>/dev/null || echo 0) / 1953125 ))"
     }
-    # --- BEGIN system drive choice (covered by tests/initramfs-boot-hook.sh, tests/initramfs-system-drive.sh)
+    # --- BEGIN drive choice (covered by tests/initramfs-boot-hook.sh)
     # Which drive an install takes (#478, the owner's rules of 2026-10-21,
     # replacing #351's "never guessed"), in order:
     #
@@ -3873,7 +3873,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     elif [ -n "$NAMED_DISK" ]; then
         CHOSEN_BY=named
     fi
-    # --- END system drive choice
+    # --- END drive choice
     # The drive that already holds this node's data half (#351, rule 1),
     # found once: the named drive's, else one on the machine's own shelves,
     # else (no own drive carries one) an external shelf's. Two of them at
