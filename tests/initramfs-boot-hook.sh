@@ -717,6 +717,8 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
             n="${spec%%|*}"; kind="${spec#*|}"
             case "$kind" in
             expander|shelf|datashelf|bigfront|jbod) mkdir -p "$real/port-0:0/expander-0:0/$n"; ln -s "$real/port-0:0/expander-0:0/$n" "$sys/$n" ;;
+            # at=<path>: a blank drive at that device path (#478's order)
+            at=*|usb=*|atlayout=*) mkdir -p "$real/${kind#*=}"; ln -s "$real/${kind#*=}" "$sys/$n" ;;
             *) mkdir -p "$sys/$n" ;;
             esac
             enc() { # id vendor model component: the drive's enclosure, as sysfs has it
@@ -735,7 +737,7 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
             echo 0 > "$sys/$n/removable"; echo 8192 > "$sys/$n/size"
             # Who it is (#351): a model, a serial and a WWN of its own.
             mkdir -p "$sys/$n/device"
-            echo "MODEL-$n" > "$sys/$n/device/model"; echo "SER-$n " > "$sys/$n/device/serial"
+            if [ -n "${SAMEMODEL:-}" ]; then echo SAME; else echo "MODEL-$n"; fi > "$sys/$n/device/model"; echo "SER-$n " > "$sys/$n/device/serial"
             echo "naa.5000c500$n" > "$sys/$n/device/wwid"
             dd if=/dev/zero of="$dev/$n" bs=1048576 count=4 2>/dev/null
             echo "/dev/$n: not a slab (bad slab magic)" > "$ans/$n"
@@ -746,7 +748,8 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
             stormraid) printf 'STORMRD1' | dd of="$dev/$n" conv=notrunc 2>/dev/null ;;
             foreign) printf '\125\252' | dd of="$dev/$n" bs=1 seek=510 conv=notrunc 2>/dev/null ;;
             tail) printf 'a92b4efc' | dd of="$dev/$n" bs=1 seek=$((4 * 1048576 - 4096)) conv=notrunc 2>/dev/null ;;
-            layout|baylayout) printf '%s\n' "$DATA_ONLY" "$SYS_HALF" > "$ans/$n" ;;
+            layout|baylayout|atlayout=*) printf '%s\n' "$DATA_ONLY" "$SYS_HALF" > "$ans/$n" ;;
+            removable) echo 1 > "$sys/$n/removable" ;;
             dataonly) printf '%s\n' "$DATA_ONLY" > "$ans/$n" ;;
             sysonly) printf '%s\n' "$SYS_HALF" > "$ans/$n" ;;
             datashelf) printf '%s\n' "$DATA_ONLY" > "$ans/$n" ;;
@@ -763,6 +766,8 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
         STORM_NO_INTENT="${NOINTENT:-$WORK/no-marker}"; export STORM_NO_INTENT
         STORM_LOCAL_DISK_REPORT="$WORK/local-disk.json"; export STORM_LOCAL_DISK_REPORT
         rm -f "$STORM_LOCAL_DISK_REPORT"
+        # This machine's install-config (#478): the media's, then forge's.
+        INSTALL_CONFIG_STAGED="${SDMEDIA:-}"; INSTALL_CONFIG_FORGE="${SDFORGE:-$WORK/no-forge.yaml}"
         SLAB_NAMED="${NAMED:-}"; ALLOW_EXTERNAL="${EXTERNAL:-}"
         SLAB="${BOOTING:-nvme-tcp://10.0.0.1:4420/nqn.x:vol-1?nsid=1}"
         CLAIMED="${CLAIMED_T:-}"
@@ -782,7 +787,7 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
 # beside it, a stormraid set on part of it.
 check "the named drive is taken; the shelf is not" "/dev/sda" \
     "$(NAMED=/dev/sda survey_m any sda\|blank sdb\|shelf sdc\|stormraid)"
-check "the named drive is spent: no other drive is taken instead" "" \
+check "the named drive's old partitions are taken over, no other drive instead (#478)" "/dev/sda force" \
     "$(NAMED=/dev/sda survey_m any sda\|foreign sdb\|blank sdc\|shelf)"
 grep -q "not the drive rd.stormblock.slab= names" "$WORK/msurvey.log" \
     && check "and the console says why" yes yes || check "and the console says why" yes no
@@ -797,7 +802,7 @@ NOINTENT=""
 # No drive named here (an NVMe-only machine whose line names /dev/sda).
 # #351: two drives on the machine's own shelves (a stormraid member and a
 # blank one) are two choices: the install stops rather than pick.
-check "none named, two internal drives (stormraid + blank): nothing taken (#351)" "" \
+check "none named, the first drive a stormraid member: left, no other taken in its place (#478)" "" \
     "$(NAMED=/dev/sda survey_m any sdb\|shelf sdc\|stormraid sdd\|blank)"
 check "none named: one internal blank drive beside a shelf is taken (#351)" "/dev/sdd" \
     "$(NAMED=/dev/sda survey_m any sdb\|shelf sdd\|blank)"
@@ -806,8 +811,8 @@ check "none named: the single drive in all, behind a SAS expander, is taken (#35
 check "none named: a stormraid member is not blank" "" "$(survey_m any sdc\|stormraid)"
 grep -q "a stormraid superblock" "$WORK/msurvey.log" \
     && check "and the console names it" yes yes || check "and the console names it" yes no
-check "none named: a partition table is not blank" "" "$(survey_m any sdc\|foreign)"
-check "none named: data in the last MiB is not blank" "" "$(survey_m any sdc\|tail)"
+check "none named: the first drive's partition table is taken over (#478)" "/dev/sdc force" "$(survey_m any sdc\|foreign)"
+check "none named: data in the last MiB (a RAID member) is not taken over" "" "$(survey_m any sdc\|tail)"
 check "none named, 'force': a stormraid member is still left" "" "$(survey_m force sdc\|stormraid)"
 check "none named, 'force': a shelf's lone data slab is never forced (#311)" "/dev/sdb" \
     "$(survey_m force sdb\|datashelf)"
@@ -868,18 +873,13 @@ shpos() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d.get("
 if command -v python3 >/dev/null 2>&1; then HAVE_PY=1; else HAVE_PY=""; fi
 # A server with front, rear and internal shelves: each is its own, each the
 # machine's own, and the system half may go on any of them unnamed.
-# #351: three drives on its own shelves and nothing known: it stops and names
-# each by shelf, bay, model and serial. It never takes "the first".
-check "front + rear + internal, nothing known: nothing taken (#351)" "" \
+# #478 (replacing #351's stop): three drives on its own shelves and nothing
+# named: the machine's first drive, said which and why.
+check "front + rear + internal, nothing named: the first drive (#478)" "/dev/sda" \
     "$(survey_m any sda\|internal sdb\|front sdc\|rear)"
-[ -n "$HAVE_PY" ] && check "  the verdict: ambiguous" "ambiguous None None None" "$(shpos)"
-for want in "STOP: the system drive is not known" \
-    "/dev/sda: internal shelf, bay none, MODEL-sda, serial SER-sda" \
-    "/dev/sdb: front shelf 500056b3a1b2c3d4, bay Slot 04, MODEL-sdb, serial SER-sdb" \
-    "/dev/sdc: rear shelf 500056b3a1b2c3e0, bay Rear Slot 0, MODEL-sdc, serial SER-sdc"; do
-    grep -qF "$want" "$WORK/msurvey.log" && check "  the console: $want" yes yes \
-        || check "  the console: $want" yes no
-done
+[ -n "$HAVE_PY" ] && check "  the verdict: taken, internal" "taken internal None None" "$(shpos)"
+grep -q "SYSTEM DRIVE: /dev/sda, this machine's first drive" "$WORK/msurvey.log" \
+    && check "  the console says which and why" yes yes || check "  the console says which and why" yes no
 check "a single internal drive is taken" "/dev/sda" "$(survey_m any sda\|internal)"
 [ -n "$HAVE_PY" ] && check "  the verdict names its shelf: internal" "taken internal None None" "$(shpos)"
 check "a front shelf's drive is taken unnamed" "/dev/sdb" "$(survey_m any sdb\|front)"
@@ -889,13 +889,13 @@ check "a rear shelf's drive is taken unnamed" "/dev/sdc" "$(survey_m any sdc\|re
 # The owner's other Dell: a large front shelf behind an expander.
 big=""
 for n in b c d e f g h i j k l m n o p q r s t u v w x y; do big="$big sd$n|bigfront"; done
-check "a large front shelf behind an expander (DP BP14G+EXP), nothing known: nothing taken (#351)" "" \
+check "a large front shelf behind an expander (DP BP14G+EXP), nothing named: its first drive (#478)" "/dev/sdb" \
     "$(survey_m any $big)"
 check "  but the drive named is taken" "/dev/sdk" "$(NAMED=/dev/sdk survey_m any $big)"
 [ -n "$HAVE_PY" ] && check "  the verdict: front, bay Slot sdk, DP BP14G+EXP" "taken front Slot sdk DP BP14G+EXP" "$(shpos)"
 # An external JBOD (#351: "the system may live on an external shelf").
 check "an external JBOD's single drive, the only drive: taken (#351)" "/dev/sdb" "$(survey_m any sdb\|jbod)"
-grep -q "the single drive this machine has" "$WORK/msurvey.log" \
+grep -q "this machine's first drive" "$WORK/msurvey.log" \
     && check "  and the console says why" yes yes || check "  and the console says why" yes no
 check "  and taken when named" "/dev/sdb" "$(NAMED=/dev/sdb survey_m any sdb\|jbod)"
 check "an external JBOD beside a front bay: the front bay is taken" "/dev/sdc" \
@@ -917,11 +917,10 @@ check "cannot tell which release: left alone" "" \
     "$(STUB_HOLDS=2 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout)"
 case "$(ld)" in *'"state": "refused"'*'cannot tell which release'*) check "  the verdict says why" yes yes ;;
 *) check "  the verdict says why: $(ld)" yes no ;; esac
-# A drive whose slabs cannot be read looks like somebody else's disk: named
-# all the same, with what `slab list` said.
-check "a drive that is not a readable slab: left, and named" "" "$(survey_m any sdc\|foreign)"
-case "$(ld)" in *'"state": "refused"'*'"drive": "/dev/sdc"'*'not a readable stormblock slab'*'bad slab magic'*) check "  the verdict names it, with slab list's answer" yes yes ;;
-*) check "  the verdict names it, with slab list's answer: $(ld)" yes no ;; esac
+# A drive whose slabs cannot be read looks like somebody else's disk. As the
+# chosen drive it is taken over (#478); boot-local still refuses a node data
+# partition whose slab is there and will not open (#346), whatever force says.
+check "the first drive, not a readable slab: taken over (#478)" "/dev/sdc force" "$(survey_m any sdc\|foreign)"
 check "no drive at all: the verdict is none" "" "$(survey_m any)"
 case "$(ld)" in *'"state": "none"'*) check "  none" yes yes ;; *) check "  none: $(ld)" yes no ;; esac
 
@@ -936,25 +935,89 @@ esac
 case "$(ld)" in *'"state": "taken"'*'"drive": "/dev/sda"'*) check "  the verdict: taken, sda" yes yes ;;
 *) check "  the verdict: $(ld)" yes no ;; esac
 
-echo "the system drive is known, never guessed (#351):"
-# Two drives each with a data slab, neither with a system half: nothing says
-# which is this node's. It stops, names them, and the probe's install-over or
-# a name is what decides.
+echo "the system drive: system_drive, the drive holding this node, else the first (#478):"
 NOINTENT="$WORK/no-intent"; : > "$NOINTENT"
-check "two data slabs, neither this node's layout: nothing taken, nothing forced" "" \
+check "two data slabs, neither this node's layout, nothing named: the first drive, data kept" "/dev/sda" \
     "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|dataonly sdb\|dataonly sdc\|blank)"
-grep -q "STOP: more than one drive carries a stormblock data slab" "$WORK/msurvey.log" \
+grep -q "the first drive is taken, the others left (#478)" "$WORK/msurvey.log" \
     && check "  and the console says so" yes yes || check "  and the console says so" yes no
-case "$(ld)" in *'"state": "ambiguous"'*'more than one drive carries a data slab'*) check "  verdict ambiguous" yes yes ;;
-*) check "  verdict ambiguous: $(ld)" yes no ;; esac
-check "two data slabs, one of them the node's layout: that one (rule 1)" "/dev/sda" \
+check "two data slabs, one of them the node's layout: that one (rule 3)" "/dev/sda" \
     "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|dataonly)"
 check "two data slabs, the probe ruled an install over one: that one" "$WORK/mdev/sdb" \
     "$(OVER="$WORK/mdev/sdb" STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|dataonly sdb\|dataonly)"
-check "two blank internal drives, no intent: nothing taken, nothing forced (#351)" "" \
+check "two blank internal drives, no intent: the first, laid fresh (#478)" "/dev/sda force" \
     "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
 check "two blank internal drives, one named: that one, forced" "/dev/sdb force" \
     "$(NAMED=/dev/sdb CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
+# server8 (#476): two drives, each with an older install of its own. Nothing
+# named: the first drive, its data half kept. system_drive names the SSD
+# (sdb): that one, both halves on it, the other's data half left and said.
+check "server8, two older installs, nothing named: the first drive (#478)" "/dev/sda" \
+    "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|layout)"
+printf 'apiVersion: v1\npullSecret: "s3cret"\nsystem_drive:\n  serial: "SER-sdb"   # the SSD\n  model: MODEL-sdb\nsshKey: x\n' > "$WORK/ic-ssd.yaml"
+check "server8, system_drive names the SSD by serial and model: that one (#478)" "/dev/sdb" \
+    "$(SDMEDIA="$WORK/ic-ssd.yaml" STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|layout)"
+grep -q "SYSTEM DRIVE: /dev/sdb, as system_drive (serial=SER-sdb model=MODEL-sdb) in ic-ssd.yaml names it" "$WORK/msurvey.log" \
+    && check "  the console says which and why" yes yes || check "  the console says which and why: $(grep SYSTEM "$WORK/msurvey.log")" yes no
+grep -q "/dev/sda carries a data half; it is left as it is" "$WORK/msurvey.log" \
+    && check "  and that sda's data half is left (stormdrive#62)" yes yes || check "  and that sda's data half is left" yes no
+grep -q "s3cret" "$WORK/msurvey.log" && check "  the install-config's secrets are never said" yes no \
+    || check "  the install-config's secrets are never said" yes yes
+check "  its identity goes to boot-local" "wwn=naa.5000c500sdb;serial=SER-sdb;model=MODEL-sdb;size=4194304" \
+    "$(cat "$WORK/msurvey.id")"
+check "system_drive outranks the probe's install-over and the cmdline's name" "/dev/sdb force" \
+    "$(SDMEDIA="$WORK/ic-ssd.yaml" NAMED=/dev/sda OVER=/dev/sda CLAIMED_T="$CLAIM_URI" survey_m any sda\|sysonly sdb\|blank)"
+check "system_drive names a drive with partitions: taken over (#478)" "/dev/sdb force" \
+    "$(SDMEDIA="$WORK/ic-ssd.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|foreign)"
+check "system_drive names a #402 pair's SSD: the only drive taken, no split" "/dev/sdb force" \
+    "$(SDMEDIA="$WORK/ic-ssd.yaml" PAIR=sda:sdb STUB_DESIGNATED=/dev/sda STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|dataonly sdb\|sysonly)"
+printf 'system_drive:\n  wwn: 5000C500SDC\n' > "$WORK/ic-wwn.yaml"
+check "system_drive by WWN, any case, no naa. prefix" "/dev/sdc force" \
+    "$(SDFORGE="$WORK/ic-wwn.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank sdc\|blank)"
+check "the media's install-config before forge's" "/dev/sdb force" \
+    "$(SDMEDIA="$WORK/ic-ssd.yaml" SDFORGE="$WORK/ic-wwn.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank sdc\|blank)"
+printf 'system_drive:\n  shelf: front\n  bay: 4\n' > "$WORK/ic-bay.yaml"
+check "system_drive by shelf and bay (bay 4 is Slot 04)" "/dev/sdc force" \
+    "$(SDFORGE="$WORK/ic-bay.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|internal sdb\|rear sdc\|front)"
+printf 'system_drive:\n  serial: NOSUCH\n' > "$WORK/ic-none.yaml"
+check "system_drive matching no drive: STOP, nothing taken" "" \
+    "$(SDFORGE="$WORK/ic-none.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|front)"
+grep -q "STOP: system_drive (serial=NOSUCH, from ic-none.yaml) matches no drive on this machine" "$WORK/msurvey.log" \
+    && check "  the console says why" yes yes || check "  the console says why" yes no
+grep -qF "/dev/sdb: front shelf 500056b3a1b2c3d4, bay Slot 04, MODEL-sdb, serial SER-sdb" "$WORK/msurvey.log" \
+    && check "  and names every drive by shelf, bay, model, serial" yes yes || check "  and names every drive" yes no
+case "$(ld)" in *'"state": "ambiguous"'*'matches no drive'*) check "  verdict ambiguous" yes yes ;;
+*) check "  verdict ambiguous: $(ld)" yes no ;; esac
+printf 'system_drive:\n  model: SAME\n' > "$WORK/ic-many.yaml"
+check "system_drive matching two drives: STOP, nothing taken" "" \
+    "$(SDFORGE="$WORK/ic-many.yaml" SAMEMODEL=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
+grep -q "matches more than one drive: /dev/sda /dev/sdb" "$WORK/msurvey.log" \
+    && check "  the console names them" yes yes || check "  the console names them" yes no
+printf 'system_drive: /dev/sdb\n' > "$WORK/ic-dev.yaml"
+check "system_drive as a device name: STOP (names move)" "" \
+    "$(SDFORGE="$WORK/ic-dev.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
+grep -q "never a device name" "$WORK/msurvey.log" && check "  said so" yes yes || check "  said so" yes no
+printf 'system_drive:\n  slot: 3\n' > "$WORK/ic-key.yaml"
+check "system_drive with a key it does not know: STOP" "" \
+    "$(SDFORGE="$WORK/ic-key.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
+# The first drive, by controller and port order, never by name (#478).
+P=pci0000:00
+check "the first drive is by port order: ata2 before ata10, not sda" "/dev/sdb force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any "sda|at=$P/0000:00:1f.2/ata10/host9/target9:0:0/9:0:0:0/block/sda" \
+        "sdb|at=$P/0000:00:1f.2/ata2/host1/target1:0:0/1:0:0:0/block/sdb")"
+check "an NVMe on 00:1c.4 before SATA on 00:1f.2 (PCI order, hex)" "/dev/nvme0n1 force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any "sda|at=$P/0000:00:1f.2/ata1/host0/target0:0:0/0:0:0:0/block/sda" \
+        "nvme0n1|at=$P/0000:00:1c.4/0000:03:00.0/nvme/nvme0/nvme0n1")"
+check "00:02.0 before 00:1f.2 (hex, not text)" "/dev/sdb force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any "sda|at=$P/0000:00:1f.2/ata1/host0/target0:0:0/0:0:0:0/block/sda" \
+        "sdb|at=$P/0000:00:02.0/host2/target2:0:0/2:0:0:0/block/sdb")"
+check "a USB stick is never the first drive" "/dev/sdb force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any "sda|usb=$P/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0/block/sda" \
+        "sdb|at=$P/0000:00:1f.2/ata3/host2/target2:0:0/2:0:0:0/block/sdb")"
+check "a removable drive is never the first drive" "/dev/sdb force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|removable sdb\|blank)"
+check "the machine's own shelves before an external one" "/dev/sdc force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|jbod sdb\|jbod sdc\|internal)"
 NOINTENT=""
 # A booting machine runs from a local disk: that is its system drive, and a
 # blank drive beside it is never taken (it was, before #351).
@@ -971,9 +1034,7 @@ check "100-drive external shelf + one front bay: the front bay drive" "/dev/sdb"
     "$(survey_m any sdb\|front $hundred)"
 check "  its identity goes to boot-local" "wwn=naa.5000c500sdb;serial=SER-sdb;model=MODEL-sdb;size=4194304" \
     "$(cat "$WORK/msurvey.id")"
-check "100-drive external shelf alone, nothing named: nothing taken" "" "$(survey_m any $hundred)"
-grep -q "0 drive(s) on this machine's" "$WORK/msurvey.log" && grep -q "/dev/sddy: external shelf" "$WORK/msurvey.log" \
-    && check "  every drive named, the 100th too" yes yes || check "  every drive named, the 100th too" yes no
+check "100-drive external shelf alone, nothing named: its first drive (#478)" "/dev/sdaa" "$(survey_m any $hundred)"
 check "100-drive external shelf, one named: that one" "/dev/sdcm" "$(NAMED=/dev/sdcm survey_m any $hundred)"
 check "  its identity" "wwn=naa.5000c500sdcm;serial=SER-sdcm;model=MODEL-sdcm;size=4194304" \
     "$(cat "$WORK/msurvey.id")"
