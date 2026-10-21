@@ -135,7 +135,7 @@ impl Boothost {
 
     /// The host a request names: by name, by a known host's MAC when the
     /// name is a MAC, or (any host) a new one.
-    fn resolve(&self, name: &str, mac: Option<&str>) -> Result<String, Response> {
+    fn resolve(&self, name: &str, mac: Option<&str>) -> Result<String, (StatusCode, String)> {
         let mut hosts = self.hosts.lock().unwrap_or_else(|e| e.into_inner());
         let mac = mac.map(normal_mac).or_else(|| mac_of_key(name));
         if name != "default" && hosts.contains_key(name) {
@@ -147,10 +147,10 @@ impl Boothost {
             }
         }
         if name == "default" && mac.is_none() {
-            return Err(error(StatusCode::BAD_REQUEST, "a default claim needs the machine's mac".into()));
+            return Err((StatusCode::BAD_REQUEST, "a default claim needs the machine's mac".into()));
         }
         if !self.policy.any_host {
-            return Err(error(StatusCode::NOT_FOUND, format!("no image for boothost/{name} on this server")));
+            return Err((StatusCode::NOT_FOUND, format!("no image for boothost/{name} on this server")));
         }
         let (n, provisional) = match (&mac, name) {
             (Some(m), "default") => (format!("mac-{}", m.replace(':', "")), true),
@@ -266,7 +266,7 @@ async fn claim(
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let host = match b.resolve(&name, body.mac.as_deref()) {
         Ok(h) => h,
-        Err(r) => return r,
+        Err((status, msg)) => return error(status, msg),
     };
     let Some(address) = address_for(&b, peer) else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "no address to hand the node; start with --advertise".into());

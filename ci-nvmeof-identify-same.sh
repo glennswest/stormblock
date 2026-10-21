@@ -10,7 +10,7 @@
 # each answers for a spread of inputs.
 #   sc-build 'bash ci-nvmeof-identify-same.sh [BASE]'
 set -uo pipefail
-BASE=${1:-8f23f72}
+BASE=${1:-8f23f721689d3fcfbc534bbd51ea9cdd2cadf174}
 ROOT=$(pwd)
 mkdir -p "$ROOT/tmp"; export TMPDIR="$ROOT/tmp"
 W=$(mktemp -d "$TMPDIR/identify.XXXXXX")
@@ -65,6 +65,10 @@ dump() { # tree out
     rm -rf "$W/devs"; mkdir -p "$W/devs"
     (cd "$1" && cargo run --quiet --locked --example identify_dump -- "$W/devs") > "$2" || return 1
 }
+# A build VM's clone holds the pushed commit alone: fetch the base by its
+# full id.
+git -C "$ROOT" cat-file -e "$BASE^{commit}" 2>/dev/null || git -C "$ROOT" fetch -q origin "$BASE" \
+    || { echo "FAIL: cannot fetch $BASE (give its full id)"; exit 1; }
 git -C "$ROOT" worktree add --detach "$W/base" "$BASE" >/dev/null 2>&1 || { echo "FAIL: no worktree at $BASE"; exit 1; }
 echo "== $BASE"; dump "$W/base" "$W/base.txt" || { echo "FAIL: the dump at $BASE"; exit 1; }
 echo "== $(git -C "$ROOT" rev-parse --short HEAD)"; dump "$ROOT" "$W/head.txt" || { rm -f "$ROOT/examples/identify_dump.rs"; echo "FAIL: the dump here"; exit 1; }

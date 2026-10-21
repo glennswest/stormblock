@@ -1960,7 +1960,11 @@ mod tests {
     /// ID is chosen and taken under one lock.
     #[tokio::test]
     async fn concurrent_adds_never_share_a_namespace() {
-        let target = Arc::new(NvmeofTarget::new(NvmeofConfig::default()));
+        // A subsystem of its own: NSID high-water marks are per NQN and
+        // process-wide (#96), so another test's adds to the default NQN
+        // would start this one above 1 under `cargo test`.
+        let nqn = format!("nqn.2024.io.stormblock:race-{}", uuid::Uuid::new_v4());
+        let target = Arc::new(NvmeofTarget::new(NvmeofConfig { nqn, ..NvmeofConfig::default() }));
         let mut paths = Vec::new();
         let mut set = tokio::task::JoinSet::new();
         for i in 0..64 {

@@ -474,7 +474,7 @@ pub fn host_reply(challenge: &[u8], key: &DhchapKey, hostnqn: &str, subnqn: &str
     v[6] = hl as u8;
     // cvalid (8) = 0, dhvlen = 0, seqnum = 0: unidirectional.
     v.extend_from_slice(&r);
-    v.extend(std::iter::repeat(0u8).take(hl)); // the unused C2 slot
+    v.extend(std::iter::repeat_n(0u8, hl)); // the unused C2 slot
     Ok(v)
 }
 
