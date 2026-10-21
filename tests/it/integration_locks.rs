@@ -745,3 +745,85 @@ async fn a_clone_of_a_golden_larger_than_the_page_cache_keeps_no_reader_waiting(
     // And the clone was right: every slot it shares now counts two.
     let _ = VolumeId(golden.0);
 }
+
+/// #475 on server1 (X9, SMR disk, 12.37 reboot): container-root clones took
+/// 10–20 s and deletes waited up to 14 s on the volume manager. A clone and
+/// a delete read the volume's slot-table pages with the manager held, so on
+/// a slow disk every other API call queued behind that read.
+///
+/// Here: the same golden as #438's (24,000 extents, a 1 MiB page cache),
+/// every device read 5 ms. A clone, through the clone path every API caller
+/// takes, and a delete as the API makes it, while a probe takes the volume
+/// manager over and over: the probe never waits more than a moment, though
+/// the clone and the delete read hundreds of pages.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clone_and_a_delete_read_their_table_pages_without_the_volume_manager() {
+    std::env::set_var("STORMBLOCK_SLOT_CACHE_MB", "1");
+    const SLOT: u64 = 64 * 1024;
+    const EXTENTS: u64 = 24_000;
+    let dir = TempDir::new().unwrap();
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reads = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let devices = common::create_file_devices(&dir, 1, 2048 * 1024 * 1024).await;
+    let dev: Arc<dyn BlockDevice> =
+        Arc::new(ReadDelay { inner: devices[0].clone(), on: on.clone(), read_us: 5000, reads: reads.clone() });
+    let mut vm = VolumeManager::new(SLOT);
+    let slab = Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System)).await.unwrap();
+    vm.add_slab(slab).await;
+    let golden = vm.create_volume_any("release", EXTENTS * SLOT).await.unwrap();
+    {
+        let d = vm.get_volume(&golden).unwrap();
+        let block = vec![0x5Au8; 4096];
+        for e in 0..EXTENTS {
+            d.write(e * SLOT, &block).await.unwrap();
+        }
+        d.flush().await.unwrap();
+    }
+    vm.persist().await;
+    vm.seal_volume(golden, None).await.unwrap();
+    let vm = Arc::new(stormblock::lockwatch::TrackedMutex::new(vm));
+
+    let worst = Arc::new(std::sync::Mutex::new(Duration::ZERO));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = {
+        let (vm, worst, stop) = (vm.clone(), worst.clone(), stop.clone());
+        tokio::spawn(async move {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let t = Instant::now();
+                drop(vm.lock().await);
+                let w = t.elapsed();
+                {
+                    let mut m = worst.lock().unwrap();
+                    if w > *m {
+                        *m = w;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+    };
+
+    on.store(true, std::sync::atomic::Ordering::Relaxed);
+    let t = Instant::now();
+    let spec = stormblock::fs::CloneSpec { name: "root-clone".into(), ..Default::default() };
+    let clone = stormblock::fs::template::clone_volume(&vm, golden, &spec).await.unwrap().volume_id;
+    let clone_took = t.elapsed();
+    let clone_worst = std::mem::take(&mut *worst.lock().unwrap());
+    let reads_clone = reads.load(std::sync::atomic::Ordering::Relaxed);
+
+    let t = Instant::now();
+    let pre = VolumeManager::preread_unlocked(&vm, clone).await.ok();
+    vm.lock().await.delete_volume_preread(clone, None, pre).await.unwrap();
+    let delete_took = t.elapsed();
+    let delete_worst = *worst.lock().unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    probe.await.unwrap();
+    println!(
+        "clone {clone_took:?} ({reads_clone} reads; the manager waited for at most {clone_worst:?}); \
+         delete {delete_took:?} (at most {delete_worst:?}); {} device reads",
+        reads.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert!(clone_took >= Duration::from_millis(100), "the clone read the golden's table pages off the slow disk ({reads_clone} reads in {clone_took:?})");
+    assert!(clone_worst < Duration::from_millis(100), "the volume manager waited {clone_worst:?} behind a clone");
+    assert!(delete_worst < Duration::from_millis(100), "the volume manager waited {delete_worst:?} behind a delete");
+}
