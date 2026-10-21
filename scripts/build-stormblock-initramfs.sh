@@ -615,21 +615,27 @@ console_list() { # cmdline -> the console devices that exist and open, in order
     done
 }
 
-console_fanout() { # devices... — stdout and stderr go to each of them
-    [ $# -ge 2 ] || return 0
-    command -v mkfifo >/dev/null 2>&1 || return 0
-    _fifo="${STORM_CONSOLE_FIFO:-/run/console.fifo}"
-    rm -f "$_fifo"
-    mkfifo "$_fifo" 2>/dev/null || return 0
+console_reader() { # fifo targets... — a reader of the fifo onto each target
+    _rfifo=$1; shift
+    rm -f "$_rfifo"
+    mkfifo "$_rfifo" 2>/dev/null || return 1
     (
         trap '' HUP INT QUIT TERM PIPE
-        exec 3<"$_fifo" </dev/null >/dev/null 2>&1
+        exec 3<"$_rfifo" </dev/null >/dev/null 2>&1
         # tee exits 0 at the end of input; anything else (killed, or a
         # console that failed a write) is run again, and at the end of input
         # the rerun reads nothing and exits 0.
         until tee -a "$@" <&3 >/dev/null; do :; done
     ) &
-    CONSOLE_FANOUT_PID=$!
+    CONSOLE_READER_PID=$!
+}
+
+console_fanout() { # devices... — stdout and stderr go to each of them
+    [ $# -ge 2 ] || return 0
+    command -v mkfifo >/dev/null 2>&1 || return 0
+    _fifo="${STORM_CONSOLE_FIFO:-/run/console.fifo}"
+    console_reader "$_fifo" "$@" || return 0
+    CONSOLE_FANOUT_PID=$CONSOLE_READER_PID
     exec >"$_fifo" 2>&1
 }
 
@@ -675,9 +681,60 @@ rescue_shell() {
 
 CONSOLE_FANOUT_PID=""
 CONSOLES=$(console_list "$(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null)" | tr '\n' ' ')
+# /init's own lines are also kept in a file (#477), which logcast follows onto
+# the network: so with one console, or none named, the fan-out runs too (the
+# kernel's /dev/console and the file). `STORM_INIT_LOG=` (empty) keeps none.
+INIT_LOG="${STORM_INIT_LOG-/run/stormblock/init.log}"
+CONSOLE_TARGETS="${CONSOLES:-${STORM_CONSOLE_DEV:-/dev}/console }"
+if [ -n "$INIT_LOG" ]; then
+    mkdir -p "${INIT_LOG%/*}" 2>/dev/null && : >> "$INIT_LOG" 2>/dev/null || INIT_LOG=""
+fi
 # shellcheck disable=SC2086
-console_fanout $CONSOLES
+if [ -n "$INIT_LOG" ]; then
+    console_fanout $CONSOLE_TARGETS "$INIT_LOG"
+else
+    console_fanout $CONSOLES
+fi
 # --- END console fan-out
+
+# The install path's log over the network (#477). A BMC's serial-over-LAN
+# that dies mid-install (server8, #476) took the installer's output with it.
+# `stormblock logcast` follows /init's lines (init.log, above) and every line
+# the engine writes (its whole log, not the console's collapsed view), keeps
+# them until a NIC can reach somewhere, and sends each as a stormcast frame:
+# to the group 239.255.42.1:5514 always, and to the collector
+# `stormpump.syslog=<host[:port]>` names, else `syslog:` in the media's or
+# forge's install-config, because multicast does not leave the subnet.
+# `stormpump.syslog=off` sends nothing. It stops before switch_root, after
+# sending what is left; stormpump carries the node's log from there.
+# --- BEGIN logcast (covered by tests/initramfs-logcast.sh)
+LOGCAST_PID=""
+logcast_start() {
+    [ -n "$INIT_LOG" ] || return 0
+    _lcb="${STORM_LOGCAST_BIN:-/usr/sbin/stormblock}"
+    [ -x "$_lcb" ] || return 0
+    "$_lcb" logcast \
+        --follow "$INIT_LOG=stormblock-init" \
+        --follow "${STORM_ENGINE_LOG:-/run/stormblock/engine.log}=stormblock" \
+        --status "${INIT_LOG%/*}/logcast.status" \
+        </dev/null >/dev/null 2>&1 &
+    LOGCAST_PID=$!
+}
+logcast_stop() { # what is left is sent; at most STORM_LOGCAST_STOP (5) s
+    [ -n "$LOGCAST_PID" ] || return 0
+    kill -TERM "$LOGCAST_PID" 2>/dev/null || { LOGCAST_PID=""; return 0; }
+    _lci=0
+    while [ "$_lci" -lt $(( ${STORM_LOGCAST_STOP:-5} * 10 )) ] && kill -0 "$LOGCAST_PID" 2>/dev/null; do
+        # A zombie has exited: only its parent (this shell) still holds it.
+        case "$(cat "/proc/$LOGCAST_PID/stat" 2>/dev/null)" in *") Z "*) break ;; esac
+        sleep 0.1
+        _lci=$((_lci + 1))
+    done
+    kill -KILL "$LOGCAST_PID" 2>/dev/null
+    LOGCAST_PID=""
+}
+logcast_start
+# --- END logcast
 
 # The engine's log is followed onto the console (#294), and a console drains
 # little: a 115200-baud port about sixty lines a second, server8's SOL three
@@ -713,6 +770,16 @@ engine_follow_filter() { # stdin: the engine's log as it grows -> stdout: the co
         fflush()
     }
     END { said() }'
+}
+
+engine_follow_start() { # follow the engine's log onto the consoles, not into init.log
+    if [ -n "$CONSOLE_FANOUT_PID" ] && [ -n "$INIT_LOG" ] \
+       && console_reader "${STORM_ENGINE_FIFO:-/run/engine-console.fifo}" $CONSOLE_TARGETS; then
+        tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter > "${STORM_ENGINE_FIFO:-/run/engine-console.fifo}" &
+    else
+        tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter &
+    fi
+    FOLLOW_PID=$!
 }
 # --- END engine follower
 
@@ -4216,8 +4283,7 @@ fi
 STORMBLOCK_PID=$!
 # The engine's output on the console as it comes (and kept in the log), with
 # floods collapsed (#476): see the engine follower above.
-tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter &
-FOLLOW_PID=$!
+engine_follow_start
 
 # Long enough for a first boot that is also doing work.
 #
@@ -4353,8 +4419,7 @@ root_fallback() { # why
     LOCAL_ROOT_SLAB=""
     launch_local
     STORMBLOCK_PID=$!
-    tail -n +1 -f "$ENGINE_LOG" 2>/dev/null | engine_follow_filter &
-    FOLLOW_PID=$!
+    engine_follow_start
     return 0
 }
 # --- END root fallback
@@ -4889,6 +4954,9 @@ fi
 for _p in $(pidof systemd-udevd udevd 2>/dev/null); do
     kill "$_p" 2>/dev/null || true
 done
+
+# What is left of the boot's log goes out before the hand-over (#477).
+logcast_stop
 
 # The init that follows gets /dev/console, as it always did; the fan-out goes
 # on for as long as the engine writes to it.

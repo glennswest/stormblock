@@ -17,6 +17,7 @@ pub mod rebuild;
 pub mod scrub;
 pub mod http;
 pub mod logging;
+pub mod logcast;
 pub mod lockwatch;
 pub mod fglat;
 pub mod flowhot;

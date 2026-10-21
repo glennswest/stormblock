@@ -113,6 +113,12 @@ fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.8.1", 
 # XFS beside ext4 (#147): a `mkfs.xfs`-identical formatter and a read-only
 # walker for XFS images (RHEL, Rocky, Alma roots). Separate crates with
 # separate device traits; `fs::xfs::XfsDevice` implements both.
+# The fleet's log framing (#477): the initramfs's lines on the stormcast
+# group and to a syslog collector, as stormpump and stormd send theirs. No
+# dependencies of its own. Pinned to the commit (main after v0.1.1, with the
+# multibyte-cut and header fixes).
+stormcast = { git = "https://github.com/glennswest/stormcast", rev = "3cec734ee0239604e9ce6e203cda403ab49aba75" }
+
 mkfs-xfs = { git = "https://github.com/glennswest/mkfs.xfs.rs", tag = "v0.3.0", default-features = false }
 fio-xfs = { git = "https://github.com/glennswest/fio.xfs.rs", tag = "v0.3.0", default-features = false }
 

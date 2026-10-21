@@ -34,6 +34,8 @@ check() { # name expected actual
 
 DEV="$WORK/dev"
 mkdir -p "$DEV"
+# No init.log unless a case asks for one (#477).
+STORM_INIT_LOG=""
 
 # Which consoles: the list only, cmdline order, options dropped, a device
 # that is not there skipped, a repeat once.
@@ -119,6 +121,21 @@ check "the fan-out ended with its writers" "" "$(pgrep -f "tee -a $DEV/" || true
 fanout 'console=ttyS0,115200n8'
 check "one console: no fan-out, stdout untouched" 1 "$(grep -c '^INSTALL: a release' "$WORK/stdout" || true)"
 check "one console: the device is not written" "" "$(cat "$DEV/ttyS0")"
+
+# With init.log (#477): one console fans out too, to it and to the file, and
+# no console= at all means the kernel's /dev/console.
+STORM_INIT_LOG="$WORK/run/init.log"
+fanout 'console=ttyS0,115200n8'
+check "init.log: one console hears /init" 1 "$(grep -c '^INSTALL: a release' "$DEV/ttyS0" || true)"
+check "init.log: the file has /init's stdout" 1 "$(grep -c '^INSTALL: a release' "$WORK/run/init.log" || true)"
+check "init.log: the file has /init's stderr" 1 "$(grep -c '^FATAL: to stderr' "$WORK/run/init.log" || true)"
+check "init.log: the file has a child's line" 1 "$(grep -c '^Flow-over: from the engine' "$WORK/run/init.log" || true)"
+check "init.log: stdout no longer the old one" "" "$(cat "$WORK/stdout")"
+rm -f "$WORK/run/init.log"; : > "$DEV/console"
+fanout 'root=/dev/ublkb0 quiet'
+check "init.log: no console= goes to the kernel's console" 1 "$(grep -c '^INSTALL: a release' "$DEV/console" || true)"
+check "init.log: and to the file" 1 "$(grep -c '^INSTALL: a release' "$WORK/run/init.log" || true)"
+STORM_INIT_LOG=""
 
 if [ "$fail" -ne 0 ]; then
     echo "initramfs console fan-out: FAILED"

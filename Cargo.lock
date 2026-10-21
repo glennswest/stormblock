@@ -2530,6 +2530,7 @@ dependencies = [
  "socket2",
  "stormblock-nvmeof",
  "stormblock-pallet-format",
+ "stormcast",
  "tempfile",
  "tokio",
  "tokio-rustls",
@@ -2578,6 +2579,11 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
 ]
+
+[[package]]
+name = "stormcast"
+version = "0.1.1"
+source = "git+https://github.com/glennswest/stormcast?rev=3cec734ee0239604e9ce6e203cda403ab49aba75#3cec734ee0239604e9ce6e203cda403ab49aba75"
 
 [[package]]
 name = "stormblock-runtime-tests"

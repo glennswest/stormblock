@@ -396,6 +396,30 @@ enum SubCommand {
     /// directly as `--slab`:
     ///
     ///   stormblock boot-local --slab "$(stormblock boot-claim --boothost URL)"
+    /// The initramfs's log over the network (#477): follow files from their
+    /// start and send every line as a stormcast frame, to the group and to
+    /// the syslog collector `stormpump.syslog=` or an install-config's
+    /// `syslog:` names, once the network is up. Runs until SIGTERM, then
+    /// sends what is left. Writes nothing to stdout or stderr; its own lines
+    /// go to `--status` and over the network.
+    Logcast {
+        /// A file to follow and the APP-NAME its lines carry: `PATH=TAG`.
+        #[arg(long = "follow", required = true, value_parser = parse_follow)]
+        follow: Vec<(std::path::PathBuf, String)>,
+        /// install-config files to read `syslog:` from, in order, while the
+        /// command line names no collector.
+        #[arg(long = "install-config")]
+        install_config: Vec<std::path::PathBuf>,
+        /// The stormcast group; `off` sends to a named collector only.
+        #[arg(long, default_value = stormcast::DEFAULT_GROUP)]
+        group: String,
+        /// Where logcast says what it did.
+        #[arg(long, default_value = "/run/stormblock/logcast.status")]
+        status: std::path::PathBuf,
+        /// How long a stop waits for the network to send what is left.
+        #[arg(long, default_value_t = 3)]
+        drain_secs: u64,
+    },
     BootClaim {
         /// The appliance, e.g. http://192.168.31.202:9090
         #[arg(long, required = true)]
@@ -1004,6 +1028,14 @@ fn parse_volume_spec(s: &str) -> Result<VolumeSpec, String> {
     Ok(VolumeSpec { name, size, redundancy_text })
 }
 
+/// `PATH=TAG` for `logcast --follow`.
+fn parse_follow(s: &str) -> Result<(std::path::PathBuf, String), String> {
+    match s.rsplit_once('=') {
+        Some((p, t)) if !p.is_empty() && !t.is_empty() => Ok((p.into(), t.to_string())),
+        _ => Err(format!("expected PATH=TAG, got {s:?}")),
+    }
+}
+
 fn parse_raid_level(s: &str) -> Result<RaidLevel, String> {
     match s {
         "1" | "raid1" | "mirror" => Ok(RaidLevel::Raid1),
@@ -1145,6 +1177,20 @@ pub async fn run() -> anyhow::Result<()> {
                     slab, volumes, meta.as_deref(), api.as_deref(), data_dir.as_deref(),
                     &cli.config, *version_mismatch,
                 ).await;
+            }
+            SubCommand::Logcast { follow, install_config, group, status, drain_secs } => {
+                let mut opts = crate::logcast::Options {
+                    follow: follow.clone(),
+                    group: group.clone(),
+                    status: Some(status.clone()),
+                    drain: std::time::Duration::from_secs(*drain_secs),
+                    ..Default::default()
+                };
+                if !install_config.is_empty() {
+                    opts.install_configs = install_config.clone();
+                }
+                tokio::task::spawn_blocking(move || crate::logcast::main(opts)).await?;
+                return Ok(());
             }
             SubCommand::BootClaim { boothost, tag, namespace, timeout_secs, token } => {
                 return handle_boot_claim(boothost, tag, namespace, *timeout_secs, token.as_deref()).await;
