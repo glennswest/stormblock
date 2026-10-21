@@ -74,6 +74,7 @@ fi
 # #478: the drive an install chose, recorded as stormdrive's designation,
 # once: stormdrive's own file is never rewritten.
 check "no drive identity: no designation written" "no" "$([ -e "$WORK/sd/stormdrive/system-drives.json" ] && echo yes || echo no)"
+sleep 1
 LD=/dev/sdb LDID="wwn=naa.5002538e40a1b2c3;serial=TF512A;model=TEAM T253X2512G;size=512110190592" CB=system_drive run
 contains "an install records its drive for stormdrive" "/dev/sdb recorded as the system drive for stormdrive (#478)" "$(cat "$WORK/sd.out")"
 if command -v python3 >/dev/null 2>&1; then
