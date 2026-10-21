@@ -16,6 +16,13 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.2.2] — 2026-10-21
+
+### Fixed
+- #475: a clone and a delete read their slot-table pages before taking the volume manager, and the serve reconciler's delete of an ephemeral volume persists after letting it go: on server1's SMR disk after a reboot, clones took 10–20 s and held the API behind them. #384's golden check and the digester wait for the node to settle, give way to the API's changes and keep to 25 % of a rotating disk's time; each run logs its start and end with MB and MB/s, and health `digests.reading` says what is being read.
+
+Also carries #474's work in progress (the `stormblock-nvmeof` crate the engine's NVMe/TCP wire code now lives in, re-exported unchanged; nothing in the engine uses its portable boot target yet).
+
 ## [v21.2.1] — 2026-10-21
 
 ### Fixed
