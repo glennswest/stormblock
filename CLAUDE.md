@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — BUILT on wip/478-system-drive
+### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — BUILT on wip/478-system-drive; paused for P0 #485
 
 Owner (2026-10-21), replacing #351's "never guessed": install-config
 `system_drive:` (serial, wwn, model, shelf + bay) names the drive; a STOP
@@ -218,7 +218,10 @@ the choice recorded as stormdrive's designation.
 - [x] tests: boot-hook (+30, under sh and busybox sh), system-data (+4),
       `ci-first-drive-verify.sh` (QEMU, real sysfs) ALL PASS; boot-hooks.md,
       README, CHANGELOG
-- [ ] check.sh on the branch; merge; v22.0.0 (the default changed); golden;
+- [x] check.sh on the branch at aeba977 ALL PASS (1258/1258);
+      `ci-split-verify.sh` ALL PASS (the #402 pair with the real initramfs)
+- Paused 2026-10-21 for P0 #485 (stormcentral). Next, on resuming:
+- [ ] merge wip/478-system-drive into main; v22.0.0 (the default changed); golden;
       stormcos (drop `rd.stormblock.slab=/dev/sda`) and storminstall
       (install-config's `system_drive` key) told; close. Metal: server8
       (two older installs; system_drive = its SSD)
