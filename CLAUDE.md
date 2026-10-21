@@ -204,6 +204,17 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### The cold claim's volume step slower on 12.37 (2026-10-21, #472, P2) — IN PROGRESS
+
+Dell 12.14 → 12.37, the first claim after boot: kubelet `lookup` 119 → 161
+ms, `blank` 146 → 206 ms (warm fine). Engine 7911dd9 → 5062192 (506
+commits); rustkube-node's claim path unchanged. lookup = GET volumes, GET
+slabs, GET volumes (+ apiserver); blank = GET fstemplates/{name}, POST
+fstemplates/{id}/clone (verify).
+- [ ] `ci-cold-claim-timing.sh`: those calls, cold (first after an engine
+      start) and warm, on 7911dd9, 5062192 and main, ~150 volumes
+- [ ] find what costs it; fix if it is the engine (P2: wip/ unless fit to ship)
+
 ### Release disk's non-boot pallets: carried or read? (2026-10-21, #471, P3, stormcentral#545) — ANSWERED, closed
 
 No. Flow-over moves slab extents; local boot and staging copy the ESP and
