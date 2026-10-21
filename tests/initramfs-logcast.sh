@@ -62,7 +62,7 @@ chmod +x "$WORK/stormblock"
     echo "before switch_root"
     logcast_stop
     echo "$LOGCAST_PID" > "$WORK/pid-after"
-    kill "$FOLLOW_PID" 2>/dev/null
+    kill "$FOLLOW_PID" 2>/dev/null || :
     exec > /dev/null 2>&1
 ) > "$WORK/stdout" 2>&1
 i=0

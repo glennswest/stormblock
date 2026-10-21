@@ -730,7 +730,7 @@ logcast_stop() { # what is left is sent; at most STORM_LOGCAST_STOP (5) s
         sleep 0.1
         _lci=$((_lci + 1))
     done
-    kill -KILL "$LOGCAST_PID" 2>/dev/null
+    kill -KILL "$LOGCAST_PID" 2>/dev/null || :
     LOGCAST_PID=""
 }
 logcast_start
