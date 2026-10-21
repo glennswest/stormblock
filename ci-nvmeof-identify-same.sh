@@ -67,7 +67,8 @@ dump() { # tree out
 }
 # A build VM's clone holds the pushed commit alone: fetch the base by its
 # full id.
-git -C "$ROOT" cat-file -e "$BASE^{commit}" 2>/dev/null || git -C "$ROOT" fetch -q origin "$BASE" \
+REPO=${STORMBLOCK_REPO:-$(git -C "$ROOT" remote get-url origin 2>/dev/null || echo https://github.com/glennswest/stormblock)}
+git -C "$ROOT" cat-file -e "$BASE^{commit}" 2>/dev/null || git -C "$ROOT" fetch -q "$REPO" "$BASE" \
     || { echo "FAIL: cannot fetch $BASE (give its full id)"; exit 1; }
 git -C "$ROOT" worktree add --detach "$W/base" "$BASE" >/dev/null 2>&1 || { echo "FAIL: no worktree at $BASE"; exit 1; }
 echo "== $BASE"; dump "$W/base" "$W/base.txt" || { echo "FAIL: the dump at $BASE"; exit 1; }

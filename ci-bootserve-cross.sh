@@ -8,6 +8,7 @@
 # the output. The engine itself is never built for them.
 #   sc-build 'bash ci-bootserve-cross.sh'
 set -uo pipefail
+mkdir -p tmp; export TMPDIR=${TMPDIR:-$PWD/tmp}
 FAILS=0
 fail() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }
 ok()   { echo "  ok    $*"; }
@@ -18,7 +19,12 @@ OUT="${CARGO_TARGET_DIR:-target}"
 for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-gnu; do
     rustup target add "$t" >/dev/null 2>&1 || true
     echo "== $t"
-    if cargo zigbuild --release --locked -p stormblock-nvmeof --bin stormboot-serve --target "$t" 2>&1 | tail -3; then
+    if cargo zigbuild --release --locked -p stormblock-nvmeof --bin stormboot-serve --target "$t" > "${TMPDIR:-/tmp}/cross.out" 2>&1; then
+        # Zero warnings, on every target (stormcentral#193).
+        if grep -q '^warning' "${TMPDIR:-/tmp}/cross.out"; then
+            grep -A12 '^warning' "${TMPDIR:-/tmp}/cross.out" | head -40
+            fail "$t: the build warns"
+        fi
         b="$OUT/$t/release/stormboot-serve"
         case "$t" in *windows*) b="$b.exe" ;; esac
         if [ -f "$b" ]; then
@@ -31,6 +37,7 @@ for t in x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-gnu; do
             fail "$t: no $b"
         fi
     else
+        tail -30 "${TMPDIR:-/tmp}/cross.out"
         fail "$t: the build"
     fi
 done
