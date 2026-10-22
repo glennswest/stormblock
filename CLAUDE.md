@@ -1546,7 +1546,10 @@ every release a node could roll back to carries that.
       volume losing 3 shards read back and rebuilt, the gate + restart;
       check.sh on the branch ALL PASS (1263/1263); docs, CHANGELOG on it
 - [ ] merge after pacing and stormcos#603; golden; close. Turning it on per
-      node is the release side's C
+      node is the release side's C. Checked 2026-10-22: stormcos#603 and
+      stormcentral#924 closed, but no 12.3x published (newest published
+      11.88) and `pacing: true`; parked with `wait-owner --until` those;
+      the branch is 179 commits behind main (rebase + check.sh at merge)
 - [ ] step 2 (EC: RS over GF(2^8), Cauchy; `ec:K+M` parse; stripes of K+M
       across domains; RMW; reconstruct ≤ M in assemble_stripe; margin;
       `SchemeExt::known` for code 1) once every rollback target carries step 1
