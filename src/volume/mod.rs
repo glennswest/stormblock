@@ -5269,6 +5269,35 @@ mod redundancy_tests {
     /// remove it, and the delete is refused rather than leaving the device
     /// to come up on a volume that is gone.
     #[tokio::test]
+    async fn a_listing_waits_on_no_volumes_lock() {
+        // #491: a volume's lock is held across its allocating writes' I/O. A
+        // listing, made with the volume manager held (the reconciler's
+        // counters, every pass), must not wait on it, or every API call
+        // queues behind the busiest volume's writes.
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        let (a, _pa) = file_slab(&d, "a", slot).await;
+        mgr.add_slab(a).await;
+        let busy = mgr.create_volume_any("load", 8 * slot).await.unwrap();
+        let other = mgr.create_volume_any("probe", 8 * slot).await.unwrap();
+        let handle = mgr.get_volume_handle(&busy).unwrap();
+        let held = handle.lock().await;
+        let listed = tokio::time::timeout(std::time::Duration::from_secs(2), mgr.list_volumes())
+            .await
+            .expect("the listing answered with a volume's lock held");
+        drop(held);
+        let mut names: Vec<String> = listed.into_iter().map(|(_, n, _, _)| n).collect();
+        names.sort();
+        assert_eq!(names, vec!["load".to_string(), "probe".to_string()]);
+        // A rename is what the listing says from then on.
+        mgr.rename_volume(other, "probe-2").await.unwrap();
+        assert_eq!(mgr.get_volume_handle(&other).unwrap().name().await, "probe-2");
+        assert!(mgr.list_volumes().await.iter().any(|(id, n, _, _)| *id == other && n == "probe-2"));
+        assert_eq!(mgr.get_volume_handle(&other).unwrap().lock().await.name, "probe-2", "the record too");
+    }
+
+    #[tokio::test]
     async fn a_delete_is_refused_by_a_hold_taken_while_it_waited() {
         let d = dir();
         let slot = 4096u64;
