@@ -34,6 +34,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v22.1.0] — 2026-10-22
+
+### Changed
+- **Safety-relevant:** #490 (decided A): a flow-over whose sources are held for #412's validation writes its copies without reading each back. The validation stays mandatory and is now the check: every moved extent is compared with the appliance by sha256, repaired or reverted, and the appliance's copy is held until it passes (durability rule 17). Until then the node can read a copy a lying drive acknowledged; the validation repairs it before any source is let go. A move with no hold still reads every copy back; `STORMBLOCK_FLOW_READBACK=1` restores the flow-over's. In the rate model on a disk-bound destination, the copy took 47–57 s instead of 75–79 s for 1.5 GB.
+
 ## [v22.0.0] — 2026-10-22
 
 ### Breaking
