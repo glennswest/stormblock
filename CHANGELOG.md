@@ -39,6 +39,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v22.3.0] — 2026-10-22
+
+### Added
+- #497: a boot claim with `"image": "maint"` answers this host's own clone of `boothost/maint`'s sealed target (`maint-<host>`), for stormbootx's `maint` command. The previous one is released, the reply's intent is `maint`, and the host's own boot is untouched. `maint`, like `default`, is never a host.
+
 ## [v22.2.0] — 2026-10-22
 
 ### Added
