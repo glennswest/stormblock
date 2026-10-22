@@ -1150,8 +1150,16 @@ async fn claim_boothost(
 ) -> Response {
     // Where a claim's time goes (#424), said once per claim.
     let mut timing = ClaimTiming::start();
-    let resolving = BOOT_CLAIMS.lock().await;
     let by_default = claimed_as.eq_ignore_ascii_case(DEFAULT_HOST);
+    // `boothost/maint` is the maintenance image (#497), not a machine: it is
+    // claimed with `"image": "maint"` under the machine's own name.
+    if !by_default && synonym::is_reserved_host(claimed_as) {
+        return ApiError::bad_request(format!(
+            "{} is the maintenance image, not a host: a machine claims it as itself with {{\"image\": \"{MAINT_IMAGE}\"}}",
+            synonym::key(BOOTHOST_NS, claimed_as)
+        ));
+    }
+    let resolving = BOOT_CLAIMS.lock().await;
     let mut named_claim: Option<synonym::NamedClaim> = None;
     // The MAC the claim named, as named, for its record (#456): below, `mac`
     // becomes the one a new host is given as its alias, or none.
