@@ -30,6 +30,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.5.0] — 2026-10-22
+
+### Changed
+- #496: `POST /api/v1/volumes/{id}/fsck` without `repair` checks what the volume's next mount would find. It takes a point-in-time snapshot and, on the snapshot, replays the journal, releases the orphans and sums the superblock's free counts from the group descriptors, then runs the read-only check and deletes the snapshot. The reply says which view it read: `view` is `snapshot`, `sealed` or `live`, and `?live=true` reads the volume itself. A mounted volume read live showed checksums, bitmaps and counts that no mount sees.
+
 ## [v21.4.2] — 2026-10-21
 
 ### Fixed
