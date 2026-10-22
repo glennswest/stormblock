@@ -211,6 +211,17 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### Multi-drive placement, drain, rebuild and shelf RAID sets on real drives (2026-10-22, #224, P2) — WAITING ON HARDWARE
+
+No test machine has ≥ 4 physical drives (`stormcentral asset list --kind
+drive`: C2NR0Q2 1, server1 1, server8 2; pve VMs virtual); the DS2246 is not
+attached. Asked on #224 (A: the shelf on C2NR0Q2, recommended, after the
+pacing; B: drives in a blade; C: close until hardware). `wait-owner --until`
+a multi-drive machine. Then: file a `multi-drive` suite on stormblock-test
+(domains by serial/WWN, `mirror:2` apart, failed → rebuild → drain, MiB/s per
+drive and in parallel, shelves + spare, reassembly after a power cycle).
+Nothing built.
+
 ### Git dependencies pinned by rev, not tag (2026-10-22, #480, P0) — XFS DONE; ext4 AFTER fio.ext4.rs#17
 
 A tag can be moved; the supply-chain check wants every git dependency by
