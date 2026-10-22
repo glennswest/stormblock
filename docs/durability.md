@@ -316,6 +316,15 @@ tests run on.
    again. The reference is the clone's own bytes (the owner's decision A):
    per-extent hashes recorded at seal come with #384, once no node can roll
    back past golden-stormblock-47e88a267077.
+   **The validation is the flow-over's check** (#490, decided A on
+   2026-10-22): a flow-over whose sources are held for it writes its copies
+   without reading each back as it goes (#239's read-back halved a
+   disk-bound destination's rate). What that read-back caught, a drive
+   acknowledging a write it did not make, the validation catches before any
+   source is let go, and repairs or reverts. Until then the node can read
+   such a copy; nothing it wrote from it is let go of on the appliance's
+   side, and the validation's repair rewrites the extent itself. A move with
+   no hold (a drain, a rebalance) still reads every copy back.
 18. **A delete lets go of a volume's slots once its writes have landed**
    (#487). A copy-on-write reads an extent's location, copies it, remaps it
    under the extent map's lock and then lets go of the old slot. A delete
