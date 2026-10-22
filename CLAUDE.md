@@ -209,9 +209,9 @@ A release wave takes every component's newest golden, so main is the next
 release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 #74 (secret volumes) and #450's engine half stay on main (master's A): both
 are inert until used, and an unmarked volume's record is byte-identical to
-the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) stage requested.
+the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) and v23.0.1 (#392) stages requested.
 
-### NVMe/TCP target: strict PDU handling (2026-10-22, #392, P1) — IN PROGRESS
+### NVMe/TCP target: strict PDU handling (2026-10-22, #392, P1) — DONE (v23.0.1), closed
 
 Compliance hardening (stormcentral-compliance-operations#8). Both targets
 (the engine's `target/nvmeof`, the crate's `stormboot-serve` server) read
@@ -233,7 +233,9 @@ for any CID/ttag/offset, C2HData's `pdo` wrong under a header digest.
       tests; ci-nvme-hosts-verify.sh ALL PASS (18: R2T writes, -g -G),
       ci-bootserve-verify.sh, ci-ana-verify.sh ALL PASS; nvme-access.md,
       CHANGELOG
-- [ ] check.sh; version; stage; close
+- [x] check.sh at c760a80 ALL PASS (1278/1278, no warnings); v23.0.1
+      (a931a7a, `stormblock 23.0.1` from a `--locked` build); stage
+      requested (478bdd3e07a9); closed
 
 ### Image build: admin class and restricted output (2026-10-22, #393, P1) — DONE (v23.0.0), closed
 
