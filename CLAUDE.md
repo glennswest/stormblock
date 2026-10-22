@@ -229,7 +229,7 @@ network is up; offline = group only.
       dead, its installer log in `stormcentral logs`, once stormcentral#1075
       names the collector in the per-host install-config (`syslog:`)
 
-### A golden one slot short after a clone's delete (2026-10-21, #487, P0) — FIXED on wip/487-golden-counts
+### A golden one slot short after a clone's delete (2026-10-21, #487, P0) — DONE (v21.4.1), closed; metal pending
 
 server1 12.40 (v21.2.2): the kubelet cloned the cilium golden, gave up on the
 root (VolumeRegister 30 s) and deleted it while stormpump's mount was still
@@ -247,7 +247,8 @@ preread: clone/delete through the API alone keep the counts.
       without the fix with server1's exact error, control tmp/487-control),
       `a_golden_slot_let_go_under_it_is_refused_and_named_so`; durability
       rule 18, CHANGELOG
-- [ ] check.sh on the branch; merge; v21.4.1; golden; close. server1's
+- [x] check.sh on the branch at 7ae257b ALL PASS (1261/1261); main
+      fast-forwarded; v21.4.1 tagged; stage requested; closed. server1's
       cilium golden is damaged until its next install lays the system half
 
 ### 12.39–12.42 pve perf "regression" (2026-10-21, #485, P0) — MEASURED: no stormblock commit adds time; closed

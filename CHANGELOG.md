@@ -26,6 +26,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.4.1] — 2026-10-21
+
+### Fixed
+- #487: a delete waits for its volume's writes in flight and refuses the volume after. A copy-on-write that remapped after a delete had taken the clone's references let go of a golden's shared slot a second time; server1's cilium golden was refused by #370 from then on and the cilium agent never started. #370's check now tells a slot let go (the golden must be laid again) from one recorded as another volume's (a restart gives it back).
+
 ## [v21.4.0] — 2026-10-21
 
 ### Added
