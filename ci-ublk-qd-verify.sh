@@ -328,11 +328,15 @@ attach_delete_race() {
         d=$(sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p' /tmp/ra-$n)
         case "$ac:$dc" in
         200:409|201:409)
-            magic=$(dd if=$d bs=8 skip=135 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-4)
-            if [ "$magic" = 53ef ] && api http://127.0.0.1:$port/api/v1/volumes/$c >/dev/null; then
+            magic=$(dd if=$d bs=8 skip=135 count=1 2>/tmp/ra-$n.dd | od -An -tx1 | tr -d ' \n' | cut -c1-4)
+            gc=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer t' http://127.0.0.1:$port/api/v1/volumes/$c)
+            if [ "$magic" = 53ef ] && [ "$gc" = 200 ]; then
                 won_attach=$((won_attach + 1))
             else
-                bad="$bad $n:attached-but-$magic"
+                bad="$bad $n:attached-but-magic[$magic]-get$gc"
+                echo "LOG race $n: volume $c attach $ac delete $dc device '$d' get $gc dd: $(tr '\n' ' ' < /tmp/ra-$n.dd)"
+                echo "LOG race $n reply: $(head -c 600 /tmp/ra-$n)"
+                grep "$c" /run/engine-$mode.log | tail -12 | sed "s/^/LOG race $n engine: /"
             fi
             api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c/attach >/dev/null
             api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c >/dev/null ;;
