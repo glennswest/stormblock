@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — IN PROGRESS (wip/490-smr-flow)
+### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — v21.6.0 (the split, the overlap); WAITS ON THE OWNER (the read-back)
 
 server1 (X9, ST2000DM008) 12.40: 3025 + 727 extents at 22–23 MB/s; the
 copy is 84 of 95 s (paced 4.6 s); halving the window (64→32) left the rate
@@ -222,7 +222,7 @@ is not known.
       paced time is noise from the foreground writer). Disk-bound: the copy
       is at most half the disk's rate; the read-back is the half
 - [x] flow tests under nextest 25/25 (plain cargo test shares globals)
-- [ ] check.sh; merge (no-regret: the split, the overlap); release
+- [x] check.sh at ac5a4d0 ALL PASS (1263/1263); merged; v21.6.0; stage requested
 - [ ] asked on #490 (owner): drop the per-run read-back in a flow-over,
       #412's validation being the check (A), or keep it (B)
 
