@@ -371,7 +371,8 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_FLOW_BATCH` | moves a flow-over makes between persists, across windows (#410; it was the window, one persist each, #331) | `256` |
 | `STORMBLOCK_FLOW_PERSIST_SECS` | the longest a flow-over goes without a persist while anything is unpersisted: what a cut can make it move again (#410) | `10` |
 | `STORMBLOCK_FLOW_PARALLEL` | sources a flow-over reads at once, and moves at once for slots it cannot take in a window (#331, #410) | `16` |
-| `STORMBLOCK_FLOW_RUN_MB` | the largest write a flow-over makes on its destination: neighbouring slots merged into one (#401) | `32` |
+| `STORMBLOCK_FLOW_RUN_MB` | the largest write a flow-over makes on its destination: neighbouring slots merged into one (#401) | `32`, `64` on a rotating disk (#490) |
+| `STORMBLOCK_FLOW_OVERLAP` | `0`: a flow-over window reads all its sources before writing, as before #490 (for measuring) | on |
 | `STORMBLOCK_FLOW_COALESCE` | `0`: one write and read-back per extent, as before #401, for measuring | on |
 | `STORMBLOCK_FLOW_FG_IO_MS`, `STORMBLOCK_FLOW_FG_FLUSH_MS`, `STORMBLOCK_FLOW_FG_RATIO` | the node's own read/write and flush p90 while a flow-over moves above which, and above that ratio of its p90 without it, the flow-over halves its window and pauses (#410; replaces `STORMBLOCK_FLOW_FLUSH_BOUND_MS`, #282) | `25`, `100`, `3` |
 | `STORMBLOCK_FLOW_PACE` | `0`: a flow-over never paces itself (#410) | on |
@@ -2057,9 +2058,13 @@ is a copy-on-write onto the local disk (rule 11).
 
 **It writes the way a slow disk wants** (#401). A window's sources are read
 from the appliance in parallel, their copies written to the local disk in
-slot order with neighbours merged into one write (up to 32 MiB,
-`STORMBLOCK_FLOW_RUN_MB`) and read back once per write, and published in one
-sweep of the maps. Before, each extent was its own 1 MiB write and read-back,
+slot order with neighbours merged into one write (up to 32 MiB, 64 on a
+rotating disk, `STORMBLOCK_FLOW_RUN_MB`) and read back once per write, and
+published in one sweep of the maps. A run is at most half the window, so the
+later sources are read while the earlier ones are written (#490). Every 100
+moves the flow-over says where the time went: the copy split into `read`
+(the appliance), `write` and `read back`. On a disk-bound destination the
+last two are equal, so the copy runs at most half the disk's rate. Before, each extent was its own 1 MiB write and read-back,
 8 at once in whatever order they finished, and each one swept every map. An
 extent that reads as all zeros is not copied at all: it is unmapped from every
 map that names it (a golden and its clones), since an unmapped extent reads

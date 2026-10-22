@@ -216,9 +216,15 @@ is not known.
 - [x] the window's reads overlap its writes (a run ≤ half the window;
       `STORMBLOCK_FLOW_OVERLAP=0` as before, for measuring); a rotating
       destination 64 MiB runs, a 128 MiB window
-- [ ] the rate model's one-actuator destination (FLOW_MODEL_DEST_MBPS,
-      _SEEK_MS): before/after on a build VM; flow tests; check.sh
-- [ ] docs, CHANGELOG; release; server1's next install says where the time goes
+- [x] the rate model's one-actuator destination (FLOW_MODEL_DEST_MBPS,
+      _SEEK_MS), `ci-flow-rate-model.sh`: 60 MB/s + 10 ms seek, 1.5 GB:
+      read ~1 s, write ~28 s, read back ~28 s in every arrangement (the
+      paced time is noise from the foreground writer). Disk-bound: the copy
+      is at most half the disk's rate; the read-back is the half
+- [x] flow tests under nextest 25/25 (plain cargo test shares globals)
+- [ ] check.sh; merge (no-regret: the split, the overlap); release
+- [ ] asked on #490 (owner): drop the per-run read-back in a flow-over,
+      #412's validation being the check (A), or keep it (B)
 
 ### dir-block-csum on a live service clone after a power cycle (2026-10-22, #496, P0) — DONE (v21.5.0), closed; the next pve run's check settles pvetest2
 
