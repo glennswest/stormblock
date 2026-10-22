@@ -204,6 +204,22 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — IN PROGRESS (wip/490-smr-flow)
+
+server1 (X9, ST2000DM008) 12.40: 3025 + 727 extents at 22–23 MB/s; the
+copy is 84 of 95 s (paced 4.6 s); halving the window (64→32) left the rate
+as it was. The Dell (WD20EFAX, also DM-SMR) 83 MB/s. A window read every
+source, then wrote and read back each run, nothing overlapping; the line
+says `copy` only, so whether forge, the write or the read-back is the time
+is not known.
+- [x] `WindowTimes` (read, write, read back) in the progress line
+- [x] the window's reads overlap its writes (a run ≤ half the window;
+      `STORMBLOCK_FLOW_OVERLAP=0` as before, for measuring); a rotating
+      destination 64 MiB runs, a 128 MiB window
+- [ ] the rate model's one-actuator destination (FLOW_MODEL_DEST_MBPS,
+      _SEEK_MS): before/after on a build VM; flow tests; check.sh
+- [ ] docs, CHANGELOG; release; server1's next install says where the time goes
+
 ### dir-block-csum on a live service clone after a power cycle (2026-10-22, #496, P0) — DONE (v21.5.0), closed; the next pve run's check settles pvetest2
 
 12.43-flowsdn pvetest2: stormcentral's ext4 stage (`perf.rs`, `POST

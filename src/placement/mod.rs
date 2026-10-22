@@ -1059,7 +1059,11 @@ impl PlacementEngine {
         // The writer: whatever has arrived, a run's worth at a time, and a
         // run never more than half the window, so the later half's sources
         // are read while the first half is written.
-        let per_run = ((run_bytes / slot_size.max(1)) as usize).min(n.div_ceil(2)).max(1);
+        // `STORMBLOCK_FLOW_OVERLAP=0`: the whole window read first, as
+        // before, for measuring.
+        let overlap = std::env::var("STORMBLOCK_FLOW_OVERLAP").map(|v| v.trim() != "0").unwrap_or(true);
+        let half = if overlap { n.div_ceil(2) } else { n };
+        let per_run = ((run_bytes / slot_size.max(1)) as usize).min(half).max(1);
         let mut written: Vec<(usize, u64)> = Vec::new();
         let mut failed_slots: Vec<u64> = Vec::new();
         let writer = async {
@@ -1080,8 +1084,9 @@ impl PlacementEngine {
                         }
                         None => open = false,
                     }
-                    // Wait for a run's worth while more is coming.
-                    if open && arrived.len() < per_run {
+                    // Wait for a run's worth while more is coming (all of
+                    // it, not overlapping).
+                    if open && (arrived.len() < per_run || !overlap) {
                         continue;
                     }
                 }
