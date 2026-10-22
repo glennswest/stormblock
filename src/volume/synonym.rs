@@ -47,6 +47,16 @@ pub const HOSTGOLDEN_NS: &str = "hostgolden";
 /// What a host seen for the first time boots (stormbootx#15).
 pub const DEFAULT_HOST: &str = "default";
 
+/// `boothost/maint`: the maintenance image a `maint` boot claim clones for a
+/// host (#497). Like `default`, a name in the boothost namespace that is
+/// not a host.
+pub const MAINT_HOST: &str = "maint";
+
+/// `default` and `maint`: boothost synonyms that are never a host.
+pub fn is_reserved_host(name: &str) -> bool {
+    name.eq_ignore_ascii_case(DEFAULT_HOST) || name.eq_ignore_ascii_case(MAINT_HOST)
+}
+
 /// What a synonym points at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -573,6 +583,11 @@ fn check_host_name(name: &str) -> Result<(), SynonymError> {
             "{DEFAULT_HOST} is what a new machine boots, not a host"
         )));
     }
+    if name.eq_ignore_ascii_case(MAINT_HOST) {
+        return Err(SynonymError::InvalidName(format!(
+            "{MAINT_HOST} is the maintenance image a host boots on a maint command (#497), not a host"
+        )));
+    }
     Ok(())
 }
 
@@ -766,8 +781,8 @@ impl SynonymStore {
     /// had. Its volumes (boot clones, host goldens) are the caller's to
     /// delete. Answers the synonyms removed. `default` is not a host.
     pub fn remove_host(&mut self, name: &str) -> Result<Vec<String>, SynonymError> {
-        if name == DEFAULT_HOST {
-            return Err(SynonymError::InvalidName(format!("{DEFAULT_HOST} is every new machine's assignment, not a host")));
+        if is_reserved_host(name) {
+            return Err(SynonymError::InvalidName(format!("{name} is not a host: it is an image every machine may be given")));
         }
         let record = self.hosts.remove(name);
         let mut names = vec![name.to_string()];
@@ -805,7 +820,7 @@ impl SynonymStore {
         }
         self.synonyms
             .values()
-            .filter(|s| s.namespace == BOOTHOST_NS && s.name != DEFAULT_HOST)
+            .filter(|s| s.namespace == BOOTHOST_NS && !is_reserved_host(&s.name))
             .find(|s| host_match_key(&s.name) == want)
             .map(|s| s.name.clone())
     }
@@ -829,7 +844,7 @@ impl SynonymStore {
     pub fn hosts(&self) -> Vec<Host> {
         let mut names: std::collections::BTreeSet<String> = self.hosts.keys().cloned().collect();
         for s in self.list(Some(BOOTHOST_NS)) {
-            if s.name != DEFAULT_HOST {
+            if !is_reserved_host(&s.name) {
                 names.insert(s.name.clone());
             }
         }
@@ -1016,8 +1031,8 @@ impl SynonymStore {
         let old = self
             .host_of(from)
             .ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, from)))?;
-        if old == DEFAULT_HOST {
-            return Err(SynonymError::InvalidName(format!("{DEFAULT_HOST} is not a host")));
+        if is_reserved_host(&old) {
+            return Err(SynonymError::InvalidName(format!("{old} is not a host")));
         }
         check_host_name(to)?;
         if old == to {

@@ -2216,3 +2216,82 @@ async fn a_machines_command_is_put_by_the_admin_read_open_and_reported_done() {
     assert_eq!((slot.last_id, slot.pending.is_none()), (1, true));
     server.abort();
 }
+
+/// #497 (stormbootx#167's `maint`): a boot claim with `"image": "maint"`
+/// gets this host's own clone of `boothost/maint`'s target, `maint-<host>`,
+/// never another machine's; the host's own boot clone and intent are left
+/// as they are; the next maint claim releases the last; `maint` is no host.
+#[tokio::test]
+async fn a_maint_claim_gives_each_host_its_own_clone_of_the_maintenance_image() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1, v2]).await;
+    let syn = |name: &str, v: uuid::Uuid| {
+        client
+            .post(format!("{base}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": name, "volume": v.to_string()}))
+            .send()
+    };
+    syn("default", v1).await.unwrap();
+    let maint = |mac: &str, image: &str| {
+        client
+            .post(format!("{base}/api/v1/synonyms/boothost/default/claim"))
+            .json(&serde_json::json!({"mac": mac, "image": image}))
+            .send()
+    };
+
+    // Each machine booted its own image first.
+    let a = default_claim(&client, &base, "AC:1F:6B:00:00:0A").await;
+    default_claim(&client, &base, "AC:1F:6B:00:00:0B").await;
+    let a_boot = a["volume"]["id"].as_str().unwrap().to_string();
+
+    // No maintenance image yet: a 404 that says so; an image nobody knows: 400.
+    let r = maint("AC:1F:6B:00:00:0A", "maint").await.unwrap();
+    assert_eq!(r.status(), 404);
+    assert!(r.text().await.unwrap().contains("boothost/maint"));
+    assert_eq!(maint("AC:1F:6B:00:00:0A", "rescue").await.unwrap().status(), 400);
+
+    // With one: each host its own clone of it.
+    assert!(syn("maint", v2).await.unwrap().status().is_success());
+    let r = maint("AC:1F:6B:00:00:0A", "maint").await.unwrap();
+    assert_eq!(r.status(), 201);
+    let ma: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((ma["intent"].as_str(), ma["volume"]["name"].as_str()), (Some("maint"), Some("maint-mac-ac1f6b00000a")), "{ma}");
+    assert_eq!(ma["claimed_from"]["volume"].as_str(), Some(v2.to_string().as_str()));
+    assert!(ma["attach"]["host_nqns"][0].as_str().unwrap().contains("host-mac-ac1f6b00000a"), "bound to its host: {ma}");
+    let mb: serde_json::Value = maint("AC:1F:6B:00:00:0B", "maint").await.unwrap().json().await.unwrap();
+    assert_ne!(ma["volume"]["id"], mb["volume"]["id"], "never one clone for two machines");
+
+    // The host's own boot is untouched: its boot clone is there, its intent auto.
+    {
+        let vm = state.volume_manager.lock().await;
+        assert!(vm.get_volume_handle(&stormblock::volume::VolumeId(a_boot.parse().unwrap())).is_some());
+    }
+    let i: serde_json::Value = client
+        .get(format!("{base}/api/v1/synonyms/boothost/ac1f6b00000a/intent"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(i["intent"], "auto");
+
+    // The next maint claim releases the last one, not the other machine's.
+    let ma2: serde_json::Value = maint("AC:1F:6B:00:00:0A", "maint").await.unwrap().json().await.unwrap();
+    assert_eq!(ma2["released"], serde_json::json!([ma["volume"]["id"]]), "{ma2}");
+    {
+        let vm = state.volume_manager.lock().await;
+        let id = |v: &serde_json::Value| stormblock::volume::VolumeId(v["volume"]["id"].as_str().unwrap().parse().unwrap());
+        assert!(vm.get_volume_handle(&id(&ma)).is_none(), "released");
+        assert!(vm.get_volume_handle(&id(&mb)).is_some(), "the other machine's kept");
+    }
+
+    // `maint` is not a host: not listed, not claimable by name.
+    let hosts: serde_json::Value = client.get(format!("{base}/api/v1/boothost")).send().await.unwrap().json().await.unwrap();
+    assert!(!hosts.to_string().contains("\"name\":\"maint\""), "{hosts}");
+    let named = client
+        .post(format!("{base}/api/v1/synonyms/boothost/maint/claim"))
+        .json(&serde_json::json!({"mac": "AC:1F:6B:00:00:0C"}))
+        .send().await.unwrap();
+    assert!(named.status().is_client_error(), "a claim as `maint` is refused: {}", named.status());
+    server.abort();
+}

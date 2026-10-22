@@ -571,6 +571,11 @@ pub struct ClaimRequest {
     /// A boot claim's firmware inventory (stormbootx#20): kept the same way.
     #[serde(default)]
     pub inventory: Option<serde_json::Value>,
+    /// A boot claim's image (#497): `maint` answers a clone of
+    /// `boothost/maint`'s target for this host (stormbootx's `maint`
+    /// command), not its own release. Absent: the host's own image.
+    #[serde(default)]
+    pub image: Option<String>,
     /// The host NQN that will connect to the clone: it is served from that
     /// host's own subsystem, to that host alone (#210). Not read by a boot
     /// claim, which binds the clone to the boot host's own NQNs.
@@ -902,8 +907,17 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
         // between its clone and its record, leaving a clone nobody names.
         let vm = state.volume_manager.clone();
         let (name, mac, serial) = (name.to_string(), req.mac.clone(), req.serial.clone());
+        let maint = match req.image.as_deref().map(str::trim) {
+            None | Some("") => false,
+            Some(i) if i.eq_ignore_ascii_case(MAINT_IMAGE) => true,
+            Some(other) => {
+                return ApiError::bad_request(format!(
+                    "a boot claim's image is \"{MAINT_IMAGE}\" or absent (the host's own), not {other:?}"
+                ))
+            }
+        };
         let claimed = crate::lockwatch::spawn_owing(
-            async move { claim_boothost(state, &name, mac.as_deref(), serial.as_deref(), extra).await },
+            async move { claim_boothost(state, &name, mac.as_deref(), serial.as_deref(), extra, maint).await },
             move || async move {
                 if let Err(e) = crate::volume::VolumeManager::persist_detached_checked(&vm).await {
                     tracing::error!("boot claim: its clones were not written to the volume metadata: {e}");
@@ -1132,6 +1146,7 @@ async fn claim_boothost(
     mac: Option<&str>,
     serial: Option<&str>,
     (agent, inventory): (Option<serde_json::Value>, Option<serde_json::Value>),
+    maint: bool,
 ) -> Response {
     // Where a claim's time goes (#424), said once per claim.
     let mut timing = ClaimTiming::start();
@@ -1200,6 +1215,12 @@ async fn claim_boothost(
     let names: Vec<String> = std::iter::once(tag.to_string())
         .chain(host.iter().flat_map(|h| h.former_names.iter().cloned()))
         .collect();
+
+    // The maintenance image (#497): a clone of its own, nothing of the host's
+    // own boot touched.
+    if maint {
+        return claim_maint(&state, tag, claimed_as, host.as_ref(), &names, (claim_mac, mac, new_machine), (agent, inventory), timing).await;
+    }
 
     // 0. A boot override for this machine (#354): stormipmi's, read here.
     let agent_name = agent.as_ref().and_then(|a| a.get("name")).and_then(|n| n.as_str()).map(str::to_string);
@@ -1535,6 +1556,159 @@ async fn claim_boothost(
     });
     timing.done(tag, claimed_as);
     let mut out = out;
+    out["timing"] = timing.json();
+    (StatusCode::CREATED, Json(out)).into_response()
+}
+
+/// The image a boot claim names for maintenance (#497), and the synonym that
+/// points at it: `boothost/maint` (baremetalservices' ESP + UKI disk).
+const MAINT_IMAGE: &str = synonym::MAINT_HOST;
+
+/// A claim of the maintenance image (#497, stormbootx#167's `maint`): a clone
+/// of `boothost/maint`'s sealed target for this host alone, `maint-<host>`,
+/// its earlier ones released (two machines in maintenance never share one,
+/// the #200 lesson). The host's own boot clone, host golden, assignment and
+/// intent are left as they are; the reply's intent is `maint`.
+#[allow(clippy::too_many_arguments)]
+async fn claim_maint(
+    state: &Arc<AppState>,
+    tag: &str,
+    claimed_as: &str,
+    host: Option<&Host>,
+    names: &[String],
+    (claim_mac, mac, new_machine): (Option<String>, Option<String>, bool),
+    (agent, inventory): (Option<serde_json::Value>, Option<serde_json::Value>),
+    mut timing: ClaimTiming,
+) -> Response {
+    let Some(syn) = state.synonyms.read().await.get(BOOTHOST_NS, MAINT_IMAGE).cloned() else {
+        return ApiError::not_found(format!(
+            "no {} on this forge: the maintenance image is not set up",
+            synonym::key(BOOTHOST_NS, MAINT_IMAGE)
+        ));
+    };
+    let Some(image) = syn.target.volume_id() else {
+        return ApiError::conflict(format!(
+            "{} names storage on another node ({}); import the maintenance image here first",
+            synonym::key(BOOTHOST_NS, MAINT_IMAGE),
+            syn.target.as_str()
+        ));
+    };
+    {
+        let vm = state.volume_manager.lock().await;
+        if vm.get_volume_handle(&image).is_none() || !vm.is_sealed(&image) {
+            return ApiError::conflict(format!(
+                "{} points at volume {image}, which is not a sealed volume on this node",
+                synonym::key(BOOTHOST_NS, MAINT_IMAGE)
+            ));
+        }
+    }
+    let clone_name = format!("{MAINT_IMAGE}-{tag}");
+    let clone_names: Vec<String> = names.iter().map(|n| format!("{MAINT_IMAGE}-{n}")).collect();
+    let predecessors: Vec<VolumeId> = state
+        .volume_manager
+        .lock()
+        .await
+        .list_volumes()
+        .await
+        .into_iter()
+        .filter(|(_, name, _, _)| clone_names.contains(name))
+        .map(|(id, ..)| id)
+        .collect();
+    let c = match crate::fs::template::clone_volume(
+        &state.volume_manager,
+        image,
+        &crate::fs::template::CloneSpec::new(&clone_name),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => return super::fstemplates::err(e),
+    };
+    timing.step("maint clone");
+    if let Some(owner) = crate::mgmt::creators::of(state, &crate::mgmt::creators::host(tag)) {
+        state
+            .creators
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set(crate::mgmt::creators::volume(&c.volume_id.0), owner);
+    }
+    let parents = lineage_of(&syn, image);
+    let (mut released, mut kept) = (Vec::new(), Vec::new());
+    for old in predecessors.into_iter().filter(|o| *o != c.volume_id) {
+        if release_superseded_clone(state, old, &parents).await {
+            released.push(old);
+        } else {
+            kept.push(old);
+        }
+    }
+    timing.step("released");
+    note_claim(c.volume_id);
+    let mut bind_aliases: Vec<String> = host.map(|h| h.aliases.clone()).unwrap_or_default();
+    if claimed_as != tag {
+        bind_aliases.push(claimed_as.to_string());
+    }
+    let attach = attach_info(state, c.volume_id, AttachFor::Boothost { name: tag, aliases: bind_aliases }).await;
+    timing.step("attach");
+    let host_nqns: Vec<String> = attach
+        .get("host_nqns")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    // What this machine booted, for its record and its attestation (#216):
+    // the maintenance image, which is the clone's parent.
+    state.synonyms.write().await.note_claim(
+        tag,
+        synonym::ClaimRecord {
+            clone: c.volume_id,
+            clone_name: clone_name.clone(),
+            claimed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            claimed_as: claimed_as.to_string(),
+            host_nqns,
+            host_golden: image,
+            golden: image,
+            assignment_version: syn.version,
+            agent,
+            inventory,
+            mac: claim_mac,
+        },
+    );
+    let host_secret = state.synonyms.write().await.mint_host_secret(tag);
+    tracing::info!(host = tag, clone = %c.volume_id, "maintenance image claimed (#497)");
+    let mut out = json!({
+        "intent": MAINT_IMAGE,
+        "image": MAINT_IMAGE,
+        "host_secret": host_secret,
+        "forge_trust": crate::mgmt::forge_trust::claim_answer(state),
+        "host": {
+            "name": tag,
+            "claimed_as": claimed_as,
+            "aliases": host.map(|h| h.aliases.clone()).unwrap_or_default(),
+            "provisional": synonym::is_provisional(tag),
+            "mac": mac,
+            "new": new_machine,
+        },
+        "claimed_from": {
+            "synonym": synonym::key(BOOTHOST_NS, MAINT_IMAGE),
+            "version": syn.version,
+            "volume": image.0,
+            "release": image.0,
+        },
+        "volume": {
+            "id": c.volume_id.0,
+            "name": clone_name,
+            "size_bytes": c.size_bytes,
+            "fs_uuid": c.fs_uuid,
+            "sealed": false,
+            "access": "rw",
+        },
+        "released": released.iter().map(|v| v.0).collect::<Vec<_>>(),
+        "kept": kept.iter().map(|v| v.0).collect::<Vec<_>>(),
+        "attach": attach,
+    });
+    timing.done(tag, claimed_as);
     out["timing"] = timing.json();
     (StatusCode::CREATED, Json(out)).into_response()
 }
