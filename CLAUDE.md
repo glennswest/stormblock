@@ -302,6 +302,21 @@ and logged neither start nor end.
       started/ended … MB/s` lines, health `digests.reading`
 - Resume #474 next (its work plan below)
 
+### A container root deleted while its ublk device came up (2026-10-21, #493, P0) — IN PROGRESS (wip/493-attach-hold)
+
+pvetest1 12.42 pods.log: the kubelet's startup root sweep (rustkube-node#288)
+deleted ctr-ct-00000005/06/08 at 20:30:06.38–.45 while their attaches were
+starting; VolumeRegister on /dev/ublkb85–87 then got EINVAL/ENXIO. The ublk
+attach held its volume (#267) only in `finish`, after the device was ready.
+- [x] hold at `begin` (`STARTING`), released in `finish`; `attach_local`:
+      a volume gone after the attach → device dropped, 404 (api + /v1)
+- [x] delete re-reads the holds after its preread, nothing awaited before
+      the remove
+- [x] tests: ublk_export unit, volume unit, ci-ublk-qd-verify.sh
+      `attach-delete-race`; README, durability rule 19, CHANGELOG
+- [ ] build VM: units + QEMU; negative control; check.sh; merge, v21.4.2,
+      golden, close
+
 ### server8's 12.37 install stalled behind its own console (2026-10-21, #476, P1) — DONE (v21.2.1, 7528cc5), shipped; metal pending
 
 From server8's full SOL log (`console/server8/sol.log`): the survey took

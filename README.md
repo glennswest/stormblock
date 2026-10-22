@@ -1339,7 +1339,11 @@ rest without naming conventions:
   same answer. Below them, a ublk device (created or adopted) **holds** its
   volume in the volume manager, which refuses to delete a held volume on
   every path, the internal ones included (`409 … in use by ublk device
-  /dev/ublkbN: detach it first`, #267). The serving layer's GC of an
+  /dev/ublkbN: detach it first`, #267). The hold is taken when the device
+  starts, not once it is ready, and a delete reads the holds again right
+  before it removes the volume, so a delete racing an attach either is
+  refused or the attach answers `404` with its device taken down (#493).
+  The serving layer's GC of an
   ephemeral export whose volume is still a device on the node keeps the
   withdrawn row and deletes the volume once it is detached.
 - **`attachments[].remote`** (#292): the remote hosts connected right now to

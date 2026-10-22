@@ -327,6 +327,17 @@ tests run on.
    volume's write gate, which every write and discard holds shared for its
    whole length, and refuses the volume from then on: a write queued behind
    the delete fails instead of remapping a volume that is gone.
+19. **A volume being attached cannot be deleted under its device** (#493).
+   A ublk attach used to hold its volume only once the device was ready,
+   and a delete could finish while the device was still starting, so the
+   attach answered a device over a volume that was gone (pvetest1 12.42:
+   the kubelet's startup sweep deleted three container roots it was
+   attaching, and their mounts got EINVAL and ENXIO). The hold is now
+   taken when the device starts. A delete reads the holds again after its
+   write gate, with nothing awaited before the volume is removed, so a
+   hold taken while it waited refuses it. An attach whose volume went
+   anyway (the delete removed it first) takes its device down and answers
+   404.
 
 ## How it is checked
 
