@@ -62,6 +62,13 @@ The golden itself is built by stormcos's `deploy/build-goldens.sh` with
 - `src/main.rs` is a wrapper; the command line is `stormblock::cli`, compiled
   and tested once as part of the library.
 
+**Main is the next release; work in progress never is its head** (#492:
+12.39 staged c2fdcce, `WIP(#474)`). Pause on a `wip/` branch, never on main.
+`.githooks/pre-push` refuses a push that leaves main's head `WIP…`: enable it
+in every checkout with `git config core.hooksPath .githooks`
+(`STORMBLOCK_ALLOW_WIP_MAIN=1` overrides). `check.sh` fails a `WIP…` head
+(`CHECK_ALLOW_WIP=1` to check a branch's anyway).
+
 **The routine check is `check.sh`** (#357): the musl release build of
 `stormblock` (and stormblock-test's own check with `STORMBLOCK_TEST_DIR`, #371),
 every initramfs test under sh and busybox sh, the whole nextest suite, the
@@ -209,9 +216,11 @@ the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v
 Master's review: 12.39's engine was c2fdcce, `WIP(#474)`: main's head when
 it was staged (a pause for P0 #475 committed on main). WIP commits inside a
 finished branch's fast-forward are harmless; a WIP head is what ships.
-- [ ] `.githooks/pre-push` (`git config core.hooksPath .githooks`): a push
-      leaving main's head `WIP…` refused
-- [ ] check.sh: a `WIP…` head fails (`CHECK_ALLOW_WIP=1` on a branch)
+- [x] `.githooks/pre-push` (`git config core.hooksPath .githooks`): a push
+      leaving main's head `WIP…` refused; tests/githooks-wip.sh (6 checks);
+      enabled in this checkout
+- [x] check.sh: a `WIP…` head fails (`CHECK_ALLOW_WIP=1` on a branch), and
+      runs the hook's test
 - [ ] stormcentral: stage stormblock from its newest tag (every staged
       golden is tagged here since #353)
 - [ ] docs (CLAUDE.md rule), CHANGELOG; check.sh; close

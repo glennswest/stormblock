@@ -1,0 +1,27 @@
+#!/bin/sh
+# pre-push (#492): main's head is the next release. A goldens stage builds
+# it as it is, so a push that leaves it on a work-in-progress commit ships
+# unfinished work: 12.39's engine was c2fdcce, `WIP(#474)`, pushed to main as
+# a pause point. WIP commits inside a finished branch's fast-forward are
+# fine; the head is what is refused. Enable once per checkout:
+#   git config core.hooksPath .githooks
+# STORMBLOCK_ALLOW_WIP_MAIN=1 pushes anyway.
+z=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$remote_ref" = refs/heads/main ] || continue
+    [ "$local_sha" = "$z" ] && continue
+    subject=$(git log -1 --format=%s "$local_sha")
+    case "$subject" in
+    WIP*|wip*)
+        if [ "${STORMBLOCK_ALLOW_WIP_MAIN:-}" = 1 ]; then
+            echo "pre-push: main's head is '$subject' (STORMBLOCK_ALLOW_WIP_MAIN=1: pushed anyway)" >&2
+            continue
+        fi
+        echo "pre-push: refused: main's head would be '$subject'." >&2
+        echo "  main is the next release (#492): keep work in progress on a wip/ branch" >&2
+        echo "  (git push origin HEAD:wip/<issue>-<what>), and push main once it is finished." >&2
+        exit 1
+        ;;
+    esac
+done
+exit 0

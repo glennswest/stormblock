@@ -5,6 +5,10 @@
 #
 # What a commit must pass before it is called done, in one command, so no part
 # of it is skipped by accident:
+#   0. a finished commit (#492): a head whose subject starts `WIP` is not done
+#      (main's head is the next release; 12.39 shipped c2fdcce, `WIP(#474)`).
+#      `CHECK_ALLOW_WIP=1` runs the rest on a branch's WIP head. And the
+#      pre-push hook that keeps such a head off main (tests/githooks-wip.sh).
 #   1. the musl release build of `stormblock`, the static binary nodes and
 #      stormblock-test's image run. 87d2d99 reached main not compiling; the
 #      test machines found it. The suites themselves live in
@@ -21,6 +25,21 @@ root=$(cd "$(dirname "$0")" && pwd)
 cd "$root"
 mkdir -p tmp
 export TMPDIR="$root/tmp"
+
+echo "== check: a finished commit (#492)"
+if command -v git >/dev/null 2>&1 && head_subject=$(git log -1 --format=%s 2>/dev/null); then
+    case "$head_subject" in
+    WIP*|wip*)
+        if [ "${CHECK_ALLOW_WIP:-}" = 1 ]; then
+            echo "  the head is '$head_subject' (CHECK_ALLOW_WIP=1: checked anyway; not done)"
+        else
+            echo "FAIL: the head is '$head_subject': a WIP commit is not done (#492; CHECK_ALLOW_WIP=1 checks it anyway)"
+            exit 1
+        fi
+        ;;
+    esac
+fi
+sh tests/githooks-wip.sh >"$TMPDIR/check.out" 2>&1 || { cat "$TMPDIR/check.out"; echo "FAIL: tests/githooks-wip.sh"; exit 1; }
 
 echo "== check: the musl release build"
 command -v rustup >/dev/null 2>&1 && rustup target add x86_64-unknown-linux-musl >/dev/null 2>&1 || true
