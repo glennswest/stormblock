@@ -958,8 +958,11 @@ forge has one address, so the flow-over had one NIC.
       ALL PASS (real busybox DHCP both ends); check.sh on the branch ALL PASS
       (1254/1254); docs, CHANGELOG on the branch
 - [x] stormpump#169 done (golden-stormpump-9fa932573a13 renews the leases)
-- [ ] merge: asked on #450 (needs-owner, 2026-10-17): A now (next wave), B
-      after the single-node pacing (recommended); then a golden, close.
+- [x] decided B (master, 2026-10-17): merge when the single-node pacing
+      ends; keep the branch rebased. Rebased 2026-10-22 onto main (v22.2.0,
+      #492; 181 behind): check.sh ALL PASS (1269/1269),
+      ci-path-nics-verify.sh ALL PASS; parked until the pacing lifts
+- [ ] merge when the master queues it (rebase + check again); golden; close.
       Metal: the Dell's ConnectX-4 Lx must be cabled to g16 to carry a path
 
 ### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — DONE (golden-stormblock-0a9fe2d97cf9), closed
