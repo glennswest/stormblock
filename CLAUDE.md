@@ -229,7 +229,7 @@ the choice recorded as stormdrive's designation.
       `rd.stormblock.slab=/dev/sda`) and storminstall (`system_drive`
       from the picker) told; closed. Metal: server8 (two older installs)
 
-### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — IN PROGRESS: decided A (drop the read-back under #412's validation)
+### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — DONE (v22.1.0), shipped; server1's after-measure pending
 
 server1 (X9, ST2000DM008) 12.40: 3025 + 727 extents at 22–23 MB/s; the
 copy is 84 of 95 s (paced 4.6 s); halving the window (64→32) left the rate
@@ -257,8 +257,9 @@ is not known.
       by the validation; read back without a hold), flow/install/validation
       48/48 under nextest; model: read back 28–30 s → 0, copy 75–79 →
       47–57 s (1.5 GB, 60 MB/s); rule 17, README, CHANGELOG (safety line)
-- [ ] check.sh; release; server1 before (12.40: 23 MB/s, copy only) and
-      after (the next pve/X9 release with this engine: the split line)
+- [x] check.sh at 49a7421 ALL PASS (1265/1265); merged; v22.1.0; stage
+      requested; shipped. server1 before: 12.40 23 MB/s (copy 84 of 95 s);
+      after: the first X9 release carrying v22.1.0 (its split line)
 
 ### dir-block-csum on a live service clone after a power cycle (2026-10-22, #496, P0) — DONE (v21.5.0), closed; the next pve run's check settles pvetest2
 
