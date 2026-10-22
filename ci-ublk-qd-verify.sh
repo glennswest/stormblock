@@ -67,7 +67,7 @@ I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
 for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed \
-         awk cut tr kill seq mkdir rm timeout pidof ps touch; do
+         awk cut tr kill seq mkdir rm timeout pidof ps touch od; do
     ln -sf busybox "$I/bin/$a"
 done
 for b in "$BIN" "$DMSETUP" "$CURL"; do
@@ -197,6 +197,7 @@ EOT
 
     [ "$mode" = concurrent ] && in_use
     [ "$mode" = concurrent ] && parallel_attach
+    [ "$mode" = concurrent ] && attach_delete_race
     [ "$mode" = concurrent ] && unanswered
 
     step stop
@@ -297,6 +298,57 @@ parallel_attach() {
     for v in $ids; do api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$v/attach > /dev/null; done
 }
 
+# #493: the kubelet's root sweep deleted container roots while their ublk
+# devices came up, and the devices then served volumes that were gone
+# (EINVAL, ENXIO, EUCLEAN at the mount, or a 404 on the attach). Thirty
+# fresh clones of an ext4 template, each attached and deleted at once:
+# either the attach wins (the delete answers 409, the device has the
+# clone's ext4 on it) or the delete does (the attach answers 404). Never a
+# device whose volume is gone.
+attach_delete_race() {
+    step attach-delete-race
+    g=$(api -X POST http://127.0.0.1:$port/api/v1/fstemplates -d '{"name":"race-root","size":"64M"}' \
+        | sed -n 's/.*"sealed_volume_id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    [ -n "$g" ] || { r attach-delete-race "FAIL (no template)"; sed 's/^/LOG /' /run/engine-$mode.log | tail -5; return; }
+    won_attach=0 won_delete=0 bad=
+    for n in $(seq 1 30); do
+        c=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$g/clone -d "{\"name\":\"ctr-ct-$n\"}" \
+            | grep -o '"\(volume_\)\{0,1\}id":"[0-9a-f-]*"' | head -1 | cut -d'"' -f4)
+        [ -n "$c" ] || { bad="$bad clone$n"; continue; }
+        ( curl -s -m 60 -o /tmp/ra-$n -w '%{http_code}' -H 'Authorization: Bearer t' -H 'Content-Type: application/json' \
+            -X POST http://127.0.0.1:$port/api/v1/volumes/$c/attach -d '{"transport":"ublk"}' > /tmp/ra-$n.code ) &
+        a=$!
+        # The delete lands anywhere from before the attach to while its
+        # device comes up.
+        [ $((n % 3)) -eq 1 ] || sleep 0.0$((n % 10))
+        dc=$(curl -s -m 60 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer t' \
+            -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c)
+        wait $a
+        ac=$(cat /tmp/ra-$n.code)
+        d=$(sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p' /tmp/ra-$n)
+        case "$ac:$dc" in
+        200:409|201:409)
+            magic=$(dd if=$d bs=8 skip=135 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' | cut -c1-4)
+            if [ "$magic" = 53ef ] && api http://127.0.0.1:$port/api/v1/volumes/$c >/dev/null; then
+                won_attach=$((won_attach + 1))
+            else
+                bad="$bad $n:attached-but-$magic"
+            fi
+            api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c/attach >/dev/null
+            api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c >/dev/null ;;
+        404:204|409:204)
+            won_delete=$((won_delete + 1)) ;;
+        *)
+            bad="$bad $n:attach$ac/delete$dc${d:+($d)}" ;;
+        esac
+    done
+    echo "GUEST attach-delete-race: the attach won $won_attach, the delete $won_delete"
+    # No device is left on a volume that is gone.
+    leftover=$(api http://127.0.0.1:$port/api/v1/volumes | grep -o '"name":"ctr-ct-[0-9]*"' | wc -l)
+    [ -z "$bad" ] && [ "$leftover" = 0 ] && r attach-delete-race PASS \
+        || r attach-delete-race "FAIL (${bad:-none bad}; $leftover left)"
+}
+
 # #337: a flush the disk below never answers. The slab's dm device is
 # suspended (I/O queued, not failed) after a write, so the fsync's FLUSH
 # waits in the engine. Health must name it once it is 30 s old, and the
@@ -347,7 +399,7 @@ echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
-         parallel-attach; do
+         parallel-attach attach-delete-race; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ -n "$SP" ] && [ -n "$CP" ] && [ "$CP" -gt 0 ]; then

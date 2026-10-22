@@ -2303,6 +2303,14 @@ impl VolumeManager {
             Some(p) => p,
             None => self.preread_volume(id).await?,
         };
+        // Again, with nothing awaited between this and the removal (#493):
+        // an attach that began while the gate or the read above waited holds
+        // the volume by now, and its device must not come up on a volume
+        // that is gone. One that begins after the removal finds it absent.
+        let by = self.holds.held_by(id.0);
+        if !by.is_empty() {
+            return Err(VolumeError::InUse { id, by });
+        }
         let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
         // Anything that still holds the handle (a write queued behind the
@@ -5250,6 +5258,39 @@ mod redundancy_tests {
         assert!(buf.iter().all(|x| *x == 0x43), "the clone's own write");
         assert!(mgr.check_golden_slots(g).await.is_ok());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #493: an attach whose device begins while a delete waits (for the
+    /// volume's writes, #487) holds the volume by the time the delete would
+    /// remove it, and the delete is refused rather than leaving the device
+    /// to come up on a volume that is gone.
+    #[tokio::test]
+    async fn a_delete_is_refused_by_a_hold_taken_while_it_waited() {
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        let (a, _pa) = file_slab(&d, "a", slot).await;
+        mgr.add_slab(a).await;
+        let v = mgr.create_volume_any("ctr-ct-00000008", 8 * slot).await.unwrap();
+        let holds = mgr.holds();
+        let handle = mgr.get_volume_handle(&v).unwrap();
+        let gate = handle.hold_writes().await;
+        let mgr = Arc::new(tokio::sync::Mutex::new(mgr));
+        let del = {
+            let m = mgr.clone();
+            tokio::spawn(async move { m.lock().await.delete_volume(v).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!del.is_finished(), "the delete waits for the volume's writes");
+        holds.hold(v.0, "a ublk device being started");
+        drop(gate);
+        match del.await.unwrap() {
+            Err(VolumeError::InUse { by, .. }) => assert_eq!(by, vec!["a ublk device being started".to_string()]),
+            other => panic!("the delete went through under a starting device: {other:?}"),
+        }
+        assert!(mgr.lock().await.get_volume(&v).is_some(), "the volume is still there");
+        holds.release(v.0, "a ublk device being started");
+        mgr.lock().await.delete_volume(v).await.expect("deleted once nothing holds it");
     }
 
     /// #487: a golden whose slot was let go under it (a delete beside a

@@ -2047,9 +2047,10 @@ async fn attach_volume(
                 "volume {uuid} is secret and already attached ({dev}): it has one consumer at a time (#74)"
             ));
         }
-        return match crate::mgmt::ublk_export::attach(&state, &key, device.clone()).await {
-            Some(path) => Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
-            None => ApiError::conflict(format!(
+        return match crate::mgmt::ublk_export::attach_local(&state, &key, uuid, device.clone()).await {
+            Err(gone) => ApiError::not_found(gone),
+            Ok(Some(path)) => Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
+            Ok(None) => ApiError::conflict(format!(
                 "volume {uuid} is secret: it is attached as a local ublk device only, and ublk is not available here"
             )),
         };
@@ -2092,8 +2093,10 @@ async fn attach_volume(
             true,
         )
     {
-        if let Some(path) = crate::mgmt::ublk_export::attach(&state, &key, device.clone()).await {
-            return Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response();
+        match crate::mgmt::ublk_export::attach_local(&state, &key, uuid, device.clone()).await {
+            Err(gone) => return ApiError::not_found(gone),
+            Ok(Some(path)) => return Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
+            Ok(None) => {}
         }
         if want == WantTransport::Ublk {
             return ApiError::conflict(

@@ -211,6 +211,27 @@ pub enum Begin {
     Started(Launch, tokio::sync::watch::Sender<Option<Option<String>>>),
 }
 
+/// What holds a volume while its ublk device is coming up (#493).
+const STARTING: &str = "a ublk device being started";
+
+/// [`attach`] for a volume of this engine: when the volume was deleted
+/// while its device came up (a delete that came before the device's hold),
+/// the device is taken down again and `Err` says so: the caller answers 404
+/// rather than a device serving a volume that is gone (#493).
+pub async fn attach_local(
+    state: &Arc<crate::mgmt::AppState>,
+    volume_id: &str,
+    volume: uuid::Uuid,
+    device: Arc<dyn BlockDevice>,
+) -> Result<Option<String>, String> {
+    let path = attach(state, volume_id, device).await;
+    if path.is_some() && !state.volume_presence.contains(&crate::volume::VolumeId(volume)) {
+        state.ublk_exports.lock().await.remove(volume_id);
+        return Err(format!("volume {volume} was deleted while its ublk device was being started"));
+    }
+    Ok(path)
+}
+
 /// A ublk server started for an attach and not yet ready (#231).
 pub struct Launch {
     volume_uuid: uuid::Uuid,
@@ -403,6 +424,10 @@ impl UblkExportManager {
         }
         match self.start(volume_id, device) {
             Some(launch) => {
+                // Held from now, not from when the device is ready (#493): a
+                // delete in between went through and the device came up on a
+                // volume that was gone (the mount's EINVAL, ENXIO, EUCLEAN).
+                self.holds.hold(launch.volume_uuid, STARTING);
                 let (tx, rx) = tokio::sync::watch::channel(None);
                 self.pending.insert(volume_id.to_string(), rx);
                 Begin::Started(launch, tx)
@@ -416,6 +441,7 @@ impl UblkExportManager {
     /// server down. Returns what the attach answers.
     pub fn finish(&mut self, volume_id: &str, launch: Launch, ready: Result<String, String>) -> Option<String> {
         self.pending.remove(volume_id);
+        self.holds.release(launch.volume_uuid, STARTING);
         let device_path = match ready {
             Ok(p) => p,
             Err(why) => {
@@ -693,13 +719,15 @@ impl UblkExportManager {
             return (Begin::Wait(rx.clone()), down);
         }
         let launch = Launch {
-            volume_uuid: uuid::Uuid::new_v4(),
+            // The volume's own id when the key is one, as a real attach has.
+            volume_uuid: uuid::Uuid::parse_str(volume_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
             shutdown,
             #[cfg(target_os = "linux")]
             server: None,
             done: Default::default(),
             before: String::new(),
         };
+        self.holds.hold(launch.volume_uuid, STARTING);
         let (tx, rx) = tokio::sync::watch::channel(None);
         self.pending.insert(volume_id.to_string(), rx);
         (Begin::Started(launch, tx), down)
@@ -910,6 +938,30 @@ mod tests {
         }
         #[cfg(not(target_os = "linux"))]
         assert!(wait.is_empty());
+    }
+
+    /// #493: a volume is held from the moment its device starts, not from
+    /// when it is ready: the kubelet's root sweep deleted roots while their
+    /// devices came up, and the devices then served volumes that were gone.
+    /// The hold passes to the device when it comes up, and goes when it
+    /// does not.
+    #[test]
+    fn a_volume_is_held_while_its_device_comes_up() {
+        let holds = crate::volume::holds::ServeHolds::default();
+        let mut mgr = UblkExportManager::new().with_holds(holds.clone());
+        let a = uuid::Uuid::new_v4();
+        let (begun, _down) = mgr.begin_fake(&a.to_string());
+        let Begin::Started(launch, _tx) = begun else { panic!("started") };
+        assert_eq!(holds.held_by(a), vec![STARTING.to_string()], "held while the device starts");
+        assert_eq!(mgr.finish(&a.to_string(), launch, Ok("/dev/ublkb85".into())).as_deref(), Some("/dev/ublkb85"));
+        assert_eq!(holds.held_by(a), vec!["ublk device /dev/ublkb85".to_string()], "then by the device");
+
+        let b = uuid::Uuid::new_v4();
+        let (begun, _down) = mgr.begin_fake(&b.to_string());
+        let Begin::Started(launch, _tx) = begun else { panic!("started") };
+        assert!(!holds.held_by(b).is_empty());
+        assert!(mgr.finish(&b.to_string(), launch, Err("never came up".into())).is_none());
+        assert!(holds.held_by(b).is_empty(), "a device that did not come up holds nothing");
     }
 
     /// A device holds its volume in the volume manager's holds from the

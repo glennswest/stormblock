@@ -1842,8 +1842,13 @@ async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) 
                 )));
             }
             if let Some(device) = device {
-                if let Some(path) = crate::mgmt::ublk_export::attach(&state, &id, device).await {
-                    return Ok(Json(AttachInfo::Ublk { device_hint: path }));
+                match crate::mgmt::ublk_export::attach_local(&state, &id, local, device).await {
+                    Err(gone) => {
+                        forget_attachment(&state, &id, &req.node).await;
+                        return Err(V1Error::NotFound(gone));
+                    }
+                    Ok(Some(path)) => return Ok(Json(AttachInfo::Ublk { device_hint: path })),
+                    Ok(None) => {}
                 }
             }
         }
