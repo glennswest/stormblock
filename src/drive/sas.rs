@@ -55,6 +55,27 @@ pub struct SasDevice {
     /// One cache flush for every caller that asked before it began (#269):
     /// a node's slabs are partitions over this one device.
     flushes: super::flushgate::FlushGate,
+    /// The bulk-write lane (#491): what large writes may have in flight at
+    /// once, in [`LANE_UNIT`]s. A read or a small write never waits on it,
+    /// so it queues in the device behind at most this much bulk data, not
+    /// behind everything a busy volume's ublk queue let in.
+    lane: Option<tokio::sync::Semaphore>,
+    lane_units: u32,
+}
+
+/// The bulk lane's unit, and the smallest write that takes it (#491).
+const LANE_UNIT: usize = 64 << 10;
+const LANE_FROM: usize = 256 << 10;
+
+/// The bulk lane's size (#491): `STORMBLOCK_BULK_INFLIGHT_MB`, else 8 MiB on a
+/// rotating disk (about 0.1 s of a 7200 rpm drive's streaming) and 64 MiB on
+/// anything else; 0 turns it off.
+fn lane_units(rotational: bool) -> u32 {
+    let mb = std::env::var("STORMBLOCK_BULK_INFLIGHT_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(if rotational { 8 } else { 64 });
+    ((mb << 20) / LANE_UNIT as u64).min(u32::MAX as u64) as u32
 }
 
 impl SasDevice {
@@ -131,6 +152,7 @@ impl SasDevice {
         let io = DirectIo::new(fd);
         tracing::debug!(%path, engine = io.engine_name(), block_size, "block device opened O_DIRECT");
 
+        let lane_units = lane_units(device_type == DriveType::SasHdd);
         Ok(SasDevice {
             fd,
             io,
@@ -142,6 +164,8 @@ impl SasDevice {
             fua,
             rmw: tokio::sync::Mutex::new(()),
             flushes: Default::default(),
+            lane: (lane_units > 0).then(|| tokio::sync::Semaphore::new(lane_units as usize)),
+            lane_units,
         })
     }
 
@@ -205,6 +229,14 @@ impl BlockDevice for SasDevice {
             return Ok(0);
         }
         self.check_range(offset, buf.len())?;
+        // A large write takes its share of the bulk lane first (#491).
+        let _lane = match &self.lane {
+            Some(l) if buf.len() >= LANE_FROM => {
+                let units = (buf.len().div_ceil(LANE_UNIT) as u32).min(self.lane_units);
+                l.acquire_many(units).await.ok()
+            }
+            _ => None,
+        };
         let (start, len) = self.span(offset, buf.len());
         if start == offset && len == buf.len() {
             let mut out = DmaBuf::alloc(len);
