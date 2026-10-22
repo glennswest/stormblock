@@ -6330,9 +6330,15 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     /// The largest write a flow-over makes on its destination (#401):
-    /// neighbouring slots merged into one, `STORMBLOCK_FLOW_RUN_MB`, 32.
-    fn flow_run_bytes() -> u64 {
-        let mb = std::env::var("STORMBLOCK_FLOW_RUN_MB").ok().and_then(|v| v.parse().ok()).filter(|n| *n > 0).unwrap_or(32u64);
+    /// neighbouring slots merged into one, `STORMBLOCK_FLOW_RUN_MB`, 32; 64
+    /// on a rotating disk, which pays a seek for every write and, drive-managed
+    /// SMR, writes a long sequential run best (#490).
+    fn flow_run_bytes(rotational: bool) -> u64 {
+        let mb = std::env::var("STORMBLOCK_FLOW_RUN_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(if rotational { 64u64 } else { 32 });
         mb << 20
     }
 
@@ -6551,7 +6557,15 @@ pub async fn run() -> anyhow::Result<()> {
         // Where the flow-over's time goes (#331): said every 100 moves and at
         // the end, so a slow one on a node says why.
         let mut spent = FlowSpent { began: Some(std::time::Instant::now()), ..Default::default() };
-        let mut pace = FlowPace::new(flow_window(), FlowPace::from_env());
+        // A rotating destination is written in longer runs (#490), and its
+        // window holds two of them, so one run's sources arrive while the
+        // other is written.
+        let dest_rotational = registry.read().await.get(&dest).is_some_and(|s| s.device().rotational());
+        let window_bytes = if dest_rotational { 2 * flow_run_bytes(true) } else { FLOW_WINDOW_BYTES };
+        let mut pace = FlowPace::new(
+            if dest_rotational { flow_window().max((window_bytes >> 20) as usize) } else { flow_window() },
+            FlowPace::from_env(),
+        );
         // Moves not yet persisted, and since when (#410): one persist for a
         // batch of them, not one a window.
         let (mut unpersisted, mut last_persist) = (0u64, std::time::Instant::now());
@@ -6671,7 +6685,7 @@ pub async fn run() -> anyhow::Result<()> {
                 // shares with its clones is listed once for each map, and one
                 // move rewrites all of them.
                 let mut seen = std::collections::HashSet::new();
-                let cap = pace.window.min((FLOW_WINDOW_BYTES / source_slot.max(1)).max(1) as usize);
+                let cap = pace.window.min((window_bytes / source_slot.max(1)).max(1) as usize);
                 let mut window = Vec::with_capacity(cap);
                 while window.len() < cap {
                     let Some((vol, vext, leg)) = batch.pop_front() else { break };
@@ -6704,11 +6718,13 @@ pub async fn run() -> anyhow::Result<()> {
                         }
                     }
                     let mut results = Vec::with_capacity(held.len() + rest.len());
+                    let mut times = crate::placement::WindowTimes::default();
                     if !held.is_empty() {
                         let items: Vec<_> = held.iter().map(|(v, e, l, f)| (*v, *e, *l, f)).collect();
-                        let outs = engine
-                            .migrate_window_unlocked(gem, registry, &items, dest, flow_run_bytes(), flow_parallel())
+                        let (outs, t) = engine
+                            .migrate_window_unlocked(gem, registry, &items, dest, flow_run_bytes(dest_rotational), flow_parallel())
                             .await;
+                        times = t;
                         for ((vol, vext, leg, f), res) in held.into_iter().zip(outs) {
                             drop(f);
                             let res = match res {
@@ -6756,8 +6772,12 @@ pub async fn run() -> anyhow::Result<()> {
                         .collect()
                         .await;
                     results.extend(one);
-                    results
+                    (results, times)
                 };
+                let (results, times) = results;
+                spent.read += times.read;
+                spent.write += times.write;
+                spent.check += times.check;
                 let copied = started.elapsed();
                 let mut window_moved = 0u64;
                 for (vol, vext, res, waited) in results {
@@ -7324,6 +7344,11 @@ pub async fn run() -> anyhow::Result<()> {
         persists: u64,
         fence: std::time::Duration,
         copy: std::time::Duration,
+        /// Inside the copy (#490): reading the sources (over NVMe/TCP),
+        /// writing the copies and reading them back. Reads overlap writes.
+        read: std::time::Duration,
+        write: std::time::Duration,
+        check: std::time::Duration,
         persist: std::time::Duration,
         release: std::time::Duration,
         /// Pauses to let a slow destination disk drain (#282).
@@ -7336,10 +7361,13 @@ pub async fn run() -> anyhow::Result<()> {
             let secs = began.elapsed().as_secs_f64().max(1e-9);
             let (zeroed, mb) = crate::flowprogress::FLOW.snapshot().map(|p| (p.zeroed, p.mb_per_s)).unwrap_or((0, 0.0));
             let line = format!(
-                "flow-over: {moved} moved ({zeroed} all zeros, not copied) in {secs:.1}s ({:.0}/h, {mb:.1} MB/s): fence {:.1}s, copy {:.1}s, persist {:.1}s ({} persists), release {:.1}s, paced {:.1}s",
+                "flow-over: {moved} moved ({zeroed} all zeros, not copied) in {secs:.1}s ({:.0}/h, {mb:.1} MB/s): fence {:.1}s, copy {:.1}s (read {:.1}s, write {:.1}s, read back {:.1}s), persist {:.1}s ({} persists), release {:.1}s, paced {:.1}s",
                 moved as f64 * 3600.0 / secs,
                 self.fence.as_secs_f64(),
                 self.copy.as_secs_f64(),
+                self.read.as_secs_f64(),
+                self.write.as_secs_f64(),
+                self.check.as_secs_f64(),
                 self.persist.as_secs_f64(),
                 self.persists,
                 self.release.as_secs_f64(),
@@ -13761,6 +13789,70 @@ mod forge_mode_tests {
         }
     }
 
+    /// One actuator (#490): an I/O at a time, a seek when it does not start
+    /// where the last one ended, then its bytes at `mbps`. What a rotating
+    /// destination (or a disk-bound appliance) is to the flow-over.
+    struct OneArm {
+        inner: Arc<dyn BlockDevice>,
+        mbps: f64,
+        seek: std::time::Duration,
+        arm: tokio::sync::Mutex<u64>,
+    }
+
+    impl OneArm {
+        async fn time(&self, offset: u64, len: usize) {
+            let mut at = self.arm.lock().await;
+            let mut d = std::time::Duration::from_secs_f64(len as f64 / (self.mbps * 1e6));
+            if *at != offset {
+                d += self.seek;
+            }
+            *at = offset + len as u64;
+            tokio::time::sleep(d).await;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for OneArm {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.inner.id()
+        }
+        fn drive_id(&self) -> crate::drive::DeviceId {
+            self.inner.drive_id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.inner.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.inner.optimal_io_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            crate::drive::DriveType::SasHdd
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            self.time(offset, buf.len()).await;
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            self.time(offset, buf.len()).await;
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            self.inner.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+        fn discard_granularity(&self) -> u32 {
+            self.inner.discard_granularity()
+        }
+        fn smart_status(&self) -> crate::drive::DriveResult<crate::drive::SmartData> {
+            self.inner.smart_status()
+        }
+    }
+
     /// #331: the flow-over's rate, modelled on a netbooted install. An
     /// appliance engine serves a release slab (goldens, and clones of them
     /// that wrote an extent each) as a sealed volume over NVMe/TCP; the node
@@ -13769,7 +13861,10 @@ mod forge_mode_tests {
     /// uses, while a foreground writer runs. Prints the rate and where the
     /// time went (`FlowSpent`). Knobs: FLOW_MODEL_EXTENTS (1500),
     /// FLOW_MODEL_GOLDENS (30), FLOW_MODEL_FOREGROUND (1),
-    /// FLOW_MODEL_DEST_FLUSH_MS (0: the destination's flushes take this, #410).
+    /// FLOW_MODEL_DEST_FLUSH_MS (0: the destination's flushes take this, #410),
+    /// FLOW_MODEL_DEST_MBPS / FLOW_MODEL_DEST_SEEK_MS (0: the destination is
+    /// one actuator at that rate, seeking between I/Os that do not follow on,
+    /// #490).
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     #[ignore]
     async fn flow_over_rate_model() {
@@ -13877,6 +13972,17 @@ mod forge_mode_tests {
                 .await
                 .unwrap(),
         ) as Arc<dyn BlockDevice>;
+        let (dest_mbps, dest_seek) = (env("FLOW_MODEL_DEST_MBPS", 0), env("FLOW_MODEL_DEST_SEEK_MS", 0));
+        let local = if dest_mbps > 0 {
+            Arc::new(OneArm {
+                inner: local,
+                mbps: dest_mbps as f64,
+                seek: Duration::from_millis(dest_seek),
+                arm: Default::default(),
+            }) as Arc<dyn BlockDevice>
+        } else {
+            local
+        };
         let dest_flush = env("FLOW_MODEL_DEST_FLUSH_MS", 0);
         let local = if dest_flush > 0 {
             Arc::new(SlowFlush { inner: local, delay: Duration::from_millis(dest_flush), gate: Default::default() })
@@ -13943,6 +14049,7 @@ mod forge_mode_tests {
                 "extents_on_source": left, "moved": moved, "failed": failed, "secs": secs,
                 "extents_per_hour": moved as f64 * 3600.0 / secs, "mb_per_s": moved as f64 / secs,
                 "foreground": foreground, "built_secs": built.as_secs_f64(), "dest_flush_ms": dest_flush,
+                "dest_mbps": dest_mbps, "dest_seek_ms": dest_seek,
                 "validated": v.validated, "validate_skipped": v.skipped, "validate_secs": vsecs,
                 "validate_mb_per_s": v.bytes as f64 / 1e6 / vsecs.max(1e-9),
             })

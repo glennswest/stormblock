@@ -119,6 +119,19 @@ pub struct MigrateExtentResult {
 /// A slot to read: its device, where it starts, how long it is.
 type SourceAt = (Arc<dyn BlockDevice>, u64, u64);
 
+/// Where a window's time went (#490): reading its sources, writing its
+/// copies, reading them back. Reads overlap the writes, so the three can add
+/// up to more than the window took.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowTimes {
+    /// From the first source read to the last one's arrival.
+    pub read: std::time::Duration,
+    /// The destination writes.
+    pub write: std::time::Duration,
+    /// The read-backs of what was written (#239).
+    pub check: std::time::Duration,
+}
+
 /// What became of one item of [`PlacementEngine::migrate_window_unlocked`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowMove {
@@ -935,13 +948,14 @@ impl PlacementEngine {
         })
     }
 
-    /// Move a window of legs to `dest` the way a slow disk wants them (#401):
-    /// the sources read in parallel, the destination slots allocated
-    /// together and written in slot order as runs of up to `run_bytes`
-    /// (one write and one read-back each, not one per extent), and published
-    /// with one sweep of the maps. A source that reads as all zeros is not
-    /// copied: its slot is unmapped from every map naming it (an unmapped
-    /// extent reads as zeros), where every reference is that slot alone.
+    /// Move a window of legs to `dest` the way a slow disk wants them (#401,
+    /// #490): the sources read in parallel and, as they arrive, written in
+    /// slot order as runs of up to `run_bytes` (one write and one read-back
+    /// each, not one per extent) while the later sources are still being
+    /// read, then published with one sweep of the maps. A source that reads
+    /// as all zeros is not copied: its slot is unmapped from every map naming
+    /// it (an unmapped extent reads as zeros), where every reference is that
+    /// slot alone.
     ///
     /// Each item carries the exclusive fence on its source slot, held by the
     /// caller until this returns (#239), as for [`migrate_leg_unlocked`].
@@ -949,7 +963,8 @@ impl PlacementEngine {
     /// the registry to publish. Every source moved or unmapped is owed, freed
     /// once the map that no longer names it is on disk.
     ///
-    /// Returns one outcome per item, in the order given.
+    /// Returns one outcome per item, in the order given, and where the time
+    /// went.
     pub async fn migrate_window_unlocked(
         &self,
         gem: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>,
@@ -958,10 +973,11 @@ impl PlacementEngine {
         dest_id: SlabId,
         run_bytes: u64,
         reads_at_once: usize,
-    ) -> Vec<Result<WindowMove, PlacementError>> {
+    ) -> (Vec<Result<WindowMove, PlacementError>>, WindowTimes) {
         use futures_util::StreamExt;
         let n = items.len();
         let mut out: Vec<Option<Result<WindowMove, PlacementError>>> = (0..n).map(|_| None).collect();
+        let mut times = WindowTimes::default();
 
         // Which items still name their source, and the generation a move
         // records.
@@ -982,8 +998,6 @@ impl PlacementEngine {
             }
         }
 
-        // The sources, in parallel (each is a round trip to the appliance),
-        // with no lock held.
         let sources: Vec<Option<SourceAt>> = {
             let r = registry.read().await;
             items
@@ -996,146 +1010,91 @@ impl PlacementEngine {
                 })
                 .collect()
         };
-        let todo: Vec<usize> = (0..n).filter(|i| out[*i].is_none()).collect();
-        let mut data: Vec<Option<Vec<u8>>> = (0..n).map(|_| None).collect();
-        let reads: Vec<(usize, Result<Vec<u8>, PlacementError>)> = futures_util::stream::iter(todo)
-            .map(|i| {
-                let src = sources[i].clone();
-                let old = items[i].2;
-                async move {
-                    let Some((dev, at, size)) = src else {
-                        return (i, Err(PlacementError::SlabNotFound(old.slab_id)));
-                    };
-                    let mut buf = vec![0u8; size as usize];
-                    let err = |e: String| PlacementError::ReadFailed { slab_id: old.slab_id, slot_idx: old.slot_idx, error: e };
-                    match dev.read(at, &mut buf).await {
-                        Ok(got) if got == buf.len() => (i, Ok(buf)),
-                        Ok(got) => (i, Err(err(format!("read {got} of {} bytes", buf.len())))),
-                        Err(e) => (i, Err(err(e.to_string()))),
-                    }
-                }
-            })
-            .buffer_unordered(reads_at_once.max(1))
-            .collect()
-            .await;
-        for (i, r) in reads {
-            match r {
-                Ok(b) => data[i] = Some(b),
-                Err(e) => out[i] = Some(Err(e)),
-            }
-        }
-
-        // All zeros: unmapped, not copied (tried first; a slot some
-        // reference keeps is copied like any other).
-        let zero: HashSet<Leg> = (0..n)
-            .filter(|i| data[*i].as_deref().is_some_and(|b| b.iter().all(|x| *x == 0)))
-            .map(|i| items[i].2)
-            .collect();
-        let unmapped = if zero.is_empty() {
-            HashSet::new()
-        } else {
-            let mut g = gem.write().await;
-            let done = g.unmap_legs_everywhere(&zero);
-            drop(g);
-            let mut owed = self.owed.lock().unwrap();
-            for leg in &done {
-                owed.push((leg.slab_id, leg.slot_idx));
-            }
-            done
-        };
-        for i in 0..n {
-            if data[i].is_some() && unmapped.contains(&items[i].2) {
-                data[i] = None;
-                out[i] = Some(Ok(WindowMove::Zeroed));
-            }
-        }
-
-        // The rest: destination slots, together, in the order the window
-        // gave them (first-fit: a fresh slab hands out a run).
-        let copy: Vec<usize> = (0..n).filter(|i| data[*i].is_some()).collect();
-        let mut dest: Vec<(usize, u64)> = Vec::with_capacity(copy.len());
         let (dest_dev, data_offset, slot_size) = {
-            let mut r = registry.write().await;
-            let Some(slab) = r.get(&dest_id) else {
-                for i in copy {
-                    out[i] = Some(Err(PlacementError::SlabNotFound(dest_id)));
-                }
-                return out.into_iter().map(|o| o.unwrap_or(Err(PlacementError::NoDestination))).collect();
-            };
-            let (dev, off, size) = (slab.device().clone(), slab.data_offset(), slab.slot_size());
-            let quarantined = r.is_quarantined(&dest_id);
-            for &i in &copy {
-                let old = items[i].2;
-                let src_size = r.get(&old.slab_id).map(|s| s.slot_size()).unwrap_or(0);
-                if quarantined || !r.size_ok(&dest_id, src_size) {
-                    out[i] = Some(Err(PlacementError::NoDestination));
-                    continue;
-                }
-                let owner = match r.get(&old.slab_id) {
-                    Some(s) => s.owner(old.slot_idx).await,
-                    None => None,
-                }
-                .unwrap_or((items[i].0, items[i].1));
-                let Some(slab) = r.get_mut(&dest_id) else { break };
-                if slab.free_slots() == 0 {
-                    out[i] = Some(Err(PlacementError::SlabFull));
-                    continue;
-                }
-                match slab.allocate_deferred(owner.0, owner.1, gens[i]).await {
-                    Ok(slot) => {
-                        r.reserve(dest_id, slot);
-                        dest.push((i, slot));
+            let r = registry.read().await;
+            match r.get(&dest_id) {
+                Some(slab) => (slab.device().clone(), slab.data_offset(), slab.slot_size()),
+                None => {
+                    for o in out.iter_mut().filter(|o| o.is_none()) {
+                        *o = Some(Err(PlacementError::SlabNotFound(dest_id)));
                     }
-                    Err(_) => out[i] = Some(Err(PlacementError::SlabFull)),
+                    return (out.into_iter().map(|o| o.unwrap_or(Err(PlacementError::NoDestination))).collect(), times);
                 }
             }
-            (dev, off, size)
+        };
+        let todo: Vec<usize> = (0..n).filter(|i| out[*i].is_none()).collect();
+
+        // The sources, in parallel (each is a round trip to the appliance),
+        // with no lock held, handed to the writer as each arrives.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(usize, Result<Vec<u8>, PlacementError>)>();
+        let reader = async {
+            let t = std::time::Instant::now();
+            futures_util::stream::iter(todo)
+                .map(|i| {
+                    let src = sources[i].clone();
+                    let old = items[i].2;
+                    async move {
+                        let Some((dev, at, size)) = src else {
+                            return (i, Err(PlacementError::SlabNotFound(old.slab_id)));
+                        };
+                        let mut buf = vec![0u8; size as usize];
+                        let err = |e: String| PlacementError::ReadFailed { slab_id: old.slab_id, slot_idx: old.slot_idx, error: e };
+                        match dev.read(at, &mut buf).await {
+                            Ok(got) if got == buf.len() => (i, Ok(buf)),
+                            Ok(got) => (i, Err(err(format!("read {got} of {} bytes", buf.len())))),
+                            Err(e) => (i, Err(err(e.to_string()))),
+                        }
+                    }
+                })
+                .buffer_unordered(reads_at_once.max(1))
+                .for_each(|m| {
+                    let _ = tx.send(m);
+                    std::future::ready(())
+                })
+                .await;
+            drop(tx);
+            t.elapsed()
         };
 
-        // Written in slot order, neighbours merged into one write, each run
-        // read back before any map names it (#239).
-        dest.sort_by_key(|(_, slot)| *slot);
-        let per_run = (run_bytes / slot_size.max(1)).max(1) as usize;
-        let mut runs: Vec<Vec<(usize, u64)>> = Vec::new();
-        for d in dest {
-            match runs.last_mut() {
-                Some(run) if run.len() < per_run && run.last().is_some_and(|(_, s)| *s + 1 == d.1) => run.push(d),
-                _ => runs.push(vec![d]),
-            }
-        }
+        // The writer: whatever has arrived, a run's worth at a time, and a
+        // run never more than half the window, so the later half's sources
+        // are read while the first half is written.
+        let per_run = ((run_bytes / slot_size.max(1)) as usize).min(n.div_ceil(2)).max(1);
         let mut written: Vec<(usize, u64)> = Vec::new();
         let mut failed_slots: Vec<u64> = Vec::new();
-        for run in runs {
-            let first = run[0].1;
-            let mut buf = Vec::with_capacity(run.len() * slot_size as usize);
-            for (i, _) in &run {
-                buf.extend_from_slice(data[*i].as_deref().unwrap_or(&[]));
-            }
-            let at = data_offset + first * slot_size;
-            let err = |e: String| PlacementError::WriteFailed { slab_id: dest_id, slot_idx: first, error: e };
-            let res = match dest_dev.write(at, &buf).await {
-                Err(e) => Err(err(e.to_string())),
-                Ok(_) => {
-                    let mut check = vec![0u8; buf.len()];
-                    match dest_dev.read(at, &mut check).await {
-                        Ok(got) if got == buf.len() && check == buf => Ok(()),
-                        Ok(got) if got != buf.len() => Err(err(format!("the copy reads back {got} of {} bytes", buf.len()))),
-                        Ok(_) => Err(err("the copy reads back different from the source".into())),
-                        Err(e) => Err(err(format!("reading the copy back: {e}"))),
+        let writer = async {
+            let mut arrived: Vec<(usize, Vec<u8>)> = Vec::new();
+            let mut open = true;
+            while open || !arrived.is_empty() {
+                if open {
+                    match rx.recv().await {
+                        Some(m) => {
+                            let mut take = |(i, r): (usize, Result<Vec<u8>, PlacementError>)| match r {
+                                Ok(b) => arrived.push((i, b)),
+                                Err(e) => out[i] = Some(Err(e)),
+                            };
+                            take(m);
+                            while let Ok(m) = rx.try_recv() {
+                                take(m);
+                            }
+                        }
+                        None => open = false,
+                    }
+                    // Wait for a run's worth while more is coming.
+                    if open && arrived.len() < per_run {
+                        continue;
                     }
                 }
-            };
-            match res {
-                Ok(()) => written.extend(run),
-                Err(e) => {
-                    for (i, slot) in run {
-                        out[i] = Some(Err(e.clone()));
-                        failed_slots.push(slot);
-                    }
-                }
+                let chunk: Vec<(usize, Vec<u8>)> = std::mem::take(&mut arrived);
+                self.write_chunk(
+                    gem, registry, items, &gens, dest_id, (&dest_dev, data_offset, slot_size), per_run,
+                    chunk, &mut out, &mut written, &mut failed_slots, &mut times,
+                )
+                .await;
             }
-        }
-        drop(data);
+        };
+        let (read_took, ()) = futures_util::join!(reader, writer);
+        times.read = read_took;
 
         // Publish, briefly: one sweep for the window. Table pages first, with
         // no lock held (#155, #269).
@@ -1188,7 +1147,144 @@ impl PlacementEngine {
         drop(r);
         drop(g);
         self.owed.lock().unwrap().extend(moves.keys().map(|l| (l.slab_id, l.slot_idx)));
-        out.into_iter().map(|o| o.unwrap_or(Err(PlacementError::NoDestination))).collect()
+        (out.into_iter().map(|o| o.unwrap_or(Err(PlacementError::NoDestination))).collect(), times)
+    }
+
+    /// One batch of a window's arrived sources (#490): those that read all
+    /// zeros unmapped, the rest given destination slots together and written
+    /// in slot order, neighbours merged into runs of up to `per_run` slots,
+    /// each run read back before any map names it (#239).
+    #[allow(clippy::too_many_arguments)]
+    async fn write_chunk(
+        &self,
+        gem: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>,
+        registry: &crate::lockwatch::TrackedRwLock<SlabRegistry>,
+        items: &[(VolumeId, u64, Leg, &crate::volume::fence::Exclusive)],
+        gens: &[u64],
+        dest_id: SlabId,
+        (dest_dev, data_offset, slot_size): (&Arc<dyn BlockDevice>, u64, u64),
+        per_run: usize,
+        chunk: Vec<(usize, Vec<u8>)>,
+        out: &mut [Option<Result<WindowMove, PlacementError>>],
+        written: &mut Vec<(usize, u64)>,
+        failed_slots: &mut Vec<u64>,
+        times: &mut WindowTimes,
+    ) {
+        // All zeros: unmapped, not copied (tried first; a slot some
+        // reference keeps is copied like any other).
+        let zero: HashSet<Leg> = chunk
+            .iter()
+            .filter(|(_, b)| b.iter().all(|x| *x == 0))
+            .map(|(i, _)| items[*i].2)
+            .collect();
+        let unmapped = if zero.is_empty() {
+            HashSet::new()
+        } else {
+            let mut g = gem.write().await;
+            let done = g.unmap_legs_everywhere(&zero);
+            drop(g);
+            let mut owed = self.owed.lock().unwrap();
+            for leg in &done {
+                owed.push((leg.slab_id, leg.slot_idx));
+            }
+            done
+        };
+        let mut data: HashMap<usize, Vec<u8>> = HashMap::new();
+        for (i, b) in chunk {
+            if unmapped.contains(&items[i].2) {
+                out[i] = Some(Ok(WindowMove::Zeroed));
+            } else {
+                data.insert(i, b);
+            }
+        }
+        if data.is_empty() {
+            return;
+        }
+
+        // Destination slots, together (first-fit: a fresh slab hands out a
+        // run, and the next batch's follow it).
+        let mut copy: Vec<usize> = data.keys().copied().collect();
+        copy.sort_unstable();
+        let mut dest: Vec<(usize, u64)> = Vec::with_capacity(copy.len());
+        {
+            let mut r = registry.write().await;
+            let quarantined = r.is_quarantined(&dest_id);
+            for i in copy {
+                let old = items[i].2;
+                let src_size = r.get(&old.slab_id).map(|s| s.slot_size()).unwrap_or(0);
+                if quarantined || !r.size_ok(&dest_id, src_size) {
+                    out[i] = Some(Err(PlacementError::NoDestination));
+                    continue;
+                }
+                let owner = match r.get(&old.slab_id) {
+                    Some(s) => s.owner(old.slot_idx).await,
+                    None => None,
+                }
+                .unwrap_or((items[i].0, items[i].1));
+                let Some(slab) = r.get_mut(&dest_id) else {
+                    out[i] = Some(Err(PlacementError::SlabNotFound(dest_id)));
+                    continue;
+                };
+                if slab.free_slots() == 0 {
+                    out[i] = Some(Err(PlacementError::SlabFull));
+                    continue;
+                }
+                match slab.allocate_deferred(owner.0, owner.1, gens[i]).await {
+                    Ok(slot) => {
+                        r.reserve(dest_id, slot);
+                        dest.push((i, slot));
+                    }
+                    Err(_) => out[i] = Some(Err(PlacementError::SlabFull)),
+                }
+            }
+        }
+
+        // Written in slot order, neighbours merged into one write, each run
+        // read back before any map names it (#239).
+        dest.sort_by_key(|(_, slot)| *slot);
+        let mut runs: Vec<Vec<(usize, u64)>> = Vec::new();
+        for d in dest {
+            match runs.last_mut() {
+                Some(run) if run.len() < per_run && run.last().is_some_and(|(_, s)| *s + 1 == d.1) => run.push(d),
+                _ => runs.push(vec![d]),
+            }
+        }
+        for run in runs {
+            let first = run[0].1;
+            let mut buf = Vec::with_capacity(run.len() * slot_size as usize);
+            for (i, _) in &run {
+                buf.extend_from_slice(data.get(i).map(|b| b.as_slice()).unwrap_or(&[]));
+            }
+            let at = data_offset + first * slot_size;
+            let err = |e: String| PlacementError::WriteFailed { slab_id: dest_id, slot_idx: first, error: e };
+            let t = std::time::Instant::now();
+            let wrote = dest_dev.write(at, &buf).await;
+            times.write += t.elapsed();
+            let res = match wrote {
+                Err(e) => Err(err(e.to_string())),
+                Ok(_) => {
+                    let mut check = vec![0u8; buf.len()];
+                    let t = std::time::Instant::now();
+                    let back = dest_dev.read(at, &mut check).await;
+                    times.check += t.elapsed();
+                    match back {
+                        Ok(got) if got == buf.len() && check == buf => Ok(()),
+                        Ok(got) if got != buf.len() => Err(err(format!("the copy reads back {got} of {} bytes", buf.len()))),
+                        Ok(_) => Err(err("the copy reads back different from the source".into())),
+                        Err(e) => Err(err(format!("reading the copy back: {e}"))),
+                    }
+                }
+            };
+            match res {
+                Ok(()) => written.extend(run),
+                Err(e) => {
+                    for (i, slot) in run {
+                        out[i] = Some(Err(e.clone()));
+                        failed_slots.push(slot);
+                    }
+                }
+            }
+        }
     }
 
     /// Evacuate all extents from a slab, moving them to other available slabs.
