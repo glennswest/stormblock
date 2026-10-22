@@ -636,8 +636,8 @@ profile inherits it rather than forking it.
 
 | Method | Path | |
 |---|---|---|
-| POST | `/api/v1/images/build` | the spec plus `out`, `format`, `keep_raw`, `include_slab` |
-| POST | `/api/v1/images/convert` | `{input, out, format, include_slab}` |
+| POST | `/api/v1/images/build` | the spec plus `out`, `format`, `keep_raw`, `include_slab` (admin) |
+| POST | `/api/v1/images/convert` | `{input, out, format, include_slab}` (admin) |
 | POST | `/api/v1/images/inspect` | `{path}` → the GPT and the pallets in it |
 | GET | `/api/v1/images/formats` | what can be written |
 
@@ -653,6 +653,26 @@ resolved against `base_dir` (or the spec file's directory) and refused **by
 name** when there is nothing to resolve them against, because a path that
 silently resolved against wherever the daemon happens to be would build an
 image out of files nobody named.
+
+**Where an image may go (#393).** Build and convert write as the engine's own
+user, so they take the admin token (or a Kubernetes bearer allowed `destroy`,
+docs/auth.md), and `out` is one of two places:
+
+- a file inside the images directory: `[images] dir`, by default
+  `<data_dir>/images` (made on first use). No `..`; the parent is resolved
+  through every link and must still be inside; a link, device or directory
+  already at the name (or at the `.raw.img` a conversion writes beside it) is
+  not written over. A subdirectory must exist already;
+- a ublk device this engine created by an attach (`/dev/ublkbN` from `POST
+  /api/v1/volumes/{id}/attach`): raw only, never mounted. A boot device an
+  adopting engine took over (the root, the node's own volumes) is not one.
+
+Anything else is `400` naming the images directory, before a byte is written.
+
+```toml
+[images]
+dir = "/data/images"
+```
 
 **A build holds its connection**, which is minutes for a real image. That is
 the same bargain the CLI makes, and it keeps "did it verify" in the same answer

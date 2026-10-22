@@ -78,6 +78,9 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
   (`PUT`/`DELETE /api/v1/forge/trust`, #381);
 - the pallet verbs that write a partition table (`gpt`, `convert`, `prune`,
   `adopt`);
+- building or converting an image (`POST /api/v1/images/build`,
+  `/api/v1/images/convert`, #393): it writes as the engine's user, and only
+  into the images directory or onto a ublk device this engine attached;
 - an emulated drive's fault (`/emulate`);
 - deleting a sealed volume (a golden, a blank, a snapshot) or a template;
 - sealing or unsealing;
