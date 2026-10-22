@@ -2261,7 +2261,9 @@ async fn a_maint_claim_gives_each_host_its_own_clone_of_the_maintenance_image() 
     let ma: serde_json::Value = r.json().await.unwrap();
     assert_eq!((ma["intent"].as_str(), ma["volume"]["name"].as_str()), (Some("maint"), Some("maint-mac-ac1f6b00000a")), "{ma}");
     assert_eq!(ma["claimed_from"]["volume"].as_str(), Some(v2.to_string().as_str()));
-    assert!(ma["attach"]["host_nqns"][0].as_str().unwrap().contains("host-mac-ac1f6b00000a"), "bound to its host: {ma}");
+    // Recorded as what this host booted: its maintenance clone, from the image.
+    let rec = state.synonyms.read().await.host("mac-ac1f6b00000a").unwrap().last_claim.unwrap();
+    assert_eq!((rec.clone_name.as_str(), rec.golden.0), ("maint-mac-ac1f6b00000a", v2));
     let mb: serde_json::Value = maint("AC:1F:6B:00:00:0B", "maint").await.unwrap().json().await.unwrap();
     assert_ne!(ma["volume"]["id"], mb["volume"]["id"], "never one clone for two machines");
 
