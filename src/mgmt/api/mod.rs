@@ -95,6 +95,14 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// how many seals wait for a digest. Read without waiting.
         #[serde(skip_serializing_if = "Option::is_none")]
         digests: Option<serde_json::Value>,
+        /// Volumes still here that lost mappings when they were restored or
+        /// adopted, their slab not attached (#500): `extents` in all and
+        /// `volumes` (id, name, extents). Such an extent reads as zeros. An
+        /// install's old-release volumes, deleted right after, are not
+        /// counted. Left out when every volume came back whole, or when the
+        /// manager is busy (read without waiting).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        lost_mappings: Option<serde_json::Value>,
         /// The worst of this node's RAID sets — `clean`, `rebuilding`,
         /// `degraded`, `failed` — when it has any (#252). Read without
         /// waiting: when the array table is busy, the last reading (#364).
@@ -182,10 +190,20 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     };
     let durability = state.durability.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let digests = crate::volume::digest::summary(&state.volume_manager).await;
+    let lost_mappings = state.volume_manager.try_lock().ok().and_then(|m| {
+        let lost = m.lost_mappings();
+        (!lost.is_empty()).then(|| {
+            serde_json::json!({
+                "extents": lost.iter().map(|(_, _, n)| n).sum::<usize>(),
+                "volumes": lost.iter().map(|(id, name, n)| serde_json::json!({"id": id.0, "name": name, "extents": n})).collect::<Vec<_>>(),
+            })
+        })
+    });
     Json(Health {
         status: if durability.is_some() { "degraded" } else { "ok" },
         durability,
         digests,
+        lost_mappings,
         service: "stormblock",
         version: crate::version::VERSION,
         commit: crate::version::COMMIT,

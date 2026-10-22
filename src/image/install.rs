@@ -487,8 +487,12 @@ pub async fn adopt(
     if let Some(b) = bulk {
         found.push(crate::drive::discover::FoundSlab { label: "bulk".into(), slab: b });
     }
+    // The strays go once adopted: what their records name on an earlier
+    // release's appliance slab, never attached again, is theirs, not a loss
+    // (#500).
+    let going: HashSet<VolumeId> = strays.iter().map(|(id, _)| *id).collect();
     let adopted = mgr
-        .adopt_slabs(found)
+        .adopt_slabs_going(found, &going)
         .await
         .map_err(|e| anyhow::anyhow!("adopting the node's data half: {e}"))?;
 

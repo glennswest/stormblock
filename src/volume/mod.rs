@@ -410,6 +410,10 @@ pub struct VolumeManager {
     records_on_slab: Arc<std::sync::Mutex<HashMap<SlabId, u64>>>,
     /// The format v2 stores this manager writes, and what each holds (#158).
     v2: Arc<std::sync::Mutex<persist_v2::V2State>>,
+    /// Extents a restore or an adoption dropped from a volume it kept, its
+    /// slab not attached (#500): id → (name, extents). A volume the caller
+    /// named as going (an install's old-release strays) is not here.
+    lost: HashMap<VolumeId, (String, usize)>,
 }
 
 /// What a persist writes: taken from the manager in memory, written with no
@@ -476,6 +480,7 @@ impl VolumeManager {
             catalog: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
+            lost: HashMap::new(),
             v2: Default::default(),
         }
     }
@@ -515,6 +520,7 @@ impl VolumeManager {
             catalog: Default::default(),
             records_written: Default::default(),
             records_on_slab: Default::default(),
+            lost: HashMap::new(),
             v2: Default::default(),
         })
     }
@@ -868,6 +874,20 @@ impl VolumeManager {
     /// How many sealed volumes wait for a digest.
     pub fn digests_waiting(&self) -> usize {
         self.to_digest.len()
+    }
+
+    /// Volumes still here that lost mappings at a restore or an adoption,
+    /// their slab not attached (#500): id, name, extents dropped. Empty on a
+    /// node whose every volume came back whole.
+    pub fn lost_mappings(&self) -> Vec<(VolumeId, String, usize)> {
+        let mut v: Vec<_> = self
+            .lost
+            .iter()
+            .filter(|(id, _)| self.volumes.contains_key(id))
+            .map(|(id, (n, c))| (*id, n.clone(), *c))
+            .collect();
+        v.sort_by(|a, b| a.1.cmp(&b.1));
+        v
     }
 
     /// What wakes the digester.
@@ -1576,6 +1596,19 @@ impl VolumeManager {
         &mut self,
         found: Vec<crate::drive::discover::FoundSlab>,
     ) -> Result<AdoptReport, VolumeError> {
+        self.adopt_slabs_going(found, &HashSet::new()).await
+    }
+
+    /// [`adopt_slabs`](Self::adopt_slabs), `going` the volumes the caller
+    /// deletes once they are adopted (#500): an install's old-release strays
+    /// (#369), whose records may name an earlier release's appliance slab
+    /// that is never attached again. What they drop is said at INFO, as
+    /// theirs; a WARN is kept for a volume that stays.
+    pub async fn adopt_slabs_going(
+        &mut self,
+        found: Vec<crate::drive::discover::FoundSlab>,
+        going: &HashSet<VolumeId>,
+    ) -> Result<AdoptReport, VolumeError> {
         let mut report = AdoptReport::default();
         if found.is_empty() {
             return Ok(report);
@@ -1678,7 +1711,7 @@ impl VolumeManager {
         };
         let mut absorbed: HashSet<VolumeId> = HashSet::new();
         let mut reclaim: Vec<Reclaim> = Vec::new();
-        let mut dropped = Dropped::default();
+        let mut dropped = Dropped { going: going.clone(), ..Default::default() };
 
         for (vrec, home) in records {
             if self.volumes.contains_key(&vrec.id) {
@@ -1774,6 +1807,7 @@ impl VolumeManager {
             raise_shares(&mut reg, &view, &mut gem).await;
         }
         dropped.report();
+        dropped.lost_into(&mut self.lost);
 
         // An adopted slab keeps its own record from here on. Storage that
         // arrived as a file has no data directory of its own, and a store
@@ -4132,6 +4166,7 @@ impl VolumeManager {
             raise_shares(&mut reg, &view, &mut rebuilt).await;
         }
         dropped.report();
+        dropped.lost_into(&mut self.lost);
 
         *self.gem.write().await = rebuilt;
 
@@ -4175,6 +4210,12 @@ type Reclaim = (gem::Leg, VolumeId, u64);
 struct Dropped {
     /// Slab not attached → volume name → extents dropped.
     missing: std::collections::BTreeMap<uuid::Uuid, std::collections::BTreeMap<String, usize>>,
+    /// The same for the volumes in `going`, said apart (#500).
+    going_missing: std::collections::BTreeMap<uuid::Uuid, std::collections::BTreeMap<String, usize>>,
+    /// Volumes the caller deletes once they are adopted (#500).
+    going: HashSet<VolumeId>,
+    /// Kept volumes' extents dropped: id → (name, extents).
+    lost: HashMap<VolumeId, (String, usize)>,
     /// Records older than the slot table: said one by one up to a bound.
     stale: usize,
 }
@@ -4183,9 +4224,22 @@ struct Dropped {
 const STALE_SAID: usize = 20;
 
 impl Dropped {
-    fn missing(&mut self, volume: &str, vext: u64, slab: SlabId) {
+    fn missing(&mut self, id: VolumeId, volume: &str, vext: u64, slab: SlabId) {
         tracing::debug!("Volume '{volume}' extent {vext}: slab {} not attached, mapping dropped", slab.0);
+        if self.going.contains(&id) {
+            *self.going_missing.entry(slab.0).or_default().entry(volume.to_string()).or_default() += 1;
+            return;
+        }
         *self.missing.entry(slab.0).or_default().entry(volume.to_string()).or_default() += 1;
+        self.lost.entry(id).or_insert_with(|| (volume.to_string(), 0)).1 += 1;
+    }
+
+    /// The kept volumes' drops into the manager's record (health's
+    /// `lost_mappings`, #500).
+    fn lost_into(&self, into: &mut HashMap<VolumeId, (String, usize)>) {
+        for (id, (name, n)) in &self.lost {
+            into.entry(*id).or_insert_with(|| (name.clone(), 0)).1 += n;
+        }
     }
 
     fn stale(&mut self, volume: &str, vext: u64, slab: SlabId, slot: u64, why: &str) {
@@ -4205,16 +4259,29 @@ impl Dropped {
     /// One line per slab not attached, naming its volumes; one for the stale
     /// records past the bound.
     fn report(&self) {
-        for (slab, vols) in &self.missing {
-            let extents: usize = vols.values().sum();
+        let named = |vols: &std::collections::BTreeMap<String, usize>| {
             let mut names: Vec<String> = vols.iter().take(8).map(|(n, c)| format!("{n} ({c})")).collect();
             if vols.len() > 8 {
                 names.push(format!("and {} more", vols.len() - 8));
             }
+            names.join(", ")
+        };
+        for (slab, vols) in &self.going_missing {
+            let extents: usize = vols.values().sum();
+            tracing::info!(
+                "slab {slab} not attached: {extents} extent(s) of {} volume(s) recorded on it, all of them \
+                 the old release's, dropped and laid again from the release (#369): nothing this node keeps \
+                 lost a mapping (#500): {}",
+                vols.len(),
+                named(vols)
+            );
+        }
+        for (slab, vols) in &self.missing {
+            let extents: usize = vols.values().sum();
             tracing::warn!(
                 "slab {slab} not attached: {extents} extent(s) of {} volume(s) recorded on it, mapping dropped: {}",
                 vols.len(),
-                names.join(", ")
+                named(vols)
             );
         }
         if self.stale > STALE_SAID {
@@ -4314,7 +4381,7 @@ fn reconcile_record(
                     }
                     rebuilt.restore_mapping(vrec.id, *vext, loc.clone());
                 } else {
-                    dropped.missing(&vrec.name, *vext, loc.slab_id);
+                    dropped.missing(vrec.id, &vrec.name, *vext, loc.slab_id);
                 }
             }
             Some(rloc) => {
@@ -4528,11 +4595,12 @@ mod tests {
         let mut d = Dropped::default();
         tracing::subscriber::with_default(sub, || {
             for v in 0..40u64 {
+                let id = VolumeId::new();
                 for e in 0..120u64 {
-                    d.missing(&format!("vol-{v:02}"), e, gone);
+                    d.missing(id, &format!("vol-{v:02}"), e, gone);
                 }
             }
-            d.missing("pod-logs", 7, other);
+            d.missing(VolumeId::new(), "pod-logs", 7, other);
             for e in 0..(STALE_SAID as u64 + 5) {
                 d.stale("busybox", e, other, e, "has been freed");
             }
@@ -4548,6 +4616,69 @@ mod tests {
         assert!(g.contains("vol-00 (120)") && g.contains("and 32 more"), "{g}");
         assert!(g.contains("mapping dropped"), "{g}");
         assert!(text.contains("5 more mapping(s) dropped"), "{text}");
+    }
+
+    /// #500: an install adopts the data half with the old release's strays
+    /// (#369) it deletes right after; their records name an earlier
+    /// release's appliance slab, never attached again. What they drop is
+    /// theirs, said at INFO and kept out of `lost`; a WARN and `lost` only
+    /// for a volume that stays.
+    #[test]
+    fn what_a_volume_on_its_way_out_drops_is_not_a_loss() {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || w.clone())
+            .finish();
+        let old_release = SlabId::new();
+        let (cilium, golden, kept) = (VolumeId::new(), VolumeId::new(), VolumeId::new());
+        let mut d = Dropped { going: [cilium, golden].into_iter().collect(), ..Default::default() };
+        tracing::subscriber::with_default(sub, || {
+            for e in 0..16 {
+                d.missing(cilium, "cilium", e, old_release);
+                d.missing(golden, "cilium.golden", e, old_release);
+            }
+            d.report();
+        });
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(!text.contains("WARN"), "{text}");
+        assert!(text.contains("INFO") && text.contains("32 extent(s) of 2 volume(s)"), "{text}");
+        assert!(text.contains("the old release's") && text.contains("nothing this node keeps"), "{text}");
+        let mut lost = HashMap::new();
+        d.lost_into(&mut lost);
+        assert!(lost.is_empty(), "{lost:?}");
+
+        // A kept volume's drop is a loss: WARN, and in `lost`.
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || w.clone())
+            .finish();
+        tracing::subscriber::with_default(sub, || {
+            d.missing(kept, "pod-logs", 3, old_release);
+            d.missing(kept, "pod-logs", 4, old_release);
+            d.report();
+        });
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("WARN") && text.contains("pod-logs (2)"), "{text}");
+        d.lost_into(&mut lost);
+        assert_eq!(lost.get(&kept), Some(&("pod-logs".to_string(), 2)));
+        assert_eq!(lost.len(), 1);
     }
 
     /// #358: a persist in progress is listed with its phase and whether its

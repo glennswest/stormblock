@@ -11096,21 +11096,66 @@ file = "{state}"
                     .await
                     .unwrap();
             }
+            // #500 (server1, 12.52): an old release's volume whose record
+            // also names an earlier release's appliance slab, never attached
+            // again. Extent 1 on a slab of its own, left out at the install.
+            if dropped {
+                let path = dir.path().join("old-appliance.slab").display().to_string();
+                let dev = Arc::new(crate::drive::filedev::FileDevice::open_with_capacity(&path, 64 * MIB).await.unwrap())
+                    as Arc<dyn BlockDevice>;
+                let extra = crate::drive::slab::Slab::format(dev, node.slot_size(), crate::placement::topology::StorageTier::Hot)
+                    .await
+                    .unwrap();
+                let extra_id = extra.slab_id();
+                node.registry().write().await.add(extra);
+                let mut gem = node.gem().write().await;
+                let mut reg = node.registry().write().await;
+                crate::placement::PlacementEngine::new()
+                    .migrate_extent(&mut gem, &mut reg, id, 1, Some(extra_id))
+                    .await
+                    .unwrap();
+            }
             node.persist().await;
             drop(node);
 
             let claim = dir.path().join("claim-n1.raw").display().to_string();
             std::fs::copy(&image_n1, &claim).unwrap();
             let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+            // The WARNs of the install (what reaches the console, #243).
+            #[derive(Clone, Default)]
+            struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+            impl std::io::Write for Buf {
+                fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(b);
+                    Ok(b.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let warns = Buf::default();
+            let w = warns.clone();
+            let sub = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(move || w.clone())
+                .finish();
+            let guard = tracing::subscriber::set_default(sub);
             let r = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await;
+            drop(guard);
             let (flow, report) = r.unwrap_or_else(|e| panic!("{name}: the install refused: {e}"));
             assert!(flow.is_some(), "{name}: laid");
             let report = report.expect("an install report");
+            let warns = String::from_utf8(warns.0.lock().unwrap().clone()).unwrap();
+            assert!(!warns.contains("not attached"), "{name}: a stray's drop is no WARN (#500): {warns}");
             if dropped {
                 assert_eq!(report.release_dropped, vec![name.to_string()], "{report:?}");
                 // The release may bring a volume of that name back (its
                 // own `svc.golden`); the node's is gone.
                 assert!(mgr.get_volume(&id).is_none(), "{name}: the node's record dropped, it comes back with the release");
+                // What it dropped on the slab not attached was its own: no
+                // volume the node keeps lost a mapping (#500).
+                assert!(mgr.lost_mappings().is_empty(), "{name}: {:?}", mgr.lost_mappings());
             } else {
                 assert!(report.release_dropped.is_empty(), "{report:?}");
                 assert!(report.carried.contains(&name.to_string()), "{name}: carried: {report:?}");
