@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — BUILT on wip/478-system-drive; paused for P0 #496
+### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — DONE (v22.0.0), closed; metal pending (server8)
 
 Owner (2026-10-21), replacing #351's "never guessed": install-config
 `system_drive:` (serial, wwn, model, shelf + bay) names the drive; a STOP
@@ -220,17 +220,14 @@ the choice recorded as stormdrive's designation.
       README, CHANGELOG
 - [x] check.sh on the branch at aeba977 ALL PASS (1258/1258);
       `ci-split-verify.sh` ALL PASS (the #402 pair with the real initramfs)
-- Paused 2026-10-21 for P0 #485 (stormcentral). Next, on resuming:
-- [ ] merge wip/478-system-drive into main; v22.0.0 (the default changed); golden;
-      stormcos (drop `rd.stormblock.slab=/dev/sda`) and storminstall
-      (install-config's `system_drive` key) told; close. Metal: server8
-      (two older installs; system_drive = its SSD)
-- Resumed 2026-10-21 after #485/#487/#493: rebased onto main (v21.4.2,
-  CHANGELOG conflict only), pushed; check.sh + ci-first-drive-verify.sh +
-  ci-split-verify.sh started on the rebased branch (result in that sc-build;
-  re-run if unread). Paused again for P0 #496
-- WIP f2134f6 reached main by mistake and was reverted there (2a205cc);
-  the branch re-applies it
+- Paused for P0s #485, #487, #493, #496; resumed 2026-10-22:
+- [x] the `taken` verdict's reason says why (system_drive, first drive,
+      named, this node's), in health's `local_disk`, for the app to show
+- [x] rebased onto v21.6.0; check.sh at 8042f5f ALL PASS (1263/1263);
+      ci-first-drive-verify.sh and ci-split-verify.sh ALL PASS; merged;
+      v22.0.0 (the default changed); stage requested; stormcos (drop
+      `rd.stormblock.slab=/dev/sda`) and storminstall (`system_drive`
+      from the picker) told; closed. Metal: server8 (two older installs)
 
 ### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — v21.6.0 (the split, the overlap); WAITS ON THE OWNER (the read-back)
 
