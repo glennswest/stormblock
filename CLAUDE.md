@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### A boothost command record (2026-10-22, #494, P1, stormbootx#167) — IN PROGRESS (wip/494-boot-command)
+### A boothost command record (2026-10-22, #494, P1, stormbootx#167) — DONE (v22.2.0), closed
 
 stormbootx (built: stormbootx#167) reads one pending command per host
 before the intent; stormcentral and the laptop app put it. The key is
@@ -219,7 +219,8 @@ decided (Ed25519, stormbootx checks it); the engine stores `sig` as given.
 - [x] stormboot-serve: the same routes (no token)
 - [x] tests (crate units, engine HTTP, serve HTTP, auth) 25/25; README,
       auth.md, crate README, CHANGELOG; `maint`'s image filed as #497
-- [ ] check.sh; release; stormbootx#167 and stormcentral told; close
+- [x] check.sh at c409512 ALL PASS (1269/1269); merged; v22.2.0; stage
+      requested; stormbootx#167 told; closed
 
 ### Starts 3–27× slower during a claim rewrite (2026-10-22, #491, P1) — DONE (v22.1.1), closed; the next stress stage on metal
 
