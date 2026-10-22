@@ -264,11 +264,13 @@ async fn a_delete_waits_for_a_copy_on_write_in_flight_and_the_golden_keeps_its_s
         let g = gem.read().await;
         let root_map: std::collections::HashMap<u64, _> =
             g.volume_extents(&VolumeId(root)).unwrap().map(|(v, l)| (v, l.primary())).collect();
-        g.volume_extents(&VolumeId(golden))
+        let found = g
+            .volume_extents(&VolumeId(golden))
             .unwrap()
             .find(|(v, l)| root_map.get(v) == Some(&l.primary()))
             .map(|(v, _)| v)
-            .expect("the root shares an extent with the golden")
+            .expect("the root shares an extent with the golden");
+        found
     };
     let handle = state.volume_manager.lock().await.get_volume(&VolumeId(root)).unwrap();
 
