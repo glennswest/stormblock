@@ -17,6 +17,9 @@
 #   nvme connect   to H2's subsystem as H2 without its secret, with another
 #                  host's secret                  → refused
 #                  with its own --dhchap-secret   → connected, authenticated
+#   nvme connect   as H1 with -g -G (header and data digests, #392) → a 1 MiB
+#                  write by R2T/H2CData and a 4 KiB in-capsule one read back,
+#                  no digest error or C2HTermReq on either side
 #
 # Needs: cargo, qemu-system-x86_64, /boot/vmlinuz-$(uname -r) and its modules,
 # a static busybox, nvme-cli (copied into the guest with its libraries), curl.
@@ -76,7 +79,7 @@ discovery_disabled = true
 [nvmeof]
 export_drives = false
 EOF
-RUST_LOG=stormblock=info "$BIN" --config "$W/stormblock.toml" \
+RUST_LOG=stormblock=info,stormblock::target::nvmeof=debug "$BIN" --config "$W/stormblock.toml" \
     --device "$W/d1.img" --device "$W/d2.img" \
     --data-dir "$W/data" --no-iscsi \
     --nvmeof-addr "127.0.0.1:$PORT" --nvmeof-nqn "$SHARED" \
@@ -214,6 +217,12 @@ if nvme connect $T -n "$SUB1" --hostnqn "$H1" >/tmp/o 2>&1; then
     dd if=/tmp/pat of=/dev/$a bs=4096 count=16 oflag=direct 2>/dev/null
     dd if=/dev/$a of=/tmp/back bs=4096 count=16 iflag=direct 2>/dev/null
     cmp -s /tmp/pat /tmp/back && r h1-clone-round-trip PASS || r h1-clone-round-trip FAIL
+    # Past the 8 KiB in-capsule allowance: the data comes by R2T and H2CData
+    # (#392), each PDU matched to its R2T.
+    dd if=/dev/urandom of=/tmp/big bs=1M count=1 2>/dev/null
+    dd if=/tmp/big of=/dev/$a bs=1M count=1 seek=2 oflag=direct 2>/dev/null
+    dd if=/dev/$a of=/tmp/bigback bs=1M count=1 skip=2 iflag=direct 2>/dev/null
+    cmp -s /tmp/big /tmp/bigback && r h1-r2t-round-trip PASS || r h1-r2t-round-trip FAIL
     [ "$(cat /sys/block/$g/ro)" = 1 ] && r golden-block-device-ro PASS || r golden-block-device-ro "FAIL ($g ro=$(cat /sys/block/$g/ro))"
     dd if=/tmp/pat of=/dev/$g bs=4096 count=1 oflag=direct 2>/dev/null \
         && r golden-write-refused FAIL || r golden-write-refused PASS
@@ -239,6 +248,27 @@ if nvme connect $T -n "$SUB2" --hostnqn "$H2" --dhchap-secret "$S2" >/tmp/o 2>&1
 else
     r h2-authenticated "FAIL ($(head -2 /tmp/o))"
 fi
+# 7. Header and data digests (#392): an R2T write, an in-capsule write and
+# reads, every PDU's digests checked both ways.
+if nvme connect $T -n "$SUB1" --hostnqn "$H1" -g -G >/tmp/o 2>&1; then
+    sleep 2
+    r digests-connect PASS
+    dev_of() { for b in $(devs); do [ "$(cat $b/nsid 2>/dev/null)" = "$1" ] && basename $b && return; done; }
+    a=$(dev_of "$NS_A"); [ -n "$a" ] || a=missing
+    dd if=/dev/urandom of=/tmp/big2 bs=1M count=1 2>/dev/null
+    dd if=/tmp/big2 of=/dev/$a bs=1M count=1 seek=4 oflag=direct 2>/dev/null
+    dd if=/dev/$a of=/tmp/big2back bs=1M count=1 skip=4 iflag=direct 2>/dev/null
+    cmp -s /tmp/big2 /tmp/big2back && r digests-r2t-round-trip PASS || r digests-r2t-round-trip FAIL
+    dd if=/tmp/pat of=/dev/$a bs=4096 count=1 seek=7 oflag=direct 2>/dev/null
+    dd if=/dev/$a of=/tmp/small bs=4096 count=1 skip=7 iflag=direct 2>/dev/null
+    head -c 4096 /tmp/pat | cmp -s - /tmp/small && r digests-in-capsule-round-trip PASS || r digests-in-capsule-round-trip FAIL
+    nvme disconnect -n "$SUB1" >/dev/null 2>&1
+else
+    r digests-connect "FAIL ($(head -2 /tmp/o))"
+fi
+dmesg | grep -iqE 'digest error|termreq|term req|fatal' \
+    && r no-transport-errors "FAIL ($(dmesg | grep -iE 'digest error|termreq|term req|fatal' | head -1))" \
+    || r no-transport-errors PASS
 echo "GUEST dmesg (nvme):"
 dmesg | grep -i nvme | tail -30
 echo "GUEST done"
@@ -257,7 +287,13 @@ tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST)|nvme' | tail -70
 
 results=$(tr -d '\r' < "$W/guest.log" | grep -c '^RESULT ')
 bad=$(tr -d '\r' < "$W/guest.log" | grep '^RESULT ' | grep -vc ' PASS')
-[ "$results" -ge 12 ] || fail "the guest reported $results results, expected 12"
+[ "$results" -ge 17 ] || fail "the guest reported $results results, expected 17"
+# The engine took both digests on the digest connection (#392), and closed
+# no connection on a fatal transport error.
+grep -q 'hdgst=true, ddgst=true' "$W/engine.log" || fail "the engine never negotiated both digests"
+if grep -q 'fatal error status' "$W/engine.log"; then
+    fail "the engine saw a fatal transport error: $(grep 'fatal error status' "$W/engine.log" | head -1)"
+fi
 [ "$bad" = 0 ] || fail "$bad guest check(s) failed"
 
 say "engine's side"
