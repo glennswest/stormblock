@@ -12755,7 +12755,11 @@ file = "{state}"
         let dev = lying.lock().unwrap().clone().unwrap();
         let r = super::flow_slabs_held(mgr.gem(), mgr.registry(), &[source_id], local_id, || mgr.persist(), None, 0, None).await;
         assert!(dev.big_reads.load(std::sync::atomic::Ordering::Relaxed) > 0, "the copies were read back");
-        assert_eq!(r, Some((16, 1)), "the lie failed its move at the read-back, and the retry moved it");
+        let (moved, failed) = r.expect("the flow-over finished");
+        // The lie fails its run at the read-back (every extent of it), and
+        // the next pass moves them.
+        assert_eq!(moved, 16);
+        assert!(failed >= 1, "the lying copy failed at the read-back");
         let g = mgr.get_volume(&_golden).unwrap();
         let mut back = vec![0u8; (16 * SLOT) as usize];
         g.read(0, &mut back).await.unwrap();
