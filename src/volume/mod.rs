@@ -2256,9 +2256,22 @@ impl VolumeManager {
         if !by.is_empty() {
             return Err(VolumeError::InUse { id, by });
         }
-        if !self.volumes.contains_key(&id) {
+        let Some(handle) = self.volumes.get(&id).cloned() else {
             return Err(VolumeError::VolumeNotFound(id));
-        }
+        };
+        // No write or discard of it in flight (#487). A copy-on-write reads
+        // an extent's location, remaps it under the extent map's lock and
+        // then lets go of the old slot; a delete between the read and the
+        // remap took the clone's reference on a shared slot, and the write
+        // let go of the same slot again. server1's cilium golden lost a share
+        // of slot 896 that way when the kubelet deleted a root stormpump was
+        // still writing (12.40, stormcos#626), and #370's check refused every
+        // clone of it after. Every write and discard holds this gate shared
+        // for its whole length; the volume is refused below, so one queued
+        // behind it fails rather than remapping a deleted volume. Taken here,
+        // under the manager: a clone takes its source's gate under it too,
+        // so taking it outside could deadlock; writes never take the manager.
+        let _gate = handle.hold_writes().await;
         // Its map in memory and its table pages read before anything is
         // forgotten (#155, #367): a load that fails leaves the volume as it was.
         let pre = match pre {
@@ -2267,6 +2280,9 @@ impl VolumeManager {
         };
         let _handle = self.volumes.remove(&id)
             .ok_or(VolumeError::VolumeNotFound(id))?;
+        // Anything that still holds the handle (a write queued behind the
+        // gate, a stale export) is refused from here (#487).
+        handle.refuse(format!("volume {} has been deleted", id.0));
         self.present.remove(&id);
         self.parents.remove(&id);
         self.fs_info.remove(&id);

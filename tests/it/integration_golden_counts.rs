@@ -167,3 +167,132 @@ async fn a_golden_keeps_its_slot_counts_when_its_clones_are_deleted_at_once() {
     let last = clone(&c, &url, golden, "root-last").await.expect("the golden clones after it all");
     assert_ne!(last, golden);
 }
+
+/// Reads slow while `on` is set: a copy-on-write's read of the old slot
+/// takes long enough for a delete to come between it and the remap.
+struct SlowReads {
+    inner: Arc<dyn stormblock::drive::BlockDevice>,
+    on: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl stormblock::drive::BlockDevice for SlowReads {
+    fn id(&self) -> &stormblock::drive::DeviceId {
+        self.inner.id()
+    }
+    fn capacity_bytes(&self) -> u64 {
+        self.inner.capacity_bytes()
+    }
+    fn block_size(&self) -> u32 {
+        self.inner.block_size()
+    }
+    fn optimal_io_size(&self) -> u32 {
+        self.inner.optimal_io_size()
+    }
+    fn device_type(&self) -> stormblock::drive::DriveType {
+        self.inner.device_type()
+    }
+    async fn read(&self, offset: u64, buf: &mut [u8]) -> stormblock::drive::DriveResult<usize> {
+        if self.on.load(Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+        self.inner.read(offset, buf).await
+    }
+    async fn write(&self, offset: u64, buf: &[u8]) -> stormblock::drive::DriveResult<usize> {
+        self.inner.write(offset, buf).await
+    }
+    async fn write_zeroes(&self, offset: u64, len: u64) -> stormblock::drive::DriveResult<()> {
+        self.inner.write_zeroes(offset, len).await
+    }
+    async fn flush(&self) -> stormblock::drive::DriveResult<()> {
+        self.inner.flush().await
+    }
+    async fn discard(&self, offset: u64, len: u64) -> stormblock::drive::DriveResult<()> {
+        self.inner.discard(offset, len).await
+    }
+}
+
+/// #487 on server1: the kubelet deleted a root while a write to it was still
+/// copying one of the golden's shared extents. The delete took the clone's
+/// share of the slot, and the copy-on-write let go of it again once it had
+/// read the old data: the golden's slot was freed under it, and #370 refused
+/// every clone of the golden after. Now the delete waits for the write, the
+/// golden's counts are unchanged, and a write that comes after the delete
+/// began is refused rather than remapping a deleted volume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_waits_for_a_copy_on_write_in_flight_and_the_golden_keeps_its_share() {
+    use stormblock::drive::slab::{Slab, SlabFormat, SlabRole};
+    use stormblock::drive::BlockDevice;
+    let dir = TempDir::new().unwrap();
+    let on = Arc::new(AtomicBool::new(false));
+    let devices = common::create_file_devices(&dir, 1, 2 * 1024 * 1024 * 1024).await;
+    let dev: Arc<dyn BlockDevice> = Arc::new(SlowReads { inner: devices[0].clone(), on: on.clone() });
+    let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    let slab = Slab::format_with(
+        dev,
+        SlabFormat::new(DEFAULT_EXTENT_SIZE, stormblock::placement::topology::StorageTier::Hot).with_role(SlabRole::System),
+    )
+    .await
+    .unwrap();
+    vm.add_slab(slab).await;
+    let mut config = StormBlockConfig::default();
+    config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
+    config.management.ublk_transport = false;
+    let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+    let state = Arc::new(AppState::new(config, vm, reg, gem.clone()));
+    let url = start(state.clone()).await;
+    let c = reqwest::Client::new();
+
+    let created: serde_json::Value = c
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "cilium", "size": "64M" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let golden: Uuid = created["template"]["sealed_volume_id"].as_str().unwrap().parse().unwrap();
+    VolumeManager::persist_detached(&state.volume_manager).await;
+    let before = counts(&state, golden).await;
+    let root = clone(&c, &url, golden, "cilium-root").await.unwrap();
+    VolumeManager::persist_detached(&state.volume_manager).await;
+
+    // An extent the root still shares with the golden (not the superblock's,
+    // which the clone's stamp already copied).
+    let shared = {
+        let g = gem.read().await;
+        let root_map: std::collections::HashMap<u64, _> =
+            g.volume_extents(&VolumeId(root)).unwrap().map(|(v, l)| (v, l.primary())).collect();
+        g.volume_extents(&VolumeId(golden))
+            .unwrap()
+            .find(|(v, l)| root_map.get(v) == Some(&l.primary()))
+            .map(|(v, _)| v)
+            .expect("the root shares an extent with the golden")
+    };
+    let handle = state.volume_manager.lock().await.get_volume(&VolumeId(root)).unwrap();
+
+    on.store(true, Ordering::Relaxed);
+    let writer = {
+        let h = handle.clone();
+        tokio::spawn(async move { h.write(shared * DEFAULT_EXTENT_SIZE + 8192, &[0x5a; 4096]).await })
+    };
+    // The write is reading the old slot; the kubelet gives up on the root.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let del = {
+        let (c, url) = (c.clone(), url.clone());
+        tokio::spawn(async move { delete(&c, &url, root).await })
+    };
+    // A write that comes once the delete is under way.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let late = {
+        let h = handle.clone();
+        tokio::spawn(async move { h.write(shared * DEFAULT_EXTENT_SIZE, &[0x6b; 4096]).await })
+    };
+    writer.await.unwrap().expect("the write in flight finishes");
+    del.await.unwrap();
+    on.store(false, Ordering::Relaxed);
+    assert!(late.await.unwrap().is_err(), "a write behind the delete is refused");
+    settled(&state, golden, &before, "a delete beside a copy-on-write in flight").await;
+    clone(&c, &url, golden, "cilium-root-2").await.expect("the golden clones again");
+}

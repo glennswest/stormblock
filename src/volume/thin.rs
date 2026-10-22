@@ -2979,6 +2979,9 @@ impl ThinVolumeHandle {
         // No snapshot shares a slot between this write's look at its count
         // and its data landing (#367).
         let _gate = self.snap_gate.read().await;
+        // Nor a delete takes this volume's references meanwhile (#487): one
+        // that held the gate before it refused the volume.
+        self.refuse_if_unknown_scheme()?;
         let buf_len = buf.len() as u64;
         let mut bytes_written = 0u64;
         let mut pos = offset;
@@ -3396,6 +3399,7 @@ impl BlockDevice for ThinVolumeHandle {
         // As a write: no snapshot shares a slot between the share check
         // below and its release (#367).
         let _gate = self.snap_gate.read().await;
+        self.refuse_if_unknown_scheme()?;
         let policy = self.redundancy();
         // An unreplicated volume serialises against its own allocations with
         // the volume lock; a redundant one uses the extent/stripe shards,
