@@ -53,6 +53,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v23.0.2] — 2026-10-22
+
+### Fixed
+- #500: an install's old-release volumes (#369), deleted right after they are adopted, no longer report the mappings their records name on an earlier release's appliance slab at WARN: they are theirs, said at INFO. A WARN is kept for a volume that stays. Health `lost_mappings` lists volumes still here that lost a mapping at a restore or adoption.
+
 ## [v23.0.1] — 2026-10-22
 
 ### Fixed
