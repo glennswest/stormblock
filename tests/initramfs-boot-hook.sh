@@ -960,9 +960,13 @@ check "two blank internal drives, one named: that one, forced" "/dev/sdb force" 
 # (sdb): that one, both halves on it, the other's data half left and said.
 check "server8, two older installs, nothing named: the first drive (#478)" "/dev/sda" \
     "$(STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|layout)"
+case "$(ld)" in *'"state": "taken"'*'"drive": "/dev/sda"'*"this machine's first drive (no system_drive set)"*) check "  the verdict says why: the first drive" yes yes ;;
+*) check "  the verdict says why: the first drive: $(ld)" yes no ;; esac
 printf 'apiVersion: v1\npullSecret: "s3cret"\nsystem_drive:\n  serial: "SER-sdb"   # the SSD\n  model: MODEL-sdb\nsshKey: x\n' > "$WORK/ic-ssd.yaml"
 check "server8, system_drive names the SSD by serial and model: that one (#478)" "/dev/sdb" \
     "$(SDMEDIA="$WORK/ic-ssd.yaml" STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|layout)"
+case "$(ld)" in *'"drive": "/dev/sdb"'*"system_drive (serial=SER-sdb model=MODEL-sdb) in ic-ssd.yaml"*) check "  the verdict says why: system_drive" yes yes ;;
+*) check "  the verdict says why: system_drive: $(ld)" yes no ;; esac
 grep -q "SYSTEM DRIVE: /dev/sdb, as system_drive (serial=SER-sdb model=MODEL-sdb) in ic-ssd.yaml names it" "$WORK/msurvey.log" \
     && check "  the console says which and why" yes yes || check "  the console says which and why: $(grep SYSTEM "$WORK/msurvey.log")" yes no
 grep -q "/dev/sda carries a data half; it is left as it is" "$WORK/msurvey.log" \

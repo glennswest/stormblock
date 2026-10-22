@@ -4253,7 +4253,15 @@ $1|$_svp|$3"
     # disk is mandatory (owner, 2026-10-08), and a node quietly running from
     # forge with its slabs on its own drive is the failure to name.
     if [ -n "$LOCAL_DISK" ]; then
-        ld_write taken "$LOCAL_DISK" ""
+        # Why this drive (#478: shown back by the app and in health).
+        case "$CHOSEN_BY" in
+            system_drive) _ldw="system_drive (${_sd_said:-}) in ${SD_FROM##*/}" ;;
+            named) _ldw="rd.stormblock.slab= names it" ;;
+            node) _ldw="it carries this node" ;;
+            first) _ldw="this machine's first drive (no system_drive set)" ;;
+            *) _ldw="" ;;
+        esac
+        ld_write taken "$LOCAL_DISK" "$_ldw"
     elif [ -n "$RUNNING_FROM" ]; then
         ld_write taken "$RUNNING_FROM" "this boot runs from it"
     elif [ -n "$SV_WHY" ]; then
