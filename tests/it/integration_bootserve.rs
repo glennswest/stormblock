@@ -163,7 +163,7 @@ async fn any_host_serves_a_bench_of_unnamed_machines() {
 async fn a_hosts_command_is_put_read_and_reported_done() {
     let s = serve(false).await;
     let c = reqwest::Client::new();
-    let url = |name: &str, rest: &str| format!("{}/api/v1/synonyms/boothost/{name}/command{rest}", s.base);
+    let url = |name: &str, rest: &str| format!("{}/api/v1/synonyms/boothost/{name}/command{rest}", s.http);
     let r = c.get(url("server8", "")).send().await.unwrap();
     assert_eq!(r.status(), 404);
     assert_eq!(r.json::<serde_json::Value>().await.unwrap()["next_id"], 1);
@@ -187,6 +187,7 @@ async fn a_hosts_command_is_put_read_and_reported_done() {
     assert_eq!(r.status(), 404);
     let v: serde_json::Value = r.json().await.unwrap();
     assert_eq!((v["next_id"].as_u64(), v["last_done"]["result"].as_str()), (Some(8), Some("rebooting")));
-    let hosts: serde_json::Value = c.get(format!("{}/api/v1/boothost", s.base)).send().await.unwrap().json().await.unwrap();
-    assert_eq!(hosts["hosts"][0]["command"]["last_id"], 7, "{hosts}");
+    let hosts: serde_json::Value = c.get(format!("{}/api/v1/boothost", s.http)).send().await.unwrap().json().await.unwrap();
+    let s8 = hosts["hosts"].as_array().unwrap().iter().find(|h| h["name"] == "server8").unwrap();
+    assert_eq!(s8["command"]["last_id"], 7, "{hosts}");
 }
