@@ -204,6 +204,23 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### dir-block-csum on a live service clone after a power cycle (2026-10-22, #496, P0) — IN PROGRESS (wip/496-fsck-snapshot)
+
+12.43-flowsdn pvetest2: stormcentral's ext4 stage (`perf.rs`, `POST
+/api/v1/volumes/{id}/fsck` on each *mounted* service clone) reported
+`flowsdn-state: dir-block-csum directory 14 block 0`. The engine's check
+reads the live device block by block over time, journal not replayed
+(`journal-recovery-skipped`): a directory block and the inode whose
+generation seeds its checksum can be read from different moments, or a
+block mid-write. Master: establish real vs artifact; if artifact, check a
+quiesced snapshot.
+- [ ] fsck (no repair): a point-in-time snapshot (write gate), its journal
+      replayed (`journal::Journal::open`, `recovery::recover`), then the
+      read-only check; snapshot deleted; `view: snapshot|live`, `?live=true`
+- [ ] QEMU: a mounted ext4 under directory churn, checked live and by
+      snapshot many times; after unmount, clean
+- [ ] tests, docs, CHANGELOG; check.sh; release; stormcentral told
+
 ### The initramfs's log over the network (2026-10-21, #477, P1) — DONE (v21.3.0), closed; metal pending
 
 Master: a dead SOL (server8, #476) lost the installer's output; stormbootx
