@@ -963,6 +963,12 @@ impl PlacementEngine {
     /// the registry to publish. Every source moved or unmapped is owed, freed
     /// once the map that no longer names it is on disk.
     ///
+    /// `read_back`: each run is read back before any map names it (#239).
+    /// A flow-over whose sources are held for #412's validation does without
+    /// (#490): the validation compares every moved extent with the appliance
+    /// before anything is let go, and on a disk-bound destination the
+    /// read-back was half the copy's time.
+    ///
     /// Returns one outcome per item, in the order given, and where the time
     /// went.
     pub async fn migrate_window_unlocked(
@@ -973,6 +979,7 @@ impl PlacementEngine {
         dest_id: SlabId,
         run_bytes: u64,
         reads_at_once: usize,
+        read_back: bool,
     ) -> (Vec<Result<WindowMove, PlacementError>>, WindowTimes) {
         use futures_util::StreamExt;
         let n = items.len();
@@ -1093,7 +1100,7 @@ impl PlacementEngine {
                 let chunk: Vec<(usize, Vec<u8>)> = std::mem::take(&mut arrived);
                 self.write_chunk(
                     gem, registry, items, &gens, dest_id, (&dest_dev, data_offset, slot_size), per_run,
-                    chunk, &mut out, &mut written, &mut failed_slots, &mut times,
+                    read_back, chunk, &mut out, &mut written, &mut failed_slots, &mut times,
                 )
                 .await;
             }
@@ -1158,7 +1165,7 @@ impl PlacementEngine {
     /// One batch of a window's arrived sources (#490): those that read all
     /// zeros unmapped, the rest given destination slots together and written
     /// in slot order, neighbours merged into runs of up to `per_run` slots,
-    /// each run read back before any map names it (#239).
+    /// each run read back before any map names it when `read_back` (#239).
     #[allow(clippy::too_many_arguments)]
     async fn write_chunk(
         &self,
@@ -1169,6 +1176,7 @@ impl PlacementEngine {
         dest_id: SlabId,
         (dest_dev, data_offset, slot_size): (&Arc<dyn BlockDevice>, u64, u64),
         per_run: usize,
+        read_back: bool,
         chunk: Vec<(usize, Vec<u8>)>,
         out: &mut [Option<Result<WindowMove, PlacementError>>],
         written: &mut Vec<(usize, u64)>,
@@ -1267,6 +1275,8 @@ impl PlacementEngine {
             times.write += t.elapsed();
             let res = match wrote {
                 Err(e) => Err(err(e.to_string())),
+                // Checked by the validation instead (#490).
+                Ok(_) if !read_back => Ok(()),
                 Ok(_) => {
                     let mut check = vec![0u8; buf.len()];
                     let t = std::time::Instant::now();

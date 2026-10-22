@@ -6561,6 +6561,13 @@ pub async fn run() -> anyhow::Result<()> {
         // window holds two of them, so one run's sources arrive while the
         // other is written.
         let dest_rotational = registry.read().await.get(&dest).is_some_and(|s| s.device().rotational());
+        // Each run read back as it is written (#239), unless the sources are
+        // held for #412's validation (#490: decided A, 2026-10-22): that
+        // compares every moved extent with the appliance, repairs it or puts
+        // it back, before any source is let go, so the read-back only halved a
+        // disk-bound destination's rate. `STORMBLOCK_FLOW_READBACK=1` keeps it.
+        let read_back = hold.is_none()
+            || std::env::var("STORMBLOCK_FLOW_READBACK").is_ok_and(|v| v.trim() == "1");
         let window_bytes = if dest_rotational { 2 * flow_run_bytes(true) } else { FLOW_WINDOW_BYTES };
         let mut pace = FlowPace::new(
             if dest_rotational { flow_window().max((window_bytes >> 20) as usize) } else { flow_window() },
@@ -6722,7 +6729,7 @@ pub async fn run() -> anyhow::Result<()> {
                     if !held.is_empty() {
                         let items: Vec<_> = held.iter().map(|(v, e, l, f)| (*v, *e, *l, f)).collect();
                         let (outs, t) = engine
-                            .migrate_window_unlocked(gem, registry, &items, dest, flow_run_bytes(dest_rotational), flow_parallel())
+                            .migrate_window_unlocked(gem, registry, &items, dest, flow_run_bytes(dest_rotational), flow_parallel(), read_back)
                             .await;
                         times = t;
                         for ((vol, vext, leg, f), res) in held.into_iter().zip(outs) {
@@ -12598,6 +12605,161 @@ file = "{state}"
         // Then the sources go.
         let freed = super::free_held(mgr.registry(), &held).await;
         assert_eq!(freed, 17);
+    }
+
+    /// A drive that acknowledges a write it did not make (#490): the first
+    /// write of at least `big` bytes lands with one byte changed. Counts the
+    /// reads of at least `big` bytes (a read-back of a copy is one).
+    struct Lying {
+        inner: Arc<dyn BlockDevice>,
+        big: u64,
+        lie: std::sync::atomic::AtomicBool,
+        big_reads: std::sync::atomic::AtomicU64,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for Lying {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.inner.id()
+        }
+        fn drive_id(&self) -> crate::drive::DeviceId {
+            self.inner.drive_id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.inner.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.inner.optimal_io_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            self.inner.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            if buf.len() as u64 >= self.big {
+                self.big_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            if buf.len() as u64 >= self.big && self.lie.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                let mut wrong = buf.to_vec();
+                wrong[100] ^= 0x5A;
+                self.inner.write(offset, &wrong).await?;
+                return Ok(buf.len());
+            }
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            self.inner.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+        fn discard_granularity(&self) -> u32 {
+            self.inner.discard_granularity()
+        }
+    }
+
+    /// The appliance's slab with a sealed golden of 16 extents, and a local
+    /// slab on `dest`, for #490's read-back tests.
+    async fn golden_and_dest(
+        dir: &std::path::Path,
+        dest: impl FnOnce(Arc<dyn BlockDevice>) -> Arc<dyn BlockDevice>,
+    ) -> (VolumeManager, crate::drive::slab::SlabId, crate::drive::slab::SlabId, crate::volume::VolumeId) {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::placement::topology::StorageTier;
+        const SLOT: u64 = 64 * 1024;
+        let open = |name: &str| {
+            let path = dir.join(name).display().to_string();
+            async move { Arc::new(FileDevice::open_with_capacity(&path, 64 * SLOT).await.unwrap()) as Arc<dyn BlockDevice> }
+        };
+        let fmt = || SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System);
+        let mut mgr = VolumeManager::new(SLOT);
+        let source = Slab::format_with(open("appliance.slab").await, fmt()).await.unwrap();
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("golden", 16 * SLOT).await.unwrap();
+        let g = mgr.get_volume(&golden).unwrap();
+        let content: Vec<u8> = (0..16 * SLOT).map(|i| (i % 251) as u8).collect();
+        g.write(0, &content).await.unwrap();
+        g.flush().await.unwrap();
+        mgr.seal_volume(golden, None).await.unwrap();
+        let local = Slab::format_with(dest(open("local.slab").await), fmt()).await.unwrap();
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+        (mgr, source_id, local_id, golden)
+    }
+
+    /// #490 (decided A): a flow-over whose sources are held for #412's
+    /// validation writes its copies without reading them back. A drive that
+    /// acknowledges a write it did not make is then not caught at the copy
+    /// but by the validation, which repairs the extent from the appliance
+    /// before any source is let go: the golden reads as written throughout
+    /// what the node is left with.
+    #[tokio::test]
+    async fn a_held_flow_over_skips_the_read_back_and_the_validation_catches_a_lying_drive() {
+        const SLOT: u64 = 64 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let lying = std::sync::Arc::new(std::sync::Mutex::new(None::<Arc<Lying>>));
+        let l2 = lying.clone();
+        let (mgr, source_id, local_id, golden) = golden_and_dest(dir.path(), move |inner| {
+            let d = Arc::new(Lying { inner, big: SLOT, lie: true.into(), big_reads: 0.into() });
+            *l2.lock().unwrap() = Some(d.clone());
+            d as Arc<dyn BlockDevice>
+        })
+        .await;
+        let dev = lying.lock().unwrap().clone().unwrap();
+        let held = super::FlowHeld::default();
+        let (moved, failed) = super::flow_slabs_held(
+            mgr.gem(), mgr.registry(), &[source_id], local_id, || mgr.persist(), None, 0, Some(&held),
+        )
+        .await
+        .expect("the flow-over finished");
+        assert_eq!((moved, failed), (16, 0), "the lie is not seen at the copy");
+        assert!(!dev.lie.load(std::sync::atomic::Ordering::Relaxed), "the drive lied once");
+        assert_eq!(dev.big_reads.load(std::sync::atomic::Ordering::Relaxed), 0, "no copy read back");
+        assert_eq!(
+            mgr.registry().read().await.get(&source_id).unwrap().allocated_slots(),
+            16,
+            "every source held until the validation"
+        );
+
+        let v = super::validate_flow(mgr.gem(), mgr.registry(), &held, &sealed_of(&mgr)).await;
+        assert_eq!((v.validated, v.mismatched, v.repaired), (16, 1, 1), "{v:?}");
+        assert!(v.unrepaired.is_empty(), "{v:?}");
+        let g = mgr.get_volume(&golden).unwrap();
+        let mut back = vec![0u8; (16 * SLOT) as usize];
+        g.read(0, &mut back).await.unwrap();
+        assert!(back.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8), "the golden reads as written");
+        assert_eq!(super::free_held(mgr.registry(), &held).await, 16, "the sources go once it passed");
+    }
+
+    /// #490: without a hold (no validation follows), every copy is read back
+    /// as it is written (#239), and a lying drive's copy fails at the move.
+    #[tokio::test]
+    async fn a_flow_over_without_a_validation_reads_every_copy_back() {
+        const SLOT: u64 = 64 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let lying = std::sync::Arc::new(std::sync::Mutex::new(None::<Arc<Lying>>));
+        let l2 = lying.clone();
+        let (mgr, source_id, local_id, _golden) = golden_and_dest(dir.path(), move |inner| {
+            let d = Arc::new(Lying { inner, big: SLOT, lie: true.into(), big_reads: 0.into() });
+            *l2.lock().unwrap() = Some(d.clone());
+            d as Arc<dyn BlockDevice>
+        })
+        .await;
+        let dev = lying.lock().unwrap().clone().unwrap();
+        let r = super::flow_slabs_held(mgr.gem(), mgr.registry(), &[source_id], local_id, || mgr.persist(), None, 0, None).await;
+        assert!(dev.big_reads.load(std::sync::atomic::Ordering::Relaxed) > 0, "the copies were read back");
+        assert_eq!(r, Some((16, 1)), "the lie failed its move at the read-back, and the retry moved it");
+        let g = mgr.get_volume(&_golden).unwrap();
+        let mut back = vec![0u8; (16 * SLOT) as usize];
+        g.read(0, &mut back).await.unwrap();
+        assert!(back.iter().enumerate().all(|(i, b)| *b == (i % 251) as u8), "the golden reads as written");
     }
 
     /// #412: a power cut during the validation lets go of nothing: the
