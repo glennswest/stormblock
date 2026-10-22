@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — BUILT on wip/478-system-drive; paused for P0 #485
+### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — BUILT on wip/478-system-drive; paused for P0 #496
 
 Owner (2026-10-21), replacing #351's "never guessed": install-config
 `system_drive:` (serial, wwn, model, shelf + bay) names the drive; a STOP
@@ -225,6 +225,10 @@ the choice recorded as stormdrive's designation.
       stormcos (drop `rd.stormblock.slab=/dev/sda`) and storminstall
       (install-config's `system_drive` key) told; close. Metal: server8
       (two older installs; system_drive = its SSD)
+- Resumed 2026-10-21 after #485/#487/#493: rebased onto main (v21.4.2,
+  CHANGELOG conflict only), pushed; check.sh + ci-first-drive-verify.sh +
+  ci-split-verify.sh started on the rebased branch (result in that sc-build;
+  re-run if unread). Paused again for P0 #496
 - WIP f2134f6 reached main by mistake and was reverted there (2a205cc);
   the branch re-applies it
 
