@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### Starts 3–27× slower during a claim rewrite (2026-10-22, #491, P1) — IN PROGRESS (wip/491-stress-io)
+### Starts 3–27× slower during a claim rewrite (2026-10-22, #491, P1) — DONE (v22.1.1), closed; the next stress stage on metal
 
 stormcentral's stress stage: a pod rewrites a 2 GiB file on a claim (`dd
 bs=4M count=512 conv=fsync` in a loop) while the container, claim and VM
@@ -222,8 +222,9 @@ volume's bulk writes and another's few I/Os.
       delete 0.25 s, lock-wait 0); test + negative control (timed out 2 s)
 - [x] tried and not kept: a per-drive bound on large writes in flight
       (0/1/2/4/8 MiB: the mount stayed 1.7 s); flushes p99 99 ms
-- [ ] check.sh; CHANGELOG; release; the next stress stage on pve and the
-      Dell (26.7× there was the lock hold's shape)
+- [x] check.sh at dbd0283 ALL PASS (1266/1266); merged; v22.1.1; stage
+      requested; closed. Metal: the next stress stage on pve and the Dell
+      (26.7× there was the lock hold's shape)
 
 ### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — DONE (v22.0.0), closed; metal pending (server8)
 
