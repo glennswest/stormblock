@@ -752,7 +752,7 @@ dependencies = [
 [[package]]
 name = "fio-xfs"
 version = "0.3.0"
-source = "git+https://github.com/glennswest/fio.xfs.rs?tag=v0.3.0#a72b29fc7c83b23f3258d5fc4d6e37845fff01b8"
+source = "git+https://github.com/glennswest/fio.xfs.rs?rev=a72b29fc7c83b23f3258d5fc4d6e37845fff01b8#a72b29fc7c83b23f3258d5fc4d6e37845fff01b8"
 dependencies = [
  "async-trait",
  "thiserror 2.0.21",
@@ -1562,7 +1562,7 @@ dependencies = [
 [[package]]
 name = "mkfs-xfs"
 version = "0.3.0"
-source = "git+https://github.com/glennswest/mkfs.xfs.rs?tag=v0.3.0#b635843c78a172d569b43e5ce5b57aee109f3bb7"
+source = "git+https://github.com/glennswest/mkfs.xfs.rs?rev=b635843c78a172d569b43e5ce5b57aee109f3bb7#b635843c78a172d569b43e5ce5b57aee109f3bb7"
 dependencies = [
  "async-trait",
  "futures",
