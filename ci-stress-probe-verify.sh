@@ -15,8 +15,6 @@
 # a loop. The engine's own request times for the probe's calls are printed
 # too.
 #
-# LANE_MB sets STORMBLOCK_BULK_INFLIGHT_MB in the guest (0: no bulk lane).
-#
 # Pass: every probe completes. With MAX_RATIO set, the loaded probe's median
 # total must be within MAX_RATIO of the clean one.
 #
@@ -95,7 +93,6 @@ data_dir = "/run/sb"
 node_name = "ci-stress"
 discovery_disabled = true
 EOT
-[ -n "@LANE@" ] && export STORMBLOCK_BULK_INFLIGHT_MB=@LANE@
 RUST_LOG=stormblock=info stormblock --config /run/sb.toml --data-dir /run/sb --no-iscsi > /run/engine.log 2>&1 &
 for i in $(seq 1 100); do api http://127.0.0.1:$port/api/v1/health >/dev/null 2>&1 && break; sleep 0.2; done
 api -X POST http://127.0.0.1:$port/api/v1/slabs -d '{"device_path":"/dev/vda","role":"data"}' >/dev/null \
@@ -151,7 +148,6 @@ umount /mnt/load
 echo "RESULT done PASS"
 poweroff -f
 EOF
-sed -i "s/@LANE@/${LANE_MB:-}/g" "$I/init"
 chmod +x "$I/init"
 (cd "$I" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$W/initrd.gz"
 truncate -s 8G "$W/a.img"
