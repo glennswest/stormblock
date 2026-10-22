@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-22
+- **docs:** #499: the +30 s pve install time since 12.51 is not the engine's. Measured by phase from pvetest2's consoles: the 12.50 → 12.51 stormblock diff is #393 only (nothing on the install path); from ~15:00 UTC the VM disk's writes slowed 10× mid flow-over and the #410 pacing then paused 6–30 s, the validation's reads too. Master's decision A: no engine change; the host's storage is stormcentral#1078.
 - **fix:** #392 (stormcentral-compliance-operations#8): the NVMe/TCP targets (the engine's and `stormboot-serve`, one reader in `stormblock_nvmeof::pdu`) hold a host to the transport specification.
   - Lengths are checked before any body is read: a capsule shorter than its header and digest used to underflow `plen - hlen - 4`. Each type's header length, data offset and padding, and DATAL against what H2CData carries, are checked too.
   - Digests: the digest flags must be the negotiated ones. H2CData's header digest is checked; it was skipped as padding. Data digests on capsules and H2CData are checked; they were read and dropped. A data digest mismatch fails the command with Transient Transport Error (0x22) and the connection goes on; a header digest mismatch is fatal.

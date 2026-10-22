@@ -211,7 +211,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) and v23.0.1 (#392) stages requested.
 
-### Install +30 s on pve since 12.51 (2026-10-22, #499, P1) — MEASURED: not the code; WAITING ON THE OWNER
+### Install +30 s on pve since 12.51 (2026-10-22, #499, P1) — DECIDED A: no engine change, closed
 
 pvetest2 boot → installed 135.8 → 165.7 s. 12.50 = stormblock 89846a6,
 12.51/12.52 = 2166700: the diff is #393 only (image build/convert admin),
@@ -223,7 +223,9 @@ the validation's reads took 26.6 s (4.5 s before). Forge reads unchanged; no
 build VM in any slow window; pvetest1 had the same 15.4 s on 12.4x
 (2026-10-21 22:32). Host storage (stormcentral#1078, data added).
 Asked on #499: A no engine change (recommended), B cap the install's
-pacing, C pacing off under an install intent. Nothing built.
+pacing, C pacing off under an install intent. Master decided **A**
+(2026-10-22): pve storage latency from build VMs sharing the host,
+stormcentral#1078 (raised to P1). Nothing built; closed.
 
 ### NVMe/TCP target: strict PDU handling (2026-10-22, #392, P1) — DONE (v23.0.1), closed
 
