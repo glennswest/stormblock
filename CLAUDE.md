@@ -204,6 +204,20 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
+### Starts 3–27× slower during a claim rewrite (2026-10-22, #491, P1) — IN PROGRESS (wip/491-stress-io)
+
+stormcentral's stress stage: a pod rewrites a 2 GiB file on a claim (`dd
+bs=4M count=512 conv=fsync` in a loop) while the container, claim and VM
+probes run: 3.9× / 2.2× / 3× on pve, 26.7× on the Dell (HDD; container
+0.79 → 21 s); fsck and attach calls stall 11–20 s, "waits on no tracked
+lock (I/O)". The engine has no I/O priority and no fairness between a
+volume's bulk writes and another's few I/Os.
+- [ ] `ci-stress-probe-verify.sh`: the engine in QEMU on one throttled disk
+      (shared budget: a read queues behind writes), a probe (clone, attach,
+      mount, write + fsync, umount, detach, delete) clean and under the
+      load, per step, with the engine's own request times: find the stall
+- [ ] the fix where it is; tests; docs, CHANGELOG; check.sh; release
+
 ### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — DONE (v22.0.0), closed; metal pending (server8)
 
 Owner (2026-10-21), replacing #351's "never guessed": install-config
