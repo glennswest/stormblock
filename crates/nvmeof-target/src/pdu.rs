@@ -513,6 +513,10 @@ async fn read_capsule<R: AsyncReadExt + Unpin>(
     if ch.hlen != CAPSULE_CMD_HLEN {
         return Err(bad(2, &hdr_buf, format!("CapsuleCmd header length {}, not {CAPSULE_CMD_HLEN}", ch.hlen)));
     }
+    // The header digest flag first: it says where the header ends.
+    if ch.hdgst_enable() != dg.header {
+        digest_flags(&ch, &hdr_buf, dg.header, ch.ddgst_enable())?;
+    }
     let hd = if dg.header { 4 } else { 0 };
     let after_hdr = CAPSULE_CMD_HLEN as usize + hd;
     let plen = ch.plen as usize;
@@ -1098,8 +1102,8 @@ mod tests {
         let r2t = || R2tTransfer::new(7, 7, 4096, 8192, 4096);
         // In order, LAST on the one that completes it.
         let mut t = r2t();
-        assert_eq!(t.take(&h, 7, 7, 4096, 4096, false, true).unwrap(), false);
-        assert_eq!(t.take(&h, 7, 7, 8192, 4096, true, false).unwrap(), true);
+        assert!(!t.take(&h, 7, 7, 4096, 4096, false, true).unwrap());
+        assert!(t.take(&h, 7, 7, 8192, 4096, true, false).unwrap());
         assert!(t.digest_bad(), "a bad data digest anywhere fails the command");
         let refused = |cccid, ttag, datao, datal, last| r2t().take(&h, cccid, ttag, datao, datal, last, true).map(|_| ()).unwrap_err();
         let cases = [
