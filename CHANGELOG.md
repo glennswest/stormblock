@@ -33,6 +33,14 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v22.0.0] — 2026-10-22
+
+### Breaking
+- #478: **the default system drive changed** (owner, 2026-10-21). With nothing named, an install takes the machine's first drive: the first non-removable, non-USB drive in controller and port order, on the machine's own shelves first. Before, an ambiguous machine stopped (#351). Old installs, slabs and partitions on that drive are taken over, and its data half is kept. A stormraid member is left alone. A release whose command line still says `rd.stormblock.slab=/dev/sda` keeps that name, which outranks the default.
+
+### Added
+- #478: `system_drive:` in the install-config (the media's, else forge's per-host one) chooses the system drive per machine by `serial`, `wwn`, `model`, or `shelf` + `bay`. It outranks every other choice, and it is the only drive taken. A spec that matches no drive or several, a device name, or an unknown key stops the install, naming every drive. The choice is recorded as stormdrive's designation in system-data when stormdrive has none. The `taken` verdict in health's `slabs.local_disk` says why the drive was taken.
+
 ## [v21.6.0] — 2026-10-22
 
 ### Added
