@@ -40,6 +40,14 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v23.0.0] — 2026-10-22
+
+### Breaking
+- #393: `POST /api/v1/images/build` and `/api/v1/images/convert` are destructive (the admin token, or a Kubernetes bearer allowed `destroy`), and write only into the images directory (`[images] dir`, by default `<data_dir>/images`) or onto a ublk device this engine created by an attach (raw only, not mounted). Anything else is `400`. stormblock-registry#142 (send the admin token).
+
+### Added
+- #393: `[images] dir`.
+
 ## [v22.3.0] — 2026-10-22
 
 ### Added
