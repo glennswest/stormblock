@@ -204,7 +204,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### dir-block-csum on a live service clone after a power cycle (2026-10-22, #496, P0) — IN PROGRESS (wip/496-fsck-snapshot)
+### dir-block-csum on a live service clone after a power cycle (2026-10-22, #496, P0) — DONE (v21.5.0), closed; the next pve run's check settles pvetest2
 
 12.43-flowsdn pvetest2: stormcentral's ext4 stage (`perf.rs`, `POST
 /api/v1/volumes/{id}/fsck` on each *mounted* service clone) reported
@@ -214,12 +214,20 @@ reads the live device block by block over time, journal not replayed
 generation seeds its checksum can be read from different moments, or a
 block mid-write. Master: establish real vs artifact; if artifact, check a
 quiesced snapshot.
-- [ ] fsck (no repair): a point-in-time snapshot (write gate), its journal
-      replayed (`journal::Journal::open`, `recovery::recover`), then the
-      read-only check; snapshot deleted; `view: snapshot|live`, `?live=true`
-- [ ] QEMU: a mounted ext4 under directory churn, checked live and by
-      snapshot many times; after unmount, clean
-- [ ] tests, docs, CHANGELOG; check.sh; release; stormcentral told
+- [x] fsck (no repair): a point-in-time snapshot (write gate), its journal
+      replayed (`journal::Journal::open`, `recovery::recover`), orphans
+      released, superblock free counts summed from the descriptors (as a
+      mount; found: only those two differed after a replay), then the
+      read-only check; snapshot deleted; `view: snapshot|sealed|live`,
+      `?live=true`
+- [x] QEMU `fsck-snapshot` (slab delay off for the phase): a real kernel's
+      ext4 under directory churn: live never clean (50/50), snapshot clean
+      50/50, clean after the unmount, no snapshot left. The live
+      dir-block-csum itself was not reproduced (0 in 50): pvetest2's is
+      most likely a torn live read (nothing orders a read against a write
+      of the same block; dir-block-malformed in the same run), not proven
+- [x] check.sh at 49c5640 ALL PASS (1263/1263); README, CHANGELOG;
+      stormcentral#1090 (snapshot view: every problem a fault); v21.5.0
 
 ### The initramfs's log over the network (2026-10-21, #477, P1) — DONE (v21.3.0), closed; metal pending
 
