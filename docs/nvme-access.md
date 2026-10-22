@@ -196,7 +196,43 @@ subsystem (the kernel logs *Connect for subsystem … is not allowed*); H1's
 clone read/written and its golden a read-only block device that refuses a
 write; H2 without its secret (`no key`), with another host's (`authentication
 failed`), and with its own (`authenticated with hash hmac(sha256) dhgroup
-null`).
+null`). Since #392 it also writes 1 MiB past the 8 KiB in-capsule allowance
+(R2T and H2CData), and connects H1 with header and data digests (`nvme
+connect -g -G`) for an R2T write, an in-capsule write and reads, with no
+digest error or C2HTermReq on either side.
+
+## PDUs as the transport specification has them (#392)
+
+Both targets (the engine's and `stormboot-serve`) read every PDU through
+`stormblock_nvmeof::pdu::read_pdu_with`, which checks what a header claims
+before reading any of its body:
+
+- the type is one a host sends (ICReq, CapsuleCmd, H2CData, H2CTermReq); a
+  controller's PDU from a host, or an unknown type, is refused;
+- the header length is that type's (128, 72, 24, 24), the PDU length is not
+  shorter than the header and its digest nor past the largest PDU taken
+  (#407), and the data offset is at or past the header and its digest with
+  data after it (padding up to it is skipped), or 0 with no data;
+- the digest flags are the ones the connection negotiated (a capsule carries
+  the data digest flag only when it carries data, as Linux sends it);
+- H2CData's DATAL is the length it carries.
+
+A **header digest** that does not match is fatal. A **data digest** that
+does not match fails that command with Transient Transport Error (status
+0x22, the host may send it again) and the connection goes on. Each H2CData
+PDU must answer the R2T outstanding for its command: the R2T's command and
+transfer tag, starting where the previous one ended, no more than
+MAXH2CDATA, within the R2T, and LAST_PDU on the one that completes it and no
+other. H2CData with no R2T outstanding is fatal; it used to be dropped.
+
+A fatal error is answered with a C2HTermReq (its Fatal Error Status, and the
+byte offset of the field at fault for Invalid PDU Header Field and
+Unsupported Parameter, with up to 152 bytes of the PDU's header) and the
+connection is closed. An ICReq asking for a PDU format version other than 0,
+or a host PDU data alignment (HPDA) the target does not pad to, is
+Unsupported Parameter. An H2CTermReq from the host closes the connection
+quietly. C2HData's data offset counts the header digest when one is
+negotiated (it named the digest's first byte before).
 
 ## Configuration
 
