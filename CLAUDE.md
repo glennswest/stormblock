@@ -211,6 +211,27 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) stage requested.
 
+### NVMe/TCP target: strict PDU handling (2026-10-22, #392, P1) — IN PROGRESS
+
+Compliance hardening (stormcentral-compliance-operations#8). Both targets
+(the engine's `target/nvmeof`, the crate's `stormboot-serve` server) read
+PDUs through `stormblock_nvmeof::pdu::read_pdu`. Found: `plen - hlen - 4`
+underflows on a short PDU, hlen not checked per type, inline padding
+ignored, data digests read and dropped, H2CData's header digest never
+checked, digest flags never compared with the negotiation, H2CData taken
+for any CID/ttag/offset, C2HData's `pdo` wrong under a header digest.
+- [ ] `read_pdu_with(digests)`: per-type hlen/plen/pdo/flags checks before
+      any body is read; header digest checked (H2CData too); data digest
+      checked (a mismatch completes the command with Transient Transport
+      Error, 0x22, the connection goes on); `Fatal {fes, fei}` → C2HTermReq
+      then close; H2CTermReq closes quietly; a controller's PDU from a host
+      refused; ICReq pfv/hpda ≠ 0 refused (Unsupported Parameter)
+- [ ] `R2tTransfer`: each H2CData matched to its R2T (CID, ttag, offset in
+      order, length ≤ maxh2cdata and within the R2T, LAST on the final one);
+      H2CData with no R2T outstanding fatal; both servers
+- [ ] tests per refusal; ci-nvme-hosts-verify.sh / Linux initiator with
+      digests on; docs, CHANGELOG
+
 ### Image build: admin class and restricted output (2026-10-22, #393, P1) — DONE (v23.0.0), closed
 
 Compliance hardening (stormcentral-compliance-operations#8): `POST
