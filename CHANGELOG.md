@@ -31,6 +31,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.6.0] — 2026-10-22
+
+### Added
+- #490: the flow-over's progress line says where the copy's time went: `read` (the appliance), `write` and `read back`. A window reads its later sources while it writes the earlier ones. A rotating destination is written in 64 MiB runs in a 128 MiB window. On a disk-bound destination the rate model puts the write and the read-back at about equal time, so the copy runs at most half the disk's rate; whether to drop the per-run read-back is asked on #490.
+
 ## [v21.5.0] — 2026-10-22
 
 ### Changed
