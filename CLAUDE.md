@@ -229,6 +229,29 @@ network is up; offline = group only.
       dead, its installer log in `stormcentral logs`, once stormcentral#1075
       names the collector in the per-host install-config (`syslog:`)
 
+### 12.39–12.42 pve perf "regression" (2026-10-21, #485, P0) — MEASURED: no stormblock commit adds time; closed
+
+Releases' stormblock: 12.38 27f46fe, 12.39 c2fdcce, 12.40 cf7e8a3, 12.41
+e91a5aa, 12.42 c38781f. Measured, by phase, from the pve consoles
+(`/var/lib/stormcentral/console/pvetest*-20261021-*.log` + `.times`, /init's
+own `[+Δ | T] stage` clock) and on build VMs:
+- [x] initramfs root ready (install boot / reboot): 6.8–10.3 / 4.7–6.1 s on
+      every release, 12.42 pvetest2 6.8 / 5.7 (12.38: 6.8 / 4.7). One
+      outlier: pvetest1 12.42's install boot 72.8 s, every I/O slow (system-
+      data 26 s, the root's mount 21 s), while pvetest2 ran the same code 6
+      min later in 6.8 s: the pve host, not the code
+- [x] flow-over: same rate (230–270 MB/s); 12.42 13.2 / 13.0 s = 12.38's
+      13.9 / 10.0 (12.39–12.41: 15–53 s, varying, same code); its start
+      waits the #278 boot grace (~90 s), the same on every release
+- [x] claim API (`ci-cold-claim-timing.sh`, the five commits): lookup 4–6
+      ms, clone 21–38 ms on all; c2fdcce's first 58 ms was run order (rerun
+      first: 37.3 vs 27f46fe 37.8); main the fastest (23.6, #475)
+- [x] engine diff 27f46fe..c2fdcce: #476's dropped-mapping counters only
+      (the #474 wire half is moved code, Identify bytes identical); e91a5aa
+      ..c38781f: tests only. logcast reads /run files and sends UDP
+- Nothing reverted. The pve variance is stormcentral's (stormcentral#1078
+  filed: builds share the host during the perf gate)
+
 ### server1's clones 10–20 s after the 12.37 reboot (2026-10-21, #475, P0) — DONE (v21.2.2, cf7e8a3), closed; metal pending
 
 stormcos#626: on X9 server1 (SMR HDD) after the reboot, every root clone
