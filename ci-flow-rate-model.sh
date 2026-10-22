@@ -3,9 +3,10 @@
 # rate model (`cli::forge_mode_tests::flow_over_rate_model`): a destination of
 # one actuator at FLOW_MODEL_DEST_MBPS (60) with a FLOW_MODEL_DEST_SEEK_MS (10)
 # seek, the appliance over NVMe/TCP on loopback, a foreground writer.
-# Compares the window as before #490 (`STORMBLOCK_FLOW_OVERLAP=0`, 32 MiB
-# runs) with its reads overlapping its writes at 32 and 64 MiB runs. Each
-# line says where the copy's time went (read, write, read back).
+# Compares a flow-over that reads each copy back as it writes it with one
+# that leaves that to #412's validation (the default since #490's A). Each
+# line says where the copy's time went (read, write, read back) and the
+# validation's own rate.
 set -eo pipefail
 mkdir -p tmp && export TMPDIR=$PWD/tmp
 m() {
@@ -14,7 +15,6 @@ m() {
         | grep -E "FLOW-MODEL|flow-over: [0-9]+ moved|panicked" | tail -2 || true
 }
 for i in 1 2; do
-    echo "== as before (reads, then writes; 32 MiB runs)"; m env STORMBLOCK_FLOW_OVERLAP=0 STORMBLOCK_FLOW_RUN_MB=32
-    echo "== overlapping, 32 MiB runs"; m env STORMBLOCK_FLOW_RUN_MB=32
-    echo "== overlapping, 64 MiB runs (a rotating destination's default)"; m env
+    echo "== each copy read back (STORMBLOCK_FLOW_READBACK=1, as before #490's A)"; m env STORMBLOCK_FLOW_READBACK=1
+    echo "== no read-back; #412's validation checks every moved extent (the default)"; m env
 done
