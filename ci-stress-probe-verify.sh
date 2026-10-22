@@ -138,6 +138,8 @@ lp=$!
 sleep 8
 mark=$(wc -l < /run/engine.log)
 for n in 1 2 3; do probe load $n; done
+curl -s -m 30 -H 'Authorization: Bearer t' http://127.0.0.1:$port/debug/stalls | grep -iE "flush|drive|p90|sda|vda" | head -12 | sed 's/^/STALLS /'
+echo "GUEST vda rotational $(cat /sys/block/vda/queue/rotational)"
 touch /tmp/stop; wait $lp
 echo "GUEST load passes: $(wc -l < /tmp/passes 2>/dev/null || echo 0) of 512 MiB"
 # The engine's own times for the probe's calls under the load.
@@ -163,7 +165,7 @@ timeout 1200 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 
     -append "console=ttyS0 panic=-1 loglevel=4" \
     -drive file="$W/a.img",if=virtio,format=raw,cache=none,aio=threads,throttling.bps-total=$BPS,throttling.iops-total=$IOPS,throttling.iops-size=65536 \
     > "$W/guest.log" 2>&1
-tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|PROBE|ENGINE|LOG)|panick'
+tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|PROBE|ENGINE|LOG|STALLS)|panick'
 
 med() { tr -d '\r' < "$W/guest.log" | awk -v l="$1" '$1=="PROBE" && $2==l {print $5}' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
 C=$(med clean); L=$(med load)
