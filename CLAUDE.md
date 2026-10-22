@@ -211,7 +211,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) and v23.0.1 (#392) stages requested.
 
-### "slab … not attached … mapping dropped" on server1's 12.52 install (2026-10-22, #500, P1) — IN PROGRESS
+### "slab … not attached … mapping dropped" on server1's 12.52 install (2026-10-22, #500, P1) — DONE (v23.0.2), closed
 
 server1 12.52 install boot: `slab 71ddf1c0 not attached: 80 extent(s) of 18
 volume(s) … cilium.golden …`; after the reboot cilium-agent not ready
@@ -222,12 +222,16 @@ slab of an earlier release image, never attached again. 12.49 (v22.3.0, which
 passed) said the same (slab 88cde524, 83 extents of 20 volumes) in a SOL gap,
 in syslog. The reboot's restore (21:12:10) dropped nothing; the flow-over
 validated 2786/2786. So not new and not cilium's cause (rustkube#185).
-- [ ] install hands `adopt_slabs` the strays it deletes: their drops at INFO
-      ("the old release's, laid again: nothing the node keeps"); WARN only
-      for a volume kept
-- [ ] health `lost_mappings`: extents dropped at a restore/adopt from volumes
+- [x] install hands `adopt_slabs_going` the strays it deletes: their drops
+      at INFO ("nothing this node keeps lost a mapping"); WARN only for a
+      volume kept
+- [x] health `lost_mappings`: extents dropped at a restore/adopt from volumes
       still present (the issue's ask 3), by volume
-- [ ] tests; README, CHANGELOG; check.sh; tag; stage; answer and close
+- [x] tests (unit; the #369 install test with a slab not attached: no WARN,
+      no loss; control with the strays not named fails with server1's line);
+      README, CHANGELOG; check.sh at 13836580 ALL PASS (1279/1279); v23.0.2
+      (92788ab, `stormblock 23.0.2` from a `--locked` build); stage
+      963762de42ff requested; closed
 
 ### Install +30 s on pve since 12.51 (2026-10-22, #499, P1) — DECIDED A: no engine change, closed
 
