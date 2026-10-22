@@ -252,12 +252,13 @@ is not known.
       dropped in a flow-over whose sources are held for #412's validation;
       validation mandatory, sources held until it passes, a mismatch
       repaired or reverted; a safety-relevant changelog line
-- [ ] `read_back` on the window: off only under a hold (`FlowHeld`),
-      `STORMBLOCK_FLOW_READBACK=1` forces it; tests (a held flow-over makes
-      no read-back and still validates; a miswritten copy is caught by the
-      validation and repaired); model before/after; durability rule 17,
-      README, CHANGELOG; check.sh; release; server1 before (12.40: 23 MB/s)
-      and after
+- [x] `read_back` on the window: off only under a hold (`FlowHeld`),
+      `STORMBLOCK_FLOW_READBACK=1` forces it; tests (a lying drive caught
+      by the validation; read back without a hold), flow/install/validation
+      48/48 under nextest; model: read back 28–30 s → 0, copy 75–79 →
+      47–57 s (1.5 GB, 60 MB/s); rule 17, README, CHANGELOG (safety line)
+- [ ] check.sh; release; server1 before (12.40: 23 MB/s, copy only) and
+      after (the next pve/X9 release with this engine: the split line)
 
 ### dir-block-csum on a live service clone after a power cycle (2026-10-22, #496, P0) — DONE (v21.5.0), closed; the next pve run's check settles pvetest2
 
