@@ -211,7 +211,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
 
-### Stage only finished commits (2026-10-22, #492, P2) — IN PROGRESS (wip/492-wip-guard)
+### Stage only finished commits (2026-10-22, #492, P2) — DONE, closed (no engine change: no golden)
 
 Master's review: 12.39's engine was c2fdcce, `WIP(#474)`: main's head when
 it was staged (a pause for P0 #475 committed on main). WIP commits inside a
@@ -223,7 +223,8 @@ finished branch's fast-forward are harmless; a WIP head is what ships.
       runs the hook's test
 - [x] stormcentral#1091: stage stormblock from its newest `v*` tag, not
       main's head (every staged golden is tagged here since #353)
-- [ ] docs (CLAUDE.md rule), CHANGELOG; check.sh; close
+- [x] check.sh at 9c21c4a-ish ALL PASS (1269/1269, stage 0 ran); a WIP head
+      fails at stage 0 (negative control, tmp/492-control); merged; closed
 
 ### A boothost command record (2026-10-22, #494, P1, stormbootx#167) — DONE (v22.2.0), closed
 
