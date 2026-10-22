@@ -211,6 +211,24 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) and v23.0.1 (#392) stages requested.
 
+### "slab … not attached … mapping dropped" on server1's 12.52 install (2026-10-22, #500, P1) — IN PROGRESS
+
+server1 12.52 install boot: `slab 71ddf1c0 not attached: 80 extent(s) of 18
+volume(s) … cilium.golden …`; after the reboot cilium-agent not ready
+(stormcos#626). Found (console + stormcentral syslog, logcast #477):
+the 18 volumes are exactly the 18 old-release strays (#369) the install
+deletes right after and lays again from the claim; 71ddf1c0 is an appliance
+slab of an earlier release image, never attached again. 12.49 (v22.3.0, which
+passed) said the same (slab 88cde524, 83 extents of 20 volumes) in a SOL gap,
+in syslog. The reboot's restore (21:12:10) dropped nothing; the flow-over
+validated 2786/2786. So not new and not cilium's cause (rustkube#185).
+- [ ] install hands `adopt_slabs` the strays it deletes: their drops at INFO
+      ("the old release's, laid again: nothing the node keeps"); WARN only
+      for a volume kept
+- [ ] health `lost_mappings`: extents dropped at a restore/adopt from volumes
+      still present (the issue's ask 3), by volume
+- [ ] tests; README, CHANGELOG; check.sh; tag; stage; answer and close
+
 ### Install +30 s on pve since 12.51 (2026-10-22, #499, P1) — DECIDED A: no engine change, closed
 
 pvetest2 boot → installed 135.8 → 165.7 s. 12.50 = stormblock 89846a6,
