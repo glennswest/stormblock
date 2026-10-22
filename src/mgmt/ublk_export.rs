@@ -513,6 +513,16 @@ impl UblkExportManager {
             .collect()
     }
 
+    /// The volume whose ublk device this engine created by an attach is at
+    /// `device_path`. An adopted boot device (the root, the node's mounted
+    /// volumes) is never one: nothing may be written over it (#393).
+    pub fn attached_volume_at(&self, device_path: &str) -> Option<String> {
+        self.exports
+            .iter()
+            .find(|(_, e)| e.device_path == device_path)
+            .map(|(v, _)| v.clone())
+    }
+
     /// Whether this node currently exports `volume_id` as a ublk device —
     /// including a boot device it adopted, which is as much in use.
     pub fn is_exported(&self, volume_id: &str) -> bool {

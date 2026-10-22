@@ -174,7 +174,93 @@ fn format_of(out: &str, want: &Option<String>) -> Result<ImageFormat, String> {
     }
 }
 
-async fn build(State(_state): State<Arc<AppState>>, Json(req): Json<BuildRequest>) -> Response {
+/// Where an image may be written (#393), or why not. The route writes as
+/// the engine's own user, so a path the caller names is never taken on trust:
+///
+/// - a ublk device this engine created by an attach (`/dev/ublkbN`, a
+///   volume of its own), raw only — a conversion writes a raw image beside
+///   its output, and there is no "beside" a device — and not mounted. A boot
+///   device the engine adopted (the root, the node's own volumes) is not one;
+/// - else a file inside the images directory (`[images] dir`, by default
+///   `<data_dir>/images`): no `..`, its parent resolved through every link
+///   and still inside, and no link, device or directory already at the name.
+///
+/// The answer is the path to write — the parent's resolved spelling, so a
+/// link swapped into the parent afterwards does not move the write — and
+/// whether it is a device.
+async fn allowed_out(state: &AppState, out: &Path, format: ImageFormat) -> Result<(PathBuf, bool), String> {
+    let shown = out.display();
+    if !out.is_absolute() {
+        return Err(format!(
+            "out is the relative path {shown}, and a daemon has no directory to resolve it against"
+        ));
+    }
+    let attached = state.ublk_exports.lock().await.attached_volume_at(&out.to_string_lossy());
+    if let Some(volume) = attached {
+        if format != ImageFormat::Raw {
+            return Err(format!(
+                "out {shown} is volume {volume}'s ublk device: only a raw image is written onto a device \
+                 ({format} converts from a raw image written beside its output)"
+            ));
+        }
+        if let Some(at) = crate::mgmt::ublk_export::mounted_at(&out.to_string_lossy()) {
+            return Err(format!("out {shown} is volume {volume}'s ublk device and is mounted on {at}"));
+        }
+        return Ok((out.to_path_buf(), true));
+    }
+    let Some(dir) = state.config.images.dir(state.data_dir.as_deref()) else {
+        return Err(format!(
+            "out {shown} is not a ublk device this engine attached, and there is no images directory \
+             (set [images] dir or a data directory)"
+        ));
+    };
+    let outside = || {
+        format!(
+            "out {shown} is outside the images directory {}: an image is written there, or onto a ublk \
+             device this engine attached",
+            dir.display()
+        )
+    };
+    if out.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(outside());
+    }
+    let (Some(parent), Some(name)) = (out.parent(), out.file_name()) else {
+        return Err(outside());
+    };
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return Err(format!("the images directory {} cannot be made: {e}", dir.display()));
+    }
+    let root = tokio::fs::canonicalize(&dir)
+        .await
+        .map_err(|e| format!("the images directory {}: {e}", dir.display()))?;
+    let parent = match tokio::fs::canonicalize(parent).await {
+        Ok(p) => p,
+        Err(_) if !out.starts_with(&dir) && !out.starts_with(&root) => return Err(outside()),
+        Err(e) => return Err(format!("out {shown}: its directory {}: {e}", parent.display())),
+    };
+    if !parent.starts_with(&root) {
+        return Err(outside());
+    }
+    let path = parent.join(name);
+    let mut names = vec![path.clone()];
+    if format != ImageFormat::Raw {
+        names.push(path.with_extension("raw.img"));
+    }
+    for p in &names {
+        if let Ok(m) = tokio::fs::symlink_metadata(p).await {
+            if !m.file_type().is_file() {
+                return Err(format!(
+                    "{} is already there and is not a plain file (a link, a device or a directory): \
+                     not written over",
+                    p.display()
+                ));
+            }
+        }
+    }
+    Ok((path, false))
+}
+
+async fn build(State(state): State<Arc<AppState>>, Json(req): Json<BuildRequest>) -> Response {
     let format = match format_of(&req.out, &req.format) {
         Ok(f) => f,
         Err(m) => return ApiError::bad_request(m),
@@ -193,13 +279,10 @@ async fn build(State(_state): State<Arc<AppState>>, Json(req): Json<BuildRequest
         return ApiError::bad_request(e);
     }
 
-    let out_path = PathBuf::from(&req.out);
-    if !out_path.is_absolute() {
-        return ApiError::bad_request(format!(
-            "out is the relative path {}, and a daemon has no directory to resolve it against",
-            out_path.display()
-        ));
-    }
+    let out_path = match allowed_out(&state, Path::new(&req.out), format).await {
+        Ok((p, _)) => p,
+        Err(m) => return ApiError::bad_request(m),
+    };
     // A conversion reads a finished raw image, so a non-raw format builds
     // beside its output first.
     let raw_path = if format == ImageFormat::Raw {
@@ -269,32 +352,40 @@ pub struct ConvertRequest {
     pub include_slab: bool,
 }
 
-async fn convert(State(_state): State<Arc<AppState>>, Json(req): Json<ConvertRequest>) -> Response {
+async fn convert(State(state): State<Arc<AppState>>, Json(req): Json<ConvertRequest>) -> Response {
     let format = match format_of(&req.out, &req.format) {
         Ok(f) => f,
+        Err(m) => return ApiError::bad_request(m),
+    };
+    // Same places as a build (#393). A conversion writes its output alone,
+    // so the raw-beside rule of a device does not apply: a raw "conversion"
+    // onto an attached device is a copy.
+    let out = match allowed_out(&state, Path::new(&req.out), ImageFormat::Raw).await {
+        Ok((p, device)) if format == ImageFormat::Raw || !device => p,
+        Ok(_) => return ApiError::bad_request(format!("out {} is a device: only a raw image is written onto one", req.out)),
         Err(m) => return ApiError::bad_request(m),
     };
     let r = if format == ImageFormat::Iso {
         iso::from_image_with(
             Path::new(&req.input),
-            Path::new(&req.out),
+            &out,
             iso::IsoOptions {
                 include_slab: req.include_slab,
             },
         )
         .await
     } else {
-        formats::convert(Path::new(&req.input), Path::new(&req.out), format).await
+        formats::convert(Path::new(&req.input), &out, format).await
     };
     match r {
         Err(e) => err(e),
         Ok(_) => {
-            let len = tokio::fs::metadata(&req.out)
+            let len = tokio::fs::metadata(&out)
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0);
             Json(json!({
-                "path": req.out,
+                "path": out.display().to_string(),
                 "format": format.as_str(),
                 "size_bytes": len,
             }))
@@ -445,5 +536,107 @@ mod tests {
             ImageFormat::Raw
         );
         assert!(format_of("/out/x", &Some("qcow3".into())).is_err());
+    }
+
+    async fn state_in(data_dir: Option<&Path>, images: Option<&Path>) -> AppState {
+        let mut config = crate::mgmt::config::StormBlockConfig::default();
+        config.management.data_dir = data_dir.map(|d| d.to_string_lossy().to_string());
+        config.images.dir = images.map(|d| d.to_string_lossy().to_string());
+        let vm = crate::volume::VolumeManager::new(1 << 20);
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        AppState::new(config, vm, reg, gem)
+    }
+
+    /// #393: a file goes inside the images directory and nowhere else; each
+    /// way out of it is refused and says where an image may go.
+    #[tokio::test]
+    async fn an_image_file_is_written_inside_the_images_directory_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let st = state_in(Some(&data), None).await;
+        let images = std::fs::canonicalize(&data).unwrap().join("images");
+
+        // Inside (the directory is made on first use).
+        let (p, device) = allowed_out(&st, &data.join("images/a.img"), ImageFormat::Raw).await.unwrap();
+        assert_eq!((p, device), (images.join("a.img"), false));
+
+        // Anywhere else.
+        for out in ["/etc/stormblock-393.img", "/dev/sda"] {
+            let e = allowed_out(&st, Path::new(out), ImageFormat::Raw).await.unwrap_err();
+            assert!(e.contains("outside the images directory"), "{out}: {e}");
+        }
+        let e = allowed_out(&st, &tmp.path().join("x.img"), ImageFormat::Raw).await.unwrap_err();
+        assert!(e.contains("outside"), "{e}");
+        // Relative.
+        let e = allowed_out(&st, Path::new("a.img"), ImageFormat::Raw).await.unwrap_err();
+        assert!(e.contains("relative"), "{e}");
+        // `..` out of it, whether or not it would land back inside.
+        for out in [data.join("images/../escape.img"), data.join("images/../images/a.img")] {
+            let e = allowed_out(&st, &out, ImageFormat::Raw).await.unwrap_err();
+            assert!(e.contains("outside"), "{}: {e}", out.display());
+        }
+        // A link inside that leads out: its target is where the write would land.
+        let away = tmp.path().join("away");
+        std::fs::create_dir_all(&away).unwrap();
+        std::os::unix::fs::symlink(&away, images.join("sub")).unwrap();
+        let e = allowed_out(&st, &images.join("sub/x.img"), ImageFormat::Raw).await.unwrap_err();
+        assert!(e.contains("outside"), "{e}");
+        // A link at the name itself, and the raw image a conversion writes beside it.
+        std::os::unix::fs::symlink("/etc/passwd", images.join("p.img")).unwrap();
+        let e = allowed_out(&st, &images.join("p.img"), ImageFormat::Raw).await.unwrap_err();
+        assert!(e.contains("not a plain file"), "{e}");
+        std::os::unix::fs::symlink("/etc/passwd", images.join("q.raw.img")).unwrap();
+        let e = allowed_out(&st, &images.join("q.qcow2"), ImageFormat::Qcow2).await.unwrap_err();
+        assert!(e.contains("q.raw.img"), "{e}");
+        // A directory at the name.
+        std::fs::create_dir_all(images.join("d.img")).unwrap();
+        assert!(allowed_out(&st, &images.join("d.img"), ImageFormat::Raw).await.is_err());
+        // A plain file already there is rewritten, as a build always has.
+        std::fs::write(images.join("old.img"), b"x").unwrap();
+        assert!(allowed_out(&st, &images.join("old.img"), ImageFormat::Raw).await.is_ok());
+        // A subdirectory that exists is inside too.
+        std::fs::create_dir_all(images.join("rel")).unwrap();
+        assert!(allowed_out(&st, &images.join("rel/b.iso"), ImageFormat::Iso).await.is_ok());
+    }
+
+    /// `[images] dir` names the directory; with neither it nor a data
+    /// directory, no file is written at all.
+    #[tokio::test]
+    async fn the_images_directory_is_configured_or_there_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mine = tmp.path().join("mine");
+        let st = state_in(Some(&tmp.path().join("data")), Some(&mine)).await;
+        assert!(allowed_out(&st, &mine.join("a.img"), ImageFormat::Raw).await.is_ok());
+        let e = allowed_out(&st, &tmp.path().join("data/images/a.img"), ImageFormat::Raw).await.unwrap_err();
+        assert!(e.contains("outside"), "{e}");
+
+        let st = state_in(None, None).await;
+        let e = allowed_out(&st, &tmp.path().join("a.img"), ImageFormat::Raw).await.unwrap_err();
+        assert!(e.contains("no images directory"), "{e}");
+    }
+
+    /// A ublk device this engine attached takes a raw image; a conversion's
+    /// format does not go onto one; an adopted boot device (the root) is
+    /// never written.
+    #[tokio::test]
+    async fn an_attached_ublk_device_takes_a_raw_image_and_a_boot_device_never() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let st = state_in(Some(tmp.path()), None).await;
+        let vol = uuid::Uuid::new_v4().to_string();
+        let root = uuid::Uuid::new_v4().to_string();
+        {
+            let mut u = st.ublk_exports.lock().await;
+            u.insert_fake(&vol, "/dev/ublkb93");
+            u.record_adopted(&root, "/dev/ublkb0".into());
+        }
+        let (p, device) = allowed_out(&st, Path::new("/dev/ublkb93"), ImageFormat::Raw).await.unwrap();
+        assert_eq!((p, device), (PathBuf::from("/dev/ublkb93"), true));
+        let e = allowed_out(&st, Path::new("/dev/ublkb93"), ImageFormat::Iso).await.unwrap_err();
+        assert!(e.contains("only a raw image"), "{e}");
+        let e = allowed_out(&st, Path::new("/dev/ublkb0"), ImageFormat::Raw).await.unwrap_err();
+        assert!(e.contains("outside the images directory"), "{e}");
+        let e = allowed_out(&st, Path::new("/dev/ublkb7"), ImageFormat::Raw).await.unwrap_err();
+        assert!(e.contains("outside"), "{e}");
     }
 }

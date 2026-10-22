@@ -172,6 +172,8 @@ async fn the_node_token_keeps_the_ordinary_verbs_and_only_those() {
         (M::DELETE, "/forge".to_string(), None),
         (M::POST, "/spares".to_string(), Some(json!({}))),
         (M::POST, "/pallets/gpt".to_string(), Some(json!({}))),
+        (M::POST, "/images/build".to_string(), Some(json!({ "out": "/nonexistent/x.img" }))),
+        (M::POST, "/images/convert".to_string(), Some(json!({ "input": "/nonexistent", "out": "/nonexistent/x.img" }))),
         (M::POST, format!("/volumes/{golden}/seal"), None),
     ] {
         assert_eq!(call(&n, m.clone(), &p, Some(NODE), b.clone()).await, 401, "{m} {p} with the node token");
@@ -890,4 +892,55 @@ async fn a_familys_bearer_keeps_to_its_namespace_and_its_quota() {
     assert!(sar.iter().any(|ra| ra["verb"] == "create" && ra["namespace"] == "nana"), "{sar:?}");
     assert!(sar.iter().any(|ra| ra["verb"] == "get" && ra["namespace"] == "stormcos"), "{sar:?}");
     assert!(sar.iter().any(|ra| ra["verb"] == "list" && ra["namespace"].is_null()), "the cluster-wide list first: {sar:?}");
+}
+
+/// #393: an image is built by the admin, into the images directory (or onto
+/// a ublk device the engine attached): an output anywhere else is refused
+/// before a byte is written, and one inside is built.
+#[tokio::test]
+async fn an_image_is_built_by_the_admin_into_the_images_directory_only() {
+    let n = node(false, None).await;
+    let spec = r#"
+size = "64M"
+[[pallet]]
+name = "boot"
+kind = "boot"
+priority = 14
+members = [ { name = "cmdline", role = "cmdline", kind = "bootconfig", text = "root=ublk0 ro" } ]
+"#;
+    let post = |tok: &'static str, body: Value| {
+        let url = format!("{}/images/build", n.base);
+        async move {
+            let r = reqwest::Client::new().post(url).bearer_auth(tok).json(&body).send().await.unwrap();
+            let status = r.status().as_u16();
+            (status, r.text().await.unwrap())
+        }
+    };
+    let outside = n.dir.path().join("elsewhere.img");
+    let images = n.dir.path().join("images");
+
+    let (st, _) = post(NODE, json!({ "spec_toml": spec, "out": images.join("a.img") })).await;
+    assert_eq!(st, 401, "the node token does not build an image");
+
+    for out in [outside.clone(), images.join("../elsewhere.img"), "/dev/ublkb0".into()] {
+        let (st, body) = post(ADMIN, json!({ "spec_toml": spec, "out": out })).await;
+        assert_eq!(st, 400, "{}: {body}", out.display());
+        assert!(body.contains("images directory"), "{body}");
+    }
+    assert!(!outside.exists(), "nothing written outside");
+
+    let (st, body) = post(ADMIN, json!({ "spec_toml": spec, "out": images.join("a.img") })).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(std::fs::metadata(images.join("a.img")).unwrap().len() > 0);
+
+    // A conversion goes to the same places.
+    let r = reqwest::Client::new()
+        .post(format!("{}/images/convert", n.base))
+        .bearer_auth(ADMIN)
+        .json(&json!({ "input": images.join("a.img"), "out": outside.with_extension("qcow2") }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 400);
+    assert!(!outside.with_extension("qcow2").exists());
 }

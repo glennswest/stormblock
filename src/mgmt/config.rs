@@ -66,6 +66,29 @@ pub struct StormBlockConfig {
     /// The other nodes whose volumes this node attaches (#328).
     #[serde(default)]
     pub fabric: FabricSection,
+    /// Where `POST /api/v1/images/build` may write (#393).
+    #[serde(default)]
+    pub images: ImagesSection,
+}
+
+/// `[images]` (#393): the one directory an image built or converted through
+/// the API may be written into. Unset: `<data_dir>/images`. An output outside
+/// it is refused, whatever token sent it; the other place an image may go is
+/// a ublk device this engine created by an attach.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImagesSection {
+    pub dir: Option<String>,
+}
+
+impl ImagesSection {
+    /// The directory, or none when neither it nor a data directory is set.
+    pub fn dir(&self, data_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+        match &self.dir {
+            Some(d) if !d.is_empty() => Some(d.into()),
+            _ => data_dir.map(|d| d.join("images")),
+        }
+    }
 }
 
 /// `[fabric]` (#328, stormvm#46): the peers this node asks for a volume it
@@ -497,6 +520,7 @@ impl Default for StormBlockConfig {
             storage: StorageSection::default(),
             kernel: KernelSection::default(),
             fabric: FabricSection::default(),
+            images: ImagesSection::default(),
         }
     }
 }

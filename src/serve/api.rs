@@ -380,6 +380,12 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if matches!(p, "/api/v1/pallets/gpt" | "/api/v1/pallets/convert" | "/api/v1/pallets/prune" | "/api/v1/pallets/adopt") {
             return true;
         }
+        // An image build or conversion writes a file, or an attached
+        // device, as the engine's own user (#393): the admin's, like a
+        // partition table.
+        if matches!(p, "/api/v1/images/build" | "/api/v1/images/convert") {
+            return true;
+        }
         if seg.len() == 6 && seg[3] == "drives" && matches!(seg[5], "emulate" | "format") {
             return true;
         }
@@ -1833,6 +1839,16 @@ mod tests {
         assert_eq!(classify(&Method::POST, &format!("{v}/scrub"), None), Class::Ordinary);
         assert_eq!(classify(&Method::GET, &format!("{v}/scrub"), None), Class::Ordinary);
         assert_eq!(classify(&Method::GET, "/api/v1/scrub", None), Class::Ordinary);
+    }
+
+    /// #393: an image build or conversion writes as the engine's user.
+    #[test]
+    fn building_or_converting_an_image_is_destructive_and_inspecting_one_is_not() {
+        for p in ["/api/v1/images/build", "/api/v1/images/convert"] {
+            assert_eq!(classify(&Method::POST, p, None), Class::Destructive, "{p}");
+        }
+        assert_eq!(classify(&Method::POST, "/api/v1/images/inspect", None), Class::Ordinary);
+        assert_eq!(classify(&Method::GET, "/api/v1/images/formats", None), Class::Ordinary);
     }
 
     /// #154: formatting a drive is destructive; opening one is not.
