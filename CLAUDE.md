@@ -209,22 +209,26 @@ A release wave takes every component's newest golden, so main is the next
 release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 #74 (secret volumes) and #450's engine half stay on main (master's A): both
 are inert until used, and an unmarked volume's record is byte-identical to
-the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466).
+the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) stage requested.
 
-### Image build: admin class and restricted output (2026-10-22, #393, P1) — IN PROGRESS
+### Image build: admin class and restricted output (2026-10-22, #393, P1) — DONE (v23.0.0), closed
 
 Compliance hardening (stormcentral-compliance-operations#8): `POST
 /api/v1/images/build` wrote to any absolute path as the node token. It
 writes as the engine's user, so it is the admin's, like `/pallets/gpt`.
 `/convert` writes the same way and goes with it; `/inspect` only reads.
-- [ ] classify `POST /api/v1/images/build` and `/convert` destructive
-- [ ] `[images] dir` (default `<data_dir>/images`): an output file only
-      inside it (parent canonicalized, no symlink at the output); or a ublk
-      device this engine created by an attach (not an adopted boot device,
-      not mounted), raw only
-- [ ] tests for each refusal; README, docs/images.md, auth.md, CHANGELOG;
-      stormblock-registry/stormcos told (stormcos's publish writes to an
-      attached ublk device: still allowed, needs the admin token)
+- [x] `POST /api/v1/images/build` and `/convert` destructive
+- [x] `[images] dir` (default `<data_dir>/images`): an output file only
+      inside it (no `..`, parent canonicalized, no link/device/directory at
+      the name or its `.raw.img`); or a ublk device this engine created by
+      an attach (not an adopted boot device, not mounted), raw only
+- [x] tests: images unit (3), classify unit, integration_destructive (the
+      node-token list + an HTTP build); README, docs/images.md, auth.md,
+      CHANGELOG; stormblock-registry#142 (it sends the admin token only on
+      DELETE). stormcos's publish writes to an attached ublk device: allowed
+- [x] check.sh at 148784d ALL PASS (1275/1275, no warnings); v23.0.0
+      (d616ade, `stormblock 23.0.0` from a `--locked` build); stage
+      requested (f99ac0ac331a); closed
 
 ### Multi-drive placement, drain, rebuild and shelf RAID sets on real drives (2026-10-22, #224, P2) — WAITING ON HARDWARE
 
