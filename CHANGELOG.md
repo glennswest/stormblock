@@ -36,6 +36,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v22.2.0] — 2026-10-22
+
+### Added
+- #494 (stormbootx#167): a host's pending command, beside its intent, on forge and in `stormboot-serve`. `PUT /api/v1/synonyms/boothost/<name>/command` is the admin's; `GET …/command` and `POST …/command/done` are open. The id grows per host, `sig` is kept as given for stormbootx to check, and the last result is kept on the host.
+
 ## [v22.1.1] — 2026-10-22
 
 ### Fixed
