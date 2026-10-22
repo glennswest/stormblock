@@ -6707,7 +6707,7 @@ pub async fn run() -> anyhow::Result<()> {
                 // reads all zeros is unmapped, not copied. A fence never waited
                 // on while others are held. The rest move one at a time as
                 // before (#331): each holds only the fence on its own slot.
-                let results: Vec<_> = {
+                let results: (Vec<_>, crate::placement::WindowTimes) = {
                     use futures_util::StreamExt;
                     let engine = &engine;
                     let (mut held, mut rest) = (Vec::new(), Vec::new());

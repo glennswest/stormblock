@@ -1,4 +1,4 @@
-set -e
+set -eo pipefail
 mkdir -p tmp && export TMPDIR=$PWD/tmp
 cargo test --locked --lib -- flow 2>&1 | grep -E "test result|FAILED|panicked" | head
 cargo test --locked --test it -- flow install power_cut 2>&1 | grep -E "test result|FAILED|panicked" | head
