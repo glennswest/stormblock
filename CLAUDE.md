@@ -236,14 +236,15 @@ finished branch's fast-forward are harmless; a WIP head is what ships.
 - [x] check.sh at the branch head ALL PASS (1269/1269, stage 0 ran); a WIP head
       fails at stage 0 (negative control, tmp/492-control); merged; closed
 
-### A boot claim for the maintenance image (2026-10-22, #497, P1) — IN PROGRESS (wip/497-maint-claim)
+### A boot claim for the maintenance image (2026-10-22, #497, P1) — DONE (v22.3.0), closed
 
 stormbootx#167's `maint` command boots baremetalservices' maintenance disk.
 - [x] claim `image: "maint"` → `maint-<host>`, a clone of `boothost/maint`'s
       sealed target; earlier ones released; intent `maint`; the host's own
       boot untouched; `maint` reserved like `default` (`is_reserved_host`)
 - [x] test (85/85 claim/synonym/boothost); README, CHANGELOG
-- [ ] check.sh; release; stormbootx#167 and baremetalservices told; close
+- [x] check.sh at dfbfe3d ALL PASS (1270/1270); merged; v22.3.0; stage
+      requested; stormbootx#167 told; closed
 
 ### A boothost command record (2026-10-22, #494, P1, stormbootx#167) — DONE (v22.2.0), closed
 
