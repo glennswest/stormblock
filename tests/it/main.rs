@@ -26,6 +26,7 @@ mod integration_emulated;
 mod integration_erase;
 mod integration_forge;
 mod integration_fstemplates;
+mod integration_golden_counts;
 mod integration_handover_order;
 mod integration_iscsi;
 mod integration_metadata_v2;
