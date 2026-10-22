@@ -35,6 +35,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v22.1.1] — 2026-10-22
+
+### Fixed
+- #491: the engine's API waited for the volume manager while a volume was being written hard. A listing made with the manager held (the serve reconciler's counters, every pass) took each volume's own lock for its name, and an allocating write holds that lock across its I/O. Names are now read without it, and the extent map is read once per listing. A claim's start under a 2 GiB rewrite loop went from 35× to 4× in `ci-stress-probe-verify.sh`.
+
 ## [v22.1.0] — 2026-10-22
 
 ### Changed
