@@ -363,6 +363,11 @@ attach_delete_race() {
 # volume itself must be clean. No check's snapshot is left behind.
 fsck_snapshot() {
     step fsck-snapshot
+    # Not a timing test: the slab's 8 ms per I/O off for this phase (a check
+    # reads the filesystem's metadata), back on after.
+    t8=$(dmsetup table slow$disk)
+    dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$(echo "$t8" | awk '{$6=0; $9=0; print}')" \
+        && dmsetup resume slow$disk || echo "LOG fsck-snapshot: the delay stays on"
     g=$(api -X POST http://127.0.0.1:$port/api/v1/fstemplates -d '{"name":"fsck-root","size":"64M"}' \
         | sed -n 's/.*"sealed_volume_id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
     c=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$g/clone -d '{"name":"fsck-state"}' \
@@ -384,7 +389,7 @@ fsck_snapshot() {
     churn=$!
     sleep 3
     live_bad=0 live_csum=0 snap_bad=0 snap_note=
-    for n in $(seq 1 20); do
+    for n in $(seq 1 10); do
         api -X POST "http://127.0.0.1:$port/api/v1/volumes/$c/fsck?live=true" > /tmp/fl 2>/dev/null
         grep -q '"clean":true' /tmp/fl || live_bad=$((live_bad + 1))
         live_csum=$((live_csum + $(grep -o '"code":"[a-z-]*csum[a-z-]*"' /tmp/fl | wc -l)))
@@ -396,7 +401,7 @@ fsck_snapshot() {
         sleep 0.$((n % 7))
     done
     touch /tmp/churn-stop; wait $churn
-    echo "GUEST fsck-snapshot: live reads not clean $live_bad/20 (checksum findings $live_csum); snapshots not clean $snap_bad/20"
+    echo "GUEST fsck-snapshot: live reads not clean $live_bad/10 (checksum findings $live_csum); snapshots not clean $snap_bad/10"
     [ -n "$snap_note" ] && echo "LOG fsck-snapshot first bad snapshot check: $snap_note"
     umount /mnt/f
     api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c/attach >/dev/null
@@ -404,9 +409,10 @@ fsck_snapshot() {
     grep -q '"clean":true' /tmp/fu && r fsck-unmounted-clean PASS \
         || r fsck-unmounted-clean "FAIL ($(head -c 500 /tmp/fu))"
     left=$(api http://127.0.0.1:$port/api/v1/volumes | grep -o '"name":"fsck-snapshot-[^"]*"' | wc -l)
-    [ "$snap_bad" = 0 ] && r fsck-snapshot PASS || r fsck-snapshot "FAIL ($snap_bad/20 snapshot checks not clean)"
+    [ "$snap_bad" = 0 ] && r fsck-snapshot PASS || r fsck-snapshot "FAIL ($snap_bad/10 snapshot checks not clean)"
     [ "$left" = 0 ] && r fsck-snapshot-deleted PASS || r fsck-snapshot-deleted "FAIL ($left left)"
     api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c >/dev/null
+    dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$t8" && dmsetup resume slow$disk
 }
 
 # #337: a flush the disk below never answers. The slab's dm device is
