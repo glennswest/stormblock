@@ -702,3 +702,105 @@ async fn every_nic_that_reaches_the_target_carries_a_path() {
     std::env::remove_var("STORMBLOCK_IFADDRS");
     server.abort();
 }
+
+/// An I/O queue to a fresh target, connected (#392).
+async fn io_queue() -> (NvmeofInitiator, tempfile::TempDir, tokio::task::JoinHandle<()>, impl Sized) {
+    let (dir, vol, vm) = common::setup_raid1_volume(64 * 1024 * 1024, 32 * 1024 * 1024).await;
+    let (addr, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+    let mut io = NvmeofInitiator::connect(addr).await.unwrap();
+    io.ic_handshake().await.unwrap();
+    io.fabric_connect(SUBSYSTEM_NQN, HOST_NQN, 1).await.unwrap();
+    (io, dir, server, vm)
+}
+
+/// The C2HTermReq a target sends before it closes: its fatal error status
+/// and field, then nothing more on the connection.
+async fn terminated(io: &mut NvmeofInitiator) -> (u16, u32) {
+    let (ch, rest) = io.read_raw_pdu().await.expect("a C2HTermReq");
+    assert_eq!(ch.pdu_type, 0x03, "C2HTermReq");
+    assert_eq!((ch.hlen, ch.flags), (24, 0));
+    let fes = u16::from_le_bytes([rest[0], rest[1]]);
+    let fei = u32::from_le_bytes(rest[2..6].try_into().unwrap());
+    assert!(io.read_raw_pdu().await.is_err(), "the target closes after its C2HTermReq");
+    (fes, fei)
+}
+
+/// Read the R2T for `cid`: its transfer tag, offset and length.
+async fn r2t_for(io: &mut NvmeofInitiator, cid: u16) -> (u16, u32, u32) {
+    let (ch, rest) = io.read_raw_pdu().await.unwrap();
+    assert_eq!(ch.pdu_type, 0x09, "R2T");
+    assert_eq!(u16::from_le_bytes([rest[0], rest[1]]), cid);
+    (
+        u16::from_le_bytes([rest[2], rest[3]]),
+        u32::from_le_bytes(rest[4..8].try_into().unwrap()),
+        u32::from_le_bytes(rest[8..12].try_into().unwrap()),
+    )
+}
+
+/// #392: a write's data asked for with an R2T arrives as H2CData PDUs in
+/// order, the last one marked, and lands.
+#[tokio::test]
+async fn h2c_data_that_answers_its_r2t_lands() {
+    let (mut io, _d, _s, _vm) = io_queue().await;
+    let cid = io.write_without_data(1, 3, 2).await.unwrap();
+    let (ttag, r2to, r2tl) = r2t_for(&mut io, cid).await;
+    assert_eq!((r2to, r2tl), (0, 8192));
+    io.send_raw(&NvmeofInitiator::h2c_data(cid, ttag, 0, &[0x5A; 4096], false)).await.unwrap();
+    io.send_raw(&NvmeofInitiator::h2c_data(cid, ttag, 4096, &[0xA5; 4096], true)).await.unwrap();
+    let (ch, rest) = io.read_raw_pdu().await.unwrap();
+    assert_eq!(ch.pdu_type, 0x05, "CapsuleResp");
+    assert_eq!(u16::from_le_bytes([rest[14], rest[15]]) & 0xFFFE, 0, "success");
+    let back = io.read(1, 3, 2).await.unwrap();
+    assert!(back[..4096].iter().all(|&b| b == 0x5A) && back[4096..].iter().all(|&b| b == 0xA5));
+}
+
+/// #392: each way H2CData can fail to answer its R2T ends the connection
+/// with a C2HTermReq naming the field, and nothing is written.
+#[tokio::test]
+async fn h2c_data_that_does_not_answer_its_r2t_ends_the_connection() {
+    // (what, the PDU sent after the R2T, fatal error status, field)
+    type Bad = fn(u16, u16) -> Vec<u8>;
+    let cases: [(&str, Bad, u16, Option<u32>); 6] = [
+        ("another command's", |cid, tt| NvmeofInitiator::h2c_data(cid + 7, tt, 0, &[1; 8192], true), 0x01, Some(8)),
+        ("another transfer tag", |cid, tt| NvmeofInitiator::h2c_data(cid, tt ^ 0x55, 0, &[1; 8192], true), 0x01, Some(10)),
+        ("out of order", |cid, tt| NvmeofInitiator::h2c_data(cid, tt, 4096, &[1; 4096], true), 0x04, None),
+        ("past the R2T", |cid, tt| NvmeofInitiator::h2c_data(cid, tt, 0, &[1; 12288], true), 0x04, None),
+        ("LAST before the end", |cid, tt| NvmeofInitiator::h2c_data(cid, tt, 0, &[1; 4096], true), 0x01, Some(1)),
+        ("no LAST at the end", |cid, tt| NvmeofInitiator::h2c_data(cid, tt, 0, &[1; 8192], false), 0x01, Some(1)),
+    ];
+    for (what, pdu, want_fes, want_fei) in cases {
+        let (mut io, _d, _s, _vm) = io_queue().await;
+        let cid = io.write_without_data(1, 9, 2).await.unwrap();
+        let (ttag, _, _) = r2t_for(&mut io, cid).await;
+        io.send_raw(&pdu(cid, ttag)).await.unwrap();
+        let (fes, fei) = terminated(&mut io).await;
+        assert_eq!(fes, want_fes, "{what}");
+        if let Some(f) = want_fei {
+            assert_eq!(fei, f, "{what}");
+        }
+    }
+}
+
+/// #392: H2CData with no R2T outstanding (it was dropped before), a
+/// controller's PDU from the host, and a capsule shorter than its own header
+/// are fatal; an H2CTermReq from the host closes quietly.
+#[tokio::test]
+async fn a_pdu_out_of_place_or_short_ends_the_connection_with_a_c2h_term_req() {
+    let (mut io, _d, _s, _vm) = io_queue().await;
+    io.send_raw(&NvmeofInitiator::h2c_data(1, 1, 0, &[0; 512], true)).await.unwrap();
+    assert_eq!(terminated(&mut io).await.0, 0x02, "PDU sequence error");
+
+    let (mut io, _d, _s, _vm) = io_queue().await;
+    let r2t = [0x09u8, 0, 24, 0, 24, 0, 0, 0].iter().copied().chain([0u8; 16]).collect::<Vec<_>>();
+    io.send_raw(&r2t).await.unwrap();
+    assert_eq!(terminated(&mut io).await, (0x01, 0), "a controller's PDU: the type field");
+
+    // A capsule of 70 bytes: shorter than its own 72-byte header.
+    let (mut io, _d, _s, _vm) = io_queue().await;
+    io.send_raw(&[0x04, 0, 72, 0, 70, 0, 0, 0]).await.unwrap();
+    assert_eq!(terminated(&mut io).await, (0x01, 4), "the PDU length field");
+
+    let (mut io, _d, _s, _vm) = io_queue().await;
+    io.send_raw(&[0x02, 0, 24, 0, 24, 0, 0, 0].iter().copied().chain([0u8; 16]).collect::<Vec<_>>()).await.unwrap();
+    assert!(io.read_raw_pdu().await.is_err(), "an H2CTermReq: closed, nothing sent");
+}

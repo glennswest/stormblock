@@ -303,6 +303,56 @@ impl NvmeofInitiator {
         Ok(())
     }
 
+    /// Send a write command with none of its data, so the target asks for
+    /// it with an R2T (#392). Answers the command's CID.
+    pub async fn write_without_data(&mut self, nsid: u32, slba: u64, nlb: u16) -> io::Result<u16> {
+        let cid = self.next_cid();
+        let mut sqe = [0u8; 64];
+        sqe[0] = IO_WRITE;
+        sqe[2..4].copy_from_slice(&cid.to_le_bytes());
+        sqe[4..8].copy_from_slice(&nsid.to_le_bytes());
+        sqe[40..44].copy_from_slice(&(slba as u32).to_le_bytes());
+        sqe[44..48].copy_from_slice(&((slba >> 32) as u32).to_le_bytes());
+        sqe[48..52].copy_from_slice(&((nlb.saturating_sub(1)) as u32).to_le_bytes());
+        self.send_capsule_cmd(&sqe, &[]).await?;
+        Ok(cid)
+    }
+
+    /// Bytes as they are, for a PDU a well-behaved host would not send.
+    pub async fn send_raw(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.writer.write_all(bytes).await?;
+        self.writer.flush().await
+    }
+
+    /// The next PDU, whatever it is: its common header and the rest.
+    pub async fn read_raw_pdu(&mut self) -> io::Result<(CommonHeader, Vec<u8>)> {
+        let mut hdr = [0u8; 8];
+        self.reader.read_exact(&mut hdr).await?;
+        let ch = CommonHeader::from_bytes(&hdr);
+        let mut rest = vec![0u8; (ch.plen as usize).saturating_sub(8)];
+        self.reader.read_exact(&mut rest).await?;
+        Ok((ch, rest))
+    }
+
+    /// An H2CData PDU with no digests.
+    pub fn h2c_data(cccid: u16, ttag: u16, datao: u32, data: &[u8], last: bool) -> Vec<u8> {
+        let ch = CommonHeader {
+            pdu_type: PduType::H2CData as u8,
+            flags: if last { 0x04 } else { 0 },
+            hlen: 24,
+            pdo: 24,
+            plen: 24 + data.len() as u32,
+        };
+        let mut v = ch.to_bytes().to_vec();
+        v.extend_from_slice(&cccid.to_le_bytes());
+        v.extend_from_slice(&ttag.to_le_bytes());
+        v.extend_from_slice(&datao.to_le_bytes());
+        v.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        v.extend_from_slice(&[0u8; 4]);
+        v.extend_from_slice(data);
+        v
+    }
+
     /// Flush a namespace.
     pub async fn flush(&mut self, nsid: u32) -> io::Result<()> {
         let cid = self.next_cid();

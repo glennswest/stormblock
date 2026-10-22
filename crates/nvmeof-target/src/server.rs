@@ -27,7 +27,10 @@ use crate::fabric::*;
 use crate::identify::{self, *};
 use crate::image::Image;
 use crate::overlay::Overlay;
-use crate::pdu::{self, NvmeCqe, NvmeSqe, NvmeofPdu, ICResp};
+use crate::pdu::{self, Digests, Fatal, NvmeCqe, NvmeSqe, NvmeofPdu, ICResp, R2tTransfer};
+
+/// Transient Transport Error: a command whose data failed its digest (#392).
+const SC_TRANSIENT_TRANSPORT: u8 = 0x22;
 
 /// I/O opcodes.
 const IO_FLUSH: u8 = 0x00;
@@ -180,23 +183,42 @@ impl BootTarget {
         let (r, w) = stream.into_split();
         let mut reader = BufReader::new(r);
         let mut writer = BufWriter::new(w);
-
-        // ICReq / ICResp. Digests are taken as asked, as the engine does.
-        let icreq = match pdu::read_pdu(&mut reader).await? {
-            NvmeofPdu::ICReq(_, req) => req,
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected ICReq")),
-        };
-        if icreq.pfv != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported PFV"));
+        let r = self.serve(&mut reader, &mut writer, peer, local).await;
+        // A fatal transport error is answered with a C2HTermReq before the
+        // connection closes (#392).
+        if let Some(f) = r.as_ref().err().and_then(pdu::fatal_of) {
+            let _ = pdu::write_c2h_term_req(&mut writer, f).await;
         }
+        r
+    }
+
+    async fn serve<R, W>(&self, reader: &mut R, writer: &mut W, peer: SocketAddr, local: SocketAddr) -> io::Result<()>
+    where
+        R: AsyncReadExt + Unpin,
+        W: AsyncWriteExt + Unpin,
+    {
+        // ICReq / ICResp. Digests are taken as asked, as the engine does.
+        let icreq = match pdu::read_pdu(reader).await? {
+            NvmeofPdu::ICReq(ch, req) => {
+                pdu::check_icreq(&ch, &req).map_err(Fatal::into_io)?;
+                req
+            }
+            other => return Err(Fatal::out_of_sequence(&other, "the first PDU is not an ICReq").into_io()),
+        };
         let (hdgst, ddgst) = (icreq.dgst & 1 != 0, icreq.dgst & 2 != 0);
-        pdu::write_ic_resp(&mut writer, &ICResp { pfv: 0, cpda: 0, dgst: icreq.dgst, maxh2cdata: self.max_transfer as u32 })
+        let dg = Digests { header: hdgst, data: ddgst };
+        pdu::write_ic_resp(writer, &ICResp { pfv: 0, cpda: 0, dgst: icreq.dgst, maxh2cdata: self.max_transfer as u32 })
             .await?;
 
         // Fabric Connect.
-        let (sqe, data) = match pdu::read_pdu(&mut reader).await? {
-            NvmeofPdu::CapsuleCmd { sqe, data, .. } => (sqe, data),
-            _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "expected Connect")),
+        let (sqe, data) = match pdu::read_pdu_with(reader, dg).await? {
+            NvmeofPdu::CapsuleCmd { sqe, data, data_digest_ok: true, .. } => (sqe, data),
+            NvmeofPdu::CapsuleCmd { sqe, .. } => {
+                pdu::write_capsule_resp(writer, &NvmeCqe::error(sqe.cid(), 0, 0, 0, SC_TRANSIENT_TRANSPORT), hdgst).await?;
+                writer.flush().await?;
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Connect data digest mismatch"));
+            }
+            other => return Err(Fatal::out_of_sequence(&other, "the PDU after the ICReq is not a Connect").into_io()),
         };
         let fab = FabricCmd::from_sqe(&sqe)
             .filter(|f| f.fctype == FCTYPE_CONNECT)
@@ -211,13 +233,13 @@ impl BootTarget {
             match self.by_subsystem(&connect.subnqn) {
                 None => {
                     tracing::warn!("NVMe/TCP: {peer} ({}) asked for unknown subsystem {}", connect.hostnqn, connect.subnqn);
-                    pdu::write_capsule_resp(&mut writer, &refuse(SC_CONNECT_INVALID_PARAMETERS), hdgst).await?;
+                    pdu::write_capsule_resp(writer, &refuse(SC_CONNECT_INVALID_PARAMETERS), hdgst).await?;
                     writer.flush().await?;
                     return Err(io::Error::new(io::ErrorKind::NotFound, "unknown subsystem"));
                 }
                 Some((_, want)) if want != connect.hostnqn => {
                     tracing::warn!("NVMe/TCP: refused {peer}: host {} is not allowed on {}", connect.hostnqn, connect.subnqn);
-                    pdu::write_capsule_resp(&mut writer, &refuse(SC_CONNECT_INVALID_HOST), hdgst).await?;
+                    pdu::write_capsule_resp(writer, &refuse(SC_CONNECT_INVALID_HOST), hdgst).await?;
                     writer.flush().await?;
                     return Err(io::Error::new(io::ErrorKind::PermissionDenied, "host not allowed"));
                 }
@@ -227,7 +249,7 @@ impl BootTarget {
         let cntlid = if qid == 0 { self.cntlid.fetch_add(1, Ordering::Relaxed).max(1) } else { connect.cntlid };
         let mut cqe = NvmeCqe::success(sqe.cid(), 0, 0);
         cqe.set_dw0(cntlid as u32);
-        pdu::write_capsule_resp(&mut writer, &cqe, hdgst).await?;
+        pdu::write_capsule_resp(writer, &cqe, hdgst).await?;
         writer.flush().await?;
         tracing::info!(
             "NVMe/TCP: {peer} ({}) connected to {}, queue {qid}",
@@ -240,17 +262,30 @@ impl BootTarget {
         loop {
             let (sqe, data) = match pending.pop_front() {
                 Some(c) => c,
-                None => match pdu::read_pdu(&mut reader).await? {
-                    NvmeofPdu::CapsuleCmd { sqe, data, .. } => (sqe, data),
-                    _ => continue,
+                None => match pdu::read_pdu_with(reader, dg).await? {
+                    NvmeofPdu::CapsuleCmd { sqe, data, data_digest_ok: true, .. } => (sqe, data),
+                    NvmeofPdu::CapsuleCmd { sqe, .. } => {
+                        pdu::write_capsule_resp(writer, &NvmeCqe::error(sqe.cid(), 0, 0, 0, SC_TRANSIENT_TRANSPORT), hdgst)
+                            .await?;
+                        writer.flush().await?;
+                        continue;
+                    }
+                    NvmeofPdu::H2CTermReq { fes, .. } => {
+                        tracing::info!("NVMe/TCP: {peer} ended the connection (H2CTermReq, status {fes:#04x})");
+                        return Ok(());
+                    }
+                    h2c @ NvmeofPdu::H2CData { .. } => {
+                        return Err(Fatal::out_of_sequence(&h2c, "H2CData with no R2T outstanding").into_io());
+                    }
+                    other => return Err(Fatal::out_of_sequence(&other, "a PDU other than a command").into_io()),
                 },
             };
             if sqe.opcode() == NVME_FABRIC_OPC {
-                self.fabric(&sqe, &mut writer, &mut session).await?;
+                self.fabric(&sqe, writer, &mut session).await?;
             } else if qid == 0 {
-                self.admin(&sqe, &mut writer, &session).await?;
+                self.admin(&sqe, writer, &session).await?;
             } else {
-                self.io(&sqe, &data, &mut reader, &mut writer, &session, &mut pending).await?;
+                self.io(&sqe, &data, reader, writer, &session, &mut pending).await?;
             }
             writer.flush().await?;
         }
@@ -452,14 +487,32 @@ impl BootTarget {
                 let expected = (nlb * bs) as usize;
                 let mut full = data.to_vec();
                 if full.len() < expected {
-                    pdu::write_r2t(w, cid, cid, full.len() as u32, (expected - full.len()) as u32, hdgst).await?;
+                    let (r2to, r2tl) = (full.len() as u32, (expected - full.len()) as u32);
+                    pdu::write_r2t(w, cid, cid, r2to, r2tl, hdgst).await?;
                     w.flush().await?;
-                    while full.len() < expected {
-                        match pdu::read_pdu(r).await? {
-                            NvmeofPdu::H2CData { data: chunk, .. } => full.extend_from_slice(&chunk),
-                            NvmeofPdu::CapsuleCmd { sqe, data, .. } => pending.push_back((sqe, data)),
-                            _ => {}
+                    // Every H2CData PDU is this R2T's, in order (#392).
+                    let mut r2t = R2tTransfer::new(cid, cid, r2to, r2tl, self.max_transfer as u32);
+                    loop {
+                        match pdu::read_pdu_with(r, Digests { header: hdgst, data: ddgst }).await? {
+                            NvmeofPdu::H2CData { header, cccid, ttag, datao, datal, data: chunk, last, data_digest_ok } => {
+                                let complete =
+                                    r2t.take(&header, cccid, ttag, datao, datal, last, data_digest_ok).map_err(Fatal::into_io)?;
+                                full.extend_from_slice(&chunk);
+                                if complete {
+                                    break;
+                                }
+                            }
+                            NvmeofPdu::CapsuleCmd { sqe, data, data_digest_ok: true, .. } => pending.push_back((sqe, data)),
+                            NvmeofPdu::CapsuleCmd { sqe, .. } => {
+                                pdu::write_capsule_resp(w, &NvmeCqe::error(sqe.cid(), 0, 0, 0, SC_TRANSIENT_TRANSPORT), hdgst).await?;
+                            }
+                            other => {
+                                return Err(Fatal::out_of_sequence(&other, "a PDU other than H2CData or a command during an R2T").into_io())
+                            }
                         }
+                    }
+                    if r2t.digest_bad() {
+                        return pdu::write_capsule_resp(w, &NvmeCqe::error(cid, 0, 0, 0, SC_TRANSIENT_TRANSPORT), hdgst).await;
                     }
                 }
                 full.truncate(expected);
