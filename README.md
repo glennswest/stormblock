@@ -1454,7 +1454,8 @@ leaves dirty has nowhere else to be repaired.
 
 A check without `repair` reads **what the volume's next mount would find**
 (#496): a snapshot taken at one moment (writes in flight land first), its
-journal replayed and its orphans released on the snapshot, then the
+journal replayed, its orphans released and its superblock's free counts
+summed from the group descriptors on the snapshot, as a mount does, then the
 read-only check (`e2fsck -fn` after a mount and unmount); the snapshot is
 deleted after. The reply says `"view": "snapshot"` and what was `replayed`.
 Read live (`?live=true`), a mounted filesystem's blocks come from different

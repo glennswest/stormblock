@@ -542,7 +542,9 @@ pub async fn check(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<fsck::FsckRepor
     .map_err(|e| anyhow::anyhow!("checking the filesystem: {e}"))
 }
 
-/// What a mount does before anything reads the metadata, done to a copy.
+/// What a mount does before anything reads the metadata, done to a copy:
+/// the journal replayed, the orphans released and the superblock's free
+/// counts summed from the group descriptors.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Replayed {
     /// Transactions replayed from the journal (0: it needed none).
@@ -553,10 +555,14 @@ pub struct Replayed {
     pub orphans: usize,
     /// What the replay could not do, as the check would say it.
     pub errors: Vec<String>,
+    /// The superblock's free counts were taken from the group descriptors,
+    /// as a mount takes them.
+    pub summary_counted: bool,
 }
 
 /// Check a **copy** of a filesystem as the kernel would find it at its next
-/// mount: the journal replayed and the orphans released first, then the
+/// mount: the journal replayed, the orphans released and the superblock's
+/// free counts taken from the group descriptors first, then the
 /// read-only check (`e2fsck -fn` after a mount and unmount).
 ///
 /// `dev` is written to, so it must be the caller's own copy: a point-in-time
@@ -610,6 +616,21 @@ pub async fn check_replayed(
             .map_err(|e| anyhow::anyhow!("releasing orphans: {e}"))?;
         done.orphans = released.released.len();
         done.errors.extend(released.errors);
+    }
+    // The superblock's free counts are a summary the kernel keeps in memory
+    // and writes back lazily; a mount sums the group descriptors' counts
+    // instead (ext4_fill_super), so a mounted filesystem's on-disk summary
+    // is stale by design. Taken as a mount takes it: the descriptors' counts
+    // are still checked against the bitmaps.
+    let (blocks, inodes) = fs.group_descs().iter().fold((0u64, 0u64), |(b, i), g| {
+        (b + u64::from(g.free_blocks_count), i + u64::from(g.free_inodes_count))
+    });
+    let sb = fs.superblock_mut();
+    if sb.free_blocks_count != blocks || u64::from(sb.free_inodes_count) != inodes {
+        sb.free_blocks_count = blocks;
+        sb.free_inodes_count = inodes as u32;
+        fs.flush_superblock().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        done.summary_counted = true;
     }
     let report = fsck::check_opened(
         &mut fs,
