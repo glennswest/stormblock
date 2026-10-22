@@ -1452,6 +1452,17 @@ check is available for any volume at `POST /api/v1/volumes/{id}/fsck` —
 RouterOS has no fsck and cannot cleanly unmount a network disk, so a volume it
 leaves dirty has nowhere else to be repaired.
 
+A check without `repair` reads **what the volume's next mount would find**
+(#496): a snapshot taken at one moment (writes in flight land first), its
+journal replayed and its orphans released on the snapshot, then the
+read-only check (`e2fsck -fn` after a mount and unmount); the snapshot is
+deleted after. The reply says `"view": "snapshot"` and what was `replayed`.
+Read live (`?live=true`), a mounted filesystem's blocks come from different
+moments and its journal holds the newer copies, so a check reports bitmaps,
+counts and checksums no mount would see. A sealed volume is read as it is
+(`"view": "sealed"`); a secret one, which cannot be snapshotted, live with
+`why_live`.
+
 Sealing runs a real fsck and refuses a filesystem a consumer could not mount
 read-write — `VALID_FS` clear, `ERROR_FS` set, journal replay pending, orphan
 cleanup pending, or anything the check turns up. A template that seals dirty
