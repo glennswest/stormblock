@@ -229,7 +229,7 @@ the choice recorded as stormdrive's designation.
       `rd.stormblock.slab=/dev/sda`) and storminstall (`system_drive`
       from the picker) told; closed. Metal: server8 (two older installs)
 
-### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — v21.6.0 (the split, the overlap); WAITS ON THE OWNER (the read-back)
+### Flow-over on drive-managed SMR at 23–36 MB/s (2026-10-22, #490, P1) — IN PROGRESS: decided A (drop the read-back under #412's validation)
 
 server1 (X9, ST2000DM008) 12.40: 3025 + 727 extents at 22–23 MB/s; the
 copy is 84 of 95 s (paced 4.6 s); halving the window (64→32) left the rate
@@ -248,8 +248,16 @@ is not known.
       is at most half the disk's rate; the read-back is the half
 - [x] flow tests under nextest 25/25 (plain cargo test shares globals)
 - [x] check.sh at ac5a4d0 ALL PASS (1263/1263); merged; v21.6.0; stage requested
-- [ ] asked on #490 (owner): drop the per-run read-back in a flow-over,
-      #412's validation being the check (A), or keep it (B)
+- [x] asked on #490: **A** (master, 2026-10-22): the per-run read-back
+      dropped in a flow-over whose sources are held for #412's validation;
+      validation mandatory, sources held until it passes, a mismatch
+      repaired or reverted; a safety-relevant changelog line
+- [ ] `read_back` on the window: off only under a hold (`FlowHeld`),
+      `STORMBLOCK_FLOW_READBACK=1` forces it; tests (a held flow-over makes
+      no read-back and still validates; a miswritten copy is caught by the
+      validation and repaired); model before/after; durability rule 17,
+      README, CHANGELOG; check.sh; release; server1 before (12.40: 23 MB/s)
+      and after
 
 ### dir-block-csum on a live service clone after a power cycle (2026-10-22, #496, P0) — DONE (v21.5.0), closed; the next pve run's check settles pvetest2
 
