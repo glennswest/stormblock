@@ -1953,6 +1953,16 @@ reading (or last read): `what`, `running`, `started_at`, `finished_at`,
 before this, and images from engines before it, have no digest: today's
 answer.
 
+**Mappings dropped at a restore (#476, #500).** A record that names a slab
+not attached loses that extent (it reads as zeros); the restore says so once
+a slab, naming the volumes, at WARN. Health `lost_mappings` (`extents`,
+`volumes`: id, name, extents) lists the volumes still here that lost one,
+and is left out when every volume came back whole. An install adopts the
+data half with the old release's volumes it deletes right after (#369):
+their records can name an earlier release's appliance slab, never attached
+again, and what they drop is theirs: said at INFO ("nothing this node keeps
+lost a mapping"), not counted.
+
 **Background reads give way to the API (#475).** The check waits, after it
 is asked for, until the node's volume I/O has been still for 10 s (at most
 `STORMBLOCK_GOLDEN_CHECK_GRACE_SECS`, 120). Before each read it waits while
