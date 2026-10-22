@@ -238,6 +238,15 @@ call is logged as one `enforce` (the default) would refuse.
   intent, `PUT …/intent`, needs the token — the admin token when one is
   configured, since `install` lays the machine's system half again (its data
   half is kept, #311).
+* `GET /api/v1/synonyms/boothost/<tag>/command` and
+  `POST /api/v1/synonyms/boothost/<tag>/command/done` — the machine's pending
+  command, read by stormbootx at every boot and reported done (#494,
+  stormbootx#167), matched the same way. The done can only clear the command
+  it names and record its text. Putting one, `PUT …/command`, is the admin's:
+  `install` and `format` are among the verbs. The command's `sig` is
+  stormbootx's to check (Ed25519 over `stormbootx-command
+  v1\n<host>\n<id>\n<command>\n<args>\n<issued>\n`); the engine stores it as
+  given.
 
 Everything else needs the token, `/metrics` included: a scrape names this
 node's volumes and says how full it is, which is a read of its state rather
@@ -380,6 +389,9 @@ PUT  /api/v1/volumes/{id}/secret        {"secret": true} (#74, one way)        a
 GET  /api/v1/synonyms/boothost/<name>/install-config   the YAML              admin token (it carries secrets)
 DELETE /api/v1/synonyms/boothost/<name>/install-config                       admin token
 POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>, "stage": "laid"|"booted"}  open
+GET  /api/v1/synonyms/boothost/<name>/command     → the pending command, or 404 {next_id, last_done}   open
+PUT  /api/v1/synonyms/boothost/<name>/command     {"command", "args", "id"?, "issued"?, "by"?, "host"?, "sig"?}  admin token
+POST /api/v1/synonyms/boothost/<name>/command/done   {"id", "result"}   open
 ```
 
 `<name>` resolves like a claim: the host's name or any alias — a machine that

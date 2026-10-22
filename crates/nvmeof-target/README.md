@@ -39,6 +39,7 @@ pinning or kernel module, so it builds for macOS, Windows and Linux
   features, keep-alive, Read, Write (with R2T), Flush, Write Zeroes and
   Dataset Management. Left out on purpose: DH-HMAC-CHAP (a boot host is
   handed no secret), ANA, asynchronous events and the engine's reactor.
+- `command`: a host's command slot (#494): the verbs, the id rule, `done`.
 - `boothost::Boothost`: the HTTP surface stormbootx and the initramfs's
   `boot-claim` call before attaching, as an axum router:
   - `GET /api/v1/health`
@@ -47,7 +48,11 @@ pinning or kernel module, so it builds for macOS, Windows and Linux
     resolve as on forge, and the reply has `attach` as its first key.
   - `POST /api/v1/synonyms/boothost/<name>/installed`. A laid install moves
     the host to `local`.
-  - `GET /api/v1/boothost`: the hosts, their claims and each overlay's size.
+  - `GET/PUT /api/v1/synonyms/boothost/<name>/command`,
+    `POST …/command/done`: a host's pending command, as on forge (#494,
+    `command`): `stormboot-serve` asks no token, the app is the admin.
+  - `GET /api/v1/boothost`: the hosts, their claims and commands, and each
+    overlay's size.
 
 ## `stormboot-serve`
 
