@@ -223,7 +223,7 @@ finished branch's fast-forward are harmless; a WIP head is what ships.
       runs the hook's test
 - [x] stormcentral#1091: stage stormblock from its newest `v*` tag, not
       main's head (every staged golden is tagged here since #353)
-- [x] check.sh at 9c21c4a-ish ALL PASS (1269/1269, stage 0 ran); a WIP head
+- [x] check.sh at the branch head ALL PASS (1269/1269, stage 0 ran); a WIP head
       fails at stage 0 (negative control, tmp/492-control); merged; closed
 
 ### A boothost command record (2026-10-22, #494, P1, stormbootx#167) — DONE (v22.2.0), closed
