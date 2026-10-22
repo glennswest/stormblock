@@ -294,7 +294,8 @@ async fn a_delete_waits_for_a_copy_on_write_in_flight_and_the_golden_keeps_its_s
     writer.await.unwrap().expect("the write in flight finishes");
     del.await.unwrap();
     on.store(false, Ordering::Relaxed);
-    assert!(late.await.unwrap().is_err(), "a write behind the delete is refused");
+    let late = late.await.unwrap();
     settled(&state, golden, &before, "a delete beside a copy-on-write in flight").await;
+    assert!(late.is_err(), "a write behind the delete is refused");
     clone(&c, &url, golden, "cilium-root-2").await.expect("the golden clones again");
 }
