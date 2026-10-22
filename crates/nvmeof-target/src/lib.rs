@@ -22,6 +22,7 @@
 
 pub mod auth;
 pub mod boothost;
+pub mod command;
 pub mod discovery;
 pub mod fabric;
 pub mod identify;

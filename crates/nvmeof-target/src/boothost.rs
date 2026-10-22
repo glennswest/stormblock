@@ -11,6 +11,9 @@
 //! - `POST /api/v1/synonyms/boothost/<name>/installed`: `{volume, stage}`;
 //!   the intent goes back to `local` once the disk is laid, one-shot as on
 //!   forge (#220).
+//! - `GET/PUT /api/v1/synonyms/boothost/<name>/command`,
+//!   `POST …/command/done`: a host's pending command, as on forge (#494,
+//!   [`crate::command`]). No token here: the app on the laptop is the admin.
 //! - `GET  /api/v1/boothost`: the hosts and their claims, for the app.
 //!
 //! **Key order matters.** stormbootx reads a reply by finding the first
@@ -26,6 +29,8 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+
+use crate::command;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -72,6 +77,8 @@ struct HostRec {
     claims: Vec<(String, u32)>,
     /// What the node said of its install.
     installed: Option<String>,
+    /// Its pending command and the last one done (#494).
+    command: command::Slot,
 }
 
 /// How hosts are let in.
@@ -109,6 +116,7 @@ impl Boothost {
                     provisional: false,
                     claims: Vec::new(),
                     installed: None,
+                    command: Default::default(),
                 };
                 (n.clone(), rec)
             })
@@ -125,6 +133,8 @@ impl Boothost {
             .route("/api/v1/synonyms/boothost/{name}/intent", get(intent))
             .route("/api/v1/synonyms/boothost/{name}/claim", post(claim))
             .route("/api/v1/synonyms/boothost/{name}/installed", post(installed))
+            .route("/api/v1/synonyms/boothost/{name}/command", get(get_command).put(put_command))
+            .route("/api/v1/synonyms/boothost/{name}/command/done", post(command_done))
             .with_state(self.clone())
     }
 
@@ -163,6 +173,7 @@ impl Boothost {
             provisional,
             claims: Vec::new(),
             installed: None,
+            command: Default::default(),
         });
         Ok(n)
     }
@@ -213,7 +224,7 @@ async fn list(State(b): State<Arc<Boothost>>) -> Json<Value> {
                 })
                 .collect();
             json!({"name": n, "intent": h.intent.as_str(), "mac": h.mac, "provisional": h.provisional,
-                   "installed": h.installed, "claims": claims})
+                   "installed": h.installed, "claims": claims, "command": h.command})
         })
         .collect();
     Json(json!({"hosts": rows}))
@@ -336,6 +347,66 @@ async fn installed(State(b): State<Arc<Boothost>>, Path(name): Path<String>, Jso
     rec.installed = Some(stage.clone());
     tracing::info!("{name}: install reported {stage}; intent {}", rec.intent.as_str());
     Json(json!({"host": name, "stage": stage, "intent": rec.intent.as_str()})).into_response()
+}
+
+/// A known host by its name or its MAC (12 hex digits), as the intent finds it.
+fn known(hosts: &BTreeMap<String, HostRec>, name: &str) -> Option<String> {
+    let mac = mac_of_key(name);
+    hosts.iter().find(|(n, h)| **n == name || (mac.is_some() && h.mac == mac)).map(|(n, _)| n.clone())
+}
+
+fn refused(r: command::Refused) -> Response {
+    error(StatusCode::from_u16(r.status()).unwrap_or(StatusCode::BAD_REQUEST), r.message().to_string())
+}
+
+async fn get_command(State(b): State<Arc<Boothost>>, Path(name): Path<String>) -> Response {
+    let hosts = b.hosts.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(host) = known(&hosts, &name) else {
+        return error(StatusCode::NOT_FOUND, format!("no host {name} on this server"));
+    };
+    let slot = &hosts[&host].command;
+    match &slot.pending {
+        Some(c) => Json(c).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(slot.none_pending(&host))).into_response(),
+    }
+}
+
+async fn put_command(
+    State(b): State<Arc<Boothost>>,
+    Path(name): Path<String>,
+    Json(req): Json<command::CommandRequest>,
+) -> Response {
+    let mut hosts = b.hosts.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(host) = known(&hosts, &name) else {
+        return error(StatusCode::NOT_FOUND, format!("no host {name} on this server"));
+    };
+    let rec = hosts.get_mut(&host).expect("known");
+    match rec.command.put(&host, req, &command::now_rfc3339()) {
+        Ok(c) => {
+            tracing::info!("{host}: command {} {} put (id {})", c.command, c.args, c.id);
+            Json(c).into_response()
+        }
+        Err(r) => refused(r),
+    }
+}
+
+async fn command_done(
+    State(b): State<Arc<Boothost>>,
+    Path(name): Path<String>,
+    Json(req): Json<command::DoneRequest>,
+) -> Response {
+    let mut hosts = b.hosts.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(host) = known(&hosts, &name) else {
+        return error(StatusCode::NOT_FOUND, format!("no host {name} on this server"));
+    };
+    let rec = hosts.get_mut(&host).expect("known");
+    match rec.command.done(req, &command::now_rfc3339()) {
+        Ok(d) => {
+            tracing::info!("{host}: command {} done: {}", d.id, d.result.lines().next().unwrap_or(""));
+            Json(d).into_response()
+        }
+        Err(r) => refused(r),
+    }
 }
 
 #[cfg(test)]

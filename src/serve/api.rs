@@ -154,8 +154,10 @@ fn is_public(path: &str) -> bool {
 
 /// What a machine may ask of this API with no credential: claim its own boot
 /// image, `POST /api/v1/synonyms/boothost/<tag>/claim` (#107); read its boot
-/// intent, `GET …/boothost/<tag>/intent`; and report an install finished,
-/// `POST …/boothost/<tag>/installed` (#148).
+/// intent, `GET …/boothost/<tag>/intent`; report an install finished,
+/// `POST …/boothost/<tag>/installed` (#148); read its pending command and
+/// report it done, `GET …/<tag>/command`, `POST …/<tag>/command/done`
+/// (#494: the done can only clear the command it names).
 ///
 /// Firmware has nowhere to keep a token, and neither has a node's engine for
 /// the appliance it booted from, so these are open — and made safe by what
@@ -169,8 +171,8 @@ fn is_public(path: &str) -> bool {
 /// and the intent's `PUT` stay guarded.
 pub fn is_boot_claim(method: &Method, path: &str) -> bool {
     let verb = match *method {
-        Method::POST => ["/claim", "/installed"].as_slice(),
-        Method::GET => ["/intent"].as_slice(),
+        Method::POST => ["/claim", "/installed", "/command/done"].as_slice(),
+        Method::GET => ["/intent", "/command"].as_slice(),
         _ => return false,
     };
     let Some(rest) = path.strip_prefix("/api/v1/synonyms/boothost/") else {
@@ -204,6 +206,11 @@ fn is_destructive(method: &Method, path: &str, query: Option<&str>) -> bool {
     if path.starts_with("/api/v1/synonyms/boothost/") && path.trim_end_matches('/').ends_with("/install-config") {
         // A machine's install-config carries its secrets (#459): every verb,
         // the read included, is the admin's.
+        return true;
+    }
+    if *method == Method::PUT && path.starts_with("/api/v1/synonyms/boothost/") && path.trim_end_matches('/').ends_with("/command") {
+        // A machine's next command (#494): `install` and `format` among
+        // them, done by firmware that trusts what it is told once signed.
         return true;
     }
     if *method == Method::PUT && path.starts_with("/api/v1/synonyms/boothost/") && path.ends_with("/intent") {
@@ -1879,6 +1886,30 @@ mod tests {
             (Method::DELETE, "/api/v1/volumes/x"),
         ] {
             assert_eq!(t(m.clone(), p), None, "{m} {p}");
+        }
+    }
+
+    #[test]
+    fn a_command_is_read_and_reported_open_and_put_by_the_admin() {
+        // #494: stormbootx reads its command and reports it done with no
+        // credential; putting one is the admin's.
+        let auth = AuthConfig { api_token: Some("t".into()), admin_token: Some("a".into()), audit_only: false };
+        let as_ = |m: Method, p: &str, tok: Option<&str>| decide(&auth, &m, p, None, tok).is_ok();
+        assert!(as_(Method::GET, "/api/v1/synonyms/boothost/server8/command", None));
+        assert!(as_(Method::POST, "/api/v1/synonyms/boothost/server8/command/done", None));
+        let put = "/api/v1/synonyms/boothost/server8/command";
+        assert!(!as_(Method::PUT, put, None));
+        assert!(!as_(Method::PUT, put, Some("t")), "the api token is not enough");
+        assert!(as_(Method::PUT, put, Some("a")));
+        for (m, p) in [
+            (Method::POST, "/api/v1/synonyms/boothost/server8/command"),
+            (Method::GET, "/api/v1/synonyms/boothost/server8/command/done"),
+            (Method::GET, "/api/v1/synonyms/images/nginx/command"),
+            (Method::GET, "/api/v1/synonyms/boothost/a/b/command"),
+            (Method::POST, "/api/v1/synonyms/boothost/../command/done"),
+            (Method::DELETE, "/api/v1/synonyms/boothost/server8/command"),
+        ] {
+            assert!(!as_(m.clone(), p, None), "{m} {p} must need the token");
         }
     }
 

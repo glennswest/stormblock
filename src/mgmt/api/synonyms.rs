@@ -10,6 +10,9 @@
 //! GET    /api/v1/synonyms/boothost/{name}/intent      a machine's boot intent (open)
 //! PUT    /api/v1/synonyms/boothost/{name}/intent      {intent: install|local|auto}
 //! POST   /api/v1/synonyms/boothost/{name}/installed   {volume} — an install finished (open)
+//! GET    /api/v1/synonyms/boothost/{name}/command     its pending command (open, #494)
+//! PUT    /api/v1/synonyms/boothost/{name}/command     {command, args, id?, sig?, …} (admin)
+//! POST   /api/v1/synonyms/boothost/{name}/command/done   {id, result} (open)
 //! PUT    /api/v1/synonyms/boothost/{name}/install-config   its install-config.yaml (admin, #459)
 //! GET    /api/v1/synonyms/boothost/{name}/install-config   (admin)
 //! DELETE /api/v1/synonyms/boothost/{name}/install-config   (admin)
@@ -64,6 +67,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{namespace}/{name}/claim", post(claim_two))
         .route("/{namespace}/{name}/intent", get(get_intent).put(put_intent))
         .route("/{namespace}/{name}/installed", post(installed))
+        .route("/{namespace}/{name}/command", get(get_command).put(put_command))
+        .route("/{namespace}/{name}/command/done", post(command_done))
         .route(
             "/{namespace}/{name}/install-config",
             get(get_install_config).put(put_install_config).delete(delete_install_config),
@@ -1791,6 +1796,81 @@ async fn put_intent(
             Json(intent_body(&h, &name)).into_response()
         }
         Err(e) => err(e),
+    }
+}
+
+/// A refused command as the API answers it (#494).
+fn command_refused(r: stormblock_nvmeof::command::Refused) -> Response {
+    match r.status() {
+        409 => ApiError::conflict(r.message().to_string()),
+        _ => ApiError::bad_request(r.message().to_string()),
+    }
+}
+
+/// `GET /api/v1/synonyms/boothost/<name>/command` — the machine's pending
+/// command (#494, stormbootx#167), as it was put: stormbootx checks its
+/// `sig`, the engine never does. Open, like the intent: stormbootx reads it
+/// at every boot, before the intent, under the name the intent answered for
+/// (a name or an alias). None pending is a 404 that says `next_id` (what a
+/// signer signs for next) and the last result.
+async fn get_command(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    if let Err(r) = boothost_only(&namespace) {
+        return r;
+    }
+    let got = state.synonyms.read().await.command_of(&name);
+    match got {
+        Ok((_, slot)) if slot.pending.is_some() => Json(slot.pending).into_response(),
+        Ok((host, slot)) => (axum::http::StatusCode::NOT_FOUND, Json(slot.none_pending(&host))).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+/// `PUT /api/v1/synonyms/boothost/<name>/command` — put the machine's next
+/// command (#494): the admin's (`serve::api`: commands include `install` and
+/// `format`). The id is minted when not given; one given must be above every
+/// id the host has had.
+async fn put_command(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+    Json(req): Json<stormblock_nvmeof::command::CommandRequest>,
+) -> Response {
+    if let Err(r) = boothost_only(&namespace) {
+        return r;
+    }
+    let put = state.synonyms.write().await.put_command(&name, req);
+    match put {
+        Ok(c) => {
+            tracing::info!(host = %c.host, id = c.id, command = %c.command, by = %c.by, "boot command put");
+            Json(c).into_response()
+        }
+        Err(Ok(r)) => command_refused(r),
+        Err(Err(e)) => err(e),
+    }
+}
+
+/// `POST /api/v1/synonyms/boothost/<name>/command/done {id, result}` — the
+/// machine did it (#494). Open, like `installed`: it can only clear the
+/// pending command it names and record its text; the id already done
+/// answers again (stormbootx's "taken before").
+async fn command_done(
+    State(state): State<Arc<AppState>>,
+    Path((namespace, name)): Path<(String, String)>,
+    Json(req): Json<stormblock_nvmeof::command::DoneRequest>,
+) -> Response {
+    if let Err(r) = boothost_only(&namespace) {
+        return r;
+    }
+    let done = state.synonyms.write().await.command_done(&name, req);
+    match done {
+        Ok(d) => {
+            tracing::info!(host = %name, id = d.id, command = %d.command, "boot command done: {}", d.result.lines().next().unwrap_or(""));
+            Json(d).into_response()
+        }
+        Err(Ok(r)) => command_refused(r),
+        Err(Err(e)) => err(e),
     }
 }
 

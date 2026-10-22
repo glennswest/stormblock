@@ -2130,3 +2130,89 @@ async fn forge_hands_a_host_its_own_install_config_at_its_claim() {
     assert!(boot_claim(&client, &base, "pvetest9").await["install_config"].is_null());
     server.abort();
 }
+
+/// #494 (stormbootx#167): a machine's pending command beside its intent.
+/// Read open under any of its names, put by the admin only (the id minted,
+/// a used one refused, `sig` kept as given), reported done open, its result
+/// kept on the host; a repeat report answers again.
+#[tokio::test]
+async fn a_machines_command_is_put_by_the_admin_read_open_and_reported_done() {
+    let dir = TempDir::new().unwrap();
+    let (mut state, v1, _v2) = setup(&dir).await;
+    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    let (base, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    sealed(&state, &[v1]).await;
+    client
+        .post(format!("{base}/api/v1/synonyms"))
+        .json(&serde_json::json!({"namespace": "boothost", "name": "default", "volume": v1.to_string()}))
+        .send().await.unwrap();
+    state.set_auth(stormblock::serve::api::AuthConfig {
+        api_token: Some("tok".into()),
+        admin_token: Some("adm".into()),
+        audit_only: false,
+    });
+    default_claim(&client, &base, "AC:1F:6B:8A:A7:9C").await;
+    let host = "mac-ac1f6b8aa79c";
+    let get = |name: &'static str| client.get(format!("{base}/api/v1/synonyms/boothost/{name}/command")).send();
+    let put = |tok: Option<&'static str>, body: serde_json::Value| {
+        let mut r = client.put(format!("{base}/api/v1/synonyms/boothost/{host}/command")).json(&body);
+        if let Some(t) = tok {
+            r = r.bearer_auth(t);
+        }
+        r.send()
+    };
+    let done = |body: serde_json::Value| {
+        client.post(format!("{base}/api/v1/synonyms/boothost/ac1f6b8aa79c/command/done")).json(&body).send()
+    };
+
+    // None yet: a 404 that says the next id; an unknown machine is a 404 too.
+    let r = get("ac1f6b8aa79c").await.unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["next_id"], 1);
+    assert_eq!(get("nobody").await.unwrap().status(), 404);
+
+    // Putting: the admin's only; a verb stormbootx knows.
+    let cmd = serde_json::json!({"command": "hold", "by": "stormcentral", "sig": "ab12"});
+    assert_eq!(put(None, cmd.clone()).await.unwrap().status(), 401);
+    assert_eq!(put(Some("tok"), cmd.clone()).await.unwrap().status(), 401);
+    assert_eq!(put(Some("adm"), serde_json::json!({"command": "explode"})).await.unwrap().status(), 400);
+    let r = put(Some("adm"), cmd).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let c: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((c["id"].as_u64(), c["host"].as_str(), c["sig"].as_str()), (Some(1), Some(host), Some("ab12")));
+    assert!(c["issued"].as_str().unwrap().ends_with('Z'), "issued now: {c}");
+    let stale = put(Some("adm"), serde_json::json!({"command": "reboot", "id": 1})).await.unwrap();
+    assert_eq!(stale.status(), 409, "an id the host has had");
+
+    // Read open, under the MAC as stormbootx sends it and under the name.
+    for name in ["ac1f6b8aa79c", "mac-ac1f6b8aa79c"] {
+        let r = get(name).await.unwrap();
+        assert_eq!(r.status(), 200, "{name}");
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!((v["id"].as_u64(), v["command"].as_str()), (Some(1), Some("hold")), "{v}");
+    }
+
+    // Done, open: the wrong id is refused, the right one clears it.
+    assert_eq!(done(serde_json::json!({"id": 2, "result": "x"})).await.unwrap().status(), 409);
+    let r = done(serde_json::json!({"id": 1, "result": "holding until another command"})).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r = get("ac1f6b8aa79c").await.unwrap();
+    assert_eq!(r.status(), 404);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((v["next_id"].as_u64(), v["last_done"]["result"].as_str()), (Some(2), Some("holding until another command")));
+    // A repeat report ("taken before") answers what was recorded.
+    let again = done(serde_json::json!({"id": 1, "result": "taken before"})).await.unwrap();
+    assert_eq!(again.status(), 200);
+    assert_eq!(again.json::<serde_json::Value>().await.unwrap()["result"], "holding until another command");
+
+    // On the host's record, and kept with the synonyms.
+    let view: serde_json::Value = client
+        .get(format!("{base}/api/v1/boothost/{host}"))
+        .bearer_auth("tok")
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(view["command"]["last_done"]["id"], 1, "{view}");
+    let (_, slot) = state.synonyms.read().await.command_of(host).unwrap();
+    assert_eq!((slot.last_id, slot.pending.is_none()), (1, true));
+    server.abort();
+}

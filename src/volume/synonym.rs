@@ -263,6 +263,11 @@ pub struct Host {
     /// version and its self-update trial result (stormcentral#286).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub claims_by_agent: std::collections::BTreeMap<String, ClaimRecord>,
+    /// The machine's pending command and the last one done (#494,
+    /// stormbootx#167): reboot, power off or hold a machine whose BMC answers
+    /// nothing. stormbootx reads it at every boot, before the intent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<stormblock_nvmeof::command::Slot>,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
@@ -1075,6 +1080,49 @@ impl SynonymStore {
         let out = h.clone();
         self.persist();
         Ok(out)
+    }
+
+    /// A machine's command slot (#494), by its name or an alias: the host's
+    /// name and the slot (empty when it never had one).
+    pub fn command_of(&self, name: &str) -> Result<(String, stormblock_nvmeof::command::Slot), SynonymError> {
+        let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
+        let slot = self.host(&host).and_then(|h| h.command).unwrap_or_default();
+        Ok((host, slot))
+    }
+
+    /// Put a machine's pending command (#494). `Err(Ok(r))` is the command
+    /// refused, `Err(Err(e))` the machine unknown.
+    #[allow(clippy::type_complexity)]
+    pub fn put_command(
+        &mut self,
+        name: &str,
+        req: stormblock_nvmeof::command::CommandRequest,
+    ) -> Result<stormblock_nvmeof::command::Command, Result<stormblock_nvmeof::command::Refused, SynonymError>> {
+        let host = self.host_of(name).ok_or_else(|| Err(SynonymError::NotFound(key(BOOTHOST_NS, name))))?;
+        let base = self.host(&host).unwrap_or_default();
+        let h = self.hosts.entry(host.clone()).or_insert(base);
+        let slot = h.command.get_or_insert_with(Default::default);
+        let c = slot.put(&host, req, &stormblock_nvmeof::command::now_rfc3339()).map_err(Ok)?;
+        h.updated_at = now();
+        self.persist();
+        Ok(c)
+    }
+
+    /// A machine reports its command done (#494).
+    #[allow(clippy::type_complexity)]
+    pub fn command_done(
+        &mut self,
+        name: &str,
+        req: stormblock_nvmeof::command::DoneRequest,
+    ) -> Result<stormblock_nvmeof::command::Done, Result<stormblock_nvmeof::command::Refused, SynonymError>> {
+        let host = self.host_of(name).ok_or_else(|| Err(SynonymError::NotFound(key(BOOTHOST_NS, name))))?;
+        let base = self.host(&host).unwrap_or_default();
+        let h = self.hosts.entry(host.clone()).or_insert(base);
+        let slot = h.command.get_or_insert_with(Default::default);
+        let d = slot.done(req, &stormblock_nvmeof::command::now_rfc3339()).map_err(Ok)?;
+        h.updated_at = now();
+        self.persist();
+        Ok(d)
     }
 
     /// Set (or, with `None`, clear) a machine's TPM mark (#216). `name` is

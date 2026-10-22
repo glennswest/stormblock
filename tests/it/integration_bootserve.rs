@@ -156,3 +156,37 @@ async fn any_host_serves_a_bench_of_unnamed_machines() {
     let (st, n) = claim(&s, "blade3", serde_json::json!({})).await;
     assert_eq!((st, n["host"]["name"].as_str()), (201, Some("blade3")));
 }
+
+/// #494: the laptop's server carries a host's command as forge does: put
+/// (no token here: the app is the admin), read by name or MAC, reported done.
+#[tokio::test]
+async fn a_hosts_command_is_put_read_and_reported_done() {
+    let s = serve(false).await;
+    let c = reqwest::Client::new();
+    let url = |name: &str, rest: &str| format!("{}/api/v1/synonyms/boothost/{name}/command{rest}", s.base);
+    let r = c.get(url("server8", "")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["next_id"], 1);
+    assert_eq!(c.get(url("nobody", "")).send().await.unwrap().status(), 404);
+
+    let r = c.put(url("server8", "")).json(&serde_json::json!({"command": "reboot", "id": 7, "sig": "beef"})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let put: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((put["id"].as_u64(), put["host"].as_str(), put["sig"].as_str()), (Some(7), Some("server8"), Some("beef")));
+    assert_eq!(c.put(url("server8", "")).json(&serde_json::json!({"command": "reboot", "id": 7})).send().await.unwrap().status(), 409);
+    assert_eq!(c.put(url("server8", "")).json(&serde_json::json!({"command": "nap"})).send().await.unwrap().status(), 400);
+
+    // By its MAC (12 hex digits), as stormbootx sends it.
+    let got: serde_json::Value = c.get(url("ac1f6b8aa396", "")).send().await.unwrap().json().await.unwrap();
+    assert_eq!((got["id"].as_u64(), got["command"].as_str()), (Some(7), Some("reboot")));
+
+    assert_eq!(c.post(url("server8", "/done")).json(&serde_json::json!({"id": 6})).send().await.unwrap().status(), 409);
+    let d = c.post(url("server8", "/done")).json(&serde_json::json!({"id": 7, "result": "rebooting"})).send().await.unwrap();
+    assert_eq!(d.status(), 200);
+    let r = c.get(url("server8", "")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((v["next_id"].as_u64(), v["last_done"]["result"].as_str()), (Some(8), Some("rebooting")));
+    let hosts: serde_json::Value = c.get(format!("{}/api/v1/boothost", s.base)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(hosts["hosts"][0]["command"]["last_id"], 7, "{hosts}");
+}
