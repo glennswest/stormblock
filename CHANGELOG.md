@@ -51,6 +51,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v23.0.1] — 2026-10-22
+
+### Fixed
+- #392: the NVMe/TCP targets read PDUs as the transport specification has them. Lengths are checked before bodies, header and data digests are checked against the negotiation, and each H2CData is matched to its R2T. A fatal error is answered with a C2HTermReq; a data digest mismatch fails the command with Transient Transport Error. C2HData's `pdo` now counts the header digest.
+
 ## [v23.0.0] — 2026-10-22
 
 ### Breaking
