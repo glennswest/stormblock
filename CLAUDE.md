@@ -221,8 +221,8 @@ finished branch's fast-forward are harmless; a WIP head is what ships.
       enabled in this checkout
 - [x] check.sh: a `WIP…` head fails (`CHECK_ALLOW_WIP=1` on a branch), and
       runs the hook's test
-- [ ] stormcentral: stage stormblock from its newest tag (every staged
-      golden is tagged here since #353)
+- [x] stormcentral#1091: stage stormblock from its newest `v*` tag, not
+      main's head (every staged golden is tagged here since #353)
 - [ ] docs (CLAUDE.md rule), CHANGELOG; check.sh; close
 
 ### A boothost command record (2026-10-22, #494, P1, stormbootx#167) — DONE (v22.2.0), closed
