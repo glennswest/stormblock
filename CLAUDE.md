@@ -302,7 +302,7 @@ and logged neither start nor end.
       started/ended … MB/s` lines, health `digests.reading`
 - Resume #474 next (its work plan below)
 
-### A container root deleted while its ublk device came up (2026-10-21, #493, P0) — IN PROGRESS (wip/493-attach-hold)
+### A container root deleted while its ublk device came up (2026-10-21, #493, P0) — DONE (v21.4.2), closed; metal pending
 
 pvetest1 12.42 pods.log: the kubelet's startup root sweep (rustkube-node#288)
 deleted ctr-ct-00000005/06/08 at 20:30:06.38–.45 while their attaches were
@@ -314,8 +314,13 @@ attach held its volume (#267) only in `finish`, after the device was ready.
       the remove
 - [x] tests: ublk_export unit, volume unit, ci-ublk-qd-verify.sh
       `attach-delete-race`; README, durability rule 19, CHANGELOG
-- [ ] build VM: units + QEMU; negative control; check.sh; merge, v21.4.2,
-      golden, close
+- [x] found by the QEMU race: the attach answered when a node of its
+      number existed, a deleted device's left behind (ENXIO): now once
+      START_DEV returned (`UblkServer::is_live`)
+- [x] build VM: units 12/12; ci-ublk-qd-verify.sh race 60/60 (two runs);
+      control (hold fix reverted): 13/30 attach 200 + delete 204; check.sh
+      at 9ab684ca ALL PASS (1263/1263); main fast-forwarded; v21.4.2 tagged;
+      stage requested; closed. rustkube-node#288: its sweep now gets 409
 
 ### server8's 12.37 install stalled behind its own console (2026-10-21, #476, P1) — DONE (v21.2.1, 7528cc5), shipped; metal pending
 
