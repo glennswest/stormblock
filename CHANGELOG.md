@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-21
+- **fix:** #487: deleting a volume while a write to it was still copying a shared extent let go of the shared slot twice. The delete took the clone's reference, then the copy-on-write released the old slot again once it had remapped. The golden's slot was freed (secure delete overwrites a freed slot) while the golden still mapped it, and #370's check refused every later clone. server1 12.40 lost the cilium golden that way when the kubelet deleted a root stormpump was still mounting, and the cilium agent never started (stormcos#626). A delete now holds the volume's write gate (every write and discard holds it shared), so the writes already in flight land first, and refuses the volume after, so a write queued behind it fails. #370's check now tells a slot recorded as another volume's (a restart gives it back) from a slot that was let go (its bytes may be overwritten: the golden must be laid again). Tests: `integration_golden_counts` (a delete beside a copy-on-write in flight: without the fix it fails with server1's exact error; clones deleted at once, many at once, syncs beside them), `volume::tests::a_golden_slot_let_go_under_it_is_refused_and_named_so`; durability rule 18.
 - **docs:** #485: the 12.39–12.42 pve slowdowns measured by phase. No stormblock commit since 27f46fe adds time:
   - initramfs root ready: 6.8–10.3 s on the install boot on every release (12.42 pvetest2 6.8 s, the same as 12.38);
   - flow-over: same rate, 12.42 13 s as 12.38;

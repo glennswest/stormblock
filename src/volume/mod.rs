@@ -651,27 +651,52 @@ impl VolumeManager {
         };
         let reg = registry.read().await;
         let mut bad = Vec::new();
+        // Slots no longer allocated at all (#487): let go while the golden
+        // still maps them. Secure delete overwrites a freed slot (#286), so
+        // a restart does not give these back.
+        let mut released = Vec::new();
         for (vext, leg) in legs {
             let Some(slab) = reg.get(&leg.slab_id) else { continue };
-            let ok = match slab.get_slot(leg.slot_idx).await {
-                Some(s) if s.state.is_owned() => lineage.contains(&s.volume_id) || s.ref_count >= 2,
-                _ => false,
-            };
-            if !ok {
-                bad.push(vext);
+            match slab.get_slot(leg.slot_idx).await {
+                Some(s) if s.state.is_owned() => {
+                    if !(lineage.contains(&s.volume_id) || s.ref_count >= 2) {
+                        bad.push(vext);
+                    }
+                }
+                _ => released.push(vext),
             }
         }
-        if bad.is_empty() {
+        if bad.is_empty() && released.is_empty() {
             return Ok(());
         }
-        let shown: Vec<String> = bad.iter().take(8).map(|v| v.to_string()).collect();
+        let shown = |v: &[u64]| {
+            let mut s: Vec<String> = v.iter().take(8).map(|x| x.to_string()).collect();
+            if v.len() > 8 {
+                s.push("…".into());
+            }
+            s.join(", ")
+        };
+        let mut why = Vec::new();
+        if !bad.is_empty() {
+            why.push(format!(
+                "{} extent(s) map slots its slab records as another volume's ({}): the next start \
+                 gives them back (#370)",
+                bad.len(),
+                shown(&bad)
+            ));
+        }
+        if !released.is_empty() {
+            why.push(format!(
+                "{} extent(s) map slots that were let go ({}): their bytes may already be \
+                 overwritten (secure delete, #286), and a restart does not bring them back; the \
+                 golden must be laid again (an install or a stage of its release) (#487)",
+                released.len(),
+                shown(&released)
+            ));
+        }
         Err(format!(
-            "volume {id}: {} extent(s) map slots its slab does not count for it ({}{}); a clone of it \
-             would read zeros there, so it is neither sealed nor cloned until the next start gives \
-             them back (#370)",
-            bad.len(),
-            shown.join(", "),
-            if bad.len() > 8 { ", …" } else { "" }
+            "volume {id}: {}; a clone of it would read zeros there, so it is neither sealed nor cloned",
+            why.join("; ")
         ))
     }
 
@@ -5225,6 +5250,30 @@ mod redundancy_tests {
         assert!(buf.iter().all(|x| *x == 0x43), "the clone's own write");
         assert!(mgr.check_golden_slots(g).await.is_ok());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #487: a golden whose slot was let go under it (a delete beside a
+    /// copy-on-write in flight, before the fix) is refused, and said so as
+    /// what it is: not one a restart gives back.
+    #[tokio::test]
+    async fn a_golden_slot_let_go_under_it_is_refused_and_named_so() {
+        let d = dir();
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::new(slot);
+        let (a, _pa) = file_slab(&d, "a", slot).await;
+        let a_id = a.slab_id();
+        mgr.add_slab(a).await;
+        let g = mgr.create_volume_any("cilium.golden", 8 * slot).await.unwrap();
+        let v = mgr.get_volume(&g).unwrap();
+        v.write(0, &vec![0x4Cu8; 2 * slot as usize]).await.unwrap();
+        v.flush().await.unwrap();
+        mgr.seal_volume(g, None).await.unwrap();
+        let leg = { mgr.gem.read().await.lookup(g, 1).unwrap().primary() };
+        assert!(mgr.registry.write().await.get_mut(&a_id).unwrap().dec_ref(leg.slot_idx).await.unwrap(), "freed");
+        let why = mgr.check_golden_slots(g).await.expect_err("a released slot is found");
+        assert!(why.contains("1 extent(s) map slots that were let go (1)"), "{why}");
+        assert!(why.contains("a restart does not bring them back"), "{why}");
+        assert!(!why.contains("another volume's"), "{why}");
     }
 
     /// #370, a node already in the state: a golden's slot recorded as its

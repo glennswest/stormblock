@@ -316,6 +316,17 @@ tests run on.
    again. The reference is the clone's own bytes (the owner's decision A):
    per-extent hashes recorded at seal come with #384, once no node can roll
    back past golden-stormblock-47e88a267077.
+18. **A delete lets go of a volume's slots once its writes have landed**
+   (#487). A copy-on-write reads an extent's location, copies it, remaps it
+   under the extent map's lock and then lets go of the old slot. A delete
+   between the read and the remap took the volume's references, and the
+   write then let go of the shared slot a second time: the slot was freed
+   (and secure delete overwrote it) while its golden still mapped it.
+   server1 12.40 lost a slot of the cilium golden that way, deleting a root
+   while stormpump's mount was still writing it. So a delete holds the
+   volume's write gate, which every write and discard holds shared for its
+   whole length, and refuses the volume from then on: a write queued behind
+   the delete fails instead of remapping a volume that is gone.
 
 ## How it is checked
 
