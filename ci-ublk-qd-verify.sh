@@ -67,7 +67,7 @@ I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods}
 cp "$BUSYBOX" "$I/bin/busybox"
 for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed \
-         awk cut tr kill seq mkdir rm timeout pidof ps touch od; do
+         awk cut tr kill seq mkdir rm timeout pidof ps touch od mv umount sync; do
     ln -sf busybox "$I/bin/$a"
 done
 for b in "$BIN" "$DMSETUP" "$CURL"; do
@@ -77,7 +77,7 @@ for b in "$BIN" "$DMSETUP" "$CURL"; do
     done
 done
 : > "$I/lib/mods/order"
-for m in ublk_drv dm-delay; do
+for m in ublk_drv dm-delay ext4; do
     modprobe -S "$KVER" --show-depends "$m" 2>/dev/null | awk '$1=="insmod"{print $2}'
 done | awk '!seen[$0]++' | while read -r ko; do
     base=$(basename "$ko" | sed 's/\.xz$//; s/\.zst$//')
@@ -198,6 +198,7 @@ EOT
     [ "$mode" = concurrent ] && in_use
     [ "$mode" = concurrent ] && parallel_attach
     [ "$mode" = concurrent ] && attach_delete_race
+    [ "$mode" = concurrent ] && fsck_snapshot
     [ "$mode" = concurrent ] && unanswered
 
     step stop
@@ -353,6 +354,61 @@ attach_delete_race() {
         || r attach-delete-race "FAIL (${bad:-none bad}; $leftover left)"
 }
 
+# #496: the engine's fsck of a mounted volume. A mounted ext4 under directory
+# churn (creates, renames, deletes; its journal busy) is checked again and
+# again. Read live, block by block over time and its journal not replayed,
+# the check sees blocks from different moments: checksums and counts no
+# mount would see. Checked the default way (a point-in-time snapshot, its
+# journal replayed) it must be clean every time, and after the unmount the
+# volume itself must be clean. No check's snapshot is left behind.
+fsck_snapshot() {
+    step fsck-snapshot
+    g=$(api -X POST http://127.0.0.1:$port/api/v1/fstemplates -d '{"name":"fsck-root","size":"64M"}' \
+        | sed -n 's/.*"sealed_volume_id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    c=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$g/clone -d '{"name":"fsck-state"}' \
+        | grep -o '"\(volume_\)\{0,1\}id":"[0-9a-f-]*"' | head -1 | cut -d'"' -f4)
+    d=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$c/attach -d '{"transport":"ublk"}' \
+        | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+    mkdir -p /mnt/f
+    if [ -z "$c" ] || [ -z "$d" ] || ! mount -t ext4 "$d" /mnt/f; then
+        r fsck-snapshot "FAIL (no mounted clone: template '$g' clone '$c' device '$d')"; return
+    fi
+    ( i=0; while [ ! -e /tmp/churn-stop ]; do
+        i=$((i + 1)); mkdir -p /mnt/f/d$((i % 23))/s$((i % 7))
+        echo $i > /mnt/f/d$((i % 23))/s$((i % 7))/f$i
+        mv /mnt/f/d$((i % 23))/s$((i % 7))/f$i /mnt/f/d$(((i + 5) % 23))/m$i 2>/dev/null
+        rm -f /mnt/f/d$(((i + 11) % 23))/m$((i - 40)) 2>/dev/null
+        [ $((i % 97)) -eq 0 ] && rm -rf /mnt/f/d$(((i + 3) % 23))
+        [ $((i % 50)) -eq 0 ] && sync
+      done ) &
+    churn=$!
+    sleep 3
+    live_bad=0 live_csum=0 snap_bad=0 snap_note=
+    for n in $(seq 1 20); do
+        api -X POST "http://127.0.0.1:$port/api/v1/volumes/$c/fsck?live=true" > /tmp/fl 2>/dev/null
+        grep -q '"clean":true' /tmp/fl || live_bad=$((live_bad + 1))
+        live_csum=$((live_csum + $(grep -o '"code":"[a-z-]*csum[a-z-]*"' /tmp/fl | wc -l)))
+        api -X POST "http://127.0.0.1:$port/api/v1/volumes/$c/fsck" > /tmp/fs 2>/dev/null
+        if ! grep -q '"view":"snapshot"' /tmp/fs || ! grep -q '"clean":true' /tmp/fs; then
+            snap_bad=$((snap_bad + 1))
+            [ -n "$snap_note" ] || snap_note=$(head -c 700 /tmp/fs)
+        fi
+        sleep 0.$((n % 7))
+    done
+    touch /tmp/churn-stop; wait $churn
+    echo "GUEST fsck-snapshot: live reads not clean $live_bad/20 (checksum findings $live_csum); snapshots not clean $snap_bad/20"
+    [ -n "$snap_note" ] && echo "LOG fsck-snapshot first bad snapshot check: $snap_note"
+    umount /mnt/f
+    api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c/attach >/dev/null
+    api -X POST "http://127.0.0.1:$port/api/v1/volumes/$c/fsck?live=true" > /tmp/fu 2>/dev/null
+    grep -q '"clean":true' /tmp/fu && r fsck-unmounted-clean PASS \
+        || r fsck-unmounted-clean "FAIL ($(head -c 500 /tmp/fu))"
+    left=$(api http://127.0.0.1:$port/api/v1/volumes | grep -o '"name":"fsck-snapshot-[^"]*"' | wc -l)
+    [ "$snap_bad" = 0 ] && r fsck-snapshot PASS || r fsck-snapshot "FAIL ($snap_bad/20 snapshot checks not clean)"
+    [ "$left" = 0 ] && r fsck-snapshot-deleted PASS || r fsck-snapshot-deleted "FAIL ($left left)"
+    api -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c >/dev/null
+}
+
 # #337: a flush the disk below never answers. The slab's dm device is
 # suspended (I/O queued, not failed) after a write, so the fsync's FLUSH
 # waits in the engine. Health must name it once it is 30 s old, and the
@@ -402,6 +458,7 @@ SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
+         fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
          parallel-attach attach-delete-race; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"

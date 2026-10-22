@@ -542,6 +542,88 @@ pub async fn check(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<fsck::FsckRepor
     .map_err(|e| anyhow::anyhow!("checking the filesystem: {e}"))
 }
 
+/// What a mount does before anything reads the metadata, done to a copy.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Replayed {
+    /// Transactions replayed from the journal (0: it needed none).
+    pub transactions: u32,
+    /// Blocks written to their home locations by the replay.
+    pub blocks: u64,
+    /// Orphan inodes released, as a mount releases them.
+    pub orphans: usize,
+    /// What the replay could not do, as the check would say it.
+    pub errors: Vec<String>,
+}
+
+/// Check a **copy** of a filesystem as the kernel would find it at its next
+/// mount: the journal replayed and the orphans released first, then the
+/// read-only check (`e2fsck -fn` after a mount and unmount).
+///
+/// `dev` is written to, so it must be the caller's own copy: a point-in-time
+/// snapshot of a mounted volume (#496). Read without the replay, a mounted
+/// filesystem's home locations come from different transactions (the
+/// journal holds the newer copies), and the check reports bitmaps, counts and
+/// checksums that no mount would ever see.
+pub async fn check_replayed(
+    dev: &Arc<dyn BlockDevice>,
+) -> anyhow::Result<(fsck::FsckReport, Replayed)> {
+    use mkfs_ext4::recovery::{self, Journal};
+    let mut fs = Filesystem::open(VolumeDevice::opaque(dev.clone()))
+        .await
+        .map_err(|e| anyhow::anyhow!("opening the filesystem: {e}"))?;
+    let mut done = Replayed::default();
+    let sb = fs.superblock().clone();
+    if sb.feature_compat.contains(CompatFeatures::HAS_JOURNAL)
+        && sb.feature_incompat.contains(IncompatFeatures::RECOVER)
+    {
+        // A journal that cannot be replayed is left for the check to report
+        // (`journal-unreplayable`), as it would be on the volume itself.
+        if let Ok(mut journal) = Journal::open(&fs)
+            .await
+            .map_err(|e| anyhow::anyhow!("reading the journal: {e}"))?
+        {
+            let r = recovery::recover(&fs, &mut journal)
+                .await
+                .map_err(|e| anyhow::anyhow!("replaying the journal: {e}"))?;
+            fs.reload().await.map_err(|e| anyhow::anyhow!("rereading after the replay: {e}"))?;
+            let sb = fs.superblock_mut();
+            sb.feature_incompat.remove(IncompatFeatures::RECOVER);
+            if !r.errors.is_empty() {
+                sb.state &= !state::VALID_FS;
+            }
+            if r.errno != 0 {
+                sb.state |= state::ERROR_FS;
+            }
+            fs.flush_superblock().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            done.transactions = r.transaction_count();
+            done.blocks = r.blocks_replayed;
+            done.errors = r.errors;
+        }
+    }
+    if mkfs_ext4::orphan::has_orphans(fs.superblock()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0);
+        let released = mkfs_ext4::orphan::release_orphans(&mut fs, now)
+            .await
+            .map_err(|e| anyhow::anyhow!("releasing orphans: {e}"))?;
+        done.orphans = released.released.len();
+        done.errors.extend(released.errors);
+    }
+    let report = fsck::check_opened(
+        &mut fs,
+        &FsckOptions {
+            repair: false,
+            force: true,
+            preen: false,
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("checking the filesystem: {e}"))?;
+    Ok((report, done))
+}
+
 /// Check and correct what can be corrected.
 ///
 /// RouterOS has no fsck and cannot cleanly unmount a network disk, so the

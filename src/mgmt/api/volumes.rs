@@ -3020,6 +3020,19 @@ async fn fsck_volume(
         .into_response();
     }
 
+    // A check reads what a mount after a power cut would find (#496): a
+    // point-in-time snapshot, its journal replayed. Read live, a mounted
+    // filesystem's blocks come from different moments and its journal holds
+    // the newer copies, so the check reports what no mount would see.
+    // `?live=true` reads the volume itself, as before.
+    let live = matches!(
+        q.get("live").map(|v| v.as_str()),
+        Some("") | Some("1") | Some("true") | Some("yes")
+    );
+    if !repair && !live {
+        return fsck_snapshot(&state, uuid, dev).await;
+    }
+
     let result = if repair {
         crate::fs::ext4::repair(&dev).await
     } else {
@@ -3027,23 +3040,89 @@ async fn fsck_volume(
     };
 
     match result {
-        Ok(report) => Json(serde_json::json!({
-            "volume_id": uuid,
-            "clean": report.is_clean(),
-            "repaired": report.repaired_anything(),
-            "exit_code": report.exit_code(),
-            "inodes_used": report.inodes_used,
-            "blocks_used": report.blocks_used,
-            "directories": report.directories,
-            "problems": report.problems.iter().map(|p| serde_json::json!({
-                "pass": p.pass,
-                "code": p.code,
-                "severity": format!("{:?}", p.severity).to_lowercase(),
-                "message": p.message,
-                "fixed": p.fixed,
-            })).collect::<Vec<_>>(),
-        }))
-        .into_response(),
+        Ok(report) => fsck_json(uuid, &report, serde_json::json!({ "view": "live" })),
+        Err(e) => ApiError::bad_request(format!("volume {uuid}: {e}")),
+    }
+}
+
+/// A check's answer: the report, and how the volume was read (`view`).
+fn fsck_json(uuid: Uuid, report: &mkfs_ext4::fsck::FsckReport, view: serde_json::Value) -> Response {
+    let mut body = serde_json::json!({
+        "volume_id": uuid,
+        "clean": report.is_clean(),
+        "repaired": report.repaired_anything(),
+        "exit_code": report.exit_code(),
+        "inodes_used": report.inodes_used,
+        "blocks_used": report.blocks_used,
+        "directories": report.directories,
+        "problems": report.problems.iter().map(|p| serde_json::json!({
+            "pass": p.pass,
+            "code": p.code,
+            "severity": format!("{:?}", p.severity).to_lowercase(),
+            "message": p.message,
+            "fixed": p.fixed,
+        })).collect::<Vec<_>>(),
+    });
+    if let (Some(b), Some(v)) = (body.as_object_mut(), view.as_object()) {
+        b.extend(v.clone());
+    }
+    Json(body).into_response()
+}
+
+/// Check a volume as its next mount would find it (#496): a snapshot taken
+/// at one point (the volume's writes in flight land first, none start until
+/// it is taken), its journal replayed and orphans released on the snapshot,
+/// then the read-only check. The snapshot is deleted after. A sealed volume
+/// cannot change and is read as it is; a volume that cannot be snapshotted
+/// (a secret one, #74) is read live and says so.
+async fn fsck_snapshot(state: &Arc<AppState>, uuid: Uuid, dev: Arc<dyn BlockDevice>) -> Response {
+    let id = VolumeId(uuid);
+    if state.volume_manager.lock().await.is_sealed(&id) {
+        return match crate::fs::ext4::check(&dev).await {
+            Ok(r) => fsck_json(uuid, &r, serde_json::json!({ "view": "sealed" })),
+            Err(e) => ApiError::bad_request(format!("volume {uuid}: {e}")),
+        };
+    }
+    let name = format!(
+        "fsck-snapshot-{uuid}-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let pre = crate::volume::VolumeManager::preread_unlocked(&state.volume_manager, id).await.ok();
+    let taken = {
+        let mut vm = state.volume_manager.lock().await;
+        match vm.create_snapshot_deferred_preread(id, &name, pre).await {
+            Ok(snap) => vm.get_volume(&snap).map(|d| (snap, d)).ok_or_else(|| "the snapshot vanished".to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    };
+    let (snap, snap_dev) = match taken {
+        Ok(t) => t,
+        Err(why) => {
+            return match crate::fs::ext4::check(&dev).await {
+                Ok(r) => fsck_json(uuid, &r, serde_json::json!({
+                    "view": "live",
+                    "why_live": format!("no snapshot: {why}"),
+                })),
+                Err(e) => ApiError::bad_request(format!("volume {uuid}: {e}")),
+            };
+        }
+    };
+    let checked = crate::fs::ext4::check_replayed(&snap_dev).await;
+    drop(snap_dev);
+    // Let go of the snapshot whatever the check said: it is nobody's.
+    let pre = crate::volume::VolumeManager::preread_unlocked(&state.volume_manager, snap).await.ok();
+    if let Err(e) = state.volume_manager.lock().await.delete_volume_preread(snap, None, pre).await {
+        tracing::warn!("fsck: the check's snapshot {} ({name}) of volume {uuid} was not deleted: {e}", snap.0);
+    }
+    state.eraser.kick();
+    match checked {
+        Ok((r, replayed)) => fsck_json(uuid, &r, serde_json::json!({
+            "view": "snapshot",
+            "replayed": replayed,
+        })),
         Err(e) => ApiError::bad_request(format!("volume {uuid}: {e}")),
     }
 }

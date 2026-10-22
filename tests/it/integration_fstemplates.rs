@@ -701,12 +701,16 @@ async fn volumes_can_be_checked_and_repaired_in_place() {
     let (url, server) = start(state.clone()).await;
     let client = reqwest::Client::new();
 
-    client
+    let created: serde_json::Value = client
         .post(format!("{url}/api/v1/fstemplates"))
         .json(&serde_json::json!({ "name": "t", "size": "64M" }))
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    let tid = created["template"]["sealed_volume_id"].as_str().unwrap().to_string();
     let clone: serde_json::Value = client
         .post(format!("{url}/api/v1/fstemplates/t/clone"))
         .json(&serde_json::json!({ "name": "c" }))
@@ -731,6 +735,62 @@ async fn volumes_can_be_checked_and_repaired_in_place() {
     assert_eq!(report["exit_code"], 0);
     assert!(report["problems"].as_array().unwrap().is_empty());
     assert!(report["directories"].as_u64().unwrap() >= 1, "root at least");
+
+    // #496: an unsealed volume is checked as its next mount would find it, on
+    // a snapshot of one moment, and the snapshot is gone afterwards; the
+    // volume's own bytes are not touched. `?live=true` reads it as it is.
+    assert_eq!(report["view"], "snapshot", "{report}");
+    assert!(report["replayed"].is_object(), "{report}");
+    let dev = state
+        .volume_manager
+        .lock()
+        .await
+        .get_volume(&VolumeId(vol.parse().unwrap()))
+        .unwrap();
+    let mut before = vec![0u8; 64 << 20];
+    dev.read(0, &mut before).await.unwrap();
+    for _ in 0..3 {
+        let r: serde_json::Value = client
+            .post(format!("{url}/api/v1/volumes/{vol}/fsck"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!((r["view"].as_str(), r["clean"].as_bool()), (Some("snapshot"), Some(true)), "{r}");
+    }
+    let mut after = vec![0u8; 64 << 20];
+    dev.read(0, &mut after).await.unwrap();
+    assert!(before == after, "the check wrote to the volume it checked");
+    let listed: serde_json::Value = client
+        .get(format!("{url}/api/v1/volumes?kind=all"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!listed.to_string().contains("fsck-snapshot-"), "a check's snapshot was left: {listed}");
+    let live: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/{vol}/fsck?live=true"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!((live["view"].as_str(), live["clean"].as_bool()), (Some("live"), Some(true)), "{live}");
+    // A sealed volume cannot change: read as it is.
+    let sealed: serde_json::Value = client
+        .post(format!("{url}/api/v1/volumes/{tid}/fsck"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sealed["view"], "sealed", "{sealed}");
 
     // A volume that does not exist is a 404, not a crash.
     let missing = client
