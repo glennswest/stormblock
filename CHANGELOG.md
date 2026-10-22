@@ -27,6 +27,11 @@
 ### 2026-10-17
 - **chore:** #353: v21.0.0 tagged (f23b508; golden-stormblock-595bf69e5baa, stormcos#601); from here a tag goes with each staged golden. stormuefi#39 and stormblock-test#4 told.
 
+## [v21.4.2] — 2026-10-21
+
+### Fixed
+- #493: a container root deleted while its ublk device came up no longer leaves a device over a deleted volume. The attach now holds the volume from the moment the device starts, and a delete re-reads the holds right before it removes the volume. An attach whose volume was deleted first takes its device down and answers 404. An attach also answers only once START_DEV has returned: a node left behind by a deleted device of the same number made the open ENXIO.
+
 ## [v21.4.1] — 2026-10-21
 
 ### Fixed
