@@ -212,11 +212,18 @@ probes run: 3.9× / 2.2× / 3× on pve, 26.7× on the Dell (HDD; container
 0.79 → 21 s); fsck and attach calls stall 11–20 s, "waits on no tracked
 lock (I/O)". The engine has no I/O priority and no fairness between a
 volume's bulk writes and another's few I/Os.
-- [ ] `ci-stress-probe-verify.sh`: the engine in QEMU on one throttled disk
-      (shared budget: a read queues behind writes), a probe (clone, attach,
-      mount, write + fsync, umount, detach, delete) clean and under the
-      load, per step, with the engine's own request times: find the stall
-- [ ] the fix where it is; tests; docs, CHANGELOG; check.sh; release
+- [x] `ci-stress-probe-verify.sh`: the engine in QEMU on one throttled disk
+      (60 MB/s, 200 IOPS), a probe (clone, attach, mount, write + fsync,
+      umount, detach, delete) clean and under the load: 35× (clone 12–29 s,
+      delete 7–14 s, lock-wait 4–15 s: the volume manager held 2–6 s by the
+      serve reconciler's counters, listing volumes)
+- [x] fix: `list_volumes` reads names without the volume lock (held across
+      an allocating write's I/O) and the extent map once: 4× (clone 0.7 s,
+      delete 0.25 s, lock-wait 0); test + negative control (timed out 2 s)
+- [x] tried and not kept: a per-drive bound on large writes in flight
+      (0/1/2/4/8 MiB: the mount stayed 1.7 s); flushes p99 99 ms
+- [ ] check.sh; CHANGELOG; release; the next stress stage on pve and the
+      Dell (26.7× there was the lock hold's shape)
 
 ### The system drive per machine: system_drive, else the first drive (2026-10-21, #478, P1) — DONE (v22.0.0), closed; metal pending (server8)
 
