@@ -1181,7 +1181,7 @@ impl VolumeManager {
                 return Err(VolumeError::AllocatorError(format!("volume {other} is already called {name}")));
             }
         }
-        handle.lock().await.name = name.to_string();
+        handle.set_name(name).await;
         Ok(())
     }
 
@@ -2736,10 +2736,14 @@ impl VolumeManager {
     }
 
     pub async fn list_volumes(&self) -> Vec<(VolumeId, String, u64, u64)> {
+        // Names without any volume's lock, and the extent map read once
+        // (#491): a listing held by the volume manager must not wait behind
+        // each volume's writes, nor once per volume behind the map's writers.
+        let gem = self.gem.read().await;
         let mut list = Vec::with_capacity(self.volumes.len());
         for (id, handle) in &self.volumes {
             let name = handle.name().await;
-            let allocated = handle.allocated().await;
+            let allocated = handle.allocated_in(&gem);
             list.push((*id, name, handle.capacity_bytes(), allocated));
         }
         list

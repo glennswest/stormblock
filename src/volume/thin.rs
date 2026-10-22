@@ -498,6 +498,11 @@ fn fua_disabled() -> bool {
 
 pub struct ThinVolumeHandle {
     inner: tokio::sync::Mutex<ThinVolume>,
+    /// The volume's name, readable without the volume lock (#491): a write
+    /// that allocates holds that lock across its I/O, and a listing that
+    /// asked for the name there waited behind the busiest volume's writes
+    /// with the volume manager held. Kept in step by [`Self::set_name`].
+    name_now: std::sync::RwLock<String>,
     device_id: DeviceId,
     virtual_size: AtomicU64,
     id: VolumeId,
@@ -613,8 +618,10 @@ impl ThinVolumeHandle {
         let virtual_size = AtomicU64::new(vol.virtual_size);
         let id = vol.id;
         let slot_size = vol.slot_size;
+        let name_now = std::sync::RwLock::new(vol.name.clone());
         ThinVolumeHandle {
             inner: tokio::sync::Mutex::new(vol),
+            name_now,
             device_id,
             virtual_size,
             id,
@@ -1079,7 +1086,14 @@ impl ThinVolumeHandle {
     }
 
     pub async fn name(&self) -> String {
-        self.inner.lock().await.name.clone()
+        self.name_now.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Rename (#219): the record and the copy readers see (#491).
+    pub async fn set_name(&self, name: &str) {
+        let mut vol = self.inner.lock().await;
+        vol.name = name.to_string();
+        *self.name_now.write().unwrap_or_else(|e| e.into_inner()) = name.to_string();
     }
 
     /// Bytes of data mapped (one slot per extent, whatever the policy).
@@ -1091,6 +1105,12 @@ impl ThinVolumeHandle {
     /// of an 11 GB golden as 11 GB of disk.
     pub async fn allocated(&self) -> u64 {
         let gem = self.gem.read().await;
+        self.allocated_in(&gem)
+    }
+
+    /// [`Self::allocated`] with the extent map already read: a listing takes
+    /// the map's read lock once for every volume (#491), not once each.
+    pub fn allocated_in(&self, gem: &GlobalExtentMap) -> u64 {
         if let Some(c) = gem.cold(&self.id) {
             return c.exclusive as u64 * self.slot_size;
         }
