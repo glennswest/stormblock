@@ -254,6 +254,19 @@ impl Launch {
             None
         }
     }
+
+    /// Whether the device has gone live: before that its node may be one a
+    /// deleted device of the same number left behind (#493).
+    fn live(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.server.as_ref().is_some_and(|s| s.is_live())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
 }
 
 /// How long the kernel has to assign a device id, and then to make the
@@ -346,7 +359,9 @@ pub async fn attach(
             tokio::spawn(async move {
                 let ready = wait_ready(
                     || launch.dev_id(),
-                    |p| std::path::Path::new(p).exists(),
+                    // Live first: a node of this number may be a deleted
+                    // device's, not yet removed (#493: ENXIO on open).
+                    |p| launch.live() && std::path::Path::new(p).exists(),
                     mounted_on,
                     ID_WAIT,
                     NODE_WAIT,

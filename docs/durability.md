@@ -337,7 +337,10 @@ tests run on.
    write gate, with nothing awaited before the volume is removed, so a
    hold taken while it waited refuses it. An attach whose volume went
    anyway (the delete removed it first) takes its device down and answers
-   404.
+   404. An attach also answers only once its device is live (START_DEV
+   returned), not when `/dev/ublkbN` exists: a device of the same number
+   deleted a moment before can leave its node behind, and an open of it
+   gives ENXIO.
 
 ## How it is checked
 

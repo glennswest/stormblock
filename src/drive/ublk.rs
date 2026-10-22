@@ -372,6 +372,11 @@ pub struct UblkServer {
     nr_queues: u16,
     queue_depth: u16,
     running: Arc<AtomicBool>,
+    /// Set once START_DEV (or END_USER_RECOVERY) has returned: the block
+    /// device is live. Before that, `/dev/ublkb<id>` may still be the node of
+    /// a device of the same number being deleted, and opening it gives ENXIO
+    /// (#493).
+    live: AtomicBool,
     /// Whether the kernel took `UBLK_F_UPDATE_SIZE` at ADD_DEV. Set during
     /// `run()`; until then no resize is possible.
     resizable: Arc<AtomicBool>,
@@ -395,6 +400,7 @@ impl UblkServer {
         UblkServer {
             device,
             dev_id: AtomicI32::new(-1),
+            live: AtomicBool::new(false),
             requested_dev_id: None,
             nr_queues: queues,
             queue_depth: depth_per_queue(queues),
@@ -467,6 +473,12 @@ impl UblkServer {
             id if id >= 0 => Some(id as u32),
             _ => None,
         }
+    }
+
+    /// Whether the device has gone live (START_DEV or END_USER_RECOVERY
+    /// returned). Its node can be opened from then on.
+    pub fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
     }
 
     /// Block device path (e.g., `/dev/ublkb0`). Valid after `run()` starts.
@@ -1006,6 +1018,7 @@ impl UblkServer {
                 }
             }
         }
+        self.live.store(true, Ordering::Release);
         tracing::info!("ublk device started: {}", blk_path);
 
         // --- Wait for shutdown signal ---
