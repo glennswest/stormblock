@@ -209,9 +209,9 @@ A release wave takes every component's newest golden, so main is the next
 release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 #74 (secret volumes) and #450's engine half stay on main (master's A): both
 are inert until used, and an unmarked volume's record is byte-identical to
-the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) and v23.0.1 (#392) stages requested.
+the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) stages requested.
 
-### A deleted volume behind a live ublk device after server1's reboot (2026-10-28, #502, P0) — IN PROGRESS
+### A deleted volume behind a live ublk device after server1's reboot (2026-10-28, #502, P0) — DONE (v23.0.3), closed; metal pending
 
 12.54 (v23.0.2) server1: cilium root mount EIO, `ublk read …: volume
 2f9eb851 has been deleted`. Cause (by reading this and rustkube-node's
@@ -226,7 +226,13 @@ handle.
 - [x] detach 409 on a device held open exclusively (`ublk_export::claimed`)
 - [x] unit test; `ci-ublk-qd-verify.sh` `mount-detach`; durability rule 20,
       README, CHANGELOG
-- [ ] check.sh and ci-ublk-qd-verify.sh on a build VM; v23.0.3; stage; close
+- [x] found by the first QEMU run: the hold went up to 20 ms after `done`,
+      so a delete right after a detach got 409 (the race's clones left):
+      the server's thread releases it itself, before `done`
+- [x] check.sh at 6bac500 ALL PASS (1280/1280); ci-ublk-qd-verify.sh ALL
+      PASS (mount-detach 4/4, attach-delete-race, the rest); v23.0.3
+      (2c9c804, `stormblock 23.0.3` from a `--locked` build); stage
+      requested (73fade5497fd); closed. Metal: server1's next reboot
 
 ### Kernel → 7.2.10-200.fc44: initramfs for it (2026-10-28, #501, P0) — DONE, no code change
 
