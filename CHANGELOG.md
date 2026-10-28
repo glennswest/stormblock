@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.0.4] — 2026-10-28
+
+### Changed
+- #480: every git dependency pinned by commit (`rev`), not tag: mkfs-ext4 and fio-ext4 (v1.8.2) join mkfs-xfs and fio-xfs. Same code as v23.0.3.
+
 ### 2026-10-28
 - **build:** mkfs-ext4 and fio-ext4 pinned by `rev`, not tag (#480): mkfs-ext4
   `14d5af82…` (v4.1.1's commit) and fio-ext4 v1.8.2 `7a13228c…`, which pins
