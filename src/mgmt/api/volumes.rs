@@ -2237,10 +2237,19 @@ async fn detach_volume(
     // recoverable, so its I/O would wait for ever rather than fail, and the
     // node's every `sync` with it (see `ublk_export::mounted_at`). The caller
     // unmounts first; this says where.
-    if let Some(dev) = state.ublk_exports.lock().await.device_path(&key) {
+    let ublk_dev = state.ublk_exports.lock().await.device_path(&key);
+    if let Some(dev) = ublk_dev {
         if let Some(at) = crate::mgmt::ublk_export::mounted_at(&dev) {
             return ApiError::conflict(format!(
                 "cannot detach volume {uuid}: {dev} is mounted at {at} — unmount it first"
+            ));
+        }
+        // A mount still being made is in no mount table yet (#502).
+        let probe = dev.clone();
+        if tokio::task::spawn_blocking(move || crate::mgmt::ublk_export::claimed(&probe)).await.unwrap_or(false) {
+            return ApiError::conflict(format!(
+                "cannot detach volume {uuid}: {dev} is held open exclusively (a mount being made?) — \
+                 let it finish and unmount it first"
             ));
         }
     }
@@ -2269,7 +2278,13 @@ async fn detach_volume(
         }))
         .into_response();
     }
-    state.ublk_exports.lock().await.remove(&key);
+    // Answered once the device is gone (#502): a delete right after it then
+    // finds the volume unheld, not a device still serving it.
+    let stopping = state.ublk_exports.lock().await.remove(&key);
+    let left = stopping.settle(crate::mgmt::ublk_export::DETACH_WAIT).await;
+    if !left.is_empty() {
+        tracing::warn!(volume = %uuid, "detach: {} still stopping; the volume stays held until it is gone", left.join(", "));
+    }
     // A vhost-user-blk socket goes with its VMM's connection (#82).
     #[cfg(target_os = "linux")]
     {

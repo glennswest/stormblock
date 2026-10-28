@@ -23,6 +23,10 @@
 # And (#231): four volumes attached over ublk at once — each reply a block
 # device that exists, all different, a listing answered meanwhile.
 #
+# And (#502): a detach and a delete while a mount of the device is being
+# made (the slab suspended) are refused, and a detach answers only once the
+# device is gone.
+#
 # And (#337): the slab's dm device suspended after a write, so an fsync's
 # FLUSH is never answered — `/api/v1/health` must list it in `ublk_stuck`
 # once it is 30 s old and the watchdog log it; after a resume the fsync
@@ -198,6 +202,7 @@ EOT
     [ "$mode" = concurrent ] && in_use
     [ "$mode" = concurrent ] && parallel_attach
     [ "$mode" = concurrent ] && attach_delete_race
+    [ "$mode" = concurrent ] && mount_detach
     [ "$mode" = concurrent ] && fsck_snapshot
     [ "$mode" = concurrent ] && unanswered
 
@@ -354,6 +359,53 @@ attach_delete_race() {
         || r attach-delete-race "FAIL (${bad:-none bad}; $leftover left)"
 }
 
+# #502: server1's kubelet gave up on a container root while stormpump's
+# mount of it was still being made (30 s on the SMR disk), detached it and
+# deleted it; the device went on serving the mount, which read a deleted
+# volume (EIO). Here the slab is suspended so a mount hangs reading its
+# superblock, as there. While it is being made, a detach must answer 409
+# (the device is claimed, though in no mount table yet) and a delete 409;
+# resumed, the mount completes and reads the clone. Unmounted, a detach
+# answers once the device is gone, so a delete right after it is 204.
+mount_detach() {
+    step mount-detach
+    g=$(api -X POST http://127.0.0.1:$port/api/v1/fstemplates -d '{"name":"md-root","size":"64M"}' \
+        | sed -n 's/.*"sealed_volume_id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    c=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$g/clone -d '{"name":"md-ct"}' \
+        | grep -o '"\(volume_\)\{0,1\}id":"[0-9a-f-]*"' | head -1 | cut -d'"' -f4)
+    d=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$c/attach -d '{"transport":"ublk"}' \
+        | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+    [ -b "$d" ] || { r mount-detach "FAIL (template '$g' clone '$c' device '$d')"; return; }
+    mkdir -p /mnt/md
+    del0=$(grep -c "has been deleted" /run/engine-$mode.log)
+    dmsetup suspend --noflush slow$disk || { r mount-detach "FAIL (suspend)"; return; }
+    ( mount -t ext4 "$d" /mnt/md; echo $? > /tmp/md.rc ) &
+    m=$!
+    sleep 3
+    ac=$(curl -s -m 30 -o /tmp/md.det -w '%{http_code}' -H 'Authorization: Bearer t' \
+        -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c/attach)
+    dc=$(curl -s -m 30 -o /tmp/md.del -w '%{http_code}' -H 'Authorization: Bearer t' \
+        -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c)
+    dmsetup resume slow$disk
+    wait $m
+    rc=$(cat /tmp/md.rc 2>/dev/null)
+    echo "GUEST mount-detach: detach during the mount $ac ($(head -c 200 /tmp/md.det)), delete $dc, mount rc ${rc:-?}"
+    [ "$ac" = 409 ] && r mount-detach-refused PASS || r mount-detach-refused "FAIL ($ac)"
+    [ "$dc" = 409 ] && [ "$rc" = 0 ] && r mount-detach-mounted PASS \
+        || r mount-detach-mounted "FAIL (delete $dc, mount rc ${rc:-?})"
+    del1=$(grep -c "has been deleted" /run/engine-$mode.log)
+    [ "$del1" = "$del0" ] && r mount-detach-no-deleted-read PASS \
+        || r mount-detach-no-deleted-read "FAIL ($((del1 - del0)) reads of a deleted volume)"
+    umount /mnt/md 2>/dev/null
+    ac=$(curl -s -m 30 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer t' \
+        -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c/attach)
+    dc=$(curl -s -m 30 -o /tmp/md.del -w '%{http_code}' -H 'Authorization: Bearer t' \
+        -X DELETE http://127.0.0.1:$port/api/v1/volumes/$c)
+    echo "GUEST mount-detach: after the unmount detach $ac, delete $dc ($(head -c 200 /tmp/md.del)), $d $( [ -b $d ] && echo still there || echo gone)"
+    [ "$ac" = 200 ] && [ "$dc" = 204 ] && [ ! -b "$d" ] && r mount-detach-after PASS \
+        || r mount-detach-after "FAIL (detach $ac delete $dc)"
+}
+
 # #496: the engine's fsck of a mounted volume. A mounted ext4 under directory
 # churn (creates, renames, deletes; its journal busy) is checked again and
 # again. Read live, block by block over time and its journal not replayed,
@@ -467,7 +519,8 @@ echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
-         parallel-attach attach-delete-race; do
+         parallel-attach attach-delete-race \
+         mount-detach-refused mount-detach-mounted mount-detach-no-deleted-read mount-detach-after; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ -n "$SP" ] && [ -n "$CP" ] && [ "$CP" -gt 0 ]; then

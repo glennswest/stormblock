@@ -211,6 +211,23 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) and v23.0.1 (#392) stages requested.
 
+### A deleted volume behind a live ublk device after server1's reboot (2026-10-28, #502, P0) — IN PROGRESS
+
+12.54 (v23.0.2) server1: cilium root mount EIO, `ublk read …: volume
+2f9eb851 has been deleted`. Cause (by reading this and rustkube-node's
+`container_roots::destroy`): the kubelet gave up (VolumeRegister 30 s) while
+the mount was still being made on the SMR disk, then detach + delete. The
+detach checks only the mount table (a mount in progress is not in it) and
+`remove` released the hold at the shutdown signal, before the server
+stopped serving; the delete passed and the mount's reads hit the refused
+handle.
+- [x] `remove`: hold kept (`… being stopped`) until the server thread exits;
+      returns a wait; API detach, `/v1` delete, peer detach wait (10 s)
+- [x] detach 409 on a device held open exclusively (`ublk_export::claimed`)
+- [x] unit test; `ci-ublk-qd-verify.sh` `mount-detach`; durability rule 20,
+      README, CHANGELOG
+- [ ] check.sh and ci-ublk-qd-verify.sh on a build VM; v23.0.3; stage; close
+
 ### Kernel → 7.2.10-200.fc44: initramfs for it (2026-10-28, #501, P0) — DONE, no code change
 
 `stormcentral component initramfs --commit d23aab5`: built for

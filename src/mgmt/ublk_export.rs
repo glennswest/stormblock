@@ -174,6 +174,33 @@ pub fn mounted_at(device_path: &str) -> Option<String> {
     }
 }
 
+/// How long a detach waits for its device to be gone before it answers
+/// (#502). A server stops in milliseconds; the bound is for one that does
+/// not, whose volume then stays held (a delete answers 409) until it does.
+pub const DETACH_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether something holds `device_path` open exclusively: a mount, also
+/// while it is still being made (#502). The mount table names a mount only
+/// once it is made, and on server1's SMR disk the mount of a container root
+/// took 30 s; the detach in between stopped the device under it. An
+/// exclusive open (`O_EXCL` on a block device) fails `EBUSY` while one is
+/// held. Our own probe holds the claim for no longer than the open.
+pub fn claimed(device_path: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_EXCL).open(device_path) {
+            Ok(_) => false,
+            Err(e) => e.raw_os_error() == Some(libc::EBUSY),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device_path;
+        false
+    }
+}
+
 pub struct UblkExportManager {
     exports: HashMap<String, Export>,
     /// Devices this engine serves but did not create here: the boot devices
@@ -583,15 +610,38 @@ impl UblkExportManager {
     }
 
     /// Tear down the export for `volume_id`, if any (detach / delete).
-    pub fn remove(&mut self, volume_id: &str) {
-        if let Some(_e) = self.exports.remove(volume_id) {
-            self.release(&_e);
-            #[cfg(target_os = "linux")]
-            {
-                // Best effort: the server removes the kernel device on exit.
-                let _ = _e.shutdown.send(true);
+    ///
+    /// The volume stays held until the device's server has exited (#502):
+    /// a server told to stop goes on serving what the kernel already queued,
+    /// and a mount still opening the device reads through it. Released at
+    /// once, the hold let server1's kubelet delete a container root while
+    /// stormpump's mount was still reading it, and the mount read a volume
+    /// that had been deleted (EIO). The returned wait says when the device
+    /// is gone, for a caller that wants to answer only then.
+    pub fn remove(&mut self, volume_id: &str) -> ShutdownWait {
+        let Some(e) = self.exports.remove(volume_id) else { return ShutdownWait::none() };
+        #[cfg(target_os = "linux")]
+        {
+            // The server removes the kernel device on exit.
+            let _ = e.shutdown.send(true);
+            if e.server.is_some() {
+                if let Some((volume, what)) = &e.held {
+                    let stopping = format!("{what} being stopped");
+                    self.holds.hold(*volume, stopping.clone());
+                    self.holds.release(*volume, what);
+                    let (holds, volume, done) = (self.holds.clone(), *volume, e.done.clone());
+                    let _ = std::thread::Builder::new().name("ublk-stopping".into()).spawn(move || {
+                        while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        holds.release(volume, &stopping);
+                    });
+                }
+                return ShutdownWait { devices: vec![(e.device_path, e.done)] };
             }
         }
+        self.release(&e);
+        ShutdownWait::none()
     }
 
     #[cfg(target_os = "linux")]
@@ -756,6 +806,24 @@ impl UblkExportManager {
         let (tx, rx) = tokio::sync::watch::channel(None);
         self.pending.insert(volume_id.to_string(), rx);
         (Begin::Started(launch, tx), down)
+    }
+
+    /// [`insert_fake`](Self::insert_fake) with a server behind it (never
+    /// run: no kernel), as a real export has: the returned flag is its
+    /// thread's "exited" (#502).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn insert_fake_served(&mut self, volume_id: &str, path: &str) -> Arc<std::sync::atomic::AtomicBool> {
+        let spec = crate::drive::emulated::EmulatedSpec::parse(&format!(
+            "emulated://ublk-fake-{}?size=16M",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .unwrap()
+        .unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(crate::drive::emulated::open(&spec).unwrap());
+        self.insert_fake(volume_id, path);
+        let e = self.exports.get_mut(volume_id).unwrap();
+        e.server = Some(Arc::new(crate::drive::ublk::UblkServer::new(dev)));
+        e.done.clone()
     }
 
     pub(crate) fn insert_fake(&mut self, volume_id: &str, path: &str) {
@@ -987,6 +1055,35 @@ mod tests {
         assert!(!holds.held_by(b).is_empty());
         assert!(mgr.finish(&b.to_string(), launch, Err("never came up".into())).is_none());
         assert!(holds.held_by(b).is_empty(), "a device that did not come up holds nothing");
+    }
+
+    /// #502: a detached device holds its volume until its server has
+    /// exited, not from the moment it is told to stop: server1's kubelet
+    /// detached and deleted a container root while stormpump's mount was
+    /// still reading through its device, and the mount read a deleted volume.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_detached_device_holds_its_volume_until_its_server_exits() {
+        let holds = crate::volume::holds::ServeHolds::default();
+        let mut mgr = UblkExportManager::new().with_holds(holds.clone());
+        let a = uuid::Uuid::new_v4();
+        let done = mgr.insert_fake_served(&a.to_string(), "/dev/ublkb90");
+        let wait = mgr.remove(&a.to_string());
+        assert!(!mgr.is_exported(&a.to_string()), "gone from the table at once");
+        assert_eq!(
+            holds.held_by(a),
+            vec!["ublk device /dev/ublkb90 being stopped".to_string()],
+            "held while its server still serves"
+        );
+        let left = wait.settle(std::time::Duration::from_millis(100)).await;
+        assert_eq!(left, vec!["/dev/ublkb90".to_string()], "the wait names it while it is still going");
+        assert!(!holds.held_by(a).is_empty());
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let at = std::time::Instant::now();
+        while !holds.held_by(a).is_empty() {
+            assert!(at.elapsed() < std::time::Duration::from_secs(5), "released once the server exited");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     /// A device holds its volume in the volume manager's holds from the

@@ -1348,6 +1348,11 @@ rest without naming conventions:
   starts, not once it is ready, and a delete reads the holds again right
   before it removes the volume, so a delete racing an attach either is
   refused or the attach answers `404` with its device taken down (#493).
+  A detach keeps the hold until the device's server has exited and
+  answers only then, so a delete right after it never runs under a device
+  still serving reads; a detach of a device held open exclusively (a mount
+  being made, not yet in the mount table) is `409` like a mounted one
+  (#502).
   The serving layer's GC of an
   ephemeral export whose volume is still a device on the node keeps the
   withdrawn row and deletes the volume once it is detached.

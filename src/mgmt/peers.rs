@@ -351,7 +351,8 @@ pub async fn attach(state: &Arc<AppState>, key: &str, read_only: bool) -> Result
 /// checks the device is not mounted first.
 pub async fn detach(state: &Arc<AppState>, volume: Uuid) -> Option<PeerAttach> {
     let rec = state.peer_attaches.lock().await.get(&volume).cloned()?;
-    state.ublk_exports.lock().await.remove(&volume.to_string());
+    let stopping = state.ublk_exports.lock().await.remove(&volume.to_string());
+    stopping.settle(crate::mgmt::ublk_export::DETACH_WAIT).await;
     release(state, &rec.peer, rec.volume, &rec.host_nqn, &rec.holder).await;
     state.peer_attaches.lock().await.remove(&volume);
     Some(rec)

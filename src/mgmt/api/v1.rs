@@ -1484,7 +1484,10 @@ async fn delete_volume(
         release_nvme_namespace(&state, &id).await;
 
         if let Some(local) = rec.local_id {
-            state.ublk_exports.lock().await.remove(&id);
+            // The device gone before the delete, which a device still
+            // stopping refuses (#502).
+            let stopping = state.ublk_exports.lock().await.remove(&id);
+            stopping.settle(crate::mgmt::ublk_export::DETACH_WAIT).await;
             let mut vm = state.volume_manager.lock().await;
             if let Err(e) = vm.delete_volume(EngineVolumeId(local)).await {
                 tracing::warn!("backing volume {local} delete: {e}");

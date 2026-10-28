@@ -350,6 +350,19 @@ tests run on.
    returned), not when `/dev/ublkbN` exists: a device of the same number
    deleted a moment before can leave its node behind, and an open of it
    gives ENXIO.
+20. **A detached device holds its volume until it is gone** (#502).
+   A detach used to let go of the volume's hold the moment it told the
+   device's server to stop. The server goes on serving what the kernel
+   already queued, and a mount still being made reads through it, so a
+   delete right after the detach went through and those reads found a
+   volume that had been deleted (server1 12.54: the kubelet gave up on a
+   cilium root whose mount was taking 30 s on the SMR disk, detached and
+   deleted it; the mount got EIO). The volume is now held (`… being
+   stopped`) until the server's thread has exited, and a detach answers
+   once that has happened (bounded at 10 s; past it the volume stays held
+   and a delete answers 409). A detach also refuses a device that is held
+   open exclusively, as a mount is from its first moment, though it is in
+   no mount table until it is made.
 
 ## How it is checked
 
