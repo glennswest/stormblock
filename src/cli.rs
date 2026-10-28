@@ -11999,6 +11999,16 @@ file = "{state}"
             assert_eq!(s.moved_to().map(|m| m.0.to_string()), Some(to_data.clone()), "the old drive points to the new one");
             assert_eq!(s.allocated_slots(), 0, "and holds nothing");
         }
+        // ci-pair-verify.sh boots the shipped /init from the old drive first.
+        if let Ok(out) = std::env::var("STORMBLOCK_PAIR_OUT") {
+            for (src, name) in [(&disk, "moved-from.raw"), (&to, "moved-to.raw")] {
+                let st = std::process::Command::new("cp")
+                    .args(["--sparse=always", src.as_str(), &format!("{out}/{name}")])
+                    .status()
+                    .unwrap();
+                assert!(st.success(), "copying {src} to {out}");
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -12112,6 +12122,16 @@ file = "{state}"
             assert_eq!(volume_bytes(&m, "state").await.as_ref(), Some(&state_before), "{alone} alone: the node's state");
             assert_eq!(volume_bytes(&m, "pvc-pair").await, Some(vec![0x77u8; 4 * MIB as usize]), "{alone} alone: the PVC");
             assert_eq!(volume_bytes(&m, "svc").await.as_ref(), Some(&n1_svc), "{alone} alone: N+1's golden");
+        }
+        // ci-pair-verify.sh boots the shipped /init from these two drives.
+        if let Ok(out) = std::env::var("STORMBLOCK_PAIR_OUT") {
+            for (src, name) in [(&a, "pair-a.raw"), (&b, "pair-b.raw")] {
+                let st = std::process::Command::new("cp")
+                    .args(["--sparse=always", src.as_str(), &format!("{out}/{name}")])
+                    .status()
+                    .unwrap();
+                assert!(st.success(), "copying {src} to {out}");
+            }
         }
     }
 
