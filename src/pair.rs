@@ -222,3 +222,62 @@ async fn compare_sealed(
         }
     }
 }
+
+/// What a system move did (#350).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MoveReport {
+    pub from: String,
+    pub to: String,
+    pub extents_moved: u64,
+    /// The new drive boots on its own (its boot area laid).
+    pub bootable: bool,
+    /// Slabs on the old drive that point to the new one.
+    pub pointer_slabs: usize,
+    /// The data slab on the new drive, which the pointer names.
+    pub data_slab: String,
+}
+
+/// A system move's state, for `GET /api/v1/system/move`: one at a time.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MoveStatus {
+    /// `idle`, `moving`, `done` or `failed`.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<MoveReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+static MOVE: std::sync::Mutex<Option<MoveStatus>> = std::sync::Mutex::new(None);
+
+/// The move's state now.
+pub fn move_status() -> MoveStatus {
+    MOVE.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or(MoveStatus { state: "idle", ..Default::default() })
+}
+
+/// Take the move for one caller: `false` when one is under way.
+pub fn move_begin(from: Option<&str>, to: &str) -> bool {
+    let mut m = MOVE.lock().unwrap_or_else(|e| e.into_inner());
+    if m.as_ref().is_some_and(|s| s.state == "moving") {
+        return false;
+    }
+    *m = Some(MoveStatus { state: "moving", from: from.map(str::to_string), to: Some(to.to_string()), ..Default::default() });
+    true
+}
+
+/// How the move ended.
+pub fn move_end(r: Result<MoveReport, String>) {
+    let mut m = MOVE.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = m.take().unwrap_or_default();
+    *m = Some(match r {
+        Ok(rep) => MoveStatus { state: "done", from: Some(rep.from.clone()), to: Some(rep.to.clone()), report: Some(rep), error: None },
+        Err(e) => MoveStatus { state: "failed", from: prev.from, to: prev.to, report: None, error: Some(e) },
+    });
+}

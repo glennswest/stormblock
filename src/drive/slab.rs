@@ -347,6 +347,12 @@ struct SlabHeader {
     /// none); covered by the v2 checksum, which an older engine computes over
     /// the same bytes and otherwise ignores.
     partner: Uuid,
+    /// Where this node's system went when it moved off this drive (#350): the
+    /// data slab on the drive it moved to. A boot from this drive follows it
+    /// and asks for the BIOS boot order to be set. Format 2 only, at bytes
+    /// 168..184 (nil = not moved); covered by the v2 checksum, ignored by an
+    /// older engine.
+    moved_to: Uuid,
     #[allow(dead_code)]
     checksum: u32,
     /// [`SLAB_VERSION`] or [`SLAB_VERSION_2`].
@@ -385,6 +391,7 @@ impl SlabHeader {
             let span = if self.span > self.total_slots { self.span } else { 0 };
             buf[144..152].copy_from_slice(&span.to_le_bytes());
             buf[152..168].copy_from_slice(self.partner.as_bytes());
+            buf[168..184].copy_from_slice(self.moved_to.as_bytes());
             let crc = Self::crc_v2(&buf);
             buf[124..128].copy_from_slice(&crc.to_le_bytes());
             return buf;
@@ -470,6 +477,11 @@ impl SlabHeader {
         } else {
             Uuid::nil()
         };
+        let moved_to = if version == SLAB_VERSION_2 {
+            Uuid::from_slice(&data[168..184]).unwrap_or_default()
+        } else {
+            Uuid::nil()
+        };
 
         Ok(SlabHeader {
             slab_uuid,
@@ -490,6 +502,7 @@ impl SlabHeader {
             table_room,
             span,
             partner,
+            moved_to,
             checksum: stored_crc,
             version,
         })
@@ -1136,7 +1149,7 @@ impl Slab {
             table_capacity: table_capacity.max(total_slots),
             table_room: table_capacity.max(total_slots),
             span: total_slots,
-            partner: Uuid::nil(),
+            partner: Uuid::nil(), moved_to: Uuid::nil(),
             checksum: 0,
             version: if opts.version == SLAB_VERSION_2 { SLAB_VERSION_2 } else { SLAB_VERSION },
         };
@@ -2033,6 +2046,33 @@ impl Slab {
         Ok(())
     }
 
+    /// The data slab this node's system moved to off this drive (#350).
+    pub fn moved_to(&self) -> Option<SlabId> {
+        (!self.header.moved_to.is_nil()).then_some(SlabId(self.header.moved_to))
+    }
+
+    /// Record where the system moved (#350), in the header; and its partner
+    /// cleared, so this drive is no longer one of the node's pair. Format 2
+    /// only. The header is the only write.
+    pub async fn set_moved_to(&mut self, to: Option<SlabId>) -> DriveResult<()> {
+        if self.header.version != SLAB_VERSION_2 {
+            return Err(DriveError::Other(anyhow::anyhow!(
+                "slab {} is format 1: its header has no room for where the system moved",
+                self.id
+            )));
+        }
+        let _g = self.commit.lock.lock().await;
+        let mut h = self.header_now();
+        h.moved_to = to.map(|p| p.0).unwrap_or_default();
+        if to.is_some() {
+            h.partner = Uuid::nil();
+        }
+        self.device.write(0, &h.to_bytes()).await?;
+        self.device.flush().await?;
+        self.header = h;
+        Ok(())
+    }
+
     /// Whether this slab holds identity and state rather than goldens, and so
     /// must survive every reimage and every flow-over (#88).
     pub fn is_data(&self) -> bool {
@@ -2676,7 +2716,7 @@ mod tests {
             slab_uuid: Uuid::new_v4(), device_uuid: Uuid::new_v4(), slot_size: 1 << 20,
             total_slots: 100, free_slots: 100, data_offset: 1 << 20, table_offset: 4096,
             create_time: 1, update_time: 1, tier: StorageTier::Hot, flags: 0,
-            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, table_room: 100, span: 100, partner: Uuid::nil(), checksum: 0, version: 1,
+            role: SlabRole::Data, meta_offset: 0, meta_size: 0, table_capacity: 100, table_room: 100, span: 100, partner: Uuid::nil(), moved_to: Uuid::nil(), checksum: 0, version: 1,
         };
         let b = h.to_bytes();
         assert_eq!(&b[120..124], &[0, 0, 0, 0], "no room beyond total_slots writes zero");
@@ -3612,7 +3652,7 @@ mod tests {
             total_slots: 5_000_000_000, free_slots: 5_000_000_000, data_offset: 1 << 40, table_offset: 4096,
             create_time: 1, update_time: 1, tier: StorageTier::Cold, flags: 0,
             role: SlabRole::Data, meta_offset: 4096, meta_size: 1 << 30, table_capacity: 9_000_000_000,
-            table_room: 9_000_000_000, span: 5_000_000_000, partner: Uuid::from_u128(0x402), checksum: 0, version: SLAB_VERSION_2,
+            table_room: 9_000_000_000, span: 5_000_000_000, partner: Uuid::from_u128(0x402), moved_to: Uuid::from_u128(0x350), checksum: 0, version: SLAB_VERSION_2,
         };
         let mut b = h.to_bytes();
         assert_eq!(u32::from_le_bytes(b[8..12].try_into().unwrap()), 2);
@@ -3621,6 +3661,7 @@ mod tests {
         assert_eq!(back.table_capacity, 9_000_000_000);
         assert_eq!(back.total_slots, 5_000_000_000);
         assert_eq!(back.partner, Uuid::from_u128(0x402), "the partner (#402) round-trips");
+        assert_eq!(back.moved_to, Uuid::from_u128(0x350), "where the system moved (#350) round-trips");
         b[160] ^= 1;
         assert!(SlabHeader::from_bytes(&b).is_err(), "the partner is checksummed");
         b[160] ^= 1;
@@ -3707,7 +3748,7 @@ mod tests {
             table_capacity: 0,
             table_room: 0,
             span: 0,
-            partner: Uuid::nil(),
+            partner: Uuid::nil(), moved_to: Uuid::nil(),
             checksum: 0,
             version: 1,
         };
@@ -3746,7 +3787,7 @@ mod tests {
             table_capacity: 0,
             table_room: 0,
             span: 0,
-            partner: Uuid::nil(),
+            partner: Uuid::nil(), moved_to: Uuid::nil(),
             checksum: 0,
             version: 1,
         };

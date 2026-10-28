@@ -642,6 +642,26 @@ enum SlabAction {
         #[arg(long = "with")]
         with: Vec<String>,
     },
+    /// Where this node's system moved off a drive (#350): a drive the system
+    /// was moved away from keeps, in its slab headers, the id of the data
+    /// slab on the drive it went to. Found among the machine's drives by that
+    /// id; prints its path as the last line.
+    ///
+    /// Exit 0: moved, and the drive it went to is here. Exit 1: not moved.
+    /// Exit 2: moved, to a drive that is not on this machine (said).
+    Moved {
+        /// The drive (or slab) named
+        disk: String,
+        /// Drives to look among; the machine's disks when none is given
+        #[arg(long = "among")]
+        among: Vec<String>,
+        /// The sysfs root the machine's disks are listed under
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        /// Where device nodes are
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
     /// The drive holding this node's other half, on this machine (#402).
     ///
     /// A system slab laid on a drive of its own records its data slab's id;
@@ -2119,6 +2139,52 @@ pub async fn run() -> anyhow::Result<()> {
                     Err((code, why)) => {
                         println!("{why}");
                         std::process::exit(code);
+                    }
+                }
+            }
+            SlabAction::Moved { disk, among, sys, dev } => {
+                use crate::image::partner;
+                let d = match inspect_storage(disk).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        println!("{disk}: cannot open ({e})");
+                        std::process::exit(1);
+                    }
+                };
+                let moved: Vec<crate::drive::slab::SlabId> =
+                    partner::slabs_on(&d).await.iter().filter_map(|s| s.moved_to()).collect();
+                drop(d);
+                let Some(to) = moved.first().copied() else {
+                    println!("{disk}: the system did not move off it");
+                    std::process::exit(1);
+                };
+                let candidates: Vec<String> = if among.is_empty() {
+                    crate::drive::designation::disks_in(std::path::Path::new(&sys))
+                        .into_iter()
+                        .map(|n| format!("{dev}/{n}"))
+                        .collect()
+                } else {
+                    among.clone()
+                };
+                let mut found = Vec::new();
+                for c in candidates.iter().filter(|c| c.as_str() != disk.as_str()) {
+                    let Ok(cd) = crate::drive::open_path(c, true).await else { continue };
+                    if partner::seen_on(&cd).await.iter().any(|s| s.id == to) {
+                        found.push(c.clone());
+                    }
+                }
+                match found.as_slice() {
+                    [one] => {
+                        println!("{disk}: the system moved to {one} (data slab {to})");
+                        println!("{one}");
+                    }
+                    [] => {
+                        println!("{disk}: the system moved to data slab {to}, which is on no drive here");
+                        std::process::exit(2);
+                    }
+                    many => {
+                        println!("{disk}: the system moved to data slab {to}, claimed by more than one drive: {}", many.join(", "));
+                        std::process::exit(2);
                     }
                 }
             }
@@ -5923,6 +5989,170 @@ pub async fn run() -> anyhow::Result<()> {
             bulk_slab: bb.map(|b| b.0.to_string()),
         });
         Ok((Some(flow), report))
+    }
+
+    /// Move this node's system off the drive `from` onto `to` (#350,
+    /// stormdrive's `move-system`), live: `to` laid as a whole node disk, both
+    /// halves moved onto it extent by extent as a flow-over moves them (each
+    /// extent fenced, read back), the boot area copied, the old drive's slabs
+    /// let go, and a pointer left in their headers to where the system went:
+    /// a boot from the old drive follows it and asks for the BIOS boot order.
+    /// One drive of a system pair moves the same way, its partner kept. `from`
+    /// may be left out on a node with one drive.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn system_move(
+        state: &Arc<crate::mgmt::AppState>,
+        from: Option<&str>,
+        to: &str,
+        force: bool,
+    ) -> anyhow::Result<crate::pair::MoveReport> {
+        use crate::drive::slab::{SlabId, SlabRole};
+        use crate::image::{local, partner};
+        // The node's own drives, by disk: their slabs and roles.
+        let mut disks: std::collections::BTreeMap<String, Vec<(SlabId, SlabRole, Option<SlabId>)>> = Default::default();
+        {
+            let reg = state.slab_registry.read().await;
+            for (id, s) in reg.iter() {
+                if matches!(s.device().device_type(), crate::drive::DriveType::NvmeTcp | crate::drive::DriveType::Iscsi) {
+                    continue;
+                }
+                disks.entry(s.device().drive_id().path.clone()).or_default().push((*id, s.role(), s.partner()));
+            }
+        }
+        let with_system: Vec<&String> =
+            disks.iter().filter(|(_, v)| v.iter().any(|(_, r, _)| *r == SlabRole::System)).map(|(d, _)| d).collect();
+        let from: String = match from {
+            Some(f) => {
+                if !disks.contains_key(f) {
+                    anyhow::bail!("{f} is not one of this node's drives ({})", disks.keys().cloned().collect::<Vec<_>>().join(", "));
+                }
+                f.to_string()
+            }
+            None => match with_system.as_slice() {
+                [one] => (*one).clone(),
+                [] => anyhow::bail!("this node runs from no drive of its own: nothing to move"),
+                many => anyhow::bail!(
+                    "this node's system is on {} drives (a pair): name the one to move with `from`",
+                    many.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+            },
+        };
+        if disks.contains_key(to) {
+            anyhow::bail!("{to} is already one of this node's drives");
+        }
+        let old = disks.remove(&from).unwrap_or_default();
+        let old_system: Vec<SlabId> = old.iter().filter(|(_, r, _)| *r == SlabRole::System).map(|(i, _, _)| *i).collect();
+        let old_data: Vec<SlabId> = old.iter().filter(|(_, r, _)| *r == SlabRole::Data).map(|(i, _, _)| *i).collect();
+        let partner_of_old: Option<SlabId> = old.iter().filter(|(_, r, _)| *r == SlabRole::Data).find_map(|(_, _, p)| *p);
+        if old_system.is_empty() && old_data.is_empty() {
+            anyhow::bail!("{from} carries none of this node's slabs");
+        }
+        if let Some(what) = data_slab_on(to).await? {
+            if !force {
+                anyhow::bail!("refusing to move the system onto {to}: {what}");
+            }
+            println!("System move: {what} — destroying it, as force was given (#350)");
+        }
+        let to_dev: Arc<dyn BlockDevice> = open_storage(to).await?;
+        let (slot, tier) = {
+            let reg = state.slab_registry.read().await;
+            let first = old_system.first().or(old_data.first()).and_then(|i| reg.get(i));
+            (first.map(|s| s.slot_size()), first.map(|s| s.tier()))
+        };
+        let mut layout = local::LocalLayout::for_drive(to_dev.capacity_bytes());
+        if let Some(s) = slot {
+            layout.slot_size = s;
+        }
+        if let Some(t) = tier {
+            layout.tier = t;
+        }
+        layout.lba = crate::drive::filedev::logical_sector_size(to);
+        println!("System move: {from} → {to} (#350): laying {to} as a whole node disk");
+        let mut laid = local::lay_node_slabs(to_dev, &layout).await.map_err(|e| anyhow::anyhow!("laying slabs on {to}: {e}"))?;
+        let (to_data, to_system, to_bulk) = (laid.data.slab_id(), laid.system.slab_id(), laid.bulk.as_ref().map(|b| b.slab_id()));
+        if let Some(p) = partner_of_old {
+            laid.data.set_partner(Some(p)).await.map_err(|e| anyhow::anyhow!("pairing {to}'s data slab: {e}"))?;
+        }
+        {
+            let mut reg = state.slab_registry.write().await;
+            reg.add(laid.data);
+            reg.add(laid.system);
+            if let Some(b) = laid.bulk {
+                reg.add(b);
+            }
+        }
+        {
+            let mut vm = state.volume_manager.lock().await;
+            let mut first = vec![to_data, to_system];
+            first.extend(to_bulk);
+            vm.keep_metadata_in_first(&first);
+        }
+        crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
+        let persist = || async {
+            crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
+        };
+        let mut moved = 0u64;
+        for (srcs, dest, what) in [(&old_system, to_system, "system"), (&old_data, to_data, "data")] {
+            if srcs.is_empty() {
+                continue;
+            }
+            match flow_slabs(&state.gem, &state.slab_registry, srcs, dest, persist, None, 0).await {
+                Some((m, 0)) => moved += m,
+                Some((_, f)) => anyhow::bail!("{f} extent(s) of the {what} half did not move off {from}; it stays the node's"),
+                None => anyhow::bail!("the {what} half stopped moving off {from}; it stays the node's"),
+            }
+        }
+        crate::volume::VolumeManager::persist_detached_checked(&state.volume_manager)
+            .await
+            .map_err(|e| anyhow::anyhow!("the moved records were not written: {e}"))?;
+        // The pair's other drive now names the new one.
+        if let Some(p) = partner_of_old {
+            if let Some(ps) = state.slab_registry.write().await.get_mut(&p) {
+                ps.set_partner(Some(to_data)).await.map_err(|e| anyhow::anyhow!("pairing the partner with {to}: {e}"))?;
+            }
+        }
+        let bootable = match run_local_boot(to, &[from.clone()]).await {
+            Ok(b) => b,
+            Err(e) => {
+                println!("WARNING: system move: local boot on {to}: {e}");
+                false
+            }
+        };
+        // The old drive's slabs let go, then the pointer written into them.
+        for id in old_system.iter().chain(&old_data) {
+            let r = state.volume_manager.lock().await.retire_drained_slab(*id).await;
+            if !matches!(r, Ok(true)) {
+                anyhow::bail!("slab {} on {from} still holds something after the move ({r:?}); it is kept", id.0);
+            }
+        }
+        crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
+        let from_dev = inspect_storage(&from).await?;
+        let mut pointed = 0;
+        for mut s in partner::slabs_on(&from_dev).await {
+            match s.set_moved_to(Some(to_data)).await {
+                Ok(()) => pointed += 1,
+                Err(e) => println!("WARNING: system move: the pointer on {from}'s slab {}: {e}", s.slab_id()),
+            }
+        }
+        println!(
+            "System move: done — {moved} extent(s) on {to}{}; {from} points to it ({pointed} slab(s)). \
+             SET THE BIOS BOOT ORDER TO {to}",
+            if bootable { ", which boots on its own" } else { " (NOT bootable on its own: see above)" }
+        );
+        crate::mgmt::slab_report::update_local_disk(
+            "taken",
+            Some(to),
+            Some(format!("the system moved here from {from} (#350); set the BIOS boot order to {to}")),
+            "system-move",
+        );
+        Ok(crate::pair::MoveReport {
+            from,
+            to: to.to_string(),
+            extents_moved: moved,
+            bootable,
+            pointer_slabs: pointed,
+            data_slab: to_data.0.to_string(),
+        })
     }
 
     /// The bytes of the release's system half this manager holds (#402): the

@@ -23,6 +23,7 @@ pub mod kube;
 pub mod moves;
 pub mod synonyms;
 pub mod boothost;
+pub mod system;
 pub mod release_stage;
 pub mod releases;
 pub mod goldens;
@@ -254,6 +255,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/erasures", erasures::router(state.clone()))
         .nest("/api/v1/synonyms", synonyms::router(state.clone()))
         .nest("/api/v1/boothost", boothost::router(state.clone()))
+        .nest("/api/v1/system", system::router(state.clone()))
         .nest("/api/v1/releases", releases::router(state.clone()))
         .nest("/api/v1/goldens", goldens::router(state.clone()))
         .nest("/api/v1/kernel", kernel::router(state.clone()))

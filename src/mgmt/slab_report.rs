@@ -53,6 +53,18 @@ pub struct SlabReport {
     /// node that is not a pair.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pair: Option<PairState>,
+    /// The boot came from a drive the system was moved off (#350): urgent,
+    /// `{set_to, booted_from, message}`, until a boot comes from the new one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_order: Option<serde_json::Value>,
+}
+
+/// Where `/init` says the boot came from a drive the system moved off (#350).
+pub const BOOT_ORDER_PATH: &str = "/run/stormblock/boot-order.json";
+
+/// The boot-order message `/init` left, when it left one.
+pub fn read_boot_order() -> Option<serde_json::Value> {
+    std::fs::read(BOOT_ORDER_PATH).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 /// A system pair's state (#350), from the data slabs' headers.
@@ -227,6 +239,7 @@ pub fn build(slabs: &[SlabFact], volumes: Option<&[HashSet<SlabId>]>) -> SlabRep
             items,
             local_disk: None,
             pair: None,
+            boot_order: None,
         };
     };
     let fact = |id: &SlabId| slabs.iter().find(|s| s.id == *id);
@@ -253,7 +266,7 @@ pub fn build(slabs: &[SlabFact], volumes: Option<&[HashSet<SlabId>]>) -> SlabRep
     let any_local = vols
         .iter()
         .any(|v| v.iter().any(|id| fact(id).is_some_and(|s| s.remote.is_none())));
-    SlabReport { diskless: !any_local, system: half(false), data: half(true), items, local_disk: None, pair: None }
+    SlabReport { diskless: !any_local, system: half(false), data: half(true), items, local_disk: None, pair: None, boot_order: None }
 }
 
 /// The report now, without waiting: `None` when the registry or the extent
@@ -321,6 +334,7 @@ pub fn for_health(state: &crate::mgmt::AppState) -> Option<SlabReport> {
     match snapshot(&state.slab_registry, &state.gem) {
         Some(mut r) => {
             r.local_disk = read_local_disk();
+            r.boot_order = read_boot_order();
             *cache = Some((Instant::now(), r.clone()));
             Some(r)
         }
@@ -349,7 +363,7 @@ mod tests {
         let deg = pair_state(&[(a, b, false)]).unwrap();
         assert_eq!(deg.state, "degraded");
         assert!(deg.reason.unwrap().contains(&b.0.to_string()));
-        let j = serde_json::to_value(SlabReport { diskless: false, system: "local", data: "local", items: vec![], local_disk: None, pair: pair_state(&[(a, b, false)]) }).unwrap();
+        let j = serde_json::to_value(SlabReport { diskless: false, system: "local", data: "local", items: vec![], local_disk: None, pair: pair_state(&[(a, b, false)]), boot_order: None }).unwrap();
         assert_eq!(j["pair"]["state"], "degraded");
     }
 

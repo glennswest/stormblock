@@ -3069,6 +3069,39 @@ if [ "$BOOT_MODE" = "local" ]; then
             PROBE_STOP="$1"
         fi
     }
+    # --- BEGIN system moved (covered by tests/initramfs-system-moved.sh)
+    # A drive this node's system was moved off (#350, stormdrive's
+    # move-system) keeps a pointer to the drive it went to. Booted from it
+    # (the BIOS boot order not changed yet), the boot follows the pointer and
+    # boots the moved system, never the stale drive, and says it urgently;
+    # health carries it until a boot comes from the new drive.
+    BOOT_ORDER_FILE="${STORM_RUN:-/run/stormblock}/boot-order.json"
+    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ]; then
+        case "$SLAB" in
+        *://*) ;;
+        *)
+            _md=$(disk_of "$SLAB")
+            _mto=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab moved "$_md" 2>/dev/null); _mrc=$?
+            if [ "$_mrc" -eq 0 ]; then
+                _mto=$(printf '%s\n' "$_mto" | tail -n 1)
+                echo "URGENT: this node's system was moved off $_md to $_mto (#350)."
+                echo "URGENT: SET THE BIOS BOOT ORDER TO $_mto. Booting the moved system from it now."
+                mkdir -p "${BOOT_ORDER_FILE%/*}"
+                printf '{"set_to": "%s", "booted_from": "%s", "message": "set BIOS boot order to %s"}\n' \
+                    "$_mto" "$_md" "$_mto" > "$BOOT_ORDER_FILE"
+                SLAB="$_mto"
+            elif [ "$_mrc" -eq 2 ]; then
+                echo "URGENT: this node's system was moved off $_md, to a drive that is not on this machine (#350):"
+                printf '%s\n' "$_mto" | sed 's/^/  /'
+                mkdir -p "${BOOT_ORDER_FILE%/*}"
+                printf '{"set_to": null, "booted_from": "%s", "message": "the system moved off %s to a drive not here"}\n' \
+                    "$_md" "$_md" > "$BOOT_ORDER_FILE"
+                probe_fallback "$_md is a drive the system moved off, and the drive it went to is not here"
+            fi
+            ;;
+        esac
+    fi
+    # --- END system moved
     # The node's two drives (#402): the drive named and the one holding its
     # other half, each found from the other by slab id. The boot goes through
     # the drive with the system half (where the root is), the other beside it

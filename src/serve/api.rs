@@ -377,6 +377,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
             // add a member; `{m}/fail`, `{m}/replace`
             return seg.len() == 6 || matches!(seg.last(), Some(&"fail") | Some(&"replace"));
         }
+        // Moving the system to another drive (#350): what the node boots from.
+        if p == "/api/v1/system/move" {
+            return true;
+        }
         if matches!(p, "/api/v1/pallets/gpt" | "/api/v1/pallets/convert" | "/api/v1/pallets/prune" | "/api/v1/pallets/adopt") {
             return true;
         }
