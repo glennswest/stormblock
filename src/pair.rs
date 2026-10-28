@@ -130,8 +130,34 @@ pub async fn pair_up_unlocked(vm: &TrackedMutex<VolumeManager>) -> PairReport {
         }
         Err(e) => report.problems.push(format!("the pair's records were not written: {e}")),
     }
-    compare_sealed(&gem, &registry, &sealed, &mut report).await;
+    // The goldens' legs compared when this wrote any: a pair made, or a
+    // drive mirrored again. A start that found the pair whole reads nothing.
+    if report.legs_added > 0 {
+        compare_sealed(&gem, &registry, &sealed, &mut report).await;
+    }
     report
+}
+
+/// Mend the pair at a start (#350): when both drives are here, every volume
+/// mirrored onto both (a drive back after a boot without it, or a new one in
+/// its place, or a pair cut off before it was made). Nothing when the node
+/// is not a pair or its other drive is missing (health says degraded).
+pub async fn mend_at_start(vm: &TrackedMutex<VolumeManager>) -> Option<PairReport> {
+    let pairs = pairs_registered(&*vm.lock().await).await;
+    if pairs.is_empty() {
+        return None;
+    }
+    if pairs.iter().any(|(_, _, here)| !here) {
+        let missing: Vec<String> = pairs.iter().filter(|(_, _, h)| !*h).map(|(_, p, _)| p.0.to_string()).collect();
+        println!(
+            "WARNING: system pair degraded: the other drive (data slab {}) is not here; every volume runs on this \
+             drive alone until it is back or replaced (#350)",
+            missing.join(", ")
+        );
+        tracing::warn!("system pair degraded: data slab(s) {} missing", missing.join(", "));
+        return None;
+    }
+    Some(pair_up_unlocked(vm).await)
 }
 
 /// [`pair_up_unlocked`] for a manager no one else holds (boot-local, tests).

@@ -8819,6 +8819,26 @@ async fn handle_adopt_ublk(
             // (#384); any that came with a digest and were never read
             // against it are, now.
             state.check_goldens();
+            // A system pair (#350): mirrored onto both drives again when one
+            // came back (or a pair was cut off before it was made); degraded
+            // said when one is missing. After the boot's own I/O settles.
+            {
+                let st = state.clone();
+                tokio::spawn(crate::lockwatch::named("the pair mend", async move {
+                    if !crate::pair::is_pair(&*st.volume_manager.lock().await).await {
+                        return;
+                    }
+                    let grace = flow_boot_grace();
+                    if !grace.is_zero() {
+                        wait_for_boot_quiet(grace, FLOW_BOOT_QUIET).await;
+                    }
+                    if let Some(r) = crate::pair::mend_at_start(&st.volume_manager).await {
+                        if r.legs_added > 0 || !r.is_whole() {
+                            say_pair("the other drive", &r);
+                        }
+                    }
+                }));
+            }
             if let Some((disk, sources)) = local_boot {
                 tokio::spawn(async move {
                     if let Err(e) = run_local_boot(&disk, &sources).await {
