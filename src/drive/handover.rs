@@ -77,6 +77,38 @@ pub struct FlowOver {
     /// local boot lays the ESP and the boot pallets. Absent: one drive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_disk: Option<String>,
+    /// The second drive of a system pair (#350): laid like `disk` (its own
+    /// boot area, system and data slabs). The successor mirrors every volume
+    /// onto it once the flow-over is proved, and lays local boot on it too.
+    /// Absent: no pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub twin: Option<Twin>,
+}
+
+/// The second drive of a system pair (#350), by its slabs' ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Twin {
+    pub disk: String,
+    pub system_slab: String,
+    pub data_slab: String,
+    /// Its bulk slab (#156), when its layout has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk_slab: Option<String>,
+}
+
+impl FlowOver {
+    /// Every slab id this flow-over lays on the node's own drives, by its
+    /// string form: the destinations, and the twin's slabs (#350), which are
+    /// never a source.
+    pub fn local_slab_ids(&self) -> Vec<String> {
+        let mut v = vec![self.system_slab.clone(), self.data_slab.clone()];
+        if let Some(t) = &self.twin {
+            v.push(t.system_slab.clone());
+            v.push(t.data_slab.clone());
+            v.extend(t.bulk_slab.clone());
+        }
+        v
+    }
 }
 
 /// Where `boot-claim` leaves the install it was asked for (#148): written
@@ -635,7 +667,7 @@ mod tests {
         mixed.slabs.push("iscsi://10.0.0.1:3260/iqn.x".into());
         assert!(!local_only_boot(&mixed), "any remote slab");
         let mut flowing = a_record();
-        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false, data_disk: None });
+        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false, data_disk: None, twin: None });
         assert!(!local_only_boot(&flowing), "the install boot itself");
         let mut installing = a_record();
         installing.install = Some(InstallTicket { boothost: "http://f".into(), host: "h".into(), volume: "v".into() });
@@ -698,6 +730,7 @@ mod tests {
             data_slab: "f86ee673-57da-4aa5-961c-168c263de265".into(),
             data_flow: false,
             data_disk: None,
+            twin: None,
         });
         let bytes = serde_json::to_vec(&rec).expect("encodes");
         assert_eq!(serde_json::from_slice::<Record>(&bytes).expect("decodes"), rec);

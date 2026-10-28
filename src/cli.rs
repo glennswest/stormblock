@@ -510,6 +510,14 @@ enum SubCommand {
         /// Who --system-disk must be (#351), as --local-disk-id.
         #[arg(long)]
         system_disk_id: Option<String>,
+        /// The second drive of a system pair (#350): laid like --local-disk
+        /// (boot area, system and data slabs), every volume mirrored across
+        /// the two once the flow-over is done, so either drive boots alone.
+        #[arg(long, conflicts_with = "system_disk")]
+        pair_disk: Option<String>,
+        /// Who --pair-disk must be (#351), as --local-disk-id.
+        #[arg(long)]
+        pair_disk_id: Option<String>,
         /// Validate the artifact and resolve the boot volume, then exit
         /// without exporting (no ublk needed)
         #[arg(long)]
@@ -1203,7 +1211,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier,
-                local_disk_force, system_disk, local_disk_id, system_disk_id, check,
+                local_disk_force, system_disk, local_disk_id, system_disk_id, pair_disk, pair_disk_id, check,
             } => {
                 return handle_boot_local(
                     slab,
@@ -1217,6 +1225,7 @@ pub async fn run() -> anyhow::Result<()> {
                     *local_disk_force,
                     system_disk.as_deref(),
                     (local_disk_id.as_deref(), system_disk_id.as_deref()),
+                    (pair_disk.as_deref(), pair_disk_id.as_deref()),
                     *check,
                 ).await;
             }
@@ -5257,6 +5266,22 @@ pub async fn run() -> anyhow::Result<()> {
         local_disk_force: bool,
         root: Option<&str>,
     ) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
+        take_local_disk_paired(mgr, disk, local_tier, local_disk_force, root, &[], &[]).await
+    }
+
+    /// [`take_local_disk_for`], `disk` being one drive of a system pair
+    /// (#350): the other drive's data slabs (`twin_data`) are part of the
+    /// node's data half, its system slab (`twin_system`) is laid again.
+    #[cfg(target_os = "linux")]
+    async fn take_local_disk_paired(
+        mgr: &mut crate::volume::VolumeManager,
+        disk: &str,
+        local_tier: &str,
+        local_disk_force: bool,
+        root: Option<&str>,
+        twin_data: &[crate::drive::slab::SlabId],
+        twin_system: &[crate::drive::slab::SlabId],
+    ) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
         let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
         let dest_dev: Arc<dyn BlockDevice> =
             open_storage(disk).await?;
@@ -5387,7 +5412,7 @@ pub async fn run() -> anyhow::Result<()> {
             // half's records must read and every leg they name must be in it.
             let release: std::collections::HashSet<String> =
                 mgr.list_volumes().await.into_iter().map(|(_, n, _, _)| n).collect();
-            let mut plan = crate::image::install::plan(&dest_dev, &release)
+            let mut plan = crate::image::install::plan_paired(&dest_dev, None, &release, twin_data, twin_system)
                 .await
                 .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
             // What the node made in the system half is carried into the data
@@ -5402,7 +5427,7 @@ pub async fn run() -> anyhow::Result<()> {
                 for c in &carried {
                     println!("Install: {c} — the node's, with extents in the system half: carried into the data half (#349, #369)");
                 }
-                plan = crate::image::install::plan(&dest_dev, &release)
+                plan = crate::image::install::plan_paired(&dest_dev, None, &release, twin_data, twin_system)
                     .await
                     .map_err(|e| anyhow::anyhow!("not installing over {disk}, its data half untouched: {e}"))?;
             }
@@ -5560,6 +5585,7 @@ pub async fn run() -> anyhow::Result<()> {
                 data_slab: data_id.0.to_string(),
                 data_flow: true,
                 data_disk: None,
+                twin: None,
             };
             println!(
                 "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
@@ -5665,6 +5691,7 @@ pub async fn run() -> anyhow::Result<()> {
             data_slab: data_id.0.to_string(),
             data_flow: false,
             data_disk: None,
+            twin: None,
         };
         {
             let mut reg = mgr.registry().write().await;
@@ -5756,14 +5783,146 @@ pub async fn run() -> anyhow::Result<()> {
         mgr: &mut crate::volume::VolumeManager,
         disk: &str,
         system_disk: Option<&str>,
+        pair_disk: Option<&str>,
         local_tier: &str,
         local_disk_force: bool,
         root: Option<&str>,
     ) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
+        if let Some(b) = pair_disk.filter(|b| *b != disk) {
+            return take_pair(mgr, disk, b, local_tier, local_disk_force, root).await;
+        }
         match system_disk.filter(|s| *s != disk) {
             None => take_local_disk_for(mgr, disk, local_tier, local_disk_force, root).await,
             Some(sys) => take_split(mgr, disk, sys, local_tier, local_disk_force, root).await,
         }
+    }
+
+    /// A system pair (#350): `a` and `b` each laid as a whole node disk (boot
+    /// area, system slab, data slab), their data slabs naming each other in
+    /// their headers. The drive that already holds this node's data half is
+    /// taken as [`take_local_disk_for`] takes one (an install over it keeps
+    /// the data half); the other is laid fresh, or, when the two are already
+    /// this node's pair, has its system half laid again and its data half
+    /// kept. Both registered with `mgr`; the successor moves both halves onto
+    /// the first drive and then mirrors every volume onto the second
+    /// ([`pair_up`]). Everything that can refuse before anything is written.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn take_pair(
+        mgr: &mut crate::volume::VolumeManager,
+        a: &str,
+        b: &str,
+        local_tier: &str,
+        local_disk_force: bool,
+        root: Option<&str>,
+    ) -> anyhow::Result<(Option<crate::drive::handover::FlowOver>, Option<crate::image::install::Report>)> {
+        use crate::drive::slab::{SlabId, SlabRole};
+        use crate::image::{local, partner};
+        let tier = parse_tier(local_tier).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let a_dev: Arc<dyn BlockDevice> = open_storage(a).await?;
+        let b_dev: Arc<dyn BlockDevice> = open_storage(b).await?;
+        let node_half = |dev: Arc<dyn BlockDevice>, path: String| async move {
+            local::node_data_half_present(&dev)
+                .await
+                .map(|h| h == Some(true))
+                .map_err(|e| anyhow::anyhow!("not installing a pair over {path}: its data partition cannot be read: {e}"))
+        };
+        let a_node = node_half(a_dev.clone(), a.to_string()).await?;
+        let b_node = node_half(b_dev.clone(), b.to_string()).await?;
+        let (a_seen, b_seen) = (partner::seen_on(&a_dev).await, partner::seen_on(&b_dev).await);
+        let paired = a_node && b_node && partner::pairs(&a_seen, &b_seen);
+        if a_node && b_node && !paired {
+            anyhow::bail!(
+                "{a} and {b} each carry a node's data half and are not each other's pair: not installing \
+                 a system pair over two installs (nothing written). Release one of them first"
+            );
+        }
+        // The drive that keeps the node goes first: its data half is what an
+        // install over it adopts.
+        let (first, second, second_seen) = if b_node && !a_node { (b, a, a_seen) } else { (a, b, b_seen) };
+        let second_dev: Arc<dyn BlockDevice> = if first == a { b_dev } else { a_dev };
+        if !paired {
+            if let Some(what) = data_slab_on(second).await? {
+                if !local_disk_force {
+                    anyhow::bail!("refusing to lay {second} as the second drive of a system pair: {what}");
+                }
+                println!("Install: {what} — destroying it, as --local-disk-force was given (#350)");
+            }
+        }
+        let twin_data: Vec<SlabId> = if paired {
+            second_seen.iter().filter(|s| s.role == SlabRole::Data).map(|s| s.id).collect()
+        } else {
+            Vec::new()
+        };
+        let twin_system: Vec<SlabId> = if paired {
+            second_seen.iter().filter(|s| s.role != SlabRole::Data).map(|s| s.id).collect()
+        } else {
+            Vec::new()
+        };
+        println!(
+            "Install: a system pair (#350): {first} and {second}, each a whole node disk; every volume mirrored \
+             across them once the flow-over is done{}",
+            if paired { " (already this node's pair: both system halves laid again, both data halves kept)" } else { "" }
+        );
+        let (flow, report) = take_local_disk_paired(mgr, first, local_tier, local_disk_force, root, &twin_data, &twin_system).await?;
+        let Some(mut flow) = flow else {
+            // The first drive holds everything already; the pair is kept by
+            // the re-pairing at the next start.
+            println!("Install: {first} is current; {second} is left as it is (re-paired at start, #350)");
+            return Ok((None, report));
+        };
+        let mut layout = local::LocalLayout::for_drive(second_dev.capacity_bytes());
+        layout.slot_size = mgr.slot_size();
+        layout.tier = tier;
+        layout.lba = crate::drive::filedev::logical_sector_size(second);
+        let mut laid = if paired {
+            local::update_system_slab(second_dev, &layout)
+                .await
+                .map_err(|e| anyhow::anyhow!("updating the system slab on {second}: {e}"))?
+        } else {
+            local::lay_node_slabs(second_dev, &layout).await.map_err(|e| anyhow::anyhow!("laying slabs on {second}: {e}"))?
+        };
+        let first_data = SlabId(
+            uuid::Uuid::parse_str(&flow.data_slab).map_err(|e| anyhow::anyhow!("the flow-over's data slab: {e}"))?,
+        );
+        let first_system = SlabId(
+            uuid::Uuid::parse_str(&flow.system_slab).map_err(|e| anyhow::anyhow!("the flow-over's system slab: {e}"))?,
+        );
+        let (bd, bs, bb) = (laid.data.slab_id(), laid.system.slab_id(), laid.bulk.as_ref().map(|s| s.slab_id()));
+        laid.data
+            .set_partner(Some(first_data))
+            .await
+            .map_err(|e| anyhow::anyhow!("pairing {second}'s data slab: {e}"))?;
+        {
+            let mut reg = mgr.registry().write().await;
+            if let Some(d) = reg.get_mut(&first_data) {
+                d.set_partner(Some(bd)).await.map_err(|e| anyhow::anyhow!("pairing {first}'s data slab: {e}"))?;
+            }
+            // A kept data half is already registered when an install over the
+            // first drive adopted it with its records naming these slabs.
+            if reg.get(&bd).is_none() {
+                reg.add(laid.data);
+            }
+            reg.add(laid.system);
+            if let Some(b) = laid.bulk {
+                if reg.get(&b.slab_id()).is_none() {
+                    reg.add(b);
+                }
+            }
+        }
+        let mut first_ids = vec![first_data, first_system, bd, bs];
+        first_ids.extend(bb);
+        mgr.keep_metadata_in_first(&first_ids);
+        mgr.persist().await;
+        println!(
+            "Install: {second} laid as the pair's second drive — data slab {bd} (partner of {first_data}), system slab {bs}"
+        );
+        flow.twin = Some(crate::drive::handover::Twin {
+            disk: second.to_string(),
+            system_slab: bs.0.to_string(),
+            data_slab: bd.0.to_string(),
+            bulk_slab: bb.map(|b| b.0.to_string()),
+        });
+        Ok((Some(flow), report))
     }
 
     /// The bytes of the release's system half this manager holds (#402): the
@@ -6002,6 +6161,7 @@ pub async fn run() -> anyhow::Result<()> {
                 data_slab: data_id.0.to_string(),
                 data_flow: true,
                 data_disk: Some(data_disk.to_string()),
+                twin: None,
             }),
             report,
         ))
@@ -6258,6 +6418,15 @@ pub async fn run() -> anyhow::Result<()> {
     /// 11.57; hubble-relay's on 11.50). So this is set as soon as the boot knows
     /// a flow-over is coming, in the engine that laid the disk and again in the
     /// one that adopts it, before either serves a write.
+    /// The slabs a flow-over lays on the node's own drives (#350): never a
+    /// source, never quarantined.
+    pub(crate) fn flow_locals(flow: &crate::drive::handover::FlowOver) -> std::collections::HashSet<crate::drive::slab::SlabId> {
+        flow.local_slab_ids()
+            .iter()
+            .filter_map(|s| uuid::Uuid::parse_str(s).ok().map(crate::drive::slab::SlabId))
+            .collect()
+    }
+
     pub(crate) async fn quarantine_flow_sources(
         mgr: &crate::volume::VolumeManager,
         flow: &crate::drive::handover::FlowOver,
@@ -6271,12 +6440,21 @@ pub async fn run() -> anyhow::Result<()> {
         } else {
             None
         };
+        // A system pair's second drive is local, never a source (#350).
+        let locals = flow_locals(flow);
         let (sources, data_sources): (Vec<_>, Vec<_>) = {
             let mut reg = mgr.registry().write().await;
-            let sources: Vec<_> =
-                reg.iter().filter(|(id, s)| !s.is_data() && **id != dest).map(|(id, _)| *id).collect();
+            let sources: Vec<_> = reg
+                .iter()
+                .filter(|(id, s)| !s.is_data() && **id != dest && !locals.contains(id))
+                .map(|(id, _)| *id)
+                .collect();
             let data_sources: Vec<_> = match data_dest {
-                Some(dd) => reg.iter().filter(|(id, s)| s.is_data() && **id != dd).map(|(id, _)| *id).collect(),
+                Some(dd) => reg
+                    .iter()
+                    .filter(|(id, s)| s.is_data() && **id != dd && !locals.contains(id))
+                    .map(|(id, _)| *id)
+                    .collect(),
                 None => Vec::new(),
             };
             for s in sources.iter().chain(&data_sources) {
@@ -7432,10 +7610,11 @@ pub async fn run() -> anyhow::Result<()> {
             // node that has just adopted, that is the appliance's system slab —
             // the local one is registered too, and migrating it into itself would
             // be a long way of doing nothing.
+            let locals = flow_locals(&flow);
             let sources: Vec<SlabId> = {
                 let reg = reg_arc.read().await;
                 reg.iter()
-                    .filter(|(id, s)| !s.is_data() && **id != dest)
+                    .filter(|(id, s)| !s.is_data() && **id != dest && !locals.contains(id))
                     .map(|(id, _)| *id)
                     .collect()
             };
@@ -7495,7 +7674,7 @@ pub async fn run() -> anyhow::Result<()> {
             let data: Option<(SlabId, Vec<SlabId>)> = match data_dest {
                 Some(dd) => {
                     let reg = reg_arc.read().await;
-                    Some((dd, reg.iter().filter(|(id, s)| s.is_data() && **id != dd).map(|(id, _)| *id).collect()))
+                    Some((dd, reg.iter().filter(|(id, s)| s.is_data() && **id != dd && !locals.contains(id)).map(|(id, _)| *id).collect()))
                 }
                 None => None,
             };
@@ -7676,6 +7855,25 @@ pub async fn run() -> anyhow::Result<()> {
                 if let Some(st) = state_for_persist.upgrade() {
                     st.check_goldens();
                 }
+                // A system pair (#350): every volume mirrored onto the second
+                // drive, the goldens' two legs compared, and that drive made
+                // bootable too. Either drive then boots the node alone.
+                if let Some(t) = flow.twin.clone() {
+                    if let Some(st) = state_for_persist.upgrade() {
+                        println!("Pair: mirroring every volume onto {} (#350)", t.disk);
+                        let r = crate::pair::pair_up_unlocked(&st.volume_manager).await;
+                        say_pair(&t.disk, &r);
+                        if r.is_whole() {
+                            if let Some((_, srcs)) = then_local_boot.as_ref() {
+                                match run_local_boot(&t.disk, srcs).await {
+                                    Ok(true) => println!("Pair: {} boots on its own", t.disk),
+                                    Ok(false) => println!("WARNING: pair: {} does not boot on its own", t.disk),
+                                    Err(e) => println!("WARNING: pair: local boot on {}: {e}", t.disk),
+                                }
+                            }
+                        }
+                    }
+                }
                 local_boot(then_local_boot).await;
                 retire_sources(retire).await;
             } else {
@@ -7686,6 +7884,28 @@ pub async fn run() -> anyhow::Result<()> {
                 );
             }
         }));
+    }
+
+    /// What making a pair did, on the console (#350).
+    fn say_pair(disk: &str, r: &crate::pair::PairReport) {
+        println!(
+            "Pair: {} volume(s) mirrored onto {disk} ({} leg(s), {} written); {} golden(s) compared on both drives \
+             ({} extent(s))",
+            r.volumes,
+            r.legs_added,
+            crate::mgmt::config::human_size(r.bytes_copied),
+            r.sealed_checked,
+            r.extents_compared,
+        );
+        for p in r.problems.iter().take(20) {
+            println!("WARNING: pair: {p}");
+        }
+        if r.problems.len() > 20 {
+            println!("WARNING: pair: and {} more", r.problems.len() - 20);
+        }
+        if !r.is_whole() {
+            tracing::warn!("pair onto {disk}: {} problem(s); the pair is degraded until mended", r.problems.len());
+        }
     }
 
     /// Test hook (#190): fail the first N restores of `adopt-ublk`, after the
@@ -9176,6 +9396,7 @@ async fn handle_boot_local(
     local_disk_force: bool,
     system_disk: Option<&str>,
     disk_ids: (Option<&str>, Option<&str>),
+    (pair_disk, pair_disk_id): (Option<&str>, Option<&str>),
     check: bool,
 ) -> anyhow::Result<()> {
     // A node disk's data half takes any space the drive has gained, before
@@ -9275,9 +9496,14 @@ async fn handle_boot_local(
         // local disk, for a node whose root was reachable the whole time.
         // The drives written are the drives chosen (#351, rule 5): proved by
         // their identity before the first byte, or not written at all.
-        let flow_over = match prove_chosen(disk, system_disk, disk_ids) {
+        let proved = prove_chosen(disk, system_disk, disk_ids)
+            .and_then(|()| match pair_disk {
+                Some(p) => prove_chosen(p, None, (pair_disk_id, None)),
+                None => Ok(()),
+            });
+        let flow_over = match proved {
             Ok(()) => {
-                take_local_disks(&mut mgr, disk, system_disk, local_tier, local_disk_force, Some(&root_name)).await
+                take_local_disks(&mut mgr, disk, system_disk, pair_disk, local_tier, local_disk_force, Some(&root_name)).await
             }
             Err(e) => Err(e),
         };
@@ -9373,6 +9599,10 @@ async fn handle_boot_local(
             if let Some(d) = &f.data_disk {
                 slabs.push(d.clone());
             }
+            // And a system pair's second drive (#350).
+            if let Some(t) = &f.twin {
+                slabs.push(t.disk.clone());
+            }
         }
         // A flow-over cut short and resumed from a fresh clone (#171): the
         // successor opens the clone too, and moves what is left onto this
@@ -9388,6 +9618,7 @@ async fn handle_boot_local(
                         // What is left of either half (#285).
                         data_flow: true,
                         data_disk: None,
+                        twin: None,
                     });
                 }
             }
@@ -10037,7 +10268,7 @@ file = "{state}"
 
         // The install, as boot-local runs it with the drive named.
         super::prove_chosen(&disk, None, (None, None)).unwrap();
-        super::take_local_disks(&mut mgr, &disk, None, "hot", false, None).await.unwrap();
+        super::take_local_disks(&mut mgr, &disk, None, None, "hot", false, None).await.unwrap();
         drop(mgr);
         assert!(head(&disk).iter().any(|b| *b != 0), "the system drive was laid");
         for (d, b) in shelf.iter().zip(&before) {
@@ -11395,21 +11626,162 @@ file = "{state}"
     /// persist. The install's report.
     /// The successor's flow-over, both halves, onto wherever `flow` says.
     async fn flow_into(claim: &str, flow: &crate::drive::handover::FlowOver) {
+        drop(flow_into_keeping(claim, flow).await);
+    }
+
+    /// [`flow_into`], the successor's manager handed back (for a pair, #350).
+    async fn flow_into_keeping(claim: &str, flow: &crate::drive::handover::FlowOver) -> VolumeManager {
         let mut paths = vec![claim.to_string(), flow.disk.clone()];
         paths.extend(flow.data_disk.clone());
+        paths.extend(flow.twin.as_ref().map(|t| t.disk.clone()));
         let (succ, _) = super::open_slabs_resuming(&paths, None, true).await.unwrap();
         let sys_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap());
         let data_dest = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        let locals = super::flow_locals(flow);
         let (sys_src, data_src): (Vec<_>, Vec<_>) = {
             let reg = succ.registry().read().await;
             (
-                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
-                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| !s.is_data() && !locals.contains(id)).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && !locals.contains(id)).map(|(id, _)| *id).collect(),
             )
         };
         super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
         super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
         succ.persist().await;
+        succ
+    }
+
+    /// Every volume's bytes, by name.
+    async fn all_bytes(mgr: &VolumeManager) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let mut out = std::collections::BTreeMap::new();
+        for (_, name, ..) in mgr.list_volumes().await {
+            if let Some(b) = volume_bytes(mgr, &name).await {
+                out.insert(name, b);
+            }
+        }
+        out
+    }
+
+    /// #350 (owner's system pair, decided 1B + 2A): release N installed onto
+    /// two blank drives as a pair: each laid as a whole node disk, the data
+    /// slabs naming each other, every volume mirrored across the two once
+    /// the flow-over is done (a leg on each drive, the goldens' legs
+    /// compared). Each drive alone then reads every volume, every byte. The
+    /// node writes its data; release N+1 installed over the pair keeps it
+    /// (both data halves kept, both system halves laid again), and each
+    /// drive alone still reads it, and N+1's goldens.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_system_pair_installs_onto_two_drives_and_either_boots_alone() {
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (_disk, image_n, image_n1, n_svc, n1_svc, _) = release_fixture(mkfs, &dir).await;
+        let p = |n: &str| dir.path().join(n).display().to_string();
+        let (a, b) = (p("pair-a.raw"), p("pair-b.raw"));
+        for d in [&a, &b] {
+            std::fs::File::create(d).unwrap().set_len(40 * 1024 * MIB).unwrap();
+        }
+        let install = |image: String, claim: String| {
+            let (a, b) = (a.clone(), b.clone());
+            async move {
+                std::fs::copy(&image, &claim).unwrap();
+                let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+                let (flow, report) = super::take_local_disks(&mut mgr, &a, None, Some(&b), "hot", false, Some("stormpump"))
+                    .await
+                    .expect("a pair is taken");
+                let flow = flow.expect("laid");
+                super::quarantine_flow_sources(&mgr, &flow).await;
+                drop(mgr);
+                let succ = flow_into_keeping(&claim, &flow).await;
+                let (succ, r) = crate::pair::pair_up(succ).await;
+                assert!(r.is_whole(), "{r:?}");
+                assert!(r.sealed_checked > 0 && r.extents_compared > 0, "the goldens compared: {r:?}");
+                drop(succ);
+                (flow, report)
+            }
+        };
+
+        // N onto two blank drives.
+        let (flow, report) = install(image_n.clone(), p("claim-pair-n.raw")).await;
+        assert!(report.is_none(), "nothing to keep on blank drives");
+        assert_eq!(flow.disk, a);
+        let twin = flow.twin.clone().expect("the second drive named");
+        assert_eq!(twin.disk, b);
+        let (a_data, b_data) = (
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap()),
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&twin.data_slab).unwrap()),
+        );
+        // Paired on the disks: each drive's data slab names the other's.
+        let a_seen = crate::image::partner::seen_on(&super::open_storage(&a).await.unwrap()).await;
+        let b_seen = crate::image::partner::seen_on(&super::open_storage(&b).await.unwrap()).await;
+        assert!(a_seen.iter().any(|s| s.id == a_data && s.partner == Some(b_data)), "{a_seen:?}");
+        assert!(b_seen.iter().any(|s| s.id == b_data && s.partner == Some(a_data)), "{b_seen:?}");
+        assert!(crate::image::partner::pairs(&a_seen, &b_seen));
+
+        // Both drives: every extent of every volume has a leg on each.
+        let (both, _) = super::open_slabs_resuming(&[a.clone(), b.clone()], None, false).await.unwrap();
+        assert!(crate::pair::is_pair(&both).await);
+        let on = |dev: &str| {
+            let dev = dev.to_string();
+            async move {
+                crate::image::partner::seen_on(&super::open_storage(&dev).await.unwrap())
+                    .await
+                    .iter()
+                    .map(|s| s.id)
+                    .collect::<std::collections::HashSet<_>>()
+            }
+        };
+        let (on_a, on_b) = (on(&a).await, on(&b).await);
+        {
+            let _pin = crate::volume::gem::pin_resident(both.gem()).await.unwrap();
+            let g = both.gem().read().await;
+            for id in both.volume_ids() {
+                let Some(m) = g.get_volume_map(&id) else { continue };
+                for (v, loc) in m.extents.iter() {
+                    let legs: Vec<_> = loc.legs().map(|l| l.slab_id).collect();
+                    assert!(legs.iter().any(|s| on_a.contains(s)) && legs.iter().any(|s| on_b.contains(s)),
+                        "{} extent {v}: a leg on each drive: {legs:?}", id.0);
+                }
+            }
+        }
+        let want = all_bytes(&both).await;
+        assert_eq!(want.get("svc"), Some(&n_svc));
+        drop(both);
+        for alone in [&a, &b] {
+            let (m, _) = super::open_slabs_resuming(&[alone.clone()], None, false).await.unwrap();
+            assert_eq!(all_bytes(&m).await, want, "{alone} alone reads every volume, every byte");
+        }
+
+        // The node writes its data (from both drives), then N+1 over the pair.
+        let (mut node, _) = super::open_slabs_resuming(&[a.clone(), b.clone()], None, false).await.unwrap();
+        let v = node.get_volume(&node.find_volume("state").await.unwrap()).unwrap();
+        v.write(4096, &[0x35u8; 8192]).await.unwrap();
+        v.flush().await.unwrap();
+        let pvc = node
+            .create_volume_with("pvc-pair", 4 * MIB, crate::volume::CreateOptions::default().in_role(crate::drive::slab::SlabRole::Data))
+            .await
+            .unwrap();
+        {
+            let v = node.get_volume(&pvc).unwrap();
+            v.write(0, &[0x77u8; 4 * MIB as usize]).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        node.persist().await;
+        let state_before = volume_bytes(&node, "state").await.unwrap();
+        drop(node);
+
+        let (flow, report) = install(image_n1.clone(), p("claim-pair-n1.raw")).await;
+        let report = report.expect("an install over the pair keeps the data half");
+        assert!(report.kept.contains(&"state".to_string()), "{report:?}");
+        assert!(flow.twin.is_some());
+        for alone in [&a, &b] {
+            let (m, _) = super::open_slabs_resuming(&[alone.clone()], None, false).await.unwrap();
+            assert_eq!(volume_bytes(&m, "state").await.as_ref(), Some(&state_before), "{alone} alone: the node's state");
+            assert_eq!(volume_bytes(&m, "pvc-pair").await, Some(vec![0x77u8; 4 * MIB as usize]), "{alone} alone: the PVC");
+            assert_eq!(volume_bytes(&m, "svc").await.as_ref(), Some(&n1_svc), "{alone} alone: N+1's golden");
+        }
     }
 
     /// #402 (owner's A): N installed on one drive, the node's data on it; N+1
@@ -11464,7 +11836,7 @@ file = "{state}"
         let claim = dir.path().join("claim-11.91.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
         let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
-        let (flow, report) = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), "hot", false, Some("stormpump")).await.unwrap();
+        let (flow, report) = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), None, "hot", false, Some("stormpump")).await.unwrap();
         let flow = flow.expect("laid");
         assert_eq!(flow.disk, ssd, "the system drive is where local boot goes");
         assert_eq!(flow.data_disk.as_deref(), Some(hdd.as_str()));
@@ -11538,7 +11910,7 @@ file = "{state}"
         let claim_n = dir.path().join("claim-11.90.raw").display().to_string();
         std::fs::copy(&image_n, &claim_n).unwrap();
         let (mut mgr, _) = super::open_slabs_resuming(&[claim_n.clone()], None, true).await.unwrap();
-        let (flow, report) = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), "hot", false, Some("stormpump")).await.unwrap();
+        let (flow, report) = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), None, "hot", false, Some("stormpump")).await.unwrap();
         let flow = flow.expect("laid again");
         assert!(report.is_some(), "the data half kept again");
         super::quarantine_flow_sources(&mgr, &flow).await;
@@ -11571,7 +11943,7 @@ file = "{state}"
         let claim = dir.path().join("claim-11.91.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
         let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
-        let e = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), "hot", false, Some("stormpump"))
+        let e = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), None, "hot", false, Some("stormpump"))
             .await
             .expect_err("no room for an update");
         let e = e.to_string();

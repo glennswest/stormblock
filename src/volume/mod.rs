@@ -4328,6 +4328,29 @@ fn reconcile_record(
         view.get(leg).filter(|s| s.state.is_owned()).map(|s| s.generation)
     };
     for (vext, loc) in &vrec.extents {
+        // A mirror whose primary leg's slab is not here (#350: one drive of a
+        // system pair booting alone) is read from a leg that is: that leg
+        // first, the others still named (degraded; a resync rebuilds them).
+        let swapped;
+        let loc = if reg.get(&loc.slab_id).is_none() {
+            match loc.mirrors.iter().position(|l| reg.get(&l.slab_id).is_some()) {
+                Some(i) => {
+                    let mut rest: Vec<gem::Leg> = loc.legs().collect();
+                    let first = rest.remove(i + 1);
+                    swapped = gem::ExtentLocation {
+                        slab_id: first.slab_id,
+                        slot_idx: first.slot_idx,
+                        ref_count: loc.ref_count,
+                        generation: loc.generation,
+                        mirrors: rest,
+                    };
+                    &swapped
+                }
+                None => loc,
+            }
+        } else {
+            loc
+        };
         match rebuilt.lookup(vrec.id, *vext) {
             None => {
                 if reg.get(&loc.slab_id).is_some() {

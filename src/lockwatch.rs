@@ -305,6 +305,14 @@ impl<T> TrackedMutex<T> {
         TrackedMutexGuard { guard, hold: self.state.hold(true) }
     }
 
+    /// The value, when nothing else holds the mutex (a clone of it, a guard).
+    pub fn into_inner(self) -> T {
+        match Arc::try_unwrap(self.inner) {
+            Ok(m) => m.into_inner(),
+            Err(_) => panic!("TrackedMutex::into_inner: still shared"),
+        }
+    }
+
     pub fn try_lock(&self) -> Result<TrackedMutexGuard<'_, T>, tokio::sync::TryLockError> {
         let guard = self.inner.try_lock()?;
         Ok(TrackedMutexGuard { guard, hold: self.state.hold(true) })

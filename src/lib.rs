@@ -12,6 +12,7 @@ pub mod boot;
 pub mod boot_iscsi;
 pub mod migrate;
 pub mod drain;
+pub mod pair;
 pub mod rebalance;
 pub mod rebuild;
 pub mod scrub;

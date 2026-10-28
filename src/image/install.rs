@@ -193,11 +193,28 @@ pub async fn plan_split(
     system: Option<&Arc<dyn BlockDevice>>,
     release: &HashSet<String>,
 ) -> anyhow::Result<Plan> {
+    plan_paired(device, system, release, &[], &[]).await
+}
+
+/// [`plan_split`] for a system pair (#350): `twin_data` are the other
+/// drive's data (and bulk) slabs, part of the node's data half (a volume's
+/// mirror legs are there); `twin_system` its system slab, laid again with
+/// this drive's.
+pub async fn plan_paired(
+    device: &Arc<dyn BlockDevice>,
+    system: Option<&Arc<dyn BlockDevice>>,
+    release: &HashSet<String>,
+    twin_data: &[SlabId],
+    twin_system: &[SlabId],
+) -> anyhow::Result<Plan> {
     let (data, bulk, system) = halves_split(device, system).await?;
     if !data.is_data() {
         anyhow::bail!("the partition typed as the data slab says it is a system slab");
     }
-    let half: HashSet<SlabId> = std::iter::once(data.slab_id()).chain(bulk.as_ref().map(|b| b.slab_id())).collect();
+    let half: HashSet<SlabId> = std::iter::once(data.slab_id())
+        .chain(bulk.as_ref().map(|b| b.slab_id()))
+        .chain(twin_data.iter().copied())
+        .collect();
     let mut volumes = Vec::new();
     let mut seen = HashSet::new();
     let mut outside: Vec<String> = Vec::new();
@@ -226,7 +243,10 @@ pub async fn plan_split(
             let away: Vec<SlabId> = legs.map(|l| l.slab_id).filter(|s| !half.contains(s)).collect();
             {
                 let mut gone: HashMap<SlabId, usize> = HashMap::new();
-                for s in away.iter().filter(|s| Some(**s) != system.as_ref().map(|x| x.slab_id())) {
+                for s in away
+                    .iter()
+                    .filter(|s| Some(**s) != system.as_ref().map(|x| x.slab_id()) && !twin_system.contains(s))
+                {
                     *gone.entry(*s).or_default() += 1;
                 }
                 for (s, n) in gone {
@@ -253,7 +273,7 @@ pub async fn plan_split(
             // Anything else whose stray extents are all in this disk's own
             // system half loses nothing: it is carried into the data half
             // first (#349's carry), and kept.
-            if sys_id.is_some_and(|sys| away.iter().all(|s| *s == sys)) {
+            if sys_id.is_some_and(|sys| away.iter().all(|s| *s == sys || twin_system.contains(s))) {
                 carry_from_data.push((v.id, v.name.clone()));
                 volumes.push((v.id, v.name, v.sealed));
                 continue;
