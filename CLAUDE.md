@@ -347,15 +347,16 @@ a multi-drive machine. Then: file a `multi-drive` suite on stormblock-test
 drive and in parallel, shelves + spare, reassembly after a power cycle).
 Nothing built.
 
-### Git dependencies pinned by rev, not tag (2026-10-22, #480, P0) — XFS DONE; ext4 AFTER fio.ext4.rs#17
+### Git dependencies pinned by rev, not tag (2026-10-22, #480, P0) — IN PROGRESS (ext4 pinned, verifying)
 
 A tag can be moved; the supply-chain check wants every git dependency by
 `rev =`, at the commits `Cargo.lock` already holds (nothing built changes).
 - [x] mkfs-xfs (b635843c…) and fio-xfs (a72b29fc…) by rev; fio-xfs takes no
       mkfs-xfs of its own; Cargo.lock's source lines by hand
-- [ ] mkfs-ext4 (14d5af82…) and fio-ext4 together, once fio-ext4 pins its
-      own mkfs-ext4 by the same rev (glennswest/fio.ext4.rs#17): a tag and a
-      rev are two sources to Cargo, so one side alone builds two copies
+- [x] mkfs-ext4 (14d5af82…) and fio-ext4 v1.8.2 (7a13228c…, pins its own
+      mkfs-ext4 by the same rev, fio.ext4.rs#17) together; Cargo.lock by hand
+      (same dependency sets)
+- [ ] check.sh at the commit; close
 
 ### Stage only finished commits (2026-10-22, #492, P2) — DONE, closed (no engine change: no golden)
 

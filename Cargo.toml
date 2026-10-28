@@ -98,17 +98,19 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 # through the BlockDevice seam, with no loopback, no /dev node and no mkfs.ext4
 # subprocess. Taken by git rather than path so a checkout of this repo alone
 # still builds.
-# Pinned to the same tag fio-ext4 depends on, so cargo resolves one copy and
-# the two crates agree on the BlockDevice trait.
+# Pinned by commit (`rev`, #480: a tag can be moved), the same rev fio-ext4
+# v1.8.2 takes (mkfs-ext4 v4.1.1's commit), so cargo resolves one copy and the
+# two crates agree on the BlockDevice trait. A tag and a rev of one commit are
+# two sources to cargo: move both pins together.
 # `features = ["std"]` is required as of mkfs-ext4 2.0.0: `std` became a default
 # feature so a UEFI driver can link the crate's synchronous read path, so
 # `default-features = false` now leaves the `no_std` core rather than the whole
 # crate.
-mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", tag = "v4.1.1", default-features = false, features = ["std"] }
+mkfs-ext4 = { git = "https://github.com/glennswest/mkfs.ext4.rs", rev = "14d5af826b1b0e6a8a38a1e3d35248266984a3d1", default-features = false, features = ["std"] }
 
 # Userspace file I/O into those filesystems — writing a template's contents
-# with no mount, no loop device and no attach.
-fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", tag = "v1.8.1", default-features = false }
+# with no mount, no loop device and no attach. v1.8.2 by rev (#480).
+fio-ext4 = { git = "https://github.com/glennswest/fio.ext4.rs", rev = "7a13228c7465abd2bc1390263071756364a06079", default-features = false }
 
 # XFS beside ext4 (#147): a `mkfs.xfs`-identical formatter and a read-only
 # walker for XFS images (RHEL, Rocky, Alma roots). Separate crates with

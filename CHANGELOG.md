@@ -3,6 +3,13 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-28
+- **build:** mkfs-ext4 and fio-ext4 pinned by `rev`, not tag (#480): mkfs-ext4
+  `14d5af82…` (v4.1.1's commit) and fio-ext4 v1.8.2 `7a13228c…`, which pins
+  its own mkfs-ext4 by the same rev (fio.ext4.rs#17), so one copy resolves.
+  Same code as before (fio-ext4 1.8.1 → 1.8.2 changes only its pin).
+  Every git dependency is now pinned by commit.
+
 ## [v23.0.3] — 2026-10-28
 
 ### Fixed
