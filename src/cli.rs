@@ -11971,14 +11971,15 @@ file = "{state}"
         let router = crate::mgmt::api::router(state.clone());
         tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
         let c = crate::http::Client::new();
-        let body = serde_json::json!({ "to": to }).to_string();
-        let r = c.post(&base).bearer("not-the-admin").json_body(&body).send().await.unwrap();
-        assert!(r.status == 401 || r.status == 403, "a move is the admin's: {}", r.status);
-        let r = c.post(&base).bearer("admin-350").json_body(&body).send().await.unwrap();
-        assert_eq!(r.status, 202, "{}", String::from_utf8_lossy(&r.body));
+        let body = serde_json::json!({ "to": to });
+        let r = c.post(&base).bearer(Some("not-the-admin")).json(&body).send().await.unwrap();
+        assert!(r.status().as_u16() == 401 || r.status().as_u16() == 403, "a move is the admin's: {}", r.status());
+        let r = c.post(&base).bearer(Some("admin-350")).json(&body).send().await.unwrap();
+        let code = r.status().as_u16();
+        assert_eq!(code, 202, "{}", String::from_utf8_lossy(&r.bytes()));
         let st = loop {
-            let r = c.get(&base).bearer("admin-350").send().await.unwrap();
-            let j: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            let r = c.get(&base).bearer(Some("admin-350")).send().await.unwrap();
+            let j: serde_json::Value = r.json().await.unwrap();
             if j["state"] != "moving" {
                 break j;
             }

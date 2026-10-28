@@ -1491,9 +1491,11 @@ impl VolumeManager {
     /// partner. (#402's split names a data slab from a system slab.)
     pub async fn is_system_pair(&self) -> bool {
         let reg = self.registry.read().await;
-        reg.iter()
+        let paired = reg
+            .iter()
             .filter(|(_, s)| s.is_data())
-            .any(|(_, s)| s.partner().is_some_and(|p| reg.get(&p).is_some_and(|q| q.is_data())))
+            .any(|(_, s)| s.partner().is_some_and(|p| reg.get(&p).is_some_and(|q| q.is_data())));
+        paired
     }
 
     pub async fn create_volume_with(
