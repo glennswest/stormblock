@@ -211,6 +211,18 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) stages requested.
 
+### ublk zero copy, batch I/O, io_uring ring flags (2026-10-28, #505, P1) — WAITING ON THE OWNER (scope)
+
+Read the 7.2.11 uapi (`ublk_cmd.h` on a build VM). Zero copy / AUTO_BUF_REG:
+the server never touches the data, only io_uring fixed-buffer ops on the
+queue's ring, but CoW (every clone's first write), parity, NVMe/TCP slabs
+and the fence/gate/ride-through paths need it in userspace, on tokio. So
+zero copy = a second data path under the thin layer. SHMEM_ZC fits only a
+VMM sharing guest memory (stormvm). PER_IO_DAEMON alone changes nothing
+here. BATCH_IO and SINGLE_ISSUER + DEFER_TASKRUN fit as they are. Asked on
+#505: A (ring flags, BATCH_IO, feature report; recommended), B (+ a
+zero-copy mode for plain volumes), C (+ SHMEM_ZC for stormvm). Nothing built.
+
 ### A deleted volume behind a live ublk device after server1's reboot (2026-10-28, #502, P0) — DONE (v23.0.3), closed; metal pending
 
 12.54 (v23.0.2) server1: cilium root mount EIO, `ublk read …: volume
