@@ -765,23 +765,36 @@ the named drive (#273), stormdrive's designation outranking install-over
 - [x] golden golden-stormblock-b18302ba6cea (5062192 ⊇ 9c7bedb,
       stormcos#601); closed. Not on metal: the X9 blades (SSD + HDD) and the Dell with its shelf
 
-### System pair and moving the system (2026-10-17, #350, P2) — DECIDED 1B + 2A; #351 DONE, WAITS ON THE PACING
+### System pair and moving the system (2026-10-17, #350, P2) — IN PROGRESS on wip/350-system-pair
 
-Two system drives laid together (the system half identical on both,
-checked by digest), the changing part mirrored, either drive boots alone;
-stormdrive's `move-system` with a pointer left on the old drive and "set
-BIOS boot order". Master's decision on #350 (2026-10-17): **1B** build
-after #351 (the pair is chosen by its known-location rules) and after the
-single-node pacing lifts; **2A** the pair's whole data half per-volume
-`mirror:2` across the two drives' data slabs. #351 closed (v21.1.0); the
-pacing is still on (stormcentral settings `pacing: true`), so parked with
-`wait-owner --until` the pacing lifts (asked on #350: A start on a wip/
-branch now, B wait, recommended). To
-build then: install lays the system half on both (digest-checked), a data
-slab on each, data volumes `mirror:2`; a missing partner = degraded in
-`local_disk` and health; `POST /api/v1/system/move {to}` (admin) writes a
-pointer into the old drive's system-data; /init follows it and raises "set
-BIOS boot order to <drive>". Nothing built.
+Decided 1B + 2A (master, 2026-10-17); released from the pacing hold by the
+owner (2026-10-28: "unhold the pacing hardware ones"). Built on a `wip/`
+branch (P2, and it changes what an install writes); merged when fit.
+Design (engine choices, said on #350):
+- a pair is asked for, never guessed (#478's rule stays: one drive by
+  default): `system_drive:` as a list of two mappings, or two drives that
+  already carry this node's paired halves
+- each drive laid as a whole node disk (boot area, system slab, data slab);
+  the two data slabs name each other in their header `partner` field (#402's
+  field), so `/init`'s `partner_of` finds either from the other
+- the flow-over moves both halves onto the first drive as today; then
+  `pair_up`: every volume `mirror:2` spread at `drive`, resynced onto the
+  twin; the goldens' two legs compared by digest; local boot on both
+- a reinstall: the twin's data slab counts as the data half (plan), its
+  system slab laid again; a missing partner = degraded, re-paired at start
+- restore: a mirror whose primary leg's slab is missing keeps the other
+  legs (either drive boots alone)
+- `POST /api/v1/system/move {to}` (admin) + a pointer on the old drive;
+  `/init` follows it and says "set BIOS boot order to <drive>"
+- [ ] FlowOver.twin, take_pair (fresh, update), plan accepts the twin's data
+- [ ] restore keeps a mirror whose primary slab is missing
+- [ ] pair_up after the flow-over's validation; digest check; local boot ×2
+- [ ] test: install onto a pair, each drive alone reads every byte; a
+      reinstall over the pair keeps the node's data
+- [ ] health `pair` (paired | degraded, the partner); re-pair at start
+- [ ] /init: `system_drive:` list → `--pair-disk`; a pair message; degraded
+- [ ] move API + pointer + /init follow
+- [ ] docs (boot-hooks.md, README), CHANGELOG; check.sh; QEMU check
 
 ### Multicast appliance discovery (2026-10-17, #104, P3) — PARKED until the single-node pacing lifts
 
