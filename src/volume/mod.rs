@@ -4408,8 +4408,13 @@ fn reconcile_record(
                 }
             }
             Some(rloc) => {
-                let recorded_is_live = rloc.legs().any(|l| l == loc.primary());
-                let newer_on_disk = rloc.primary() != loc.primary()
+                // The slot table's slot is one the record names as a leg (a
+                // mirror leg a resync added is allocated at a later
+                // generation than the primary, #350): the record is live.
+                let named = loc.legs().any(|m| m == rloc.primary());
+                let recorded_is_live = named || rloc.legs().any(|l| l == loc.primary());
+                let newer_on_disk = !named
+                    && rloc.primary() != loc.primary()
                     && slot_gen(rloc.primary()) > slot_gen(loc.primary());
                 if recorded_is_live && !newer_on_disk {
                     // Legs the record names that are gone stay
