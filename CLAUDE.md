@@ -211,6 +211,13 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393) and v23.0.1 (#392) stages requested.
 
+### Kernel → 7.2.10-200.fc44: initramfs for it (2026-10-28, #501, P0) — DONE, no code change
+
+`stormcentral component initramfs --commit d23aab5`: built for
+7.2.10-200.fc44.x86_64 from golden-modules-d9aa1db5ceca, dependency closure
+passed; registry/initramfs:blob-4c5c1fdffec8beda. stormcentral closes the
+issue when each member has a golden for the kernel.
+
 ### "slab … not attached … mapping dropped" on server1's 12.52 install (2026-10-22, #500, P1) — DONE (v23.0.2), closed
 
 server1 12.52 install boot: `slab 71ddf1c0 not attached: 80 extent(s) of 18
