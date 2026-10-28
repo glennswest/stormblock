@@ -87,6 +87,8 @@ struct Export {
     /// `join` cannot be given a deadline, and the one thing a stop must not do
     /// is wait forever (#105).
     done: Arc<std::sync::atomic::AtomicBool>,
+    /// What the server's thread releases as it exits, before `done` (#502).
+    exit: Exit,
     /// The hold this device keeps on its volume (#267): the engine's id of
     /// the volume behind it, and the words it was taken with.
     held: Option<(uuid::Uuid, String)>,
@@ -259,6 +261,31 @@ pub async fn attach_local(
     Ok(path)
 }
 
+/// Shared by an export and its server's thread (#502): whether the thread
+/// has exited, and the hold a detach left for it to release. One lock for
+/// both, so a hold handed over is released exactly once, by whichever comes
+/// second, and always before `done` says the device is gone.
+type Exit = Arc<std::sync::Mutex<ExitState>>;
+
+#[derive(Default)]
+struct ExitState {
+    exited: bool,
+    release: Option<(uuid::Uuid, String)>,
+}
+
+/// The server's thread is done: release what a detach left, then say so.
+fn server_exited(holds: &crate::volume::holds::ServeHolds, exit: &Exit, done: &std::sync::atomic::AtomicBool) {
+    let release = {
+        let mut x = exit.lock().unwrap_or_else(|p| p.into_inner());
+        x.exited = true;
+        x.release.take()
+    };
+    if let Some((volume, what)) = release {
+        holds.release(volume, &what);
+    }
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// A ublk server started for an attach and not yet ready (#231).
 pub struct Launch {
     volume_uuid: uuid::Uuid,
@@ -266,6 +293,7 @@ pub struct Launch {
     #[cfg(target_os = "linux")]
     server: Option<Arc<crate::drive::ublk::UblkServer>>,
     done: Arc<std::sync::atomic::AtomicBool>,
+    exit: Exit,
     before: String,
 }
 
@@ -503,6 +531,7 @@ impl UblkExportManager {
                 #[cfg(target_os = "linux")]
                 server: launch.server,
                 done: launch.done,
+                exit: launch.exit,
                 held: Some((launch.volume_uuid, what)),
             },
         );
@@ -629,13 +658,14 @@ impl UblkExportManager {
                     let stopping = format!("{what} being stopped");
                     self.holds.hold(*volume, stopping.clone());
                     self.holds.release(*volume, what);
-                    let (holds, volume, done) = (self.holds.clone(), *volume, e.done.clone());
-                    let _ = std::thread::Builder::new().name("ublk-stopping".into()).spawn(move || {
-                        while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                            std::thread::sleep(std::time::Duration::from_millis(20));
-                        }
-                        holds.release(volume, &stopping);
-                    });
+                    let mut x = e.exit.lock().unwrap_or_else(|p| p.into_inner());
+                    if x.exited {
+                        drop(x);
+                        self.holds.release(*volume, &stopping);
+                    } else {
+                        // Released by the server's thread as it exits.
+                        x.release = Some((*volume, stopping));
+                    }
                 }
                 return ShutdownWait { devices: vec![(e.device_path, e.done)] };
             }
@@ -684,6 +714,8 @@ impl UblkExportManager {
         let id = seq;
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let thread_done = done.clone();
+        let exit: Exit = Default::default();
+        let (thread_exit, thread_holds) = (exit.clone(), self.holds.clone());
         // UblkServer::run() holds non-Send raw pointers, so it must run on a
         // dedicated OS thread with its own runtime (same pattern as the
         // boot-iscsi ublk export in main.rs).
@@ -708,13 +740,13 @@ impl UblkExportManager {
                 // Last thing this thread does: the device is stopped, deleted
                 // and its queues closed, so a shutdown waiting on it can stop
                 // waiting (#105).
-                thread_done.store(true, std::sync::atomic::Ordering::SeqCst);
+                server_exited(&thread_holds, &thread_exit, &thread_done);
             })
             .ok()?;
         // Ready when the kernel has made the device: waited for by the
         // caller, with no lock held (#231, `wait_ready`).
         let _ = volume_id;
-        Some(Launch { volume_uuid, shutdown, server: Some(server), done, before })
+        Some(Launch { volume_uuid, shutdown, server: Some(server), done, exit, before })
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -800,6 +832,7 @@ impl UblkExportManager {
             #[cfg(target_os = "linux")]
             server: None,
             done: Default::default(),
+            exit: Default::default(),
             before: String::new(),
         };
         self.holds.hold(launch.volume_uuid, STARTING);
@@ -812,7 +845,7 @@ impl UblkExportManager {
     /// run: no kernel), as a real export has: the returned flag is its
     /// thread's "exited" (#502).
     #[cfg(target_os = "linux")]
-    pub(crate) fn insert_fake_served(&mut self, volume_id: &str, path: &str) -> Arc<std::sync::atomic::AtomicBool> {
+    pub(crate) fn insert_fake_served(&mut self, volume_id: &str, path: &str) -> impl FnOnce() + use<> {
         let spec = crate::drive::emulated::EmulatedSpec::parse(&format!(
             "emulated://ublk-fake-{}?size=16M",
             uuid::Uuid::new_v4().simple()
@@ -823,7 +856,8 @@ impl UblkExportManager {
         self.insert_fake(volume_id, path);
         let e = self.exports.get_mut(volume_id).unwrap();
         e.server = Some(Arc::new(crate::drive::ublk::UblkServer::new(dev)));
-        e.done.clone()
+        let (holds, exit, done) = (self.holds.clone(), e.exit.clone(), e.done.clone());
+        move || server_exited(&holds, &exit, &done)
     }
 
     pub(crate) fn insert_fake(&mut self, volume_id: &str, path: &str) {
@@ -842,6 +876,7 @@ impl UblkExportManager {
                 #[cfg(target_os = "linux")]
                 server: None,
                 done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                exit: Default::default(),
                 held,
             },
         );
@@ -1067,7 +1102,7 @@ mod tests {
         let holds = crate::volume::holds::ServeHolds::default();
         let mut mgr = UblkExportManager::new().with_holds(holds.clone());
         let a = uuid::Uuid::new_v4();
-        let done = mgr.insert_fake_served(&a.to_string(), "/dev/ublkb90");
+        let exits = mgr.insert_fake_served(&a.to_string(), "/dev/ublkb90");
         let wait = mgr.remove(&a.to_string());
         assert!(!mgr.is_exported(&a.to_string()), "gone from the table at once");
         assert_eq!(
@@ -1075,15 +1110,23 @@ mod tests {
             vec!["ublk device /dev/ublkb90 being stopped".to_string()],
             "held while its server still serves"
         );
-        let left = wait.settle(std::time::Duration::from_millis(100)).await;
-        assert_eq!(left, vec!["/dev/ublkb90".to_string()], "the wait names it while it is still going");
-        assert!(!holds.held_by(a).is_empty());
-        done.store(true, std::sync::atomic::Ordering::SeqCst);
-        let at = std::time::Instant::now();
-        while !holds.held_by(a).is_empty() {
-            assert!(at.elapsed() < std::time::Duration::from_secs(5), "released once the server exited");
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        let (x, ()) = tokio::join!(wait.settle(std::time::Duration::from_secs(5)), async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            assert!(!holds.held_by(a).is_empty(), "held for as long as the server serves");
+            exits();
+        });
+        assert!(x.is_empty(), "the wait ends once the server exits");
+        // Released by the time the wait says the device is gone: a delete
+        // right after a detach is never refused by its own device.
+        assert!(holds.held_by(a).is_empty(), "released before the device is said to be gone");
+
+        // A server that exited before the detach: released at the detach.
+        let b = uuid::Uuid::new_v4();
+        let exits = mgr.insert_fake_served(&b.to_string(), "/dev/ublkb91");
+        exits();
+        let wait = mgr.remove(&b.to_string());
+        assert!(holds.held_by(b).is_empty(), "nothing left to wait for");
+        assert!(wait.settle(std::time::Duration::from_millis(10)).await.is_empty());
     }
 
     /// A device holds its volume in the volume manager's holds from the
