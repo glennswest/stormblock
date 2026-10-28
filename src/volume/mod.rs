@@ -1486,13 +1486,29 @@ impl VolumeManager {
     /// now, rather than the first write finding out. Thin sizing is not
     /// checked — a volume larger than any one drive is the normal case,
     /// since each extent picks its own slabs.
+    /// Whether this node is a system pair with both drives here (#350): a
+    /// registered data slab names another registered data slab as its
+    /// partner. (#402's split names a data slab from a system slab.)
+    pub async fn is_system_pair(&self) -> bool {
+        let reg = self.registry.read().await;
+        reg.iter()
+            .filter(|(_, s)| s.is_data())
+            .any(|(_, s)| s.partner().is_some_and(|p| reg.get(&p).is_some_and(|q| q.is_data())))
+    }
+
     pub async fn create_volume_with(
         &mut self,
         name: &str,
         virtual_size: u64,
-        opts: CreateOptions,
+        mut opts: CreateOptions,
     ) -> Result<VolumeId, VolumeError> {
         self.refuse_if_undurable().await?;
+        // On a system pair (#350) every volume is mirrored across its two
+        // drives, the new ones from their first write: a volume made with no
+        // policy of its own is `mirror:2` spread at `drive`.
+        if opts.redundancy.is_none() && opts.placement.pinned.is_none() && self.is_system_pair().await {
+            opts.redundancy = RedundancyPolicy::mirror(2).at("drive");
+        }
         // The role is settled here, once, and written onto the handle: an
         // unspecified role means "wherever this node keeps volumes", which is
         // the system slabs on a node that has them and the data slabs on a

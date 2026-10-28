@@ -235,12 +235,18 @@ pub async fn plan_paired(
             if !seen.insert(v.id) {
                 continue;
             }
-            let legs = v
+            // A mirrored extent with a leg in the data half loses nothing
+            // when its other legs are elsewhere (#350: a system pair's other
+            // drive, or one missing): it is degraded, not away. Parity legs
+            // count one by one.
+            let away: Vec<SlabId> = v
                 .extents
                 .values()
-                .flat_map(|l| l.legs().collect::<Vec<_>>())
-                .chain(v.parity.values().flat_map(|g| g.legs.clone()));
-            let away: Vec<SlabId> = legs.map(|l| l.slab_id).filter(|s| !half.contains(s)).collect();
+                .filter(|l| !l.legs().any(|g| half.contains(&g.slab_id)))
+                .flat_map(|l| l.legs().map(|g| g.slab_id).collect::<Vec<_>>())
+                .chain(v.parity.values().flat_map(|g| g.legs.iter().map(|l| l.slab_id).collect::<Vec<_>>()))
+                .filter(|s| !half.contains(s))
+                .collect();
             {
                 let mut gone: HashMap<SlabId, usize> = HashMap::new();
                 for s in away

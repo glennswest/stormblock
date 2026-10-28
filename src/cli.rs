@@ -5929,6 +5929,27 @@ pub async fn run() -> anyhow::Result<()> {
              across them once the flow-over is done{}",
             if paired { " (already this node's pair: both system halves laid again, both data halves kept)" } else { "" }
         );
+        // The pair made whole before anything is read for the install: a
+        // volume with a leg on one drive only (made while the other was away)
+        // is mirrored onto both, so the first drive's records name every
+        // volume of the node and the install keeps them all.
+        if paired {
+            let (both, _) = open_slabs_resuming(&[first.to_string(), second.to_string()], None, false)
+                .await
+                .map_err(|e| anyhow::anyhow!("not installing over the pair: its slabs do not open together: {e}"))?;
+            let (both, r) = crate::pair::pair_up(both).await;
+            if r.legs_added > 0 || !r.is_whole() {
+                say_pair(second, &r);
+            }
+            drop(both);
+            if !r.is_whole() {
+                anyhow::bail!(
+                    "not installing over the pair {first} + {second} (nothing written): it is not whole ({} problem(s), \
+                     above)",
+                    r.problems.len()
+                );
+            }
+        }
         let (flow, report) = take_local_disk_paired(mgr, first, local_tier, local_disk_force, root, &twin_data, &twin_system).await?;
         let Some(mut flow) = flow else {
             // The first drive holds everything already; the pair is kept by
@@ -11920,6 +11941,66 @@ file = "{state}"
     /// node writes its data; release N+1 installed over the pair keeps it
     /// (both data halves kept, both system halves laid again), and each
     /// drive alone still reads it, and N+1's goldens.
+    /// #350 (stormdrive's move-system): a node installed on one drive moves
+    /// its system onto another, live, through `POST /api/v1/system/move`
+    /// (admin). The new drive alone then reads every volume, every byte; the
+    /// old drive's slabs name the new drive's data slab (the pointer a boot
+    /// from it follows) and hold nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_system_moves_to_another_drive_and_the_old_one_points_to_it() {
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, ..) = release_fixture(mkfs, &dir).await;
+        let to = dir.path().join("moved-to.raw").display().to_string();
+        std::fs::File::create(&to).unwrap().set_len(40 * 1024 * MIB).unwrap();
+        let (node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let want = all_bytes(&node).await;
+        assert!(want.contains_key("svc") && want.contains_key("state"));
+        let data_dir = dir.path().join("engine-move");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let mut config = crate::mgmt::config::StormBlockConfig::default();
+        config.management.data_dir = Some(data_dir.display().to_string());
+        config.management.admin_token = Some("admin-350".into());
+        let (reg, gem) = (node.registry().clone(), node.gem().clone());
+        let state = Arc::new(crate::mgmt::AppState::new(config, node, reg, gem));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/api/v1/system/move", l.local_addr().unwrap());
+        let router = crate::mgmt::api::router(state.clone());
+        tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
+        let c = crate::http::Client::new();
+        let body = serde_json::json!({ "to": to }).to_string();
+        let r = c.post(&base).bearer("not-the-admin").json_body(&body).send().await.unwrap();
+        assert!(r.status == 401 || r.status == 403, "a move is the admin's: {}", r.status);
+        let r = c.post(&base).bearer("admin-350").json_body(&body).send().await.unwrap();
+        assert_eq!(r.status, 202, "{}", String::from_utf8_lossy(&r.body));
+        let st = loop {
+            let r = c.get(&base).bearer("admin-350").send().await.unwrap();
+            let j: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            if j["state"] != "moving" {
+                break j;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        assert_eq!(st["state"], "done", "{st}");
+        assert_eq!(st["report"]["from"], disk.as_str());
+        let to_data = st["report"]["data_slab"].as_str().unwrap().to_string();
+        drop(state);
+
+        let (alone, _) = super::open_slabs_resuming(&[to.clone()], None, false).await.unwrap();
+        assert_eq!(all_bytes(&alone).await, want, "the new drive alone reads every volume, every byte");
+        drop(alone);
+        let old = super::open_storage(&disk).await.unwrap();
+        let slabs = crate::image::partner::slabs_on(&old).await;
+        assert!(!slabs.is_empty());
+        for s in &slabs {
+            assert_eq!(s.moved_to().map(|m| m.0.to_string()), Some(to_data.clone()), "the old drive points to the new one");
+            assert_eq!(s.allocated_slots(), 0, "and holds nothing");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_system_pair_installs_onto_two_drives_and_either_boots_alone() {
         let Some(mkfs) = mkfs_ext4() else {
