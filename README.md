@@ -2304,6 +2304,30 @@ before the network and after it, in order and once each, the guest's pcap
 holds the same lines sent to the group, and `stormpump.syslog=off` sends
 nothing.
 
+### A system pair, and moving the system (#350)
+
+Two drives, each a whole node disk (boot area, system slab, data slab), so
+either boots the node alone, with or without the other (BIOS boot order
+lists both). Asked for in the install-config (`system_drive:` as a list of
+two mappings), or found as the two drives already holding this node's pair:
+their data slabs name each other in their headers (`partner`, #402's field).
+`boot-local --pair-disk <drive>` (`--pair-disk-id`) takes the second drive.
+After the flow-over every volume is `mirror:2` spread at `drive`: the goldens
+laid on both and compared byte for byte, the data mirrored (#146's per-volume
+mirror, never a drive-level RAID). A volume made on a pair is `mirror:2`
+from its first write; a restore reads a mirror from whichever drive is here;
+health `slabs.pair` is `paired` or `degraded` (one drive missing, said on
+the console too), and the next start with both drives mirrors again.
+
+`POST /api/v1/system/move {to, from?, force?}` (admin; `GET` for its state)
+moves the system off a drive onto another, live: `to` laid, both halves moved
+onto it as a flow-over moves them, the boot area copied, the old drive let
+go with a pointer in its slab headers (`moved_to`, bytes 168..184 of the v2
+header, under its checksum). `stormblock slab moved <drive>` follows it; a
+boot from the old drive boots the moved system and says `SET THE BIOS BOOT
+ORDER TO <drive>`, carried in health's `slabs.boot_order`. One drive of a
+pair moves the same way (`from` names it), its partner kept and re-paired.
+
 ### The system half on a drive of its own (#402)
 
 A node may keep its data on one drive and its system half on another: the X9
