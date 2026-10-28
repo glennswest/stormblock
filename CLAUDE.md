@@ -209,7 +209,7 @@ A release wave takes every component's newest golden, so main is the next
 release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 #74 (secret volumes) and #450's engine half stay on main (master's A): both
 are inert until used, and an unmarked volume's record is byte-identical to
-the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) stages requested.
+the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
 ### ublk zero copy, batch I/O, io_uring ring flags (2026-10-28, #505, P1) — WAITING ON THE OWNER (scope)
 
@@ -347,7 +347,7 @@ a multi-drive machine. Then: file a `multi-drive` suite on stormblock-test
 drive and in parallel, shelves + spare, reassembly after a power cycle).
 Nothing built.
 
-### Git dependencies pinned by rev, not tag (2026-10-22, #480, P0) — IN PROGRESS (ext4 pinned, verifying)
+### Git dependencies pinned by rev, not tag (2026-10-22, #480, P0) — DONE (v23.0.4), closed
 
 A tag can be moved; the supply-chain check wants every git dependency by
 `rev =`, at the commits `Cargo.lock` already holds (nothing built changes).
@@ -356,7 +356,10 @@ A tag can be moved; the supply-chain check wants every git dependency by
 - [x] mkfs-ext4 (14d5af82…) and fio-ext4 v1.8.2 (7a13228c…, pins its own
       mkfs-ext4 by the same rev, fio.ext4.rs#17) together; Cargo.lock by hand
       (same dependency sets)
-- [ ] check.sh at the commit; close
+- [x] check.sh at 496b017 ALL PASS (1280/1280; `cargo tree --locked`: one
+      mkfs-ext4 `?rev=14d5af82…`, fio-ext4 v1.8.2 `?rev=7a13228c…`); v23.0.4
+      (e9a71ee, `stormblock 23.0.4` from a `--locked` build); stage requested
+      (ade657437e24); closed
 
 ### Stage only finished commits (2026-10-22, #492, P2) — DONE, closed (no engine change: no golden)
 
