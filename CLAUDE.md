@@ -924,12 +924,19 @@ slab on each, data volumes `mirror:2`; a missing partner = degraded in
 pointer into the old drive's system-data; /init follows it and raises "set
 BIOS boot order to <drive>". Nothing built.
 
-### Multicast appliance discovery (2026-10-17, #104, P3) — PARKED until the single-node pacing lifts
+### Multicast appliance discovery (2026-10-17, #104, P3) — IN PROGRESS (owner 2026-10-28: unheld)
 
 Master's decision B: last in the order, off by default,
-`rd.stormblock.discover=on`. stormbootx#159 filed. To build: forge mode
-answers a query on the multicast group, `stormblock discover`, `/init` adds
-what answered after every other source (health-checked). Nothing built.
+`rd.stormblock.discover=on`. stormbootx#159 filed.
+- [x] `mgmt::finder`: a query on 239.255.42.99:7448, answered (one line of
+      JSON, the API's URL: advertised host, else the reply's source
+      address) by an engine while forge mode is on; `stormblock discover`
+      asks on every IPv4 interface, prints each URL once
+- [x] /init: `rd.stormblock.discover=on` adds what answered last, asked
+      /api/v1/health like the rest; tests/initramfs-no-appliance.sh (+5)
+- [ ] units; the shell tests (sh, busybox sh); ci-finder-verify.sh (QEMU,
+      a virtio NIC: off silent, on answered, its health); check.sh; docs;
+      close; stormbootx#159 told
 
 ### A privileged pod stops/deletes the node's ublk device (2026-10-17, #299, P3) — PARKED until the single-node pacing lifts
 

@@ -820,6 +820,7 @@ for param in $(cat /proc/cmdline); do
         # cmdline is baked into the image and identical on every node that
         # boots it, so it names the appliance, never the namespace.
         rd.stormblock.boothost=*)    BOOTHOST="${param#*=}" ;;
+        rd.stormblock.discover=*)    DISCOVER="${param#*=}" ;;
         rd.stormblock.bootport=*)    BOOTPORT="${param#*=}" ;;
         rd.stormblock.assimilate=*)  ASSIMILATE="${param#*=}" ;;
         rd.stormblock.wipe=*)        WIPE="${param#*=}" ;;
@@ -2666,6 +2667,8 @@ if [ "$BOOT_MODE" = "local" ]; then
     #                             everywhere - each network answers with its own
     #   the DHCP next-server      what the lease named for booting
     #   the DHCP server itself    the last thing known to be up and listening
+    #   a multicast query         only with rd.stormblock.discover=on (#104):
+    #                             whatever engine serving boot claims answers
     #
     # None of them is trusted on sight: each is *asked*, and the first that
     # answers as an engine is the appliance. A candidate that is right by
@@ -2719,6 +2722,19 @@ if [ "$BOOT_MODE" = "local" ]; then
         for f in /run/dhcp-siaddr /run/dhcp-serverid; do
             [ -s "$f" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://$(cat "$f"):$BOOTPORT"
         done
+        # Last, and only when asked (#104, the master's decision B): what
+        # answers a query on the multicast group. Unauthenticated - anyone
+        # on the segment can answer - so never without
+        # rd.stormblock.discover=on, and asked /api/v1/health like the rest.
+        if [ "${DISCOVER:-}" = on ]; then
+            FOUND=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" discover 2>/dev/null | tr '\n' ' ')
+            if [ -n "${FOUND% }" ]; then
+                echo "  multicast discovery (rd.stormblock.discover=on) heard: $FOUND"
+                CANDIDATE_HOSTS="$CANDIDATE_HOSTS $FOUND"
+            else
+                echo "  multicast discovery (rd.stormblock.discover=on): nothing answered"
+            fi
+        fi
         BH_WAIT=0
         [ -n "$NAMED_HOST" ] && BH_WAIT="${STORM_BOOTHOST_WAIT:-90}"
         BH_START=$(date +%s)
@@ -5253,6 +5269,7 @@ echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
 echo "  netboot: root=/dev/ublkb0   — both parameters below are optional:"
 echo "           rd.stormblock.boothost=<url>  overrides DHCP option 17, then http://boothost:9090"
+echo "           [rd.stormblock.discover=on]   also ask the network (multicast), last (#104)"
 echo "           the name: the firmware's StormBootTag EFI variable (stormbootx), else"
 echo "           rd.stormblock.tag=<tag>, else the SMBIOS serial/UUID - a guess, which"
 echo "           installs over no disk carrying a slab unless rd.stormblock.trust-smbios=1"

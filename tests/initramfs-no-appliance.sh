@@ -71,6 +71,10 @@ discover() { # named-host -> "BOOTHOST|BOOTHOST_WHY|asks"
             esac
         }
         nslookup() { return 1; }
+        # `stormblock discover` (#104): prints STUB_FOUND.
+        printf '#!/bin/sh\n[ "$1" = discover ] && [ -n "$STUB_FOUND" ] && printf "%%s\\n" $STUB_FOUND && exit 0\nexit 1\n' > "$WORK/sb-discover"
+        chmod +x "$WORK/sb-discover"
+        STORM_STORMBLOCK="$WORK/sb-discover"; export STUB_FOUND
         . "$WORK/discovery.sh" > "$WORK/discovery.out" 2>&1
         echo "$BOOTHOST|$BOOTHOST_WHY|$(cat "$WORK/asks")"
     )
@@ -95,6 +99,16 @@ asks=${r##*|}
 r=$(STORM_BOOTHOST_WAIT=30 discover "")
 check "with no named boothost nothing is waited for" "" "${r%%|*}"
 contains "and why is kept" "no appliance answered" "$(printf '%s' "$r" | cut -d'|' -f2)"
+# #104: multicast discovery, last and only when asked.
+r=$(ANSWERS=http://10.9.9.9:9090 STUB_FOUND=http://10.9.9.9:9090 discover "")
+check "an appliance only multicast finds is not asked for without discover=on" "" "${r%%|*}"
+r=$(DISCOVER=on ANSWERS=http://10.9.9.9:9090 STUB_FOUND=http://10.9.9.9:9090 discover "")
+check "with rd.stormblock.discover=on what answers the query is the appliance" "http://10.9.9.9:9090" "${r%%|*}"
+contains "  and the console says it was heard by multicast" "multicast discovery (rd.stormblock.discover=on) heard: http://10.9.9.9:9090" "$(cat "$WORK/discovery.out")"
+r=$(DISCOVER=on ANSWERS=http://forge:9090 STUB_FOUND=http://forge:9090 STORM_BOOTHOST_WAIT=5 discover http://forge:9090)
+check "a configured boothost is asked before a discovered one" "http://forge:9090" "${r%%|*}"
+r=$(DISCOVER=on STUB_FOUND="" discover "")
+contains "with nothing answering, said" "multicast discovery (rd.stormblock.discover=on): nothing answered" "$(cat "$WORK/discovery.out")"
 start=$(date +%s); discover "" > /dev/null; took=$(( $(date +%s) - start ))
 [ "$took" -lt 5 ] && echo "  ok    and it does not wait (${took}s)" \
     || { echo "  FAIL  it waited ${took}s with no named boothost"; fail=1; }

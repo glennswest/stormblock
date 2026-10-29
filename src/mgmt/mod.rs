@@ -21,6 +21,7 @@ pub mod nvme_hosts;
 pub mod ana;
 pub mod forge;
 pub mod forge_trust;
+pub mod finder;
 pub mod install_config;
 pub mod kernelopt;
 pub mod peers;

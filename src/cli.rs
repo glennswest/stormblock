@@ -425,6 +425,16 @@ enum SubCommand {
         #[arg(long)]
         console_copy: Option<String>,
     },
+    /// Ask the network for an appliance (#104): a query on the multicast
+    /// group, answered by every engine that serves boot claims. Prints each
+    /// answer's URL, one a line. Exit 0: something answered; 1: nothing.
+    /// `/init` runs it only with `rd.stormblock.discover=on`, and tries what
+    /// it prints last.
+    Discover {
+        /// How long to wait for answers, in milliseconds.
+        #[arg(long, default_value_t = 2000)]
+        wait_ms: u64,
+    },
     BootClaim {
         /// The appliance, e.g. http://192.168.31.202:9090
         #[arg(long, required = true)]
@@ -1204,6 +1214,13 @@ pub async fn run() -> anyhow::Result<()> {
                 tokio::task::spawn_blocking(move || crate::logcast::main(opts)).await?;
                 return Ok(());
             }
+            SubCommand::Discover { wait_ms } => {
+                let got = crate::mgmt::finder::discover(std::time::Duration::from_millis(*wait_ms), None)?;
+                for a in &got {
+                    println!("{}", a.url);
+                }
+                std::process::exit(if got.is_empty() { 1 } else { 0 });
+            }
             SubCommand::BootClaim { boothost, tag, namespace, timeout_secs, token } => {
                 return handle_boot_claim(boothost, tag, namespace, *timeout_secs, token.as_deref()).await;
             }
@@ -1746,6 +1763,8 @@ pub async fn run() -> anyhow::Result<()> {
                 mgmt::forge::restore(&state, None).await;
             }
         }
+        // Answers a node asking for its appliance, while forge mode is on (#104).
+        mgmt::finder::spawn_responder(state.clone());
 
         // This node is its own forge: its own trust for its own enrolment
         // (#381), when its stormcert has set one.
@@ -8553,6 +8572,8 @@ async fn handle_adopt_ublk(
             },
             None => mgmt::forge::restore(&state, Some(mgmt::forge::default_settings(&state))).await,
         }
+        // Answers a node asking for its appliance, while forge mode is on (#104).
+        mgmt::finder::spawn_responder(state.clone());
         // The first node: forge mode on, booted from its own disk, no claim
         // this boot — its own trust for its own enrolment (#381).
         if mgmt::forge_trust::write_self(&state).await {
