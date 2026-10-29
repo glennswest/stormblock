@@ -952,8 +952,14 @@ access to /dev/ublk-control is stormcentral#932. Here:
       id may be another device's); an attach of its volume replaces the
       record with a new device. A boot device cannot be given back to a
       mounted filesystem: the node fails visibly
-- [ ] tests: registry unit; ci-ublk-qd-verify.sh `taken` (examples/ublk_take
-      plays the pod); check.sh; docs; close
+- [x] found by the QEMU run: another process's DEL_DEV waits until the
+      server lets go of /dev/ublkcN, and the server waited for its own
+      shutdown: the "pod" hung. A taken server now lets go at once
+- [x] tests: registry unit; ci-ublk-qd-verify.sh `taken` ALL PASS (kernel
+      7.2.11: STOP+DEL by examples/ublk_take, health degraded + ublk_lost,
+      ERROR logged, re-attach got id 1 again and reads, entry cleared);
+      README, CHANGELOG
+- [ ] check.sh; close
 
 ### Clone verify: i-blocks-wrong on fedora-base (2026-10-17, #293, P3) — AFTER mkfs.ext4.rs#25
 
