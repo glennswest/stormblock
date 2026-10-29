@@ -6381,12 +6381,28 @@ pub async fn run() -> anyhow::Result<()> {
 
     /// The most a successor's flow-over waits for the node's boot (#278):
     /// `STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 90 by default, 0 = no wait.
-    fn flow_boot_grace() -> std::time::Duration {
-        let secs = std::env::var("STORMBLOCK_FLOW_BOOT_GRACE_SECS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(90);
+    ///
+    /// An install boot's (#448) is `STORMBLOCK_FLOW_INSTALL_GRACE_SECS`, 20 by
+    /// default: a booting node is never still for the quiet window (sbregistry
+    /// and the probes poll the API), so the grace always ran to its bound, and
+    /// on pve 90 of the 127 s from claim to `laid` were this wait. The grace
+    /// was for a *reboot* during a flow-over on the Dell's SMR disk (#278);
+    /// since #410 the flow-over paces itself on the foreground's measured
+    /// latency, which is the protection that wait gave. A flow-over resumed
+    /// after a cut keeps the 90 s.
+    fn flow_boot_grace_for(install: bool) -> std::time::Duration {
+        let var = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<u64>().ok());
+        let secs = if install {
+            var("STORMBLOCK_FLOW_INSTALL_GRACE_SECS").unwrap_or(20)
+        } else {
+            var("STORMBLOCK_FLOW_BOOT_GRACE_SECS").unwrap_or(90)
+        };
         std::time::Duration::from_secs(secs)
+    }
+
+    /// [`flow_boot_grace_for`] a boot that is not an install.
+    fn flow_boot_grace() -> std::time::Duration {
+        flow_boot_grace_for(false)
     }
 
     /// Wait for the node's boot before moving anything (#278).
@@ -7425,6 +7441,8 @@ pub async fn run() -> anyhow::Result<()> {
             );
             return;
         };
+        // An install boot waits less for the node's boot (#448).
+        let is_install = install.is_some();
         let gem_arc = state.gem.clone();
         let reg_arc = state.slab_registry.clone();
         let flow_remaining = state.flow_over_remaining.clone();
@@ -7569,7 +7587,7 @@ pub async fn run() -> anyhow::Result<()> {
             );
             // The node boots first (#278); what is left is reported meanwhile,
             // so a settle check (#260) does not read the wait as done.
-            let grace = flow_boot_grace();
+            let grace = flow_boot_grace_for(is_install);
             if !grace.is_zero() {
                 let left = extents_on(&gem_arc, &sources).await + data_left;
                 flow_remaining.store(left as i64, std::sync::atomic::Ordering::Relaxed);
@@ -15195,6 +15213,22 @@ mod flow_boot_grace_tests {
         busy.abort();
         assert!(!quiet);
         assert!(waited >= Duration::from_secs(2) && waited < Duration::from_secs(4), "{waited:?}");
+    }
+
+    /// #448: an install boot's flow-over waits 20 s for the boot, a resumed
+    /// one 90 s (#278); each its own variable.
+    #[test]
+    fn an_install_boot_waits_less_than_a_resumed_flow_over() {
+        // Neither variable set in this test's process (nextest: one process
+        // a test).
+        if std::env::var_os("STORMBLOCK_FLOW_INSTALL_GRACE_SECS").is_some()
+            || std::env::var_os("STORMBLOCK_FLOW_BOOT_GRACE_SECS").is_some()
+        {
+            return;
+        }
+        assert_eq!(flow_boot_grace_for(true), Duration::from_secs(20));
+        assert_eq!(flow_boot_grace_for(false), Duration::from_secs(90));
+        assert_eq!(flow_boot_grace(), Duration::from_secs(90));
     }
 
     #[tokio::test]

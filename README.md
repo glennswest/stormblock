@@ -379,6 +379,7 @@ set only in the file ran a target with no authentication. Now:
 | `STORMBLOCK_SEED_DATA`, `STORMBLOCK_NO_SEED_DATA` | whether `boot-local` flow-over seeds a **kept** data half (the update path) | policy decides |
 | `STORMBLOCK_SLOT_CACHE_MB` | bound of each slab's cache of slot table pages; nothing else of the table is kept in memory (#155) | `16` |
 | `STORMBLOCK_FLOW_BOOT_GRACE_SECS` | the most a successor's flow-over waits for the node's boot: until volume I/O is still for 10 s (#278) | `90`; `0` starts at once |
+| `STORMBLOCK_FLOW_INSTALL_GRACE_SECS` | the same on an install boot (#448) | `20`; `0` starts at once |
 | `STORMBLOCK_FLOW_WINDOW` | extents a flow-over window holds at most (and at most 64 MiB of them); the pacing shrinks it (#331, #410) | `64` |
 | `STORMBLOCK_FLOW_BATCH` | moves a flow-over makes between persists, across windows (#410; it was the window, one persist each, #331) | `256` |
 | `STORMBLOCK_FLOW_PERSIST_SECS` | the longest a flow-over goes without a persist while anything is unpersisted: what a cut can make it move again (#410) | `10` |
@@ -2129,7 +2130,11 @@ idle node moves at full speed. And it lets the node boot first (#278): the
 first move waits until volume I/O has been still for 10 s, or 90 s at most
 (`STORMBLOCK_FLOW_BOOT_GRACE_SECS`, 0 = no wait). Before this, a reboot
 during the flow-over on an SMR disk took stormpump and the apiserver twice
-as long. `GET /api/v1/health` reports what is left, the wait included
+as long. An install boot waits 20 s at most
+(`STORMBLOCK_FLOW_INSTALL_GRACE_SECS`, #448): a booting node is never still
+for 10 s, so its flow-over always waited the whole bound, and on pve 90 of
+the 127 s from the claim to `laid` were that wait; the flow-over's pacing on
+the foreground's measured latency (#410) protects the boot since. `GET /api/v1/health` reports what is left, the wait included
 (`flow_over_remaining`, #260).
 
 **A flow-over cut short is finished, not lost.** If the power goes while

@@ -4,6 +4,9 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-10-29
+- **perf:** #448: an install boot's flow-over waits at most 20 s for the node's boot (`STORMBLOCK_FLOW_INSTALL_GRACE_SECS`), not 90 s. A booting node is never still for #278's 10 s quiet window (sbregistry and the probes poll the API), so the wait always ran to its bound: on pve 90 of the 127 s from the claim to `laid` (12.27, and every pve install since: `Flow-over: starting after 90.2s (the boot grace of 90s ran out)`). The grace was for a reboot during a flow-over on the Dell's SMR disk; since #410 the flow-over paces itself on the foreground's measured latency. A resumed flow-over keeps 90 s (`STORMBLOCK_FLOW_BOOT_GRACE_SECS`). The first boot's own time to Ready was never the engine's (stormcentral#891 measured after `laid`).
+
+### 2026-10-29
 - **feat:** #389 (owner: "can we support 4096 with pi?"; steps 1 and 2): the engine on T10 PI type 1 drives. It needed no change on the I/O path: the block layer's `T10-DIF-TYPE1-CRC` profile generates and checks the tags on every I/O, and the engine follows the drive's logical block, its volumes 4096 (a 4Kn drive takes them whole, no read-modify-write). Health's `slabs.items` now say each local slab's `logical_block` and its drive's `integrity` profile. `ci-pi-verify.sh` (QEMU, kernel 7.2.11, scsi_debug `dif=1 dix=1` at 4096 and at 512): the profile and block, a data slab formatted on the drive, 32 MiB through a ublk device read back equal, an ext4 claim mounted, written, mounted again and read back, health, no protection error in the kernel log: ALL PASS. `docs/durability.md` says how PI fits with the engine's own checks (no per-block checksums: PI is the only per-block check, below the kernel). Step 3 (PI from the engine's buffers, io_uring integrity) is #511.
 
 ## [v23.2.0] — 2026-10-29
