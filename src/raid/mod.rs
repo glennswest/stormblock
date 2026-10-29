@@ -180,6 +180,8 @@ pub enum RaidError {
     NotSupported(String),
     /// Cannot remove member (would leave array with insufficient members).
     CannotRemoveMember(String),
+    /// The array cannot grow now (#318): why.
+    CannotGrow(String),
 }
 
 impl fmt::Display for RaidError {
@@ -196,6 +198,7 @@ impl fmt::Display for RaidError {
             RaidError::InvalidStripe(msg) => write!(f, "{msg}"),
             RaidError::NotSupported(msg) => write!(f, "not supported: {msg}"),
             RaidError::CannotRemoveMember(msg) => write!(f, "cannot remove member: {msg}"),
+            RaidError::CannotGrow(msg) => write!(f, "cannot grow: {msg}"),
         }
     }
 }
@@ -334,8 +337,8 @@ pub struct RaidArray {
     device_id: DeviceId,
     level: RaidLevel,
     stripe_size: u64,
-    /// Member data bytes each member carries.
-    data_size: u64,
+    /// Member data bytes each member carries; raised by a grow (#318).
+    data_size: AtomicU64,
     capacity: AtomicU64,
     create_time: u64,
     names: std::sync::Mutex<(String, String)>,
@@ -360,6 +363,22 @@ pub struct RaidArray {
     /// Handed to another engine (#296): nothing is written to a member from
     /// here, and I/O is refused.
     released: AtomicBool,
+    /// One grow at a time (#318).
+    grow_lock: tokio::sync::Mutex<()>,
+}
+
+/// What a grow found and did (#318).
+#[derive(Debug, Clone, Serialize)]
+pub struct GrowReport {
+    /// Whether the array is larger now.
+    pub grown: bool,
+    /// Member data bytes before and after.
+    pub was: u64,
+    pub data_size: u64,
+    /// The array's capacity now.
+    pub capacity: u64,
+    /// Each member's path and size, as it answered just now.
+    pub members: Vec<(String, u64)>,
 }
 
 fn device_id_for(id: RaidArrayId, level: RaidLevel) -> DeviceId {
@@ -457,7 +476,7 @@ impl RaidArray {
             device_id: device_id_for(id, level),
             level,
             stripe_size,
-            data_size,
+            data_size: AtomicU64::new(data_size),
             capacity: AtomicU64::new(geo.capacity(data_size)),
             create_time,
             names: std::sync::Mutex::new((name, pool)),
@@ -478,6 +497,7 @@ impl RaidArray {
             rebuild_config: std::sync::Mutex::new(RebuildConfig::default()),
             stopped: AtomicBool::new(false),
             released: AtomicBool::new(false),
+            grow_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -571,12 +591,12 @@ impl RaidArray {
         // What may be half written: the union of every attached member's map.
         let mut images = Vec::new();
         for d in array.attached_devices() {
-            let mut img = vec![0u8; array.bitmap.bytes as usize];
+            let mut img = vec![0u8; array.bitmap.bytes() as usize];
             if d.1.read(BITMAP_OFFSET, &mut img).await.is_ok() {
                 images.push(img);
             }
         }
-        let dirty = bitmap::dirty_chunks(&images, array.bitmap.bits);
+        let dirty = bitmap::dirty_chunks(&images, array.bitmap.bits());
         if !dirty.is_empty() {
             tracing::warn!(
                 "array {} ({}): {} chunk(s) were being written when it stopped — resyncing them",
@@ -584,7 +604,7 @@ impl RaidArray {
             );
             for c in &dirty {
                 let start = c * array.bitmap.chunk;
-                let end = (start + array.bitmap.chunk).min(array.data_size);
+                let end = (start + array.bitmap.chunk).min(array.data_size());
                 array.resync_range(start, end, true, None).await?;
             }
         }
@@ -600,7 +620,7 @@ impl RaidArray {
             let lu = array.lock_unit();
             for c in &dirty {
                 let start = c * array.bitmap.chunk;
-                let end = (start + array.bitmap.chunk).min(array.data_size);
+                let end = (start + array.bitmap.chunk).min(array.data_size());
                 for key in start / lu..end.div_ceil(lu) {
                     array.rebuild_unit(key, &[slot]).await?;
                 }
@@ -652,12 +672,12 @@ impl RaidArray {
 
     /// Member data bytes per member.
     pub fn data_size(&self) -> u64 {
-        self.data_size
+        self.data_size.load(Ordering::SeqCst)
     }
 
     /// The size a drive must be to take a slot.
     pub fn member_bytes_needed(&self) -> u64 {
-        DATA_OFFSET + self.data_size
+        DATA_OFFSET + self.data_size()
     }
 
     pub fn name(&self) -> String {
@@ -915,12 +935,12 @@ impl RaidArray {
             level: Some(self.level),
             stripe_size: self.stripe_size,
             data_offset: DATA_OFFSET,
-            data_size: self.data_size,
+            data_size: self.data_size(),
             create_time: self.create_time,
             update_time: now_secs(),
             events,
             bitmap_offset: BITMAP_OFFSET,
-            bitmap_bytes: self.bitmap.bytes,
+            bitmap_bytes: self.bitmap.bytes(),
             bitmap_chunk: self.bitmap.chunk,
             name,
             pool,
@@ -995,7 +1015,7 @@ impl RaidArray {
         if self.is_released() {
             return Ok(());
         }
-        let zeros = vec![0u8; self.bitmap.bytes as usize];
+        let zeros = vec![0u8; self.bitmap.bytes() as usize];
         for (i, d) in self.attached_devices() {
             if only.is_some_and(|o| o != i) {
                 continue;
@@ -1504,7 +1524,7 @@ impl RaidArray {
             }
             let _g = self.locks.lock(key).await;
             let moff = key * lu;
-            let len = lu.min(self.data_size - moff) as usize;
+            let len = lu.min(self.data_size() - moff) as usize;
             // A scrub locates a bad strip (#390); a resync after a cut
             // recomputes parity from the data (a write cut off between its
             // data and its parity is consistent either way, and the data may
@@ -1660,7 +1680,7 @@ impl RaidArray {
                 return p.clone();
             }
         }
-        let progress = ScrubProgress::new(self.data_size, config.repair);
+        let progress = ScrubProgress::new(self.data_size(), config.repair);
         *slot = Some(progress.clone());
         drop(slot);
         let array = Arc::clone(self);
@@ -1671,11 +1691,11 @@ impl RaidArray {
             let mut pos = 0;
             let mut err = None;
             let started = Instant::now();
-            while pos < array.data_size {
+            while pos < array.data_size() {
                 if p.is_cancelled() || array.stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                let end = (pos + batch).min(array.data_size);
+                let end = (pos + batch).min(array.data_size());
                 if let Err(e) = array.resync_range(pos, end, config.repair, Some(&p)).await {
                     err = Some(e.to_string());
                     break;
@@ -1823,8 +1843,8 @@ impl RaidArray {
         let (old, new) = (tee.old.clone(), tee.new.clone());
         let broken = || tee.broken.load(Ordering::SeqCst);
         let lu = self.lock_unit();
-        let last = self.data_size.div_ceil(lu);
-        let progress = RebuildProgress::new(vec![slot], self.data_size, 0);
+        let last = self.data_size().div_ceil(lu);
+        let progress = RebuildProgress::new(vec![slot], self.data_size(), 0);
         *self.rebuild_progress.lock().unwrap() = Some(progress.clone());
         let mut key = 0;
         while key < last {
@@ -1842,7 +1862,7 @@ impl RaidArray {
                 let _g = self.locks.lock_many(key..end_key).await;
                 for k in key..end_key {
                     let moff = k * lu;
-                    let len = lu.min(self.data_size - moff) as usize;
+                    let len = lu.min(self.data_size() - moff) as usize;
                     let mut b = vec![0u8; len];
                     if old.read(DATA_OFFSET + moff, &mut b).await.is_err() {
                         drop(_g);
@@ -1862,7 +1882,7 @@ impl RaidArray {
                         return Ok(());
                     }
                 }
-                progress.set_done((end_key * lu).min(self.data_size));
+                progress.set_done((end_key * lu).min(self.data_size()));
             }
             key = end_key;
         }
@@ -2017,11 +2037,11 @@ impl RaidArray {
             let m = self.members.read().unwrap();
             targets.iter().map(|t| m[*t].rebuilt_to).min().unwrap() / lu * lu
         };
-        let progress = RebuildProgress::new(targets.clone(), self.data_size, start);
+        let progress = RebuildProgress::new(targets.clone(), self.data_size(), start);
         *self.rebuild_progress.lock().unwrap() = Some(progress.clone());
         tracing::info!(
             "{} {} ({}): rebuilding slot(s) {targets:?} from {start} of {} bytes",
-            self.level, self.id, self.name(), self.data_size
+            self.level, self.id, self.name(), self.data_size()
         );
         let batch_bytes = match self.rebuild_config.lock().unwrap().batch_bytes {
             0 => REBUILD_BATCH,
@@ -2029,7 +2049,7 @@ impl RaidArray {
         };
         let batch = (batch_bytes / lu).max(1);
         let mut key = start / lu;
-        let last = self.data_size.div_ceil(lu);
+        let last = self.data_size().div_ceil(lu);
         let started = Instant::now();
         let mut checkpoint = Instant::now();
         while key < last {
@@ -2052,7 +2072,7 @@ impl RaidArray {
                     self.persist_if_dirty().await;
                     return Err(e);
                 }
-                let end = (end_key * lu).min(self.data_size);
+                let end = (end_key * lu).min(self.data_size());
                 let mut members = self.members.write().unwrap();
                 for t in &targets {
                     let m = &mut members[*t];
@@ -2061,7 +2081,7 @@ impl RaidArray {
                     }
                 }
             }
-            let done = (end_key * lu).min(self.data_size);
+            let done = (end_key * lu).min(self.data_size());
             progress.set_done(done);
             self.publish_metrics();
             self.persist_if_dirty().await;
@@ -2113,7 +2133,7 @@ impl RaidArray {
     async fn rebuild_unit(&self, key: u64, targets: &[usize]) -> Result<(), RaidError> {
         let lu = self.lock_unit();
         let moff = key * lu;
-        let len = lu.min(self.data_size - moff) as usize;
+        let len = lu.min(self.data_size() - moff) as usize;
         let live_targets: Vec<(usize, Arc<dyn BlockDevice>)> = {
             let m = self.members.read().unwrap();
             targets
@@ -2263,6 +2283,102 @@ impl RaidArray {
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.failures.notify_one();
+    }
+
+    /// Take the room the members have grown into (#318, stormstorage#73): a
+    /// RAID-1 whose legs were each made larger (a namespace resized on its
+    /// own engine, a partition extended) becomes as large as its smallest
+    /// leg. Every member is asked its size again; when the smallest has room
+    /// past the data this array uses, that room is zeroed on every leg (so
+    /// the legs agree there, and a scrub finds nothing), the bitmap gets the
+    /// bits for it (the chunk stays), and the superblocks are written with
+    /// the new size and the event count bumped, so a reassembly agrees. Only
+    /// then is the larger capacity served. A grow cut short before the
+    /// superblocks leaves the array as it was; one after them is the new
+    /// size at the next assembly. `grown: false` when no leg gave room.
+    pub async fn grow(&self) -> Result<GrowReport, RaidError> {
+        let _g = self.grow_lock.lock().await;
+        if self.is_released() {
+            return Err(RaidError::CannotGrow("the array was released to another engine".into()));
+        }
+        if self.level != RaidLevel::Raid1 {
+            return Err(RaidError::NotSupported(format!(
+                "growing a {} set (only RAID 1 grows; reshaping a parity set is #387)",
+                self.level
+            )));
+        }
+        if let Some(why) = self.release_blocker() {
+            return Err(RaidError::CannotGrow(why));
+        }
+        if self.replacing.lock().unwrap().is_some() {
+            return Err(RaidError::CannotGrow("a member is being replaced".into()));
+        }
+        let devs: Vec<(usize, Arc<dyn BlockDevice>)> = {
+            let members = self.members.read().unwrap();
+            if let Some((i, m)) = members.iter().enumerate().find(|(_, m)| m.state != RaidMemberState::Active || !m.attached()) {
+                return Err(RaidError::CannotGrow(format!("member {i} is {}: every leg must be in service", m.state)));
+            }
+            members.iter().enumerate().map(|(i, m)| (i, m.device.clone().unwrap())).collect()
+        };
+        let mut sizes = Vec::new();
+        for (i, d) in &devs {
+            let size = d
+                .refresh_capacity()
+                .await
+                .map_err(|e| RaidError::CannotGrow(format!("member {i} ({}) did not say its size: {e}", d.id().path)))?;
+            sizes.push((d.id().path.clone(), size));
+        }
+        let was = self.data_size();
+        let min = sizes.iter().map(|(_, s)| *s).min().unwrap_or(0);
+        let new = min.saturating_sub(DATA_OFFSET) / 4096 * 4096;
+        let report = |grown: bool, data_size: u64| GrowReport {
+            grown,
+            was,
+            data_size,
+            capacity: self.capacity_bytes(),
+            members: sizes.clone(),
+        };
+        if new <= was {
+            return Ok(report(false, was));
+        }
+        let align = if self.level == RaidLevel::Raid1 { MIRROR_UNIT } else { self.stripe_size };
+        let (chunk, bits, bytes) = bitmap::geometry(new, align);
+        if chunk != self.bitmap.chunk {
+            return Err(RaidError::CannotGrow(format!(
+                "{new} bytes a member needs a bitmap chunk of {chunk} bytes, not this array's {}",
+                self.bitmap.chunk
+            )));
+        }
+        // The new room reads as zeros on every leg, and the new bitmap pages
+        // are clear, before anything says the room is there.
+        let old_bytes = self.bitmap.bytes();
+        for (i, d) in &devs {
+            d.write_zeroes(DATA_OFFSET + was, new - was)
+                .await
+                .map_err(|e| RaidError::MemberIo { member_idx: *i, error: e })?;
+            if bytes > old_bytes {
+                d.write(BITMAP_OFFSET + old_bytes, &vec![0u8; (bytes - old_bytes) as usize])
+                    .await
+                    .map_err(|e| RaidError::MemberIo { member_idx: *i, error: e })?;
+            }
+            d.flush().await.map_err(|e| RaidError::MemberIo { member_idx: *i, error: e })?;
+        }
+        self.bitmap.grow(bits, bytes);
+        self.data_size.store(new, Ordering::SeqCst);
+        self.events.fetch_add(1, Ordering::SeqCst);
+        if let Err(e) = self.write_superblocks().await {
+            self.data_size.store(was, Ordering::SeqCst);
+            return Err(e);
+        }
+        self.capacity.store(self.geometry().capacity(new), Ordering::SeqCst);
+        tracing::info!(
+            "{} {} ({}): grown from {was} to {new} bytes a member; capacity {}",
+            self.level,
+            self.id,
+            self.name(),
+            self.capacity_bytes()
+        );
+        Ok(report(true, new))
     }
 
     /// Why the set cannot be released now (#296): a rebuild or a scrub runs.

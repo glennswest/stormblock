@@ -315,6 +315,13 @@ pub trait BlockDevice: Send + Sync {
     /// Total capacity in bytes.
     fn capacity_bytes(&self) -> u64;
 
+    /// Ask the device its size again and take it (#318): a leg grown under a
+    /// running RAID head. A device whose size cannot change answers what it
+    /// has.
+    async fn refresh_capacity(&self) -> DriveResult<u64> {
+        Ok(self.capacity_bytes())
+    }
+
     /// Logical block size (512 or 4096).
     fn block_size(&self) -> u32;
 

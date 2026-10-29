@@ -4,7 +4,7 @@
 //! testing with regular files. Works with both block devices and regular files.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use tokio::fs::{File, OpenOptions};
@@ -20,7 +20,7 @@ use super::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType, SmartData
 pub struct FileDevice {
     file: Mutex<File>,
     id: DeviceId,
-    capacity: u64,
+    capacity: AtomicU64,
     /// True when the path is a block device rather than a regular file —
     /// discard then means BLKDISCARD, not hole punching. Only consulted on
     /// Linux, where discard is actually implemented.
@@ -164,7 +164,7 @@ impl FileDevice {
         Ok(FileDevice {
             file: Mutex::new(file),
             id,
-            capacity,
+            capacity: AtomicU64::new(capacity),
             is_block_device,
             _tag_counter: AtomicU64::new(0),
         })
@@ -172,13 +172,13 @@ impl FileDevice {
 
     /// Open with a pre-set capacity (for sparse/thin files).
     pub async fn open_with_capacity(path: &str, capacity: u64) -> DriveResult<Self> {
-        let mut dev = Self::open(path).await?;
-        if dev.capacity < capacity {
+        let dev = Self::open(path).await?;
+        if dev.capacity_bytes() < capacity {
             // Extend the file to the desired capacity.
             let file = dev.file.lock().await;
             file.set_len(capacity).await.map_err(DriveError::Io)?;
             drop(file);
-            dev.capacity = capacity;
+            dev.capacity.store(capacity, Ordering::SeqCst);
         }
         Ok(dev)
     }
@@ -191,7 +191,20 @@ impl BlockDevice for FileDevice {
     }
 
     fn capacity_bytes(&self) -> u64 {
-        self.capacity
+        self.capacity.load(Ordering::SeqCst)
+    }
+
+    async fn refresh_capacity(&self) -> DriveResult<u64> {
+        let mut file = self.file.lock().await;
+        let size = if self.is_block_device {
+            let size = file.seek(SeekFrom::End(0)).await.map_err(DriveError::Io)?;
+            file.seek(SeekFrom::Start(0)).await.map_err(DriveError::Io)?;
+            size
+        } else {
+            file.metadata().await.map_err(DriveError::Io)?.len()
+        };
+        self.capacity.store(size, Ordering::SeqCst);
+        Ok(size)
     }
 
     fn block_size(&self) -> u32 {

@@ -35,7 +35,9 @@ pub struct SasDevice {
     fd: RawFd,
     io: DirectIo,
     id: DeviceId,
-    capacity: u64,
+    capacity: std::sync::atomic::AtomicU64,
+    /// Opened as a regular file (tests): its size is the file's (#318).
+    regular_file: bool,
     block_size: u32,
     device_type: DriveType,
     /// The kernel will pass a discard to this disk (`queue/discard_max_bytes`
@@ -135,7 +137,8 @@ impl SasDevice {
             fd,
             io,
             id,
-            capacity,
+            capacity: std::sync::atomic::AtomicU64::new(capacity),
+            regular_file: file_block.is_some(),
             block_size,
             device_type,
             discards,
@@ -159,8 +162,9 @@ impl SasDevice {
     }
 
     fn check_range(&self, offset: u64, len: usize) -> DriveResult<()> {
-        if offset + len as u64 > self.capacity {
-            return Err(DriveError::OutOfRange { offset, len: len as u64, capacity: self.capacity });
+        let capacity = self.capacity_bytes();
+        if offset + len as u64 > capacity {
+            return Err(DriveError::OutOfRange { offset, len: len as u64, capacity });
         }
         Ok(())
     }
@@ -173,7 +177,17 @@ impl BlockDevice for SasDevice {
     }
 
     fn capacity_bytes(&self) -> u64 {
-        self.capacity
+        self.capacity.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn refresh_capacity(&self) -> DriveResult<u64> {
+        let size = if self.regular_file {
+            std::fs::metadata(&self.id.path).map_err(DriveError::Io)?.len()
+        } else {
+            ioctl_blkgetsize64(self.fd)?
+        };
+        self.capacity.store(size, std::sync::atomic::Ordering::SeqCst);
+        Ok(size)
     }
 
     fn block_size(&self) -> u32 {

@@ -1009,14 +1009,25 @@ golden-stormblock-47e88a267077 (the X9 blades' last-known-good is 11.88).
 Then: behind a switch, default off, and the owner's fault-injection suite.
 Proposed after #444. Nothing built.
 
-### Grow a RAID1 array and its dedicated slab (2026-10-17, #318, P2/P3) — PARKED until the single-node pacing lifts
+### Grow a RAID1 array and its dedicated slab (2026-10-17, #318, P2/P3, stormstorage#73) — IN PROGRESS
 
-For stormstorage#73 (P2, volume expand). To build on a wip/ branch (plan on
-#318): `POST /api/v1/arrays/{id}/grow`: re-identify members (nvme-tcp reads
-its size once, at connect), 409 naming one not grown; new data_size, bitmap
-re-chunked, superblocks with an event bump; resync only the new region; the
-dedicated slab grown (formatted with no table room today: new ones get
-growth room, older ones report `slab_grown: false`). Nothing built.
+Unheld (owner, 2026-10-28). Inert until called: on main.
+- [x] `BlockDevice::refresh_capacity` (file: its length; block: BLKGETSIZE64;
+      NVMe/TCP: Identify Namespace again; ridethrough forwards); capacities
+      atomic
+- [x] `RaidArray::grow` (RAID 1 only; every leg in service, no rebuild/scrub/
+      replace): new room zeroed on every leg, new bitmap pages cleared,
+      bitmap bits added (chunk unchanged, else refused), superblocks with the
+      new size and events+1, then the capacity served; `data_size` atomic
+- [x] dedicated slabs formatted with 4x table room; `grow_array_slab`
+      (`slab_short` when the table has no room: older slabs)
+- [x] `POST /api/v1/arrays/{id}/grow` (destructive): 409 naming members and
+      sizes when nothing to grow; grows the slab alone after a grow cut short
+- [x] tests: integration_array_pin (refused, one leg, both with a writer,
+      legs agree, a cut after the superblocks reassembled at the new size,
+      the slab grown by the next call), integration_nvmeof (namespace
+      resized, refresh), destructive list
+- [ ] build VM; check.sh; docs; release; stormstorage#73 told; close
 
 ### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — PARKED until the single-node pacing lifts
 

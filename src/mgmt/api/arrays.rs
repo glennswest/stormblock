@@ -452,6 +452,61 @@ async fn delete_array(
     axum::http::StatusCode::NO_CONTENT.into_response()
 }
 
+/// `POST /api/v1/arrays/{id}/grow` (#318, stormstorage#73): a RAID-1 whose
+/// legs were each made larger takes the room, and its slab grows into it.
+/// Every member is asked its size again (an NVMe/TCP leg is identified again);
+/// the new room is zeroed on every leg, the superblocks written with the new
+/// size, then the slab grown. 409 when no leg has room past what the array
+/// uses (naming each member and its size), when a member is not in service,
+/// while it rebuilds or scrubs, or for a parity set. The served volume is
+/// then resized as any volume is. A slab left short by a grow cut off after
+/// the superblocks is grown by calling it again.
+async fn grow_array(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let (array_id, info) = match array_of(&state, &id).await {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    let report = match info.array.grow().await {
+        Ok(r) => r,
+        Err(crate::raid::RaidError::MemberIo { member_idx, error }) => {
+            return ApiError::internal(format!("growing array {array_id}: member {member_idx}: {error}"));
+        }
+        Err(e) => return ApiError::conflict(format!("array {array_id}: {e}")),
+    };
+    let slab = state.volume_manager.lock().await.grow_array_slab(&array_id).await;
+    let (before, after, short) = match slab {
+        Ok(x) => (Some(x.0), Some(x.1), x.2),
+        Err(e) if report.grown => return ApiError::internal(format!("array {array_id} grew; its slab did not: {e}")),
+        Err(_) => (None, None, None),
+    };
+    let slab_grew = matches!((before, after), (Some(b), Some(a)) if a > b);
+    if !report.grown && !slab_grew {
+        let sizes: Vec<String> =
+            report.members.iter().map(|(p, s)| format!("{p} {}", human_size(*s))).collect();
+        return ApiError::conflict(format!(
+            "array {array_id} has nothing to grow into: it uses {} a member past the first MiB, and its members are {}",
+            human_size(report.data_size),
+            sizes.join(", ")
+        ));
+    }
+    if let Some(i) = state.arrays.write().await.get_mut(&array_id) {
+        i.capacity_bytes = info.array.capacity_bytes();
+    }
+    Json(serde_json::json!({
+        "id": array_id,
+        "grown": report.grown,
+        "was": report.was,
+        "data_size": report.data_size,
+        "capacity_bytes": info.array.capacity_bytes(),
+        "members": report.members.iter().map(|(p, s)| serde_json::json!({"path": p, "bytes": s})).collect::<Vec<_>>(),
+        "slab_slots_before": before,
+        "slab_slots": after,
+        "slab_grown": slab_grew,
+        "slab_short": short,
+    }))
+    .into_response()
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct ReleaseQuery {
     /// Withdraw what serves the array's volumes (exports, LUNs, NVMe
@@ -773,6 +828,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/assemble", post(assemble))
         .route("/{id}", get(get_array).delete(delete_array))
         .route("/{id}/release", post(release_array))
+        .route("/{id}/grow", post(grow_array))
         .route("/{id}/members", post(add_member))
         // `{m}`: a member uuid to remove one from a mirror; a slot number to
         // fail or replace one.

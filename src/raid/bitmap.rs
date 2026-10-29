@@ -54,8 +54,9 @@ struct State {
 
 pub struct IntentBitmap {
     pub chunk: u64,
-    pub bits: u64,
-    pub bytes: u64,
+    /// Raised by a grow (#318); the chunk never changes.
+    bits: std::sync::atomic::AtomicU64,
+    bytes: std::sync::atomic::AtomicU64,
     state: std::sync::Mutex<State>,
     /// Held while pages are written, so writes of the bitmap never overlap.
     pub io: tokio::sync::Mutex<()>,
@@ -71,8 +72,8 @@ impl IntentBitmap {
         let len = (bytes * 8) as usize;
         IntentBitmap {
             chunk,
-            bits,
-            bytes,
+            bits: bits.into(),
+            bytes: bytes.into(),
             state: std::sync::Mutex::new(State {
                 wanted: bitvec![u8, Lsb0; 0; len],
                 durable: bitvec![u8, Lsb0; 0; len],
@@ -84,11 +85,35 @@ impl IntentBitmap {
         }
     }
 
+    pub fn bits(&self) -> u64 {
+        self.bits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Cover more member data with the same chunk (#318): bits and pages
+    /// added, clear; the bits there were keep their places.
+    pub fn grow(&self, bits: u64, bytes: u64) {
+        let mut st = self.state.lock().unwrap();
+        if bytes > self.bytes() {
+            let len = (bytes * 8) as usize;
+            st.wanted.resize(len, false);
+            st.durable.resize(len, false);
+            self.bytes.store(bytes, std::sync::atomic::Ordering::SeqCst);
+        }
+        if bits > self.bits() {
+            self.bits.store(bits, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     /// The chunks a member-data range touches.
     pub fn chunks(&self, member_offset: u64, len: u64) -> RangeInclusive<u64> {
         let first = member_offset / self.chunk;
         let last = (member_offset + len.max(1) - 1) / self.chunk;
-        first.min(self.bits - 1)..=last.min(self.bits - 1)
+        let bits = self.bits();
+        first.min(bits - 1)..=last.min(bits - 1)
     }
 
     /// Count a write in. `true` when a bit it needs is not yet on disk: the
@@ -131,7 +156,7 @@ impl IntentBitmap {
     /// contents. Call under `io`; then write them and `commit`.
     pub fn pending(&self) -> PageWrite {
         let st = self.state.lock().unwrap();
-        let pages = (self.bytes / PAGE as u64) as usize;
+        let pages = (self.bytes() / PAGE as u64) as usize;
         let mut out = Vec::new();
         for p in 0..pages {
             let lo = p * PAGE * 8;

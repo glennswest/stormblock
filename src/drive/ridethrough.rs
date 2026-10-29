@@ -214,6 +214,9 @@ impl BlockDevice for RideThrough {
     fn capacity_bytes(&self) -> u64 {
         self.inner.capacity_bytes()
     }
+    async fn refresh_capacity(&self) -> DriveResult<u64> {
+        self.inner.refresh_capacity().await
+    }
     fn block_size(&self) -> u32 {
         self.inner.block_size()
     }

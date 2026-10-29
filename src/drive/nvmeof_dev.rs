@@ -871,7 +871,7 @@ pub struct NvmeofDevice {
     /// Writes hold it shared; a read-modify-write exclusively.
     rmw: tokio::sync::RwLock<()>,
     spec: NvmeTcpSpec,
-    capacity: u64,
+    capacity: std::sync::atomic::AtomicU64,
     block_size: u32,
     /// Bytes one command carries: the target's MDTS and ours (#407).
     max_transfer: usize,
@@ -1002,7 +1002,7 @@ impl NvmeofDevice {
             next: AtomicU32::new(0),
             rmw: tokio::sync::RwLock::new(()),
             spec: spec.clone(),
-            capacity,
+            capacity: std::sync::atomic::AtomicU64::new(capacity),
             block_size,
             max_transfer,
             id,
@@ -1088,8 +1088,9 @@ impl NvmeofDevice {
     fn cover(&self, offset: u64, len: usize) -> DriveResult<(u64, u64)> {
         let bs = self.block_size as u64;
         let end = offset + len as u64;
-        if end > self.capacity {
-            return Err(DriveError::OutOfRange { offset, len: len as u64, capacity: self.capacity });
+        let capacity = self.capacity_bytes();
+        if end > capacity {
+            return Err(DriveError::OutOfRange { offset, len: len as u64, capacity });
         }
         Ok((offset / bs * bs, end.div_ceil(bs) * bs))
     }
@@ -1139,12 +1140,9 @@ impl NvmeofDevice {
                 block_size: self.block_size,
             });
         }
-        if offset + len as u64 > self.capacity {
-            return Err(DriveError::OutOfRange {
-                offset,
-                len: len as u64,
-                capacity: self.capacity,
-            });
+        let capacity = self.capacity_bytes();
+        if offset + len as u64 > capacity {
+            return Err(DriveError::OutOfRange { offset, len: len as u64, capacity });
         }
         Ok(())
     }
@@ -1157,7 +1155,44 @@ impl BlockDevice for NvmeofDevice {
     }
 
     fn capacity_bytes(&self) -> u64 {
-        self.capacity
+        self.capacity.load(Ordering::SeqCst)
+    }
+
+    /// Identify the namespace again (#318): its size is read once at
+    /// connect, so a namespace grown on its own engine stays its old size
+    /// here until asked. On an admin connection of its own, by the first
+    /// path that answers. A smaller answer is taken too: the device says
+    /// what it is, and the caller decides what that means.
+    async fn refresh_capacity(&self) -> DriveResult<u64> {
+        let mut last = None;
+        for p in &self.paths {
+            let mut admin = match Conn::establish(&self.spec, &p.addr, p.source.as_ref(), 0).await {
+                Ok(c) => c,
+                Err(e) => {
+                    last = Some(e);
+                    continue;
+                }
+            };
+            let ns = bounded("identify", admin.identify(CNS_NAMESPACE, self.spec.nsid)).await.map_err(DriveError::Io)?;
+            let (nsze, bs) = decode_identify_ns(&ns).ok_or_else(|| {
+                DriveError::Other(anyhow::anyhow!("nsid {} on {}: unparseable Identify Namespace", self.spec.nsid, self.spec.nqn))
+            })?;
+            if bs != self.block_size {
+                return Err(DriveError::Other(anyhow::anyhow!(
+                    "nsid {} on {}: block size changed from {} to {bs}",
+                    self.spec.nsid,
+                    self.spec.nqn,
+                    self.block_size
+                )));
+            }
+            let size = nsze * bs as u64;
+            let was = self.capacity.swap(size, Ordering::SeqCst);
+            if was != size {
+                tracing::info!("NVMe-TCP initiator: {} is now {size} bytes (was {was})", self.id.path);
+            }
+            return Ok(size);
+        }
+        Err(DriveError::Io(last.unwrap_or_else(|| io::Error::other("no path to the target"))))
     }
 
     fn block_size(&self) -> u32 {

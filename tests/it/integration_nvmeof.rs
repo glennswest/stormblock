@@ -804,3 +804,30 @@ async fn a_pdu_out_of_place_or_short_ends_the_connection_with_a_c2h_term_req() {
     io.send_raw(&[0x02, 0, 24, 0, 24, 0, 0, 0].iter().copied().chain([0u8; 16]).collect::<Vec<_>>()).await.unwrap();
     assert!(io.read_raw_pdu().await.is_err(), "an H2CTermReq: closed, nothing sent");
 }
+
+/// A namespace grown on its own engine is its old size on an initiator until
+/// asked again (#318): `refresh_capacity` identifies it again, and I/O past
+/// the old end then goes through.
+#[tokio::test]
+async fn a_namespace_grown_on_its_engine_is_seen_once_identified_again() {
+    const MIB: u64 = 1 << 20;
+    let (_dir, vol, mut vm) = common::setup_raid1_volume(64 * MIB, 8 * MIB).await;
+    let (addr, server) = common::start_nvmeof_target(vol.clone(), default_nvmeof_config()).await;
+    let uri = format!("nvme-tcp://{addr}/{SUBSYSTEM_NQN}?nsid=1");
+    let dev = open_one_drive(&uri).await.unwrap();
+    assert_eq!(dev.capacity_bytes(), 8 * MIB);
+
+    let id = vm.find_volume("test-vol").await.unwrap();
+    vm.resize_volume(id, 24 * MIB).await.unwrap();
+    assert_eq!(vol.capacity_bytes(), 24 * MIB, "grown on its engine");
+    assert_eq!(dev.capacity_bytes(), 8 * MIB, "read once, at connect");
+    assert!(dev.write(20 * MIB, &[7u8; 4096]).await.is_err(), "past the size it knows");
+
+    assert_eq!(dev.refresh_capacity().await.unwrap(), 24 * MIB);
+    assert_eq!(dev.capacity_bytes(), 24 * MIB);
+    dev.write(20 * MIB, &[7u8; 4096]).await.unwrap();
+    let mut back = vec![0u8; 4096];
+    dev.read(20 * MIB, &mut back).await.unwrap();
+    assert!(back.iter().all(|&b| b == 7));
+    server.abort();
+}

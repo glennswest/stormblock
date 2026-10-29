@@ -251,3 +251,113 @@ async fn an_array_is_released_to_another_engine_with_nothing_written() {
         assert!(buf.iter().all(|&x| x == 70u8.wrapping_add(i as u8)), "extent {i}");
     }
 }
+
+/// A RAID-1 head grows after its legs grow (#318, stormstorage#73): refused
+/// while a leg has no room, then the array and its slab take it with a
+/// writer busy on a volume, the new room zeroed alike on both legs. A grow
+/// cut off after the superblocks (array grown, slab not) is the new size at
+/// the next assembly, and the next call grows the slab.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_array_grows_into_its_grown_legs_and_its_slab_follows() {
+    let dir = TempDir::new().unwrap();
+    let (state, base, c) = start(&dir).await;
+    let api = format!("{base}/api/v1");
+    let (a, apath) = open_drive(&c, &api, &dir, "leg-a.img").await;
+    let (b, bpath) = open_drive(&c, &api, &dir, "leg-b.img").await;
+    let (s, arr) = call(&c, reqwest::Method::POST, format!("{api}/arrays"), Some(json!({ "level": "Raid1", "drive_uuids": [a, b] }))).await;
+    assert_eq!(s, 201, "{arr}");
+    let array = arr["id"].as_str().unwrap().to_string();
+    let (s, pv) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "dist-vol", "size": "8M", "array_id": array }))).await;
+    assert!(s == 200 || s == 201, "{pv}");
+    let pv = pv["id"].as_str().unwrap().to_string();
+    fill(&state, &pv, 8, 30).await;
+    let grow = format!("{api}/arrays/{array}/grow");
+
+    // Nothing grown: refused, each member named with its size.
+    let (s, e) = call(&c, reqwest::Method::POST, grow.clone(), None).await;
+    assert_eq!(s, 409, "{e}");
+    assert!(e.to_string().contains("leg-a.img") && e.to_string().contains("leg-b.img"), "{e}");
+    // One leg grown: the smaller still decides.
+    std::fs::OpenOptions::new().write(true).open(&apath).unwrap().set_len(128 * MIB).unwrap();
+    let (s, e) = call(&c, reqwest::Method::POST, grow.clone(), None).await;
+    assert_eq!(s, 409, "{e}");
+
+    // Both grown, a writer busy meanwhile.
+    std::fs::OpenOptions::new().write(true).open(&bpath).unwrap().set_len(128 * MIB).unwrap();
+    let v = state.volume_manager.lock().await.get_volume(&VolumeId(pv.parse().unwrap())).unwrap();
+    let writer = {
+        let v = v.clone();
+        tokio::spawn(async move {
+            for round in 0..200u64 {
+                v.write((round % 8) * MIB, &vec![30u8.wrapping_add((round % 8) as u8); MIB as usize]).await.unwrap();
+            }
+            v.flush().await.unwrap();
+        })
+    };
+    let (s, g) = call(&c, reqwest::Method::POST, grow.clone(), None).await;
+    writer.await.unwrap();
+    assert_eq!(s, 200, "{g}");
+    assert_eq!(g["grown"], true);
+    assert_eq!(g["data_size"].as_u64().unwrap(), 127 * MIB, "{g}");
+    assert_eq!(g["slab_grown"], true, "{g}");
+    assert!(g["slab_short"].is_null(), "{g}");
+    let (before, after) = (g["slab_slots_before"].as_u64().unwrap(), g["slab_slots"].as_u64().unwrap());
+    assert!(after >= before + 60, "{g}");
+    let (_, got) = call(&c, reqwest::Method::GET, format!("{api}/arrays/{array}"), None).await;
+    assert_eq!(got["capacity_bytes"].as_u64().unwrap(), 127 * MIB, "{got:#}");
+
+    // The old data, and room for a volume the old array could not hold.
+    let mut buf = vec![0u8; MIB as usize];
+    for i in 0..8u64 {
+        v.read(i * MIB, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&x| x == 30u8.wrapping_add(i as u8)), "extent {i}");
+    }
+    let (s, big) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "big", "size": "90M", "array_id": array }))).await;
+    assert!(s == 200 || s == 201, "{big}");
+    let big = big["id"].as_str().unwrap().to_string();
+    fill(&state, &big, 90, 100).await;
+    let bv = state.volume_manager.lock().await.get_volume(&VolumeId(big.parse().unwrap())).unwrap();
+    bv.flush().await.unwrap();
+    // The legs agree on every byte of data, the new room included.
+    let (fa, fb) = (std::fs::read(&apath).unwrap(), std::fs::read(&bpath).unwrap());
+    assert!(fa[MIB as usize..] == fb[MIB as usize..], "the legs differ past the superblocks");
+
+    // Grown again, cut off after the superblocks: the array, not the slab.
+    std::fs::OpenOptions::new().write(true).open(&apath).unwrap().set_len(192 * MIB).unwrap();
+    std::fs::OpenOptions::new().write(true).open(&bpath).unwrap().set_len(192 * MIB).unwrap();
+    let ra = state.arrays.read().await.get(&stormblock::raid::RaidArrayId(array.parse().unwrap())).unwrap().array.clone();
+    let rep = ra.grow().await.unwrap();
+    assert!(rep.grown && rep.data_size == 191 * MIB, "{rep:?}");
+    drop(ra);
+    state.volume_manager.lock().await.persist().await;
+    let (s, r) = call(&c, reqwest::Method::POST, format!("{api}/arrays/{array}/release"), None).await;
+    assert_eq!(s, 200, "{r}");
+
+    // The next engine assembles it at the new size; the call grows the slab.
+    let dir2 = TempDir::new().unwrap();
+    let (state2, base2, c2) = start(&dir2).await;
+    let api2 = format!("{base2}/api/v1");
+    let mut uuids = Vec::new();
+    for p in [&apath, &bpath] {
+        let (s, d) = call(&c2, reqwest::Method::POST, format!("{api2}/drives"), Some(json!({ "path": p }))).await;
+        assert!(s == 200 || s == 201, "{d}");
+        uuids.push(d["uuid"].as_str().unwrap().to_string());
+    }
+    let (s, rep) = call(&c2, reqwest::Method::POST, format!("{api2}/arrays/assemble"), Some(json!({ "drive_uuids": uuids }))).await;
+    assert_eq!(s, 200, "{rep}");
+    let (_, got) = call(&c2, reqwest::Method::GET, format!("{api2}/arrays/{array}"), None).await;
+    assert_eq!(got["capacity_bytes"].as_u64().unwrap(), 191 * MIB, "the superblocks say the new size: {got:#}");
+    let (s, g) = call(&c2, reqwest::Method::POST, format!("{api2}/arrays/{array}/grow"), None).await;
+    assert_eq!(s, 200, "{g}");
+    assert_eq!((g["grown"].as_bool(), g["slab_grown"].as_bool()), (Some(false), Some(true)), "{g}");
+    let (s, e) = call(&c2, reqwest::Method::POST, format!("{api2}/arrays/{array}/grow"), None).await;
+    assert_eq!(s, 409, "nothing left to grow: {e}");
+    for (name, extents, seed) in [("dist-vol", 8u64, 30u8), ("big", 90, 100)] {
+        let id = state2.volume_manager.lock().await.find_volume(name).await.unwrap();
+        let v = state2.volume_manager.lock().await.get_volume(&id).unwrap();
+        for i in 0..extents {
+            v.read(i * MIB, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|&x| x == seed.wrapping_add(i as u8)), "{name} extent {i}");
+        }
+    }
+}

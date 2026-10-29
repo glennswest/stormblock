@@ -1411,7 +1411,9 @@ impl VolumeManager {
             .with_role(SlabRole::Data)
             .with_auto_metadata(cap);
         if dedicated {
-            fmt = fmt.dedicated();
+            // Room in the table for the array to grow fourfold in place, as
+            // a node's data slab has (#318): a leg expanded under the head.
+            fmt = fmt.dedicated().with_growth(cap.saturating_mul(4));
         }
         let slab = Slab::format_with(device, fmt)
             .await
@@ -1429,6 +1431,37 @@ impl VolumeManager {
         );
         self.persist().await;
         Ok(slab_id)
+    }
+
+    /// Grow an array's slab into its device's capacity, after the array grew
+    /// (#318): `(slots before, slots after, why it stopped short)`. A slab
+    /// formatted with no room in its slot table (a dedicated slab from before
+    /// #318) grows as far as its table reaches, and says so.
+    pub async fn grow_array_slab(&self, array_id: &RaidArrayId) -> Result<(u64, u64, Option<String>), VolumeError> {
+        let Some(slab_id) = self.array_slabs.get(array_id).copied() else {
+            return Err(VolumeError::AllocatorError(format!("array {array_id} has no slab here")));
+        };
+        let mut reg = self.registry.write().await;
+        let Some(slab) = reg.get_mut(&slab_id) else {
+            return Err(VolumeError::AllocatorError(format!("array {array_id}'s slab {} is not registered", slab_id.0)));
+        };
+        let before = slab.total_slots();
+        slab.grow()
+            .await
+            .map_err(|e| VolumeError::AllocatorError(format!("growing slab {} on array {array_id}: {e}", slab_id.0)))?;
+        let after = slab.total_slots();
+        let fits = slab.device().capacity_bytes().saturating_sub(slab.data_offset()) / slab.slot_size();
+        let short = (fits > after).then(|| {
+            format!(
+                "the slab's slot table has room for {} slots and the array holds {fits}: \
+                 formatted with no room to grow (before #318); move its volumes to a new array to use the rest",
+                slab.table_capacity()
+            )
+        });
+        if after > before {
+            tracing::info!("array {array_id}: slab {} grown from {before} to {after} slots", slab_id.0);
+        }
+        Ok((before, after, short))
     }
 
     /// Forget a flow-over's source slab once nothing is left on it (#358).
