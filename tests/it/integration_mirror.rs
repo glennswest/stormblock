@@ -247,7 +247,8 @@ async fn a_target_that_fails_never_reaches_the_writer_and_a_restart_says_failed(
     let (s, _) = call(&c, reqwest::Method::POST, format!("{api}/volumes/{id}/mirror"), Some(json!({"target": uri}))).await;
     assert_eq!(s, 202);
     let h = state.volume_manager.lock().await.get_volume_handle(&VolumeId(id.parse().unwrap())).unwrap();
-    h.stop_mirror().await.expect("held"); // what a restart does to the live half
+    let (_m, flushed) = h.stop_mirror().await.expect("held"); // what a restart does to the live half
+    flushed.unwrap();
     let (_, v) = call(&c, reqwest::Method::GET, format!("{api}/volumes/{id}"), None).await;
     assert_eq!(v["mirror"]["state"], "failed", "{v}");
     assert!(v["mirror"]["message"].as_str().unwrap().contains("restarted"), "{v}");
