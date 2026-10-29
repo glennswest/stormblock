@@ -410,6 +410,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if matches!(*method, Method::PUT | Method::DELETE) && p == "/api/v1/forge" {
         return true;
     }
+    // Back to the node's default forge (#290): turns it on, as a PUT does.
+    if *method == Method::POST && p == "/api/v1/forge/default" {
+        return true;
+    }
     // A release erase (#291): everything the node holds for its cluster,
     // erased at the next boot.
     if matches!(*method, Method::POST | Method::DELETE) && p == "/api/v1/release" {
@@ -1975,5 +1979,8 @@ mod tests {
                 assert!(as_(m, Some("a")));
             }
         }
+        let p = "/api/v1/forge/default";
+        assert!(decide(&auth, &Method::POST, p, None, Some("t")).is_err(), "#290: the api token is not enough");
+        assert!(decide(&auth, &Method::POST, p, None, Some("a")).is_ok());
     }
 }

@@ -75,7 +75,8 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
 - arrays: create, delete, release to another engine (#296), and members
   added, failed or replaced;
 - spares;
-- forge on and off (`PUT`/`DELETE /api/v1/forge`), and forge's trust
+- forge on and off (`PUT`/`DELETE /api/v1/forge`), back to the node's
+  default (`POST /api/v1/forge/default`, #290), and forge's trust
   (`PUT`/`DELETE /api/v1/forge/trust`, #381);
 - a release erase asked or cancelled (`POST`/`DELETE /api/v1/release`, #291);
 - the pallet verbs that write a partition table (`gpt`, `convert`, `prune`,

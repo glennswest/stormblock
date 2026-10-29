@@ -64,6 +64,9 @@ pub struct Forge {
     pub source: Option<Source>,
     /// Off because `forge.json` says so (#287).
     pub off: bool,
+    /// What this engine serves with nothing kept, as `restore` was given it:
+    /// a node's [`default_settings`], `None` for the daemon (#290).
+    default: Option<NvmeofExportConfig>,
     /// A reactor for a target started when the node has none of its own to
     /// lend (no serving layer).
     reactor: Option<Arc<ReactorPool>>,
@@ -325,10 +328,67 @@ pub async fn stop(state: &Arc<AppState>) -> Result<usize, ForgeError> {
     Ok(live)
 }
 
+/// Back to this engine's default (#290, stormcluster#16): `forge.json`
+/// forgotten, and what the engine serves with nothing kept served now — a
+/// node's [`default_settings`] (on, `from: default`), the daemon's nothing
+/// (off). So a caller turning a node's forge back on needs no copy of the
+/// default, and a later engine with another default applies its own. A
+/// target the configuration set up is refused; a repeat changes nothing.
+pub async fn to_default(state: &Arc<AppState>) -> Result<(), ForgeError> {
+    let (source, default) = {
+        let f = state.forge.lock().await;
+        (f.source, f.default.clone())
+    };
+    if source == Some(Source::Config)
+        || (source.is_none() && state.nvmeof_target.read().await.is_some())
+    {
+        return Err(ForgeError::Configured);
+    }
+    match default {
+        Some(d) => {
+            let running = state.nvmeof_settings();
+            let same = state.nvmeof_target.read().await.is_some()
+                && running.as_ref().is_some_and(|r| r.listen_addr == d.listen_addr && r.nqn == d.nqn
+                    && r.allow_any_host == d.allow_any_host && r.allowed_hosts == d.allowed_hosts
+                    && r.require_dhchap == d.require_dhchap && r.boothost_host_nqn == d.boothost_host_nqn);
+            if same {
+                // Serving the default already (from it, or from a kept copy
+                // of it): nothing to restart, only who it is from.
+                let mut f = state.forge.lock().await;
+                f.source = Some(Source::Default);
+                f.off = false;
+            } else {
+                // Started before the file goes: a default that cannot be
+                // served leaves the node as it was.
+                start_as(state, d, false, Source::Default).await?;
+            }
+        }
+        None => {
+            let mut f = state.forge.lock().await;
+            if let Some(t) = state.nvmeof_target.write().await.take() {
+                t.stop_accepting();
+            }
+            *state.nvmeof_settings.write().unwrap() = state.config.nvmeof.clone();
+            f.source = None;
+            f.off = false;
+        }
+    }
+    if let Some(p) = path(state) {
+        match std::fs::remove_file(&p) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(ForgeError::Io(format!("removing {}: {e}", p.display()))),
+        }
+    }
+    tracing::info!("forge mode: back to this engine's default ({FORGE_FILE} forgotten)");
+    Ok(())
+}
+
 /// At start, when nothing configured a target of its own: serve the forge
 /// this node keeps; with nothing kept, serve `default` (a node's, #287;
 /// `None` for the daemon, which stays off).
 pub async fn restore(state: &Arc<AppState>, default: Option<NvmeofExportConfig>) {
+    state.forge.lock().await.default = default.clone();
     let (settings, source) = match load(state) {
         Some(Persisted::On(s)) => (s, Source::Api),
         Some(Persisted::Off) => {

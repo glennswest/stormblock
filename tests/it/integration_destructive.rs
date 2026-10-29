@@ -171,6 +171,7 @@ async fn the_node_token_keeps_the_ordinary_verbs_and_only_those() {
         (M::POST, format!("/arrays/{id}/release"), None),
         (M::PUT, "/forge".to_string(), Some(json!({}))),
         (M::DELETE, "/forge".to_string(), None),
+        (M::POST, "/forge/default".to_string(), None),
         (M::POST, "/spares".to_string(), Some(json!({}))),
         (M::POST, "/pallets/gpt".to_string(), Some(json!({}))),
         (M::POST, "/images/build".to_string(), Some(json!({ "out": "/nonexistent/x.img" }))),

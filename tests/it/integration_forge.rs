@@ -380,3 +380,110 @@ async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writ
     assert_eq!(r.status(), 200);
     assert!(claim().await["forge_trust"].is_null());
 }
+
+async fn forge_state(c: &reqwest::Client, base: &str) -> serde_json::Value {
+    c.get(format!("{base}/api/v1/forge")).send().await.unwrap().json().await.unwrap()
+}
+
+async fn back_to_default(c: &reqwest::Client, base: &str) -> (u16, serde_json::Value) {
+    let r = c.post(format!("{base}/api/v1/forge/default")).send().await.unwrap();
+    (r.status().as_u16(), r.json().await.unwrap_or_default())
+}
+
+/// #290 (stormcluster#16): back to the node's default with no copy of it.
+/// Off → default serves it (nothing written, the next start too); a PUT copy
+/// → default forgets it; a repeat changes nothing; the daemon's default is
+/// off; a configured target is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_goes_back_to_its_default_forge_without_a_copy_of_it() {
+    use stormblock::mgmt::forge;
+    let dir = TempDir::new().unwrap();
+    let c = reqwest::Client::new();
+    let file = dir.path().join("engine/forge.json");
+    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+
+    let (state, base, _) = engine(&dir, None).await;
+    let mut d = forge::default_settings(&state);
+    d.listen_addr = addr.to_string();
+    forge::restore(&state, Some(d.clone())).await;
+    // A cluster member: off, kept.
+    assert!(c.delete(format!("{base}/api/v1/forge")).send().await.unwrap().status().is_success());
+    assert!(file.exists());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // An SNO again: back to the default, nothing written down.
+    let (st, s) = back_to_default(&c, &base).await;
+    assert_eq!(st, 200, "{s}");
+    assert_eq!((s["state"].as_str(), s["from"].as_str(), s["nqn"].as_str()), (Some("on"), Some("default"), Some(d.nqn.as_str())), "{s}");
+    assert!(!file.exists(), "forge.json forgotten");
+    assert!(listening(addr).await);
+    // A repeat changes nothing.
+    let (st, s) = back_to_default(&c, &base).await;
+    assert_eq!((st, s["state"].as_str(), s["from"].as_str()), (200, Some("on"), Some("default")), "{s}");
+    assert!(!file.exists() && listening(addr).await);
+
+    // The next start serves the default: nothing kept said otherwise.
+    state.nvmeof_target.write().await.take().unwrap().stop_accepting();
+    drop(state);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let (state, base, _) = engine(&dir, None).await;
+    forge::restore(&state, Some(d.clone())).await;
+    let s = forge_state(&c, &base).await;
+    assert_eq!((s["state"].as_str(), s["from"].as_str()), (Some("on"), Some("default")), "{s}");
+
+    // stormcluster's interim copy of the default: kept as persisted …
+    let r = c.put(format!("{base}/api/v1/forge")).json(&d).send().await.unwrap();
+    assert!(r.status().is_success());
+    assert_eq!(forge_state(&c, &base).await["from"], "persisted");
+    assert!(file.exists());
+    // … forgotten by default, with no restart of the target it is already.
+    let (st, s) = back_to_default(&c, &base).await;
+    assert_eq!((st, s["from"].as_str()), (200, Some("default")), "{s}");
+    assert!(!file.exists());
+    // Other settings kept → default serves the default again.
+    let other: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    let r = c
+        .put(format!("{base}/api/v1/forge"))
+        .json(&serde_json::json!({"listen_addr": other.to_string(), "nqn": "nqn.2026-10.test:other"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    let (st, s) = back_to_default(&c, &base).await;
+    assert_eq!((st, s["nqn"].as_str(), s["listen_addr"].as_str()), (200, Some(d.nqn.as_str()), Some(addr.to_string().as_str())), "{s}");
+    assert!(listening(addr).await);
+    state.nvmeof_target.write().await.take().unwrap().stop_accepting();
+    drop(state);
+
+    // The daemon: its default is off; a kept forge is forgotten and stopped.
+    let dir2 = TempDir::new().unwrap();
+    let (state, base, _) = engine(&dir2, None).await;
+    forge::restore(&state, None).await;
+    let r = c
+        .put(format!("{base}/api/v1/forge"))
+        .json(&serde_json::json!({"listen_addr": other.to_string(), "nqn": "nqn.2026-10.test:daemon"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    let (st, s) = back_to_default(&c, &base).await;
+    assert_eq!((st, s["state"].as_str(), s["from"].as_str()), (200, Some("off"), Some("default")), "{s}");
+    assert!(!dir2.path().join("engine/forge.json").exists());
+    assert!(state.nvmeof_target.read().await.is_none());
+    drop(state);
+
+    // A configured target is not the API's.
+    let dir3 = TempDir::new().unwrap();
+    let (state, base, _) = engine(&dir3, None).await;
+    let mut cfg = d.clone();
+    cfg.listen_addr = format!("127.0.0.1:{}", free_port());
+    let target = forge::target_from(&cfg, &state.config).unwrap();
+    let reactor = Arc::new(stormblock::target::reactor::ReactorPool::new(
+        &stormblock::target::reactor::ReactorConfig { core_count: 1, pin_cores: false },
+    ));
+    forge::serve(&state, &reactor, Arc::new(target)).await.unwrap();
+    forge::mark_configured(&state).await;
+    let (st, _) = back_to_default(&c, &base).await;
+    assert_eq!(st, 409);
+    assert!(state.nvmeof_target.read().await.is_some());
+}

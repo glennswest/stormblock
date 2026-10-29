@@ -4,7 +4,8 @@
 //! host policy), starts the shared NVMe/TCP target live and keeps them, so
 //! every later start of the engine serves it again. `DELETE` turns it off and
 //! keeps it off (a node is a forge by default, #287): no new connections, the
-//! ones being served finish. `GET` reports `state` (on/off) and `from`
+//! ones being served finish. `POST /default` forgets both and goes back to
+//! the engine's default (#290). `GET` reports `state` (on/off) and `from`
 //! (default/persisted/config). Not for a target the command line or
 //! `--config` set up: that is answered `409`.
 
@@ -23,6 +24,7 @@ use crate::mgmt::AppState;
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(status).put(enable).delete(disable))
+        .route("/default", axum::routing::post(to_default))
         .route("/trust", get(trust_status).put(trust_set).delete(trust_forget))
         .with_state(state)
 }
@@ -84,6 +86,15 @@ async fn trust_forget(State(state): State<Arc<AppState>>) -> Response {
         forge_trust::remove_dir(&dir);
     }
     Json(forge_trust::status(&state)).into_response()
+}
+
+/// `POST /api/v1/forge/default` (#290): forget `forge.json` and serve this
+/// engine's default (a node: on, `from: default`; the daemon: off). Admin.
+async fn to_default(State(state): State<Arc<AppState>>) -> Response {
+    match forge::to_default(&state).await {
+        Ok(()) => Json(forge::status(&state).await).into_response(),
+        Err(e) => error(e),
+    }
 }
 
 async fn disable(State(state): State<Arc<AppState>>) -> Response {
