@@ -78,7 +78,7 @@ pub fn elems_sqe(char_fd: RawFd, op: u32, q_id: u16, elems: &[u8], user_data: u6
     let n = (elems.len() / ELEM_BYTES) as u16;
     let sqe = opcode::UringCmd80::new(types::Fd(char_fd), op)
         .cmd(batch_cmd(q_id, UBLK_BATCH_F_HAS_BUF_ADDR, n, ELEM_BYTES as u8))
-        .addr(elems.as_ptr() as u64)
+        .addr(Some(elems.as_ptr() as u64))
         .build()
         .user_data(user_data);
     patch(sqe, elems.len() as u32, 0, None)
