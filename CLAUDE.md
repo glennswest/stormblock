@@ -1824,7 +1824,7 @@ destination; API `placement` on create, `layout` on responses.
       1249/1249, the affinity, drain, rebalance and metav2 tests); in the
       12.23 stage (4d79108) and golden-stormblock-0a9fe2d97cf9; closed
 
-### Erasure coding k+m (2026-10-11, #159, P3) — MERGING (owner 2026-10-28: "Hardware ones and multi-node ones should be working"; master: merge and ship)
+### Erasure coding k+m (2026-10-11, #159, P3) — DONE (v23.4.0), closed; turning it on is the release side's C
 
 Owner (2026-10-13): 1(a) M 3–4, K+M ≤ 24, 8+3 default, 16+4 at scale;
 2(a) RAID-6's P+Q stays; 3(b) readers refuse unknown schemes first, EC once
@@ -1834,7 +1834,9 @@ default: `[redundancy] erasure_coding`) built on wip/159-ec (cfa6990, check.sh
 ALL PASS 1263/1263 there); rebased onto main as **wip/159-ec-v2** (the only
 conflicts: config.rs beside #393's `[images]`, the changelog). Turning EC on
 per node is the release side's decision C (publish 12.3x, retire older).
-- [ ] check.sh on wip/159-ec-v2; main fast-forwarded; release; stage; close
+- [x] check.sh on wip/159-ec-v2 at 3f525b8b ALL PASS (1302/1302); main
+      fast-forwarded; v23.4.0 (`stormblock 23.4.0` from a `--locked` build);
+      stage requested (bdd94cdbc818); closed
 
 ### StormFS registration names its target (2026-10-11, #170, P3) — DONE (merged abdf3cf; in golden-stormblock-12891c0025b2 and later), closed 2026-10-17
 
