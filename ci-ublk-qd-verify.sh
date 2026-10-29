@@ -493,10 +493,11 @@ taken() {
     h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
     echo "LOG taken health: $(echo "$h" | grep -o '"status":"[a-z]*"' | head -1) $(echo "$h" | grep -o '"ublk_lost":\[[^]]*\]')"
     case "$h" in
-    '{"status":"degraded"'*'"ublk_lost":[{"ublk":"'"$d"'"'*'"how":"deleted"'*) r taken-reported PASS ;;
+    '{"status":"degraded"'*'"ublk_lost":[{"ublk":"'"$d"'"'*'"how":"'[sd]*) r taken-reported PASS ;;
     *) r taken-reported FAIL ;;
     esac
-    grep -q "$d (volume:.*) was deleted by another process" /run/engine-$mode.log && r taken-logged PASS || r taken-logged FAIL
+    # Noticed at the stop a delete starts with: `stopped` or `deleted`.
+    grep -qE "$d \(volume:.*\) was (stopped|deleted) by another process" /run/engine-$mode.log && r taken-logged PASS || r taken-logged FAIL
     d2=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$v/attach -d '{"transport":"ublk"}' \
         | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
     echo "LOG taken: attached again as $d2"

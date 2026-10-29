@@ -1811,7 +1811,9 @@ pub struct Lost {
     /// Where it was mounted, when it was.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mount: Option<String>,
-    /// `deleted` (its char device is gone) or `stopped`.
+    /// `deleted` (its char device was gone when it was noticed) or
+    /// `stopped`; a delete stops the device first, so it is most often
+    /// noticed as `stopped`.
     pub how: &'static str,
     /// Unix seconds.
     pub since: u64,
