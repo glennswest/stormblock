@@ -123,6 +123,25 @@ const UBLK_F_UPDATE_SIZE: u64 = 1 << 10;
 /// Batch I/O (#505, Linux 7.0): PREP/FETCH/COMMIT_IO_CMDS in place of a
 /// command per request. Exclusive with PER_IO_DAEMON (the kernel drops it).
 const UBLK_F_BATCH_IO: u64 = 1 << 15;
+/// Each (queue, tag) may have a daemon task of its own (#505): a queue's tags
+/// served by several threads. 7.2 grants it on every device unasked; batch
+/// I/O drops it.
+const UBLK_F_PER_IO_DAEMON: u64 = 1 << 13;
+
+/// Threads serving one queue when the device allows a daemon per tag and
+/// does not use batch I/O (#505): `STORMBLOCK_UBLK_QUEUE_THREADS`, 1–8,
+/// default 1 (one thread a queue, as before).
+fn threads_per_queue(dev_flags: u64, depth: u16) -> u16 {
+    if dev_flags & UBLK_F_PER_IO_DAEMON == 0 || dev_flags & UBLK_F_BATCH_IO != 0 {
+        return 1;
+    }
+    std::env::var("STORMBLOCK_UBLK_QUEUE_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(1)
+        .clamp(1, 8)
+        .min(depth.max(1))
+}
 
 /// Whether a device created now asks for batch I/O (#505). A device in batch
 /// mode can only be served in batch mode, so one that is handed to another
@@ -976,11 +995,20 @@ impl UblkServer {
         // --- Spawn per-queue I/O worker threads ---
         // Workers must submit FETCH_REQ before START_DEV (kernel checks
         // nr_queues_ready == nr_hw_queues). Use a barrier for sync.
-        let startup_barrier = Arc::new(std::sync::Barrier::new(nr_queues as usize + 1));
+        let per_queue = threads_per_queue(dev_flags, queue_depth);
+        if per_queue > 1 {
+            tracing::info!("ublk: /dev/ublkb{assigned_id}: {per_queue} threads a queue, the tags split between them (PER_IO_DAEMON, #505)");
+        }
+        let startup_barrier = Arc::new(std::sync::Barrier::new(nr_queues as usize * per_queue as usize + 1));
         self.running.store(true, Ordering::SeqCst);
 
-        let mut workers = Vec::with_capacity(nr_queues as usize);
+        let mut workers = Vec::with_capacity(nr_queues as usize * per_queue as usize);
         for q in 0..nr_queues {
+          let track = QueueTrack::new(assigned_id, q, self.device.id().path.clone(), queue_depth);
+          for part in 0..per_queue {
+            // This thread's tags: an equal share of the queue's.
+            let tags = (queue_depth as u32 * part as u32 / per_queue as u32) as u16
+                ..(queue_depth as u32 * (part as u32 + 1) / per_queue as u32) as u16;
             let device = self.device.clone();
             let running = self.running.clone();
             let raw_char_fd = char_fd;
@@ -989,15 +1017,15 @@ impl UblkServer {
             let max_io = DEFAULT_MAX_IO_BYTES as usize;
             let rt_handle = tokio::runtime::Handle::current();
             let barrier = startup_barrier.clone();
-            let track = QueueTrack::new(assigned_id, q, self.device.id().path.clone(), queue_depth);
+            let track = track.clone();
 
             let handle = std::thread::Builder::new()
-                .name(format!("ublk-q{}", q))
+                .name(if per_queue > 1 { format!("ublk-q{q}.{part}") } else { format!("ublk-q{}", q) })
                 .spawn(move || {
                     let desc_base = desc_base;
                     queue_worker(
                         q, raw_char_fd, desc_base.0, depth, max_io,
-                        device, running, rt_handle, barrier, track, batch,
+                        device, running, rt_handle, barrier, track, batch, tags,
                     );
                 })
                 .map_err(|e| DriveError::Other(anyhow::anyhow!(
@@ -1005,6 +1033,7 @@ impl UblkServer {
                 )))?;
 
             workers.push(handle);
+          }
         }
 
         // Wait for all workers to submit their initial FETCH_REQs
@@ -1920,6 +1949,7 @@ fn queue_worker(
     startup_barrier: Arc<std::sync::Barrier>,
     track: Arc<QueueTrack>,
     batch: bool,
+    tags: std::ops::Range<u16>,
 ) {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -1961,8 +1991,10 @@ fn queue_worker(
     // Pre-allocate I/O buffers (one per tag). A tag's buffer moves into the
     // task serving it and comes back with the result; its heap allocation,
     // the address the kernel was given, never changes.
+    // Indexed by tag; only this thread's tags have one (#505: a queue's tags
+    // may be split between threads).
     let mut bufs: Vec<Vec<u8>> = (0..queue_depth)
-        .map(|_| vec![0u8; max_io_bytes])
+        .map(|t| if tags.contains(&t) { vec![0u8; max_io_bytes] } else { Vec::new() })
         .collect();
 
     // Batch I/O (#505): every tag prepared with its buffer in one command
@@ -2004,8 +2036,8 @@ fn queue_worker(
         }
         fetch = Some(fr);
     } else {
-        // Submit initial FETCH_REQ for all tags — registers this queue with kernel
-        for tag in 0..queue_depth {
+        // Submit initial FETCH_REQ for this thread's tags — registers them with the kernel
+        for tag in tags.clone() {
             if submit_io_fetch(&mut ring, char_fd, queue_id, tag, &bufs[tag as usize]).is_err() {
                 tracing::error!("ublk queue {}: initial FETCH_REQ failed for tag {}", queue_id, tag);
                 startup_barrier.wait();

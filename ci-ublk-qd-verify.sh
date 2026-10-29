@@ -145,6 +145,8 @@ EOT
     # #505: the engine as before it: plain io_uring rings (no SINGLE_ISSUER +
     # DEFER_TASKRUN) and a command per request (no batch I/O), served at once.
     if [ "$mode" = plain ]; then export STORMBLOCK_URING_PLAIN=1 STORMBLOCK_UBLK_BATCH=0; else unset STORMBLOCK_URING_PLAIN STORMBLOCK_UBLK_BATCH; fi
+    # #505: no batch I/O, each queue's tags served by four threads (PER_IO_DAEMON).
+    if [ "$mode" = split ]; then export STORMBLOCK_UBLK_BATCH=0 STORMBLOCK_UBLK_QUEUE_THREADS=4; else unset STORMBLOCK_UBLK_QUEUE_THREADS; fi
     RUST_LOG=stormblock=info stormblock --config /run/sb$disk.toml --data-dir /run/sb$disk \
         --no-iscsi > /run/engine-$mode.log 2>&1 &
     pid=$!
@@ -446,6 +448,10 @@ features() {
     concurrent:*'"offered":['*'"used":['*'BATCH_IO'*'"rings_tuned":'[1-9]*) r features-tuned PASS ;;
     plain:*'"used":['*'BATCH_IO'*) r features-plain "FAIL (batch I/O used)" ;;
     plain:*'"offered":['*'"rings_tuned":0,"rings_plain":'[1-9]*) r features-plain PASS ;;
+    split:*'"used":['*'BATCH_IO'*) r features-split "FAIL (batch I/O used)" ;;
+    split:*'"rings_tuned":'[4-9]*|split:*'"rings_tuned":'[1-9][0-9]*)
+        grep -q "4 threads a queue" /run/engine-$mode.log && r features-split PASS \
+            || r features-split "FAIL (no split queues in the log)" ;;
     *) r features-$mode "FAIL" ;;
     esac
 }
@@ -537,12 +543,13 @@ unanswered() {
 run serial vda 9091
 run concurrent vdb 9092
 run plain vdc 9093
+run split vdd 9094
 echo "GUEST done"
 poweroff -f
 EOF
 chmod +x "$I/init"
 (cd "$I" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$W/initrd.gz"
-truncate -s 1G "$W/a.img" "$W/b.img" "$W/c.img"
+truncate -s 1G "$W/a.img" "$W/b.img" "$W/c.img" "$W/d.img"
 
 say "boot $KERNEL in QEMU"
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
@@ -551,7 +558,8 @@ timeout 900 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
     -append "console=ttyS0 panic=-1 loglevel=4" \
     -drive file="$W/a.img",if=virtio,format=raw \
     -drive file="$W/b.img",if=virtio,format=raw \
-    -drive file="$W/c.img",if=virtio,format=raw > "$W/guest.log" 2>&1
+    -drive file="$W/c.img",if=virtio,format=raw \
+    -drive file="$W/d.img",if=virtio,format=raw > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG|STEP|STACK|PS|WATCHDOG)|ERROR|panick'
 
 t() { tr -d '\r' < "$W/guest.log" | awk -v m="$1" -v w="$2" '$1=="TIME" && $2==m && $3==w {print $4}'; }
@@ -559,11 +567,11 @@ SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
 SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
-echo "fast reads (#505): tuned rings + batch I/O $(t concurrent fast-reads) ms, engine CPU $(t concurrent fast-reads-cpu) ms; as before (plain, no batch) $(t plain fast-reads) ms, CPU $(t plain fast-reads-cpu) ms"
+echo "fast reads (#505): tuned rings + batch I/O $(t concurrent fast-reads) ms, engine CPU $(t concurrent fast-reads-cpu) ms; as before (plain, no batch) $(t plain fast-reads) ms, CPU $(t plain fast-reads-cpu) ms; no batch, 4 threads a queue $(t split fast-reads) ms, CPU $(t split fast-reads-cpu) ms"
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
-         parallel-attach attach-delete-race plain-round-trip features-tuned features-plain \
+         parallel-attach attach-delete-race plain-round-trip split-round-trip features-tuned features-plain features-split \
          mount-detach-refused mount-detach-mounted mount-detach-no-deleted-read mount-detach-after; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
