@@ -364,6 +364,30 @@ tests run on.
    open exclusively, as a mount is from its first moment, though it is in
    no mount table until it is made.
 
+## T10 protection information (#389)
+
+A drive formatted with PI type 1 (stormdrive formats shelf drives 4096 + PI1
+where they can, 512 + PI1 elsewhere) has the block layer's integrity profile
+`T10-DIF-TYPE1-CRC`: on every write the kernel generates each block's guard
+tag (a CRC of its data) and reference tag (its LBA), the HBA and the drive
+check them, and on every read they are checked again before the data reaches
+the engine. The engine needs nothing for that: it follows the drive's
+logical block (O_DIRECT alignment, the slab, the GPT at the drive's own LBA),
+and volumes are 4096, so a 4Kn drive takes every request whole with no
+read-modify-write and a quarter of the commands of a 512 one. Checked in
+QEMU on scsi_debug PI drives at 4096 and at 512 (`ci-pi-verify.sh`).
+
+**How it fits with the engine's own checks.** The engine keeps **no
+per-block checksums**: a scrub compares mirror legs and parity (#160), a
+sealed volume has a whole-volume digest (#384), and a flow-over validates
+what it moved against its source (#412). PI is then the only per-block check
+on the path, and it covers what those cannot: a block corrupted between the
+kernel and the platter (the HBA, the cable, the drive's own memory), or a
+misdirected write landing on the wrong LBA. It does not cover the engine's
+own memory: the tags are generated in the kernel from the buffer the engine
+hands it. Passing PI from the engine's buffers end to end (io_uring
+integrity metadata, Linux 6.13+) is the follow-up, #511.
+
 ## How it is checked
 
 * `tests/integration_power_cut.rs`:

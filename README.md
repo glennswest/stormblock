@@ -651,7 +651,11 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   - `items` lists each slab: `role`, `source`, and for a local slab its
     `device`, for a remote one only its `transport` (`nvme-tcp`/`iscsi`).
     The remote URI carries what attaching the clone takes, so it is never
-    shown. `volumes` counts the volumes with a leg on that slab.
+    shown. `volumes` counts the volumes with a leg on that slab. A local
+    slab also says its `logical_block` (4096 on a 4Kn drive, 512 on a
+    512n/512e one) and its drive's T10 protection information profile,
+    `integrity` (`T10-DIF-TYPE1-CRC` on a drive formatted with PI type 1,
+    else `none`; #389).
   - It is counted only on a node with a remote slab, at most every 10 s, and
     never waited for: it is left out until a first answer could be read, so
     absent means unknown.
