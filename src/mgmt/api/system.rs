@@ -49,14 +49,22 @@ async fn start(State(state): State<Arc<AppState>>, Json(req): Json<MoveRequest>)
     #[cfg(target_os = "linux")]
     {
         let st = state.clone();
-        tokio::spawn(crate::lockwatch::named("the system move", async move {
-            let r = crate::cli::system_move(&st, req.from.as_deref(), &req.to, req.force).await;
+        tokio::spawn(async move {
+            let to = req.to.clone();
+            // On a task of its own, so a panic in it still ends the move as failed.
+            let job = tokio::spawn(crate::lockwatch::named("the system move", async move {
+                crate::cli::system_move(&st, req.from.as_deref(), &req.to, req.force).await.map_err(|e| e.to_string())
+            }));
+            let r = match job.await {
+                Ok(r) => r,
+                Err(e) => Err(format!("the move stopped: {e}")),
+            };
             if let Err(e) = &r {
-                println!("WARNING: system move onto {}: {e}", req.to);
-                tracing::warn!("system move onto {}: {e}", req.to);
+                println!("WARNING: system move onto {to}: {e}");
+                tracing::warn!("system move onto {to}: {e}");
             }
-            crate::pair::move_end(r.map_err(|e| e.to_string()));
-        }));
+            crate::pair::move_end(r);
+        });
         (StatusCode::ACCEPTED, Json(crate::pair::move_status())).into_response()
     }
     #[cfg(not(target_os = "linux"))]

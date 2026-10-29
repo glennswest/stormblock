@@ -11977,7 +11977,9 @@ file = "{state}"
         let r = c.post(&base).bearer(Some("admin-350")).json(&body).send().await.unwrap();
         let code = r.status().as_u16();
         assert_eq!(code, 202, "{}", String::from_utf8_lossy(&r.bytes()));
+        let started = std::time::Instant::now();
         let st = loop {
+            assert!(started.elapsed() < std::time::Duration::from_secs(300), "the move did not end in 5 min");
             let r = c.get(&base).bearer(Some("admin-350")).send().await.unwrap();
             let j: serde_json::Value = r.json().await.unwrap();
             if j["state"] != "moving" {
