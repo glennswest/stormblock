@@ -3,6 +3,14 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.3.0] — 2026-10-29
+
+### Added
+- #389: health's `slabs.items` say each local slab's `logical_block` and its drive's T10 PI `integrity` profile; the engine checked on PI type 1 drives at 4096 and 512 (`ci-pi-verify.sh`).
+
+### Changed
+- #448: an install boot's flow-over waits at most 20 s for the node's boot (`STORMBLOCK_FLOW_INSTALL_GRACE_SECS`), not 90; a resumed flow-over keeps 90.
+
 ### 2026-10-29
 - **perf:** #448: an install boot's flow-over waits at most 20 s for the node's boot (`STORMBLOCK_FLOW_INSTALL_GRACE_SECS`), not 90 s. A booting node is never still for #278's 10 s quiet window (sbregistry and the probes poll the API), so the wait always ran to its bound: on pve 90 of the 127 s from the claim to `laid` (12.27, and every pve install since: `Flow-over: starting after 90.2s (the boot grace of 90s ran out)`). The grace was for a reboot during a flow-over on the Dell's SMR disk; since #410 the flow-over paces itself on the foreground's measured latency. A resumed flow-over keeps 90 s (`STORMBLOCK_FLOW_BOOT_GRACE_SECS`). The first boot's own time to Ready was never the engine's (stormcentral#891 measured after `laid`).
 
