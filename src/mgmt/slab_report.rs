@@ -150,6 +150,29 @@ pub struct SlabItem {
     /// Volumes with a leg on it. Absent when nothing was counted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volumes: Option<usize>,
+    /// A local slab's logical block, in bytes (#389): 4096 on a 4Kn drive,
+    /// 512 on a 512n/512e one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logical_block: Option<u32>,
+    /// A local slab's drive's T10 protection information profile (#389), as
+    /// the block layer has it (`/sys/block/<disk>/integrity/format`):
+    /// `T10-DIF-TYPE1-CRC` on a drive formatted with PI type 1, `none`
+    /// without. The block layer generates and checks it on every I/O.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<String>,
+}
+
+/// A drive's T10 PI profile from sysfs (#389): `none` when it has none, `None`
+/// when it is not a block device here.
+pub fn integrity_of(disk_path: &str) -> Option<String> {
+    let name = std::path::Path::new(disk_path).file_name()?.to_str()?;
+    let dir = std::path::Path::new("/sys/block").join(name);
+    if !dir.exists() {
+        return None;
+    }
+    let f = std::fs::read_to_string(dir.join("integrity/format")).unwrap_or_default();
+    let f = f.trim();
+    Some(if f.is_empty() { "none".to_string() } else { f.to_string() })
 }
 
 /// Remote, and over what.
@@ -167,6 +190,9 @@ pub struct SlabFact {
     pub data: bool,
     pub remote: Option<&'static str>,
     pub device: String,
+    /// Logical block and PI profile of a local slab's drive (#389).
+    pub logical_block: Option<u32>,
+    pub integrity: Option<String>,
 }
 
 /// The report from the slabs and, when counted, the slab set of each volume.
@@ -180,6 +206,8 @@ pub fn build(slabs: &[SlabFact], volumes: Option<&[HashSet<SlabId>]>) -> SlabRep
             device: s.remote.is_none().then(|| s.device.clone()),
             transport: s.remote,
             volumes: volumes.map(|vs| vs.iter().filter(|v| v.contains(&s.id)).count()),
+            logical_block: s.logical_block,
+            integrity: s.integrity.clone(),
         })
         .collect();
     let Some(vols) = volumes else {
@@ -230,11 +258,16 @@ pub fn snapshot(
         let reg = registry.try_read().ok()?;
         let mut v: Vec<SlabFact> = reg
             .iter()
-            .map(|(id, s)| SlabFact {
-                id: *id,
-                data: s.is_data(),
-                remote: remote(s.device().device_type()),
-                device: s.device().id().path.clone(),
+            .map(|(id, s)| {
+                let remote = remote(s.device().device_type());
+                SlabFact {
+                    id: *id,
+                    data: s.is_data(),
+                    remote,
+                    device: s.device().id().path.clone(),
+                    logical_block: remote.is_none().then(|| s.device().block_size()),
+                    integrity: if remote.is_none() { integrity_of(&s.device().drive_id().path) } else { None },
+                }
             })
             .collect();
         v.sort_by(|a, b| (a.data, a.remote.is_some(), &a.device).cmp(&(b.data, b.remote.is_some(), &b.device)));
@@ -291,8 +324,20 @@ mod tests {
             data,
             remote: remote.then_some("nvme-tcp"),
             device: if remote { format!("nvme-tcp://10.0.0.1:4420/nqn.x:host:server3@{n}") } else { format!("/dev/sda@{n}") },
+            logical_block: (!remote).then_some(4096),
+            integrity: (!remote).then(|| "T10-DIF-TYPE1-CRC".to_string()),
         }
     }
+    #[test]
+    fn a_local_slab_says_its_block_and_its_drives_protection() {
+        let r = build(&[slab(1, true, false), slab(2, false, true)], None);
+        let j = serde_json::to_value(&r).unwrap();
+        assert_eq!(j["items"][0]["logical_block"], 4096);
+        assert_eq!(j["items"][0]["integrity"], "T10-DIF-TYPE1-CRC");
+        assert!(j["items"][1].get("integrity").is_none(), "a remote slab says neither: {j}");
+        assert_eq!(integrity_of("/dev/no-such-disk-389"), None);
+    }
+
     fn vols(sets: &[&[u8]]) -> Vec<HashSet<SlabId>> {
         sets.iter()
             .map(|s| s.iter().map(|n| SlabId(uuid::Uuid::from_bytes([*n; 16]))).collect())

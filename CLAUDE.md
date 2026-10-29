@@ -211,6 +211,23 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
+### 4096 + T10 PI drives (2026-10-10, #389, P2) — IN PROGRESS
+
+Owner: "can we support 4096 with pi?"; stormdrive formats shelf drives 4096 +
+PI type 1 (else 512 + PI1). Recommended on the issue: 1 and 2 now, 3 (PI from
+the engine's own buffers, io_uring integrity) after 1 passes on the Dell's
+shelf. Found: the engine follows each device's logical block (O_DIRECT
+alignment, slab, GPT at the drive's LBA) and volumes are 4096, so a 4Kn drive
+is aligned with no RMW; the 4096-vs-512 choice is a low-level format,
+stormdrive's. The engine keeps no per-block checksums (#160): PI is the only
+per-block check on the path, the block layer's (DIX generates, the drive
+checks).
+- [x] health: each local slab's `logical_block` and its drive's `integrity`
+      (`/sys/block/<disk>/integrity/format`)
+- [ ] `ci-pi-verify.sh` (QEMU, scsi_debug dif=1 dix=1 at 4096 and 512): slab,
+      ublk round trip, ext4 clone mounted, health, no protection errors
+- [ ] docs (README, durability), CHANGELOG; 3 filed as its own issue
+
 ### Out of file descriptors after ~805 ublk exports (2026-10-29, #510, P1) — DONE (v23.2.0), closed; metal pending
 
 pvetest1 12.58: EMFILE everywhere after ~805 attach/detach cycles in 5 h.
