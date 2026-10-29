@@ -224,9 +224,11 @@ per-block check on the path, the block layer's (DIX generates, the drive
 checks).
 - [x] health: each local slab's `logical_block` and its drive's `integrity`
       (`/sys/block/<disk>/integrity/format`)
-- [ ] `ci-pi-verify.sh` (QEMU, scsi_debug dif=1 dix=1 at 4096 and 512): slab,
-      ublk round trip, ext4 clone mounted, health, no protection errors
-- [ ] docs (README, durability), CHANGELOG; 3 filed as its own issue
+- [x] `ci-pi-verify.sh` (QEMU, scsi_debug dif=1 dix=1 at 4096 and 512): slab,
+      ublk round trip, ext4 clone mounted, health, no protection errors:
+      ALL PASS (kernel 7.2.11)
+- [x] docs (README, durability.md), CHANGELOG; step 3 is #511
+- [ ] check.sh; close. Metal: the Dell's shelf once stormdrive formats PI
 
 ### Out of file descriptors after ~805 ublk exports (2026-10-29, #510, P1) — DONE (v23.2.0), closed; metal pending
 

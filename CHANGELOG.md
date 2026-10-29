@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-29
+- **feat:** #389 (owner: "can we support 4096 with pi?"; steps 1 and 2): the engine on T10 PI type 1 drives. It needed no change on the I/O path: the block layer's `T10-DIF-TYPE1-CRC` profile generates and checks the tags on every I/O, and the engine follows the drive's logical block, its volumes 4096 (a 4Kn drive takes them whole, no read-modify-write). Health's `slabs.items` now say each local slab's `logical_block` and its drive's `integrity` profile. `ci-pi-verify.sh` (QEMU, kernel 7.2.11, scsi_debug `dif=1 dix=1` at 4096 and at 512): the profile and block, a data slab formatted on the drive, 32 MiB through a ublk device read back equal, an ext4 claim mounted, written, mounted again and read back, health, no protection error in the kernel log: ALL PASS. `docs/durability.md` says how PI fits with the engine's own checks (no per-block checksums: PI is the only per-block check, below the kernel). Step 3 (PI from the engine's buffers, io_uring integrity) is #511.
+
 ## [v23.2.0] — 2026-10-29
 
 ### Added
