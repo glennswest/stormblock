@@ -6172,7 +6172,8 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
         crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
-        let from_dev = inspect_storage(&from).await?;
+        // Opened to write: the pointer is a header write on each slab.
+        let from_dev = open_storage(&from).await?;
         let mut pointed = 0;
         for mut s in partner::slabs_on(&from_dev).await {
             match s.set_moved_to(Some(to_data)).await {
