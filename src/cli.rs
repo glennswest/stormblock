@@ -6400,10 +6400,6 @@ pub async fn run() -> anyhow::Result<()> {
         std::time::Duration::from_secs(secs)
     }
 
-    /// [`flow_boot_grace_for`] a boot that is not an install.
-    fn flow_boot_grace() -> std::time::Duration {
-        flow_boot_grace_for(false)
-    }
 
     /// Wait for the node's boot before moving anything (#278).
     ///
@@ -15228,7 +15224,6 @@ mod flow_boot_grace_tests {
         }
         assert_eq!(flow_boot_grace_for(true), Duration::from_secs(20));
         assert_eq!(flow_boot_grace_for(false), Duration::from_secs(90));
-        assert_eq!(flow_boot_grace(), Duration::from_secs(90));
     }
 
     #[tokio::test]

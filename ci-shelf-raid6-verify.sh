@@ -121,8 +121,11 @@ shelf_raid6_test verify $H --drives $SHELF,$EXTRA --wait-clean 300 2>&1 | sed 's
 
 echo "GUEST step 8b: the engine killed mid-rebuild"
 A=$(grep -o '"array": *"[0-9a-f-]*"' /run/state.json | head -1 | sed 's/.*"\([0-9a-f-]*\)"$/\1/')
-U=$(api -X POST http://127.0.0.1:9097/api/v1/drives -d "{\"path\":\"$LAST_EXTRA\"}" \
-    | sed -n 's/.*"uuid":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+# Opened already (by `verify` after the first restart): its uuid by path.
+api -X POST http://127.0.0.1:9097/api/v1/drives -d "{\"path\":\"$LAST_EXTRA\"}" > /dev/null
+U=$(api http://127.0.0.1:9097/api/v1/drives | grep -o '"uuid":"[0-9a-f-]*","path":"'"$LAST_EXTRA"'"' \
+    | sed 's/"uuid":"\([0-9a-f-]*\)".*/\1/' | head -1)
+echo "LOG 8b: spare $LAST_EXTRA is drive '$U'"
 api -X POST http://127.0.0.1:9097/api/v1/spares -d "{\"drive_uuid\":\"$U\",\"pool\":\"ds1\"}" > /dev/null
 SLOT=$(api http://127.0.0.1:9097/api/v1/arrays/$A | grep -o '"index":[0-9]*,"uuid":"[0-9a-f-]*","state":"[A-Za-z]*"' \
     | grep -i active | head -1 | sed 's/"index":\([0-9]*\).*/\1/')
