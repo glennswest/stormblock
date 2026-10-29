@@ -129,8 +129,10 @@ echo "LOG 8b: spare $LAST_EXTRA is drive '$U'"
 api -X POST http://127.0.0.1:9097/api/v1/spares -d "{\"drive_uuid\":\"$U\",\"pool\":\"ds1\"}" > /dev/null
 SLOT=$(api http://127.0.0.1:9097/api/v1/arrays/$A | grep -o '"index":[0-9]*,"uuid":"[0-9a-f-]*","state":"[A-Za-z]*"' \
     | grep -i active | head -1 | sed 's/"index":\([0-9]*\).*/\1/')
+# Slowed, so the cut lands mid-rebuild (these drives rebuild in a second).
+api -X PUT http://127.0.0.1:9097/api/v1/arrays/$A/rebuild -d '{"max_bytes_per_sec":1048576}' > /dev/null
 api -X POST http://127.0.0.1:9097/api/v1/arrays/$A/members/$SLOT/fail -d '{}' > /dev/null
-sleep 1
+sleep 3
 echo "LOG 8b before the cut: $(api http://127.0.0.1:9097/api/v1/arrays/$A | grep -o '"status":{[^}]*')"
 kill -9 $pid; wait $pid 2>/dev/null
 start
@@ -155,6 +157,7 @@ for m in drives-4k-pi shelf-laid-out fill-read-set0 fill-read-set1 one-lost-read
          end-reads-set0 end-reads-set1; do
     echo "$G" | grep -q "^H RESULT $m PASS" || fail "$m"
 done
+echo "$G" | grep -q 'LOG 8b before the cut: .*"state":"rebuilding"' || fail "8b: the cut did not land mid-rebuild"
 for p in H8A H8B; do
     for m in after-cut-consistent-set0 after-cut-consistent-set1 after-cut-data-set0 after-cut-data-set1; do
         echo "$G" | grep -q "^$p RESULT $m PASS" || fail "$p $m"
