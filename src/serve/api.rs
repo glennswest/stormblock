@@ -1800,6 +1800,13 @@ mod tests {
     }
 
     #[test]
+    fn a_system_move_is_the_admins() {
+        let d = |m: Method, p: &str| matches!(classify(&m, p, None), Class::Destructive);
+        assert!(d(Method::POST, "/api/v1/system/move"), "moving the system (#350)");
+        assert!(!d(Method::GET, "/api/v1/system/move"), "its state is ordinary");
+    }
+
+    #[test]
     fn protocol_names_parse() {
         // No protocol stated ⇒ NVMe-TCP, whether or not iSCSI is served.
         assert_eq!(parse_protocol(None, false).unwrap(), WireProto::Nvmeof);

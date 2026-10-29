@@ -11972,8 +11972,7 @@ file = "{state}"
         tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
         let c = crate::http::Client::new();
         let body = serde_json::json!({ "to": to });
-        let r = c.post(&base).bearer(Some("not-the-admin")).json(&body).send().await.unwrap();
-        assert!(r.status().as_u16() == 401 || r.status().as_u16() == 403, "a move is the admin's: {}", r.status());
+        // Admin only: serve::api::tests::a_system_move_is_the_admins (this router has no auth layer).
         let r = c.post(&base).bearer(Some("admin-350")).json(&body).send().await.unwrap();
         let code = r.status().as_u16();
         assert_eq!(code, 202, "{}", String::from_utf8_lossy(&r.bytes()));
