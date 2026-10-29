@@ -152,6 +152,8 @@ EOT
         r $t-ext4 "FAIL (template '$g' clone '$c' device '$d')"
     fi
 
+    # Health's slab report is cached for 10 s (`slab_report::TTL`).
+    sleep 11
     h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
     echo "LOG $t health slabs: $(echo "$h" | grep -o '"items":\[[^]]*\]')"
     case "$h" in *"\"logical_block\":$ss,\"integrity\":\"T10-DIF-TYPE1-CRC\""*) r $t-health PASS ;; *) r $t-health FAIL ;; esac
