@@ -1033,16 +1033,19 @@ Unheld (owner, 2026-10-28). Inert until called: on main.
       told; closed. Not on metal: a head over real NVMe/TCP legs grown on
       their engines
 
-### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — PARKED until the single-node pacing lifts
+### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — IN PROGRESS
 
-For stormstorage#44 (VM disk migration) and stormcluster#53 (evacuate a
-storage node before a release), both P3. To build on a wip/ branch (plan on
-#295): `POST/DELETE /api/v1/volumes/{id}/mirror {target}` (nvme-tcp leg on
-the handle; writes/zeroes/discards under the extent lock, ack after both;
-flush both), background copy of mapped non-zero extents under the extent
-lock, paced; `mirror {state copying|synced|failed, bytes_*}` on GET; leg
-errors → failed, never the guest's; `mirrors.json`, failed after a restart;
-node-level evacuate settled with stormcluster. Nothing built.
+Unheld (owner, 2026-10-28). Inert until called: on main.
+- [x] `volume::mirror::LiveMirror` (sharded extent locks, copy, fail, stop),
+      handle hooks (write, discard, flush; `mirror_gate` for start/stop)
+- [x] `mgmt::live_mirror`: POST/DELETE `/api/v1/volumes/{id}/mirror`
+      (POST destructive), `mirror` on GET, `mirrors.json` (restart =
+      failed), resize refused while mirrored, secret volumes refused
+- [x] tests: integration_mirror (2, 15× green), ci-mirror-verify.sh ALL
+      PASS (QEMU, mounted ext2 on ublk), destructive list; migration.md §3,
+      README, auth.md, CHANGELOG
+- [ ] check.sh; release; stormstorage#44, stormcluster#53 told; close.
+      Node-level evacuation: the per-volume verb driven by stormcluster
 
 ### Release an array with no write to its members (2026-10-17, #296, P3) — DONE (v23.7.0), closed
 

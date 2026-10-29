@@ -1582,6 +1582,16 @@ curl -X POST http://node:9090/v1/volumes/<clone-id>/reset
 Reset is refused while the volume is attached, since its contents cannot
 change under a live host.
 
+### A volume in use mirrored to another node (#295)
+
+`POST /api/v1/volumes/{id}/mirror {"target": "nvme-tcp://…"}` (admin) sends
+every write of a volume in use (a VM's disk over ublk) to a fresh volume on
+another engine, attached for this node over NVMe/TCP, and copies the extents
+already mapped in the background; `GET /api/v1/volumes/{id}` says `mirror
+{state: copying | synced | failed, …}`; `DELETE …/mirror` lets in-flight
+writes land on both, flushes the target and lets go: the switch-over and the
+abort. An error on the target never reaches the guest. docs/migration.md §3.
+
 ### A disk served from two nodes: ANA and the epoch (#83)
 
 A volume served from two nodes on one subsystem NQN, at one NSID and under

@@ -72,6 +72,9 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
   /api/v1/drives/{id}/format`;
 - slabs: `POST /api/v1/slabs` (format), `DELETE`, and a GC that is not a dry
   run;
+- a live mirror of a volume to another engine (`POST
+  /api/v1/volumes/{id}/mirror`, #295): it sends the volume's bytes off this
+  engine; stopping one is ordinary;
 - arrays: create, delete, release to another engine (#296), grow (#318), and members
   added, failed or replaced;
 - spares;

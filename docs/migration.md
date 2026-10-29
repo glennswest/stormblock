@@ -2,8 +2,11 @@
 
 A VM's disk moves from node A to node B while the VM runs. Three things make
 that safe and invisible to the guest. The engine does all three on its own
-side. What copies the bytes is not here: under the owner's decision on #179
-(b), that is stormstorage's RAID heads, over NVMe/TCP legs from the engines.
+side. What copies the bytes of a disk served from two nodes is not here:
+under the owner's decision on #179 (b), that is stormstorage's RAID heads,
+over NVMe/TCP legs from the engines. A plain local volume in use (a VM's
+disk over ublk) is copied by the engine that serves it: §3, the live mirror
+(#295).
 
 | | what | where |
 |---|---|---|
@@ -129,8 +132,53 @@ Not here:
   the same subsystem. The fence only guarantees that whatever it attached
   before is gone.
 
+## 3. A live mirror of a volume in use (#295)
+
+A VM's disk on S is a plain local volume, attached over ublk to the running
+hypervisor. Only S's engine sees every write to it, so it copies it:
+
+1. The caller makes a fresh thin volume of the same size on T and attaches
+   it for S over NVMe/TCP (`transport: nvme_tcp`, S's host NQN).
+2. `POST /api/v1/volumes/{id}/mirror {"target": "nvme-tcp://T:port/<nqn>?nsid=N"}`
+   on S (admin: it sends the volume's bytes off this engine). S connects as
+   its own host NQN (`[fabric] host_nqn`, else `/etc/nvme/hostnqn`, else
+   `nqn.2026-09.lo.storm:host-<node>`) unless the URI names one, and refuses
+   a target smaller than the volume, a second mirror, and a secret volume
+   (#74). 202 with the mirror's status.
+3. From then on every write also goes to T under a per-extent lock held
+   across both copies, and is acknowledged once both have it; a discard that
+   unmaps a whole extent here makes T read zeros there; a flush flushes T. A
+   background copy walks the extents mapped when it began, each under the
+   same lock (a write lands before the copy reads the extent, or after it and
+   is mirrored), skips extents that read as zeros (T is fresh, so it stays
+   thin), and lets foreground I/O go first.
+4. `GET /api/v1/volumes/{id}` carries `mirror {target, state: copying |
+   synced | failed, bytes_total, bytes_remaining, message, started_at}`.
+   `synced`: T has every byte, and writes are mirrored synchronously. An
+   error on T never reaches the guest: the mirror goes `failed` and says why,
+   and the volume carries on as before. A resize is refused while mirrored.
+5. `DELETE /api/v1/volumes/{id}/mirror`: every write in flight lands on both,
+   T is flushed, the mirror is dropped (`{stopped, flushed, state}`). Called
+   with the guest paused on S, T is then exact: the switch-over. The same
+   call is the abort. S's volume is never changed by any of it.
+6. `<data_dir>/mirrors.json` names each mirror started and not stopped. One
+   a restart left behind reports `failed` ("the engine restarted") until a
+   `DELETE` forgets it; start it again with a `POST`. A copy that resumes is
+   not built.
+
+Evacuating a node (stormcluster#53) is this verb per volume, driven by the
+caller: one mirror per served volume, then each switched over.
+
 ## Checked
 
+- The live mirror (#295): `tests/it/integration_mirror.rs` (two engines over
+  real NVMe/TCP, a writer and discards running through the copy: every byte
+  the same at `synced` and after the stop, nothing sent after it; a target
+  whose disk fails: `failed`, the writer never sees an error; a restart's
+  record reported `failed`, then forgotten) and `ci-mirror-verify.sh` (QEMU,
+  a mounted ext2 on S's ublk device written throughout: `synced`, the
+  switch-over flushed, T's device equal to S's byte for byte, mounted on T
+  with every file as written).
 - `tests/it/integration_ana_epoch.rs`, over HTTP and real NVMe/TCP:
   - Identify and log page fields.
   - The ANA change notice.
