@@ -373,6 +373,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if matches!(p, "/api/v1/slabs" | "/api/v1/arrays" | "/api/v1/spares") {
             return true;
         }
+        // A live mirror sends a volume's bytes to another engine (#295).
+        if seg.len() == 6 && seg[3] == "volumes" && seg[5] == "mirror" {
+            return true;
+        }
         // Handing an array to another engine (#296), or growing it into its
         // members (#318: it zeroes their new room and rewrites superblocks).
         if seg.len() == 6 && seg[3] == "arrays" && (seg[5] == "release" || seg[5] == "grow") {

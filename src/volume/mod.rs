@@ -12,6 +12,7 @@ pub mod fence;
 pub mod gem;
 pub mod metadata;
 pub mod metav2;
+pub mod mirror;
 mod persist_v2;
 pub mod redundancy;
 pub mod thin;

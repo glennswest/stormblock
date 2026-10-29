@@ -25,6 +25,7 @@ pub mod finder;
 pub mod install_config;
 pub mod kernelopt;
 pub mod peers;
+pub mod live_mirror;
 pub mod creators;
 pub mod namespaces;
 #[cfg(feature = "ui")]

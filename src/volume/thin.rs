@@ -567,6 +567,13 @@ pub struct ThinVolumeHandle {
     /// that saw a count of one and wrote in place after a snapshot shared
     /// the slot changed the snapshot underneath it.
     snap_gate: Arc<tokio::sync::RwLock<()>>,
+    /// A live mirror to a peer's namespace (#295), and the gate every write
+    /// and discard holds shared while it looks at it: setting or dropping
+    /// the mirror takes it exclusively, so no write that began without the
+    /// mirror is still landing once the copy starts, nor one with it once
+    /// it is dropped.
+    mirror: std::sync::RwLock<Option<Arc<super::mirror::LiveMirror>>>,
+    mirror_gate: tokio::sync::RwLock<()>,
 }
 
 /// Counts one write, discard or write-zeroes as finished when it returns,
@@ -653,7 +660,44 @@ impl ThinVolumeHandle {
             completed: AtomicU64::new(1),
             synced: AtomicU64::new(0),
             snap_gate: Arc::new(tokio::sync::RwLock::new(())),
+            mirror: std::sync::RwLock::new(None),
+            mirror_gate: tokio::sync::RwLock::new(()),
         }
+    }
+
+    /// The bytes one extent of this volume covers.
+    pub fn extent_bytes(&self) -> u64 {
+        self.slot_size
+    }
+
+    /// The live mirror, if one is set (#295).
+    pub fn live_mirror(&self) -> Option<Arc<super::mirror::LiveMirror>> {
+        self.mirror.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Set a live mirror (#295) once every write in flight has landed, and
+    /// return the extents mapped now, for its copy. Refused when one is set.
+    pub async fn start_mirror(&self, m: Arc<super::mirror::LiveMirror>) -> Result<Vec<u64>, String> {
+        self.resident().await.map_err(|e| e.to_string())?;
+        let _w = self.mirror_gate.write().await;
+        {
+            let mut slot = self.mirror.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(old) = slot.as_ref() {
+                return Err(format!("a mirror to {} is set; stop it first", old.target()));
+            }
+            *slot = Some(m);
+        }
+        let n = self.capacity_bytes().div_ceil(self.slot_size);
+        Ok(self.gem.read().await.mapped_in(self.id, 0..n))
+    }
+
+    /// Drop the live mirror (#295) once every write in flight has landed
+    /// on both: the switch-over, or the abort. T flushed when still good.
+    pub async fn stop_mirror(&self) -> Option<(Arc<super::mirror::LiveMirror>, Result<(), DriveError>)> {
+        let _w = self.mirror_gate.write().await;
+        let m = self.mirror.write().unwrap_or_else(|e| e.into_inner()).take()?;
+        let r = m.stop().await;
+        Some((m, r))
     }
 
     /// The logical block size this volume is presented at (#228).
@@ -3316,11 +3360,23 @@ impl BlockDevice for ThinVolumeHandle {
         let _finished = Finished(&self.completed);
         FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let _took = crate::fglat::Timer::new(crate::fglat::Class::Io);
+        // A live mirror (#295): the extents locked across both copies.
+        let _gate = self.mirror_gate.read().await;
+        let mirror = self.live_mirror().filter(|m| m.is_live());
+        let _locks = match &mirror {
+            Some(m) => m.lock_range(offset, buf.len() as u64).await,
+            None => Vec::new(),
+        };
         let bs = u64::from(self.block_size());
-        if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
-            return self.write_blocks(offset, buf).await;
+        let n = if offset % bs == 0 && (buf.len() as u64) % bs == 0 {
+            self.write_blocks(offset, buf).await?
+        } else {
+            self.write_padded_to_block(offset, buf).await?
+        };
+        if let Some(m) = mirror {
+            m.write(offset, &buf[..n]).await;
         }
-        self.write_padded_to_block(offset, buf).await
+        Ok(n)
     }
 
     /// A write durable when it returns, without the volume's flush when it
@@ -3418,6 +3474,9 @@ impl BlockDevice for ThinVolumeHandle {
             tracing::warn!(volume = %self.id, "dirty-stripe log could not be cleared: {e}");
         }
         self.synced.fetch_max(start, Ordering::SeqCst);
+        if let Some(m) = self.live_mirror() {
+            m.flush().await;
+        }
         Ok(())
     }
 
@@ -3426,16 +3485,6 @@ impl BlockDevice for ThinVolumeHandle {
         self.resident().await?;
         self.refuse_if_sealed()?;
         let _finished = Finished(&self.completed);
-        // As a write: no snapshot shares a slot between the share check
-        // below and its release (#367).
-        let _gate = self.snap_gate.read().await;
-        self.refuse_if_unknown_scheme()?;
-        let policy = self.redundancy();
-        // An unreplicated volume serialises against its own allocations with
-        // the volume lock; a redundant one uses the extent/stripe shards,
-        // which the write path takes *before* the volume lock — so taking
-        // the volume lock here would invert the order.
-        let _vol = if policy.is_none() { Some(self.inner.lock().await) } else { None };
         // Only discard full slots, and only ones this volume holds alone.
         // Unmapping a shared extent is not durable until the volume record
         // is rewritten, so after a power cut the record would map it again
@@ -3448,24 +3497,36 @@ impl BlockDevice for ThinVolumeHandle {
         if last <= first {
             return Ok(());
         }
+        // A live mirror (#295): what this discard unmaps reads zeros on the
+        // target too, under the same extent locks as a write, taken first as
+        // a write takes them (before the snapshot gate and the volume lock).
+        let _mgate = self.mirror_gate.read().await;
+        let mirror = self.live_mirror().filter(|m| m.is_live());
+        let _locks = match &mirror {
+            Some(m) => m.lock_range(first * self.slot_size, (last - first) * self.slot_size).await,
+            None => Vec::new(),
+        };
+        // As a write: no snapshot shares a slot between the share check
+        // below and its release (#367).
+        let _gate = self.snap_gate.read().await;
+        self.refuse_if_unknown_scheme()?;
+        let policy = self.redundancy();
+        // An unreplicated volume serialises against its own allocations with
+        // the volume lock; a redundant one uses the extent/stripe shards,
+        // which the write path takes *before* the volume lock — so taking
+        // the volume lock here would invert the order.
+        let _vol = if policy.is_none() { Some(self.inner.lock().await) } else { None };
         let mapped = self.gem.read().await.mapped_in(self.id, first..last);
-        for vext_idx in mapped {
-            let shared = {
-                let gem = self.gem.read().await;
-                gem.lookup(self.id, vext_idx).is_some_and(|l| l.ref_count > 1)
-            };
-            if shared {
-                continue;
+        let released = self.discard_mapped(mapped.clone(), &policy).await;
+        if let Some(m) = mirror {
+            let still: HashSet<u64> = self.gem.read().await.mapped_in(self.id, first..last).into_iter().collect();
+            let cap = self.capacity_bytes();
+            for x in mapped.into_iter().filter(|x| !still.contains(x)) {
+                let at = x * self.slot_size;
+                m.zero(at, self.slot_size.min(cap.saturating_sub(at))).await;
             }
-            let _shard = if policy.is_none() || policy.scheme.is_parity() {
-                None
-            } else {
-                Some(self.shard(vext_idx).lock().await)
-            };
-            self.release_extent(vext_idx).await?;
         }
-
-        Ok(())
+        released
     }
 
     /// Make a range read back as zeros (#171). An extent that is not mapped
@@ -3495,6 +3556,30 @@ impl BlockDevice for ThinVolumeHandle {
 
     fn smart_status(&self) -> DriveResult<SmartData> {
         Ok(SmartData { healthy: true, ..Default::default() })
+    }
+}
+
+impl ThinVolumeHandle {
+    /// The release half of a discard: each mapped extent this volume holds
+    /// alone is let go.
+    async fn discard_mapped(&self, mapped: Vec<u64>, policy: &RedundancyPolicy) -> DriveResult<()> {
+        for vext_idx in mapped {
+            let shared = {
+                let gem = self.gem.read().await;
+                gem.lookup(self.id, vext_idx).is_some_and(|l| l.ref_count > 1)
+            };
+            if shared {
+                continue;
+            }
+            let _shard = if policy.is_none() || policy.scheme.is_parity() {
+                None
+            } else {
+                Some(self.shard(vext_idx).lock().await)
+            };
+            self.release_extent(vext_idx).await?;
+        }
+
+        Ok(())
     }
 }
 

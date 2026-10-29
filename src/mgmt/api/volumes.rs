@@ -595,6 +595,12 @@ async fn get_volume_with_creator(State(state): State<Arc<AppState>>, Path(id): P
             v["labels"] = serde_json::json!(c.labels);
         }
     }
+    // A live mirror to a peer (#295), or one a restart left failed.
+    if let Some(id) = v.get("id").and_then(|i| i.as_str()).and_then(|i| i.parse::<uuid::Uuid>().ok()) {
+        if let Some(m) = crate::mgmt::live_mirror::status_of(&state, id).await {
+            v["mirror"] = m;
+        }
+    }
     (parts.status, Json(v)).into_response()
 }
 
@@ -2874,6 +2880,10 @@ async fn resize_volume(
             return ApiError::conflict("cannot resize volume with active exports".to_string());
         }
     }
+    // A live mirror's target is the size it was (#295).
+    if crate::mgmt::live_mirror::is_mirrored(&state, uuid).await {
+        return ApiError::conflict(format!("volume {uuid} is being mirrored to a peer; stop the mirror first"));
+    }
 
     let mut vm = state.volume_manager.lock().await;
     match vm.resize_volume(vol_id, new_size).await {
@@ -3736,6 +3746,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/lineage", get(volume_lineage))
         .route("/{id}/attach", get(get_attach).post(attach_volume).delete(detach_volume))
         .route("/{id}/ana", get(get_ana).put(set_ana))
+        .route("/{id}/mirror", axum::routing::post(crate::mgmt::live_mirror::post).delete(crate::mgmt::live_mirror::delete))
         .route("/import", get(list_imports).post(start_import))
         .route("/import/{id}", get(get_import))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
