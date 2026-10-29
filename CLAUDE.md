@@ -1029,7 +1029,7 @@ lock, paced; `mirror {state copying|synced|failed, bytes_*}` on GET; leg
 errors → failed, never the guest's; `mirrors.json`, failed after a restart;
 node-level evacuate settled with stormcluster. Nothing built.
 
-### Release an array with no write to its members (2026-10-17, #296, P3) — IN PROGRESS
+### Release an array with no write to its members (2026-10-17, #296, P3) — DONE (v23.7.0), closed
 
 For a live RAID-head handover (stormstorage#33; failover already works).
 Inert until called, so on main (as #104, #299).
@@ -1042,8 +1042,10 @@ Inert until called, so on main (as #104, #299).
 - [x] test `integration_array_pin::an_array_is_released_to_another_engine_
       with_nothing_written` (members' sha256 unchanged, assembled on a second
       engine, data read back); destructive list
-- [ ] build VM; check.sh; docs (raid-sets.md, README, auth.md), CHANGELOG;
-      release; stormstorage#33 told; close
+- [x] docs (raid-sets.md, README, auth.md), CHANGELOG; check.sh at
+      4051571c ALL PASS (1306/1306); v23.7.0 (`stormblock 23.7.0` from a
+      `--locked` build); stage requested (d56ce0390ee1); stormstorage#33
+      told; closed
 
 ### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P1; stormcluster#21, P1) — DONE (v23.1.0, ba53377d), closed; metal pending
 
