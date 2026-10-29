@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.6.0] — 2026-10-29
+
+### Added
+- #299: a ublk device another process stops or deletes is detected, logged and reported (health `ublk_lost`; `failed` for a boot device, else `degraded`); its server lets go of it (the other DEL_DEV no longer hangs) without a STOP/DEL of its own; a new attach replaces it.
+
 ### 2026-10-29
 - **feat:** #299 (stormraid's test deleted pvetest1's /dev/ublkb0 on 11.82; the node's ext4 then gave EIO and nothing said why): a ublk device this engine serves that another process stops or deletes is detected (its queue commands aborted while the engine is not stopping it itself), logged at ERROR naming the device, volume and mount, and reported in health `ublk_lost` (status `failed` for a boot device, which cannot be given back to a mounted filesystem, with a console FATAL; `degraded` otherwise). Its server lets go of the device at once (the other process's DEL_DEV waits for that; before, it hung) and sends no STOP_DEV/DEL_DEV of its own for that id, which the kernel may already have given another device; the next attach of its volume makes a new device. Tests: `ublk::tests::a_device_taken_away_is_listed_once_until_it_is_served_again`; `ci-ublk-qd-verify.sh` `taken` (QEMU, kernel 7.2.11: `examples/ublk_take` plays the privileged pod, STOP+DEL of an attached device; health degraded with it in `ublk_lost`, the ERROR logged, a new attach got the same id back and reads, the old server did not tear it down, the entry cleared). Test pods' access to /dev/ublk-control is stormcentral#932.
 

@@ -940,7 +940,7 @@ Master's decision B: last in the order, off by default,
 - [x] check.sh at ccab816c ALL PASS (1304/1304); v23.5.0; stage; closed;
       stormbootx#159 told
 
-### A privileged pod stops/deletes the node's ublk device (2026-10-17, #299, P3) — IN PROGRESS (owner 2026-10-28: unheld)
+### A privileged pod stops/deletes the node's ublk device (2026-10-17, #299, P3) — DONE (v23.6.0), closed
 
 stormraid's test deleted /dev/ublkb0 (fixed there, stormraid#20); test-pod
 access to /dev/ublk-control is stormcentral#932. Here:
@@ -959,7 +959,7 @@ access to /dev/ublk-control is stormcentral#932. Here:
       7.2.11: STOP+DEL by examples/ublk_take, health degraded + ublk_lost,
       ERROR logged, re-attach got id 1 again and reads, entry cleared);
       README, CHANGELOG
-- [ ] check.sh; close
+- [x] check.sh at e3c79684 ALL PASS (1305/1305); v23.6.0; stage; closed
 
 ### Clone verify: i-blocks-wrong on fedora-base (2026-10-17, #293, P3) — AFTER mkfs.ext4.rs#25
 
