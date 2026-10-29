@@ -62,9 +62,10 @@ done
 command -v qemu-system-x86_64 >/dev/null || { echo "SKIP: no qemu-system-x86_64"; exit 2; }
 
 say "build"
-cargo build --release --locked 2>&1 | tail -2
+cargo build --release --locked --bin stormblock --example ublk_take 2>&1 | tail -2
 BIN="${CARGO_TARGET_DIR:-$ROOT/target}/release/stormblock"
-[ -x "$BIN" ] || { echo "FAIL: no binary"; exit 1; }
+TAKE="${CARGO_TARGET_DIR:-$ROOT/target}/release/examples/ublk_take"
+[ -x "$BIN" ] && [ -x "$TAKE" ] || { echo "FAIL: no binary"; exit 1; }
 
 say "guest initramfs: busybox, stormblock, dmsetup, curl, ublk_drv, dm-delay"
 I="$W/initrd"
@@ -74,7 +75,7 @@ for a in sh mount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head ta
          awk cut tr kill seq mkdir rm timeout pidof ps touch od mv umount sync; do
     ln -sf busybox "$I/bin/$a"
 done
-for b in "$BIN" "$DMSETUP" "$CURL"; do
+for b in "$BIN" "$TAKE" "$DMSETUP" "$CURL"; do
     cp "$b" "$I/bin/$(basename "$b")"
     ldd "$b" | grep -o '/[^ ]*' | while read -r lib; do
         mkdir -p "$I$(dirname "$lib")"; cp -L "$lib" "$I$lib"
@@ -207,6 +208,7 @@ EOT
     [ "$mode" != serial ] && fast_reads
     [ "$mode" != serial ] && features
     [ "$mode" = concurrent ] && fd_cycles
+    [ "$mode" = concurrent ] && taken
     [ "$mode" = concurrent ] && in_use
     [ "$mode" = concurrent ] && parallel_attach
     [ "$mode" = concurrent ] && attach_delete_race
@@ -474,6 +476,41 @@ fd_cycles() {
     case "$h" in *'"fds":{"open":'*'"limit":'*) r fd-health PASS ;; *) r fd-health "FAIL ($h)" ;; esac
 }
 
+# #299: another process (a privileged pod) deletes a device the engine
+# serves. The engine says so (ERROR, health `ublk_lost`, status degraded),
+# does not tear down whatever gets that id next, and a new attach of the
+# volume makes a new device that reads.
+taken() {
+    step taken
+    v=$(api -X POST http://127.0.0.1:$port/api/v1/volumes -d '{"name":"taken","size":"16M"}' \
+        | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    d=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$v/attach -d '{"transport":"ublk"}' \
+        | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+    n=${d#/dev/ublkb}
+    echo "LOG taken: $d ($v)"
+    ublk_take "$n" 2>&1 | sed 's/^/LOG ublk_take: /'
+    sleep 2
+    h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
+    echo "LOG taken health: $(echo "$h" | grep -o '"status":"[a-z]*"' | head -1) $(echo "$h" | grep -o '"ublk_lost":\[[^]]*\]')"
+    case "$h" in
+    '{"status":"degraded"'*'"ublk_lost":[{"ublk":"'"$d"'"'*'"how":"deleted"'*) r taken-reported PASS ;;
+    *) r taken-reported FAIL ;;
+    esac
+    grep -q "$d (volume:.*) was deleted by another process" /run/engine-$mode.log && r taken-logged PASS || r taken-logged FAIL
+    d2=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$v/attach -d '{"transport":"ublk"}' \
+        | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+    echo "LOG taken: attached again as $d2"
+    sleep 3
+    if [ -b "$d2" ] && dd if=$d2 of=/dev/null bs=4096 count=16 iflag=direct 2>/dev/null; then
+        r taken-reattached PASS
+    else
+        r taken-reattached "FAIL ('$d2')"
+    fi
+    h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
+    case "$h" in *ublk_lost*) r taken-cleared "FAIL ($h)" ;; *) r taken-cleared PASS ;; esac
+    curl -s -m 30 -o /dev/null -H 'Authorization: Bearer t' -X DELETE http://127.0.0.1:$port/api/v1/volumes/$v/attach
+}
+
 # #505: health says what the kernel offers, what the device uses, and how
 # the rings were built (tuned unless asked plain).
 features() {
@@ -606,7 +643,7 @@ echo "fast reads (#505, median of 5): tuned rings + batch I/O $(t concurrent fas
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
-         parallel-attach attach-delete-race plain-round-trip split-round-trip features-tuned features-plain features-split fd-cycles fd-health \
+         parallel-attach attach-delete-race plain-round-trip split-round-trip features-tuned features-plain features-split fd-cycles fd-health taken-reported taken-logged taken-reattached taken-cleared \
          mount-detach-refused mount-detach-mounted mount-detach-no-deleted-read mount-detach-after; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done

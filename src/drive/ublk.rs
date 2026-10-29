@@ -406,6 +406,9 @@ pub struct UblkServer {
     requested_dev_id: Option<u32>,
     nr_queues: u16,
     queue_depth: u16,
+    /// Another process stopped or deleted this device (#299): its teardown
+    /// sends no STOP_DEV/DEL_DEV, since the id may be another device's by then.
+    taken: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
     /// Set once START_DEV (or END_USER_RECOVERY) has returned: the block
     /// device is live. Before that, `/dev/ublkb<id>` may still be the node of
@@ -440,6 +443,7 @@ impl UblkServer {
             nr_queues: queues,
             queue_depth: depth_per_queue(queues),
             running: Arc::new(AtomicBool::new(false)),
+            taken: Arc::new(AtomicBool::new(false)),
             resizable: Arc::new(AtomicBool::new(false)),
             dev_sectors: Arc::new(AtomicU64::new(0)),
             recoverable: false,
@@ -1011,6 +1015,7 @@ impl UblkServer {
                 ..(queue_depth as u32 * (part as u32 + 1) / per_queue as u32) as u16;
             let device = self.device.clone();
             let running = self.running.clone();
+            let taken = self.taken.clone();
             let raw_char_fd = char_fd;
             let desc_base = SendPtr(desc_ptrs[q as usize]);
             let depth = queue_depth;
@@ -1025,7 +1030,7 @@ impl UblkServer {
                     let desc_base = desc_base;
                     queue_worker(
                         q, raw_char_fd, desc_base.0, depth, max_io,
-                        device, running, rt_handle, barrier, track, batch, tags,
+                        device, running, rt_handle, barrier, track, batch, tags, taken,
                     );
                 })
                 .map_err(|e| DriveError::Other(anyhow::anyhow!(
@@ -1055,6 +1060,8 @@ impl UblkServer {
             std::process::id() as u64,
         )?;
         tracing::debug!("ublk: /dev/ublkb{assigned_id} {what}");
+        // Served from here; a boot device (recoverable) is the node's (#299).
+        note_serving(assigned_id, self.recoverable || self.adopt.is_some());
         // mknod /dev/ublkbN block device if not present (container workaround)
         let blk_path = format!("/dev/ublkb{}", assigned_id);
         if !std::path::Path::new(&blk_path).exists() {
@@ -1105,6 +1112,8 @@ impl UblkServer {
         // recoverable, and handing it on is the same act as handing it over
         // was. A node upgrades its engine by doing this repeatedly.
         let recoverable = self.recoverable || self.adopt.is_some();
+        // Whatever ends now is this engine's own doing (#299).
+        note_stopping(assigned_id);
         if recoverable {
             tracing::info!(
                 "ublk: releasing /dev/ublkb{assigned_id} for recovery (not stopping it)"
@@ -1123,9 +1132,13 @@ impl UblkServer {
             // `submit_bio_wait`). So the workers keep serving until the kernel
             // has aborted their queues, which is what STOP_DEV returning
             // means, and are only then told to go.
-            let _ = submit_ctrl_cmd(
-                &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, assigned_id, 0, 0, 0,
-            );
+            // Not a device another process took away (#299): its id may be
+            // another device's by now.
+            if !self.taken.load(Ordering::SeqCst) {
+                let _ = submit_ctrl_cmd(
+                    &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_STOP_DEV, assigned_id, 0, 0, 0,
+                );
+            }
             self.running.store(false, Ordering::SeqCst);
         }
 
@@ -1155,6 +1168,10 @@ impl UblkServer {
         }
 
         // --- DEL_DEV ---
+        if self.taken.load(Ordering::SeqCst) {
+            tracing::info!("ublk: /dev/ublkb{assigned_id} was taken away by another process; not deleting that id (#299)");
+            return Ok(());
+        }
         let _ = submit_ctrl_cmd(
             &mut ctrl_ring, ctrl_fd, UBLK_U_CMD_DEL_DEV, assigned_id, 0, 0, 0,
         );
@@ -1395,6 +1412,7 @@ pub fn devices() -> DriveResult<Vec<u32>> {
 /// whose server died. Never a node's own: a quiesced device with no server is
 /// the handover's gap, and the next engine adopts it.
 pub fn remove(dev_id: u32) -> DriveResult<()> {
+    note_stopping(dev_id);
     let ctrl = OpenOptions::new()
         .read(true)
         .write(true)
@@ -1762,6 +1780,112 @@ fn op_name(op: u8) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Devices taken away from under the engine (#299)
+// ---------------------------------------------------------------------------
+
+/// A device this engine served that someone else stopped or deleted (#299):
+/// any process with CAP_SYS_ADMIN and `/dev/ublk-control` may send STOP_DEV
+/// or DEL_DEV for any id, and the serving process has no veto. stormraid's
+/// test did it to pvetest1's root (11.82): ext4 on it gave EIO from then on,
+/// and nothing said why.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Lost {
+    pub ublk: String,
+    /// The volume behind it (`volume:<id>`).
+    pub device: String,
+    /// Where it was mounted, when it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount: Option<String>,
+    /// `deleted` (its char device is gone) or `stopped`.
+    pub how: &'static str,
+    /// Unix seconds.
+    pub since: u64,
+    /// A boot device (the root, the node's mounted volumes): a mounted
+    /// filesystem cannot be given a new device, so the node has failed.
+    pub boot: bool,
+}
+
+static LOST: std::sync::Mutex<Vec<Lost>> = std::sync::Mutex::new(Vec::new());
+static STOPPING: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+static BOOT_DEVICES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// The engine is stopping this device itself: its aborts are not a loss.
+fn note_stopping(dev_id: u32) {
+    let mut s = STOPPING.lock().unwrap_or_else(|e| e.into_inner());
+    if !s.contains(&dev_id) {
+        s.push(dev_id);
+    }
+}
+
+fn is_stopping(dev_id: u32) -> bool {
+    STOPPING.lock().unwrap_or_else(|e| e.into_inner()).contains(&dev_id)
+}
+
+/// A device served now: whether it is a boot device, and no longer lost
+/// (its id served again).
+fn note_serving(dev_id: u32, boot: bool) {
+    STOPPING.lock().unwrap_or_else(|e| e.into_inner()).retain(|d| *d != dev_id);
+    LOST.lock().unwrap_or_else(|e| e.into_inner()).retain(|l| l.ublk != format!("/dev/ublkb{dev_id}"));
+    let mut b = BOOT_DEVICES.lock().unwrap_or_else(|e| e.into_inner());
+    b.retain(|d| *d != dev_id);
+    if boot {
+        b.push(dev_id);
+    }
+}
+
+/// Where `dev` is mounted, from the mount table.
+fn mount_of(dev: &str) -> Option<String> {
+    let m = std::fs::read_to_string("/proc/self/mounts").ok()?;
+    m.lines().find_map(|l| {
+        let mut f = l.split_whitespace();
+        (f.next() == Some(dev)).then(|| f.next().map(str::to_string)).flatten()
+    })
+}
+
+/// A queue's commands came back aborted while the engine was not stopping
+/// the device: someone else stopped or deleted it. Said once a device, at
+/// ERROR (and FATAL on the console for a boot device), kept for health.
+fn note_lost(dev_id: u32, device: &str) {
+    let ublk = format!("/dev/ublkb{dev_id}");
+    let mut l = LOST.lock().unwrap_or_else(|e| e.into_inner());
+    if l.iter().any(|x| x.ublk == ublk) {
+        return;
+    }
+    let how = if std::path::Path::new(&format!("/sys/class/ublk-char/ublkc{dev_id}")).exists() { "stopped" } else { "deleted" };
+    let boot = BOOT_DEVICES.lock().unwrap_or_else(|e| e.into_inner()).contains(&dev_id);
+    let mount = mount_of(&ublk);
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    tracing::error!(
+        "ublk: {ublk} ({device}{}) was {how} by another process, not by this engine (#299): every read and \
+         write on it now fails{}",
+        mount.as_deref().map(|m| format!(", mounted on {m}")).unwrap_or_default(),
+        if boot { "; it is one of this node's boot devices, which cannot be given back to a mounted filesystem: the node has failed and must be reinstalled or rebooted" } else { "; a new attach makes a new device" }
+    );
+    if boot {
+        eprintln!(
+            "FATAL: {ublk} ({device}{}) was {how} by another process (#299): this node's storage under it is gone; reboot or reinstall the node",
+            mount.as_deref().map(|m| format!(", {m}")).unwrap_or_default()
+        );
+    }
+    l.push(Lost { ublk, device: device.to_string(), mount, how, since, boot });
+}
+
+/// Devices taken away from under the engine (#299).
+pub fn lost() -> Vec<Lost> {
+    LOST.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Forget a lost device (#299): its volume has a new device now.
+pub fn forget_lost(device_path: &str) {
+    LOST.lock().unwrap_or_else(|e| e.into_inner()).retain(|l| l.ublk != device_path);
+}
+
+/// Whether `device_path` (`/dev/ublkbN`) is one of them.
+pub fn is_lost(device_path: &str) -> bool {
+    LOST.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|l| l.ublk == device_path)
+}
+
 /// Every request a ublk device has held for `older_than` or more, oldest
 /// first.
 pub fn stuck(older_than: std::time::Duration) -> Vec<Stuck> {
@@ -1950,6 +2074,7 @@ fn queue_worker(
     track: Arc<QueueTrack>,
     batch: bool,
     tags: std::ops::Range<u16>,
+    taken: Arc<AtomicBool>,
 ) {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -2079,7 +2204,12 @@ fn queue_worker(
     // measuring against a storage handover that hangs.
     let idle_wait = types::Timespec::new().sec(0).nsec(100_000_000);
     let wait_args = types::SubmitArgs::new().timespec(&idle_wait);
+    // The device taken away by another process (#299): nothing more comes.
+    let mut lost_here = false;
     while running.load(Ordering::Relaxed) {
+        if lost_here {
+            break;
+        }
         match ring.submitter().submit_with_args(1, &wait_args) {
             Ok(_) => {}
             // The wait expired with nothing to do: go round, which is where
@@ -2125,7 +2255,11 @@ fn queue_worker(
                     arrived.extend(fr.take(res as usize));
                 }
                 if res < 0 && res != -libc::ENOBUFS {
-                    if res != -(libc::ENODEV) && running.load(Ordering::Relaxed) {
+                    if res == -(libc::ENODEV) && running.load(Ordering::Relaxed) && !is_stopping(track.dev_id) {
+                        note_lost(track.dev_id, &track.device);
+                        taken.store(true, Ordering::SeqCst);
+                        lost_here = true;
+                    } else if res != -(libc::ENODEV) && running.load(Ordering::Relaxed) {
                         tracing::warn!("ublk queue {}: batch fetch ended: {}", queue_id, res);
                     }
                     continue;
@@ -2166,7 +2300,13 @@ fn queue_worker(
             let tag = user_data as u16;
             // Negative = device stopping or error
             if res < 0 {
-                if res != -(libc::ENODEV) {
+                // Aborted while this engine was not stopping it: taken away
+                // by another process (#299).
+                if res == -(libc::ENODEV) && running.load(Ordering::Relaxed) && !is_stopping(track.dev_id) {
+                    note_lost(track.dev_id, &track.device);
+                    taken.store(true, Ordering::SeqCst);
+                    lost_here = true;
+                } else if res != -(libc::ENODEV) {
                     tracing::warn!(
                         "ublk queue {} tag {}: CQE error {}",
                         queue_id, tag, res,
@@ -2291,6 +2431,32 @@ mod tests {
 
     /// #337: a request a device has not answered is listed with its op and
     /// age, oldest first; an answered one, or a dropped device, is not.
+    /// #299: a device taken away is listed once, a boot device as such; its
+    /// id served again, or its volume attached anew, it is forgotten; one the
+    /// engine is stopping itself is not a loss (the worker checks).
+    #[test]
+    fn a_device_taken_away_is_listed_once_until_it_is_served_again() {
+        note_serving(9299, true);
+        note_serving(9300, false);
+        note_lost(9299, "volume:root");
+        note_lost(9299, "volume:root");
+        note_lost(9300, "volume:pvc");
+        let l = lost();
+        let root: Vec<_> = l.iter().filter(|x| x.ublk == "/dev/ublkb9299").collect();
+        assert_eq!(root.len(), 1, "once");
+        assert!(root[0].boot && root[0].how == "deleted", "{:?}", root[0]);
+        assert!(l.iter().any(|x| x.ublk == "/dev/ublkb9300" && !x.boot));
+        assert!(is_lost("/dev/ublkb9300"));
+        forget_lost("/dev/ublkb9300");
+        assert!(!is_lost("/dev/ublkb9300"));
+        note_serving(9299, false);
+        assert!(!is_lost("/dev/ublkb9299"), "served again");
+        note_stopping(9301);
+        assert!(is_stopping(9301));
+        note_serving(9301, false);
+        assert!(!is_stopping(9301));
+    }
+
     #[test]
     fn feature_masks_read_by_name() {
         assert_eq!(feature_names(0), Vec::<&str>::new());

@@ -483,6 +483,16 @@ impl UblkExportManager {
     /// the answer to wait for if another attach is bringing it up, else a
     /// server started for it. See [`attach`].
     pub fn begin(&mut self, volume_id: &str, device: Arc<dyn BlockDevice>) -> Begin {
+        // Its device taken away by another process (#299): the record goes,
+        // and this attach makes a new device.
+        #[cfg(target_os = "linux")]
+        if self.exports.get(volume_id).is_some_and(|e| crate::drive::ublk::is_lost(&e.device_path)) {
+            tracing::warn!(volume = volume_id, "its ublk device was taken away by another process; attaching a new one (#299)");
+            if let Some(p) = self.exports.get(volume_id).map(|e| e.device_path.clone()) {
+                let _ = self.remove(volume_id);
+                crate::drive::ublk::forget_lost(&p);
+            }
+        }
         if let Some(e) = self.exports.get(volume_id) {
             return Begin::Ready(e.device_path.clone());
         }

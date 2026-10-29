@@ -146,6 +146,12 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// every device does.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         ublk_stuck: Vec<crate::drive::ublk::Stuck>,
+        /// ublk devices this engine served that another process stopped or
+        /// deleted (#299): `ublk`, `device`, `mount`, `how`, `since`, `boot`.
+        /// A boot device lost makes `status` `failed`; another, `degraded`.
+        #[cfg(target_os = "linux")]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        ublk_lost: Vec<crate::drive::ublk::Lost>,
         /// The ublk features this kernel offers and the devices use, and how
         /// the engine's io_uring rings were set up (#505).
         #[cfg(target_os = "linux")]
@@ -214,8 +220,20 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
             })
         })
     });
+    #[cfg(target_os = "linux")]
+    let lost_devices = crate::drive::ublk::lost();
+    #[cfg(target_os = "linux")]
+    let lost_status = if lost_devices.iter().any(|l| l.boot) {
+        Some("failed")
+    } else if !lost_devices.is_empty() {
+        Some("degraded")
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let lost_status: Option<&'static str> = None;
     Json(Health {
-        status: if durability.is_some() { "degraded" } else { "ok" },
+        status: lost_status.unwrap_or(if durability.is_some() { "degraded" } else { "ok" }),
         durability,
         digests,
         lost_mappings,
@@ -230,6 +248,8 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         slabs: super::slab_report::for_health(&state),
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
+        #[cfg(target_os = "linux")]
+        ublk_lost: lost_devices.clone(),
         #[cfg(target_os = "linux")]
         ublk_features: crate::drive::ublk::feature_report(),
         drives_unreachable: crate::drive::ridethrough::stalls(),

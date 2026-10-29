@@ -940,13 +940,20 @@ Master's decision B: last in the order, off by default,
 - [x] check.sh at ccab816c ALL PASS (1304/1304); v23.5.0; stage; closed;
       stormbootx#159 told
 
-### A privileged pod stops/deletes the node's ublk device (2026-10-17, #299, P3) — PARKED until the single-node pacing lifts
+### A privileged pod stops/deletes the node's ublk device (2026-10-17, #299, P3) — IN PROGRESS (owner 2026-10-28: unheld)
 
-stormraid's test deleted /dev/ublkb0 (fixed there, stormraid#20). To build:
-detect a served device stopped/deleted (aborted queue commands, ublkcN
-gone), ERROR + health `ublk_lost`; re-add a stopped device, fail visibly on
-a deleted one. Test-pod access to /dev/ublk-control: stormcentral#932.
-Nothing built.
+stormraid's test deleted /dev/ublkb0 (fixed there, stormraid#20); test-pod
+access to /dev/ublk-control is stormcentral#932. Here:
+- [x] detect: a queue's commands aborted (-ENODEV) while the engine is not
+      stopping that device itself = taken by another process; ERROR naming
+      the device, volume, mount (FATAL on the console for a boot device);
+      health `ublk_lost`, status `failed` (a boot device) or `degraded`
+- [x] survive: the server of a taken device sends no STOP_DEV/DEL_DEV (the
+      id may be another device's); an attach of its volume replaces the
+      record with a new device. A boot device cannot be given back to a
+      mounted filesystem: the node fails visibly
+- [ ] tests: registry unit; ci-ublk-qd-verify.sh `taken` (examples/ublk_take
+      plays the pod); check.sh; docs; close
 
 ### Clone verify: i-blocks-wrong on fedora-base (2026-10-17, #293, P3) — AFTER mkfs.ext4.rs#25
 
