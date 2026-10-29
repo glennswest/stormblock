@@ -277,7 +277,7 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
       ~1700, split ~1510, rounds 879–1770 in every mode: no difference a
       build VM can measure; the earlier single-run gains were noise. pve and
       the Dell (stormcentral's perf stage) once a release carries it
-- [ ] check.sh at 47c55218 (PER_IO_DAEMON on top of 2ab8395f's pass)
+- [x] check.sh at 47c55218 ALL PASS (1287/1287, no warnings)
 - [ ] 2: zero copy fast path (SUPPORT_ZERO_COPY + AUTO_BUF_REG; the copy
       path per request: USER_COPY with ZERO_COPY, pread/pwrite of
       /dev/ublkcN, to check against the driver), crash/power-cut tests
