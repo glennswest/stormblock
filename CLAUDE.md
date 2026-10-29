@@ -1009,7 +1009,7 @@ golden-stormblock-47e88a267077 (the X9 blades' last-known-good is 11.88).
 Then: behind a switch, default off, and the owner's fault-injection suite.
 Proposed after #444. Nothing built.
 
-### Grow a RAID1 array and its dedicated slab (2026-10-17, #318, P2/P3, stormstorage#73) — IN PROGRESS
+### Grow a RAID1 array and its dedicated slab (2026-10-17, #318, P2/P3, stormstorage#73) — DONE (v23.9.0), closed
 
 Unheld (owner, 2026-10-28). Inert until called: on main.
 - [x] `BlockDevice::refresh_capacity` (file: its length; block: BLKGETSIZE64;
@@ -1027,7 +1027,11 @@ Unheld (owner, 2026-10-28). Inert until called: on main.
       legs agree, a cut after the superblocks reassembled at the new size,
       the slab grown by the next call), integration_nvmeof (namespace
       resized, refresh), destructive list
-- [ ] build VM; check.sh; docs; release; stormstorage#73 told; close
+- [x] docs (raid-sets.md, README, auth.md), CHANGELOG; check.sh at
+      15b65ed5 ALL PASS (1309/1309); v23.9.0 (`stormblock 23.9.0` from a
+      `--locked` build); stage requested (b6f6964490c5); stormstorage#73
+      told; closed. Not on metal: a head over real NVMe/TCP legs grown on
+      their engines
 
 ### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — PARKED until the single-node pacing lifts
 
