@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-28
+- **chore:** #508: kernel set 7.2.10-200.fc44 → 7.2.11-200.fc44. No code change: `stormcentral component initramfs --commit f8b965b5` built the initramfs for 7.2.11-200.fc44.x86_64 (its dependency closure over the kernel's modules.dep passed): registry/initramfs:blob-aafea1b1d512d74b.
+
 ## [v23.0.4] — 2026-10-28
 
 ### Changed

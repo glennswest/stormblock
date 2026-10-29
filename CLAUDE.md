@@ -211,12 +211,13 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
-### Kernel → 7.2.11-200.fc44: initramfs for it (2026-10-28, #508, P0) — IN PROGRESS
+### Kernel → 7.2.11-200.fc44: initramfs for it (2026-10-28, #508, P0) — DONE, no code change
 
-As #501: `stormcentral component initramfs --commit <main head>` builds the
-initramfs for the new kernel set and checks the modules' dependency closure.
-#350 paused on wip/350-system-pair for it.
-- [ ] initramfs built for 7.2.11-200.fc44; closure passes; CHANGELOG
+As #501: `stormcentral component initramfs --commit f8b965b5` built the
+initramfs for 7.2.11-200.fc44.x86_64 on a build VM (static stormblock, the
+modules' dependency closure taken over the kernel's full modules.dep, which
+stops the build on anything missing): registry/initramfs:blob-aafea1b1d512d74b
+(vmlinuz blob-515dcb6e407dff32). #350 paused on wip/350-system-pair for it.
 
 ### ublk zero copy, batch I/O, io_uring ring flags (2026-10-28, #505, P1) — WAITING ON THE OWNER (scope)
 
