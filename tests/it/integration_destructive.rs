@@ -943,6 +943,7 @@ members = [ { name = "cmdline", role = "cmdline", kind = "bootconfig", text = "r
         .unwrap();
     assert_eq!(r.status().as_u16(), 400);
     assert!(!outside.with_extension("qcow2").exists());
+}
 
 /// A release erase (#291): asked of the running node with the admin token,
 /// planned, recorded as a ticket in the state volume before the answer, and

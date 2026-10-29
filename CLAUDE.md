@@ -883,16 +883,21 @@ drop slab + volumes from memory with no persist/erase; stop the array with
 no superblock/bitmap/flush write; forget the members); test: assemble on a
 second engine, every member byte unchanged. Nothing built.
 
-### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P3; stormcluster#21, P1) — BUILT on wip/291-release-erase; merge asked on #291
+### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P1; stormcluster#21, P1) — MERGING (owner 2026-10-28: ship it)
 
 Decided (master, 2026-10-17): 1B, a ticket then a reboot; the initramfs
 engine erases and re-lays before anything is mounted. Keep: sealed release
-goldens, `system-data`, the node's declaration. Erase: everything else.
-Built at the owner's ask on **wip/291-release-erase** (32a63f6):
-`src/release_erase.rs`, `POST/GET/DELETE /api/v1/release`, the run in
-`boot-local`; check.sh on the branch ALL PASS (1264/1264). The work plan in
-full is on the branch. Merge asked on #291 (needs-owner): A now, B after the
-single-node pacing (recommended). Then a golden, stormcluster#21 told, close.
+goldens, `system-data`, the node's declaration. Erase: everything else,
+unmarked included. Built on wip/291-release-erase (check.sh ALL PASS
+1264/1264 there); owner 2026-10-28: "Hardware ones and multi-node ones
+should be working": merge and ship. Rebased onto main as
+**wip/291-release-erase-v2** (the old branch is left as it was).
+- [x] `src/release_erase.rs`, `POST/GET/DELETE /api/v1/release`, the run in
+      `boot-local`; tests; erase.md, README, auth.md, CHANGELOG
+- [x] rebased onto main (847fd20c + #265's work plan)
+- [ ] check.sh on the rebased branch; main fast-forwarded; minor bump + tag;
+      stage requested; stormcluster#21 told; closed. Metal: a real node
+      through a reboot (stormcluster#21's step)
 
 ### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — PARKED until the single-node pacing lifts
 
