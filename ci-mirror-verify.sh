@@ -48,7 +48,7 @@ I="$W/initrd"
 mkdir -p "$I"/{bin,dev,proc,sys,run,tmp,etc,lib/mods,mnt,mnt2}
 cp "$BUSYBOX" "$I/bin/busybox"
 for a in sh mount umount insmod ip sleep cat echo ls grep dd cmp poweroff dmesg head tail wc sed \
-         awk cut tr kill seq mkdir rm timeout mke2fs md5sum sync touch; do
+         awk cut tr kill seq mkdir rm timeout mke2fs md5sum sync touch sort; do
     ln -sf busybox "$I/bin/$a"
 done
 for b in "$BIN" "$CURL"; do
@@ -133,7 +133,8 @@ echo "GUEST T: volume $t as $uri"
 ( i=0
   while [ ! -e /tmp/stop ]; do
       i=$((i + 1))
-      dd if=/dev/urandom of=/mnt/during$i bs=256k count=2 2>/dev/null || touch /tmp/werr
+      # Over 100 names: files rewritten, the filesystem never full.
+      dd if=/dev/urandom of=/mnt/during$((i % 100)) bs=256k count=2 2>/dev/null || touch /tmp/werr
       [ $((i % 4)) = 0 ] && { sync || touch /tmp/werr; }
   done
   echo $i > /tmp/wcount ) &
