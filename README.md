@@ -677,6 +677,18 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   `write`, …) and `secs`. A `flush` there is a consumer's fsync that has not
   returned. Left out when there is none; `status` stays `ok`. The watchdog
   logs the same list (WARN) every 30 s while it lasts.
+  And `"ublk_lost"` (#299): every ublk device this engine served that
+  another process stopped or deleted (any process with CAP_SYS_ADMIN and
+  `/dev/ublk-control` can; a privileged test pod did it to pvetest1's root),
+  with `ublk`, `device`, `mount`, `how` (`stopped`/`deleted`), `since` and
+  `boot`. The engine notices when the kernel aborts the device's queues while
+  it is not stopping the device itself, logs an ERROR naming the volume and
+  the mount, lets go of the device (so the other process's DEL_DEV
+  completes) and sends no STOP/DEL of its own for that id, which may be
+  another device's by then. A device it attached is replaced by the next
+  attach of its volume; a boot device cannot be given back to a mounted
+  filesystem, so `status` is `failed` (and the console says FATAL);
+  otherwise `degraded`.
   And `"fds"` (#510): `{open, limit}`, this process's open file descriptors
   and its soft limit; past 80 % the log says so (WARN, once a minute). A
   serving engine starts with its soft limit raised to the hard one.
