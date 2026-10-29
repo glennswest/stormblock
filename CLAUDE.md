@@ -1033,7 +1033,7 @@ Unheld (owner, 2026-10-28). Inert until called: on main.
       told; closed. Not on metal: a head over real NVMe/TCP legs grown on
       their engines
 
-### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — IN PROGRESS
+### Live mirror of an in-use volume to a peer, then release (2026-10-17, #295, P3) — DONE (v23.11.0), closed; metal pending
 
 Unheld (owner, 2026-10-28). Inert until called: on main.
 - [x] `volume::mirror::LiveMirror` (sharded extent locks, copy, fail, stop),
@@ -1044,8 +1044,11 @@ Unheld (owner, 2026-10-28). Inert until called: on main.
 - [x] tests: integration_mirror (2, 15× green), ci-mirror-verify.sh ALL
       PASS (QEMU, mounted ext2 on ublk), destructive list; migration.md §3,
       README, auth.md, CHANGELOG
-- [ ] check.sh; release; stormstorage#44, stormcluster#53 told; close.
-      Node-level evacuation: the per-volume verb driven by stormcluster
+- [x] check.sh at d9ee9d46 ALL PASS (1311/1311); v23.11.0 (`stormblock
+      23.11.0`); the test's one warning fixed after (75a38b90, test only);
+      stage requested; stormstorage#44, stormcluster#53 told; closed.
+      Node-level evacuation: the per-volume verb driven by stormcluster.
+      Not on metal: a VM's disk moved between two nodes
 
 ### Release an array with no write to its members (2026-10-17, #296, P3) — DONE (v23.7.0), closed
 
