@@ -3373,7 +3373,7 @@ impl BlockDevice for ThinVolumeHandle {
         } else {
             self.write_padded_to_block(offset, buf).await?
         };
-        if let Some(m) = mirror {
+        if let Some(m) = &mirror {
             m.write(offset, &buf[..n]).await;
         }
         Ok(n)
@@ -3518,7 +3518,7 @@ impl BlockDevice for ThinVolumeHandle {
         let _vol = if policy.is_none() { Some(self.inner.lock().await) } else { None };
         let mapped = self.gem.read().await.mapped_in(self.id, first..last);
         let released = self.discard_mapped(mapped.clone(), &policy).await;
-        if let Some(m) = mirror {
+        if let Some(m) = &mirror {
             let still: HashSet<u64> = self.gem.read().await.mapped_in(self.id, first..last).into_iter().collect();
             let cap = self.capacity_bytes();
             for x in mapped.into_iter().filter(|x| !still.contains(x)) {
