@@ -211,6 +211,17 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
+### 12.18's first boot ~2× slower than 12.16 (2026-10-13, #421, P1) — RE-MEASURED: gone, closed
+
+Re-measured from stormcentral's pve consoles of 2026-10-28/29 (engine
+v23.0.4; `tmp/tl.py`): first boot `root ready` 7.32 / 7.04 s (12.16: 26.03 /
+26.44, 12.18: 33.14 / 31.85), network up → root ready +4.4 / +4.3 s (8.2 /
+8.8; 15.3 / 14.2), mounts 1.3 / 1.1 s, system-half flow-over 17.5 s at
+160 MB/s / 4.8 s at 389 MB/s, after the 90 s boot grace (77 / 70 s; 148 /
+142 s), root ready → apiserver started 3.6 / 3.0 s (≈4 s). Forge runs the
+current engine (MDTS 8 MiB) since 2026-10-14 and #410/#411/#278 reworked the
+flow-over; no bisect needed. No code change.
+
 ### Kernel → 7.2.13-200.fc44: initramfs for it (2026-10-28, #509, P0) — DONE, no code change
 
 As #508: `stormcentral component initramfs --commit a3c1805b` built the
