@@ -211,6 +211,22 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
+### Out of file descriptors after ~805 ublk exports (2026-10-29, #510, P1) — IN PROGRESS
+
+pvetest1 12.58: EMFILE everywhere after ~805 attach/detach cycles in 5 h.
+Found by reading: every export registered its runtime's `Handle` for
+`/debug/tasks` and nothing removed it (pruned only by a dump, on demand
+since #365); a Handle keeps the runtime's I/O driver, its epoll fd and
+eventfd, open.
+- [x] `register_runtime` returns a guard (drop unlists); the export and adopt
+      threads drop it before their runtime; a runtime that fails to start
+      says the server exited
+- [x] health `fds {open, limit}`, WARN past 80 %; a serving engine raises its
+      soft limit to the hard one
+- [ ] tests: `fdlimit` units (50 runtimes registered and dropped; negative
+      control `FD_LEAK_510=1`); ci-ublk-qd-verify.sh `fd-cycles` (40
+      attach/detach, the engine's fds before and after); check.sh
+
 ### 12.18's first boot ~2× slower than 12.16 (2026-10-13, #421, P1) — RE-MEASURED: gone, closed
 
 Re-measured from stormcentral's pve consoles of 2026-10-28/29 (engine

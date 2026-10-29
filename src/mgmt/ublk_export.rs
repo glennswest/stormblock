@@ -723,20 +723,25 @@ impl UblkExportManager {
             .name(format!("ublk-csi-{id}"))
             .spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => {
-                        crate::mgmt::debug::register_runtime(format!("ublk-export-{id}"), rt.handle().clone());
-                        rt
-                    }
+                    Ok(rt) => rt,
                     Err(e) => {
                         tracing::error!("ublk-csi {id}: runtime init failed: {e}");
+                        // Said done: an attach waiting on it, and a shutdown,
+                        // must not wait for a server that never ran (#510).
+                        server_exited(&thread_holds, &thread_exit, &thread_done);
                         return;
                     }
                 };
+                // Unlisted before the runtime goes (#510): the list held
+                // every export's handle, and with it its fds, for good.
+                let listed = crate::mgmt::debug::register_runtime(format!("ublk-export-{id}"), rt.handle().clone());
                 rt.block_on(async move {
                     if let Err(e) = runner.run(rx).await {
                         tracing::error!("ublk-csi {id}: export failed: {e}");
                     }
                 });
+                drop(listed);
+                drop(rt);
                 // Last thing this thread does: the device is stopped, deleted
                 // and its queues closed, so a shutdown waiting on it can stop
                 // waiting (#105).

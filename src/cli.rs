@@ -1083,6 +1083,12 @@ pub async fn run() -> anyhow::Result<()> {
     // The engine that serves (a node's, or the daemon): a panic ends it, so
     // its supervisor restarts it, never leaving it half-alive (#368). The
     // CLI tools keep the default: a panic there ends the command anyway.
+    // A serving engine holds a ring, a device and a runtime per volume it
+    // serves: its soft fd limit raised to the hard one (#510).
+    #[cfg(target_os = "linux")]
+    if matches!(&cli.command, None | Some(SubCommand::AdoptUblk { .. }) | Some(SubCommand::BootLocal { .. })) {
+        crate::fdlimit::raise_soft_limit();
+    }
     match &cli.command {
         Some(SubCommand::AdoptUblk { .. }) => crate::logging::abort_on_panic("adopt-ublk"),
         Some(SubCommand::BootLocal { .. }) => crate::logging::abort_on_panic("boot-local"),
@@ -8285,11 +8291,12 @@ async fn handle_adopt_ublk(
                     .enable_all()
                     .build()
                     .expect("runtime");
-                crate::mgmt::debug::register_runtime(format!("ublk-adopt-{dev_id} ({name})"), rt.handle().clone());
+                let listed = crate::mgmt::debug::register_runtime(format!("ublk-adopt-{dev_id} ({name})"), rt.handle().clone());
                 let server = UblkServer::new(dev).adopting(dev_id);
                 if let Err(e) = rt.block_on(server.run(rx)) {
                     tracing::error!("ublk adopt {dev_id} ({name}): {e}");
                 }
+                drop(listed);
             })?;
         threads.push(thread);
     }

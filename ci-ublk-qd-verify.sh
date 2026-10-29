@@ -206,6 +206,7 @@ EOT
 
     [ "$mode" != serial ] && fast_reads
     [ "$mode" != serial ] && features
+    [ "$mode" = concurrent ] && fd_cycles
     [ "$mode" = concurrent ] && in_use
     [ "$mode" = concurrent ] && parallel_attach
     [ "$mode" = concurrent ] && attach_delete_race
@@ -450,6 +451,29 @@ fast_reads() {
     dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$t8" && dmsetup resume slow$disk
 }
 
+# #510: attach and detach one volume 40 times over ublk; the engine's open
+# fds after are what they were before (pvetest1 ran out after ~805), and
+# health reports them against the limit.
+fd_cycles() {
+    step fd-cycles
+    v=$(api -X POST http://127.0.0.1:$port/api/v1/volumes -d '{"name":"fdc","size":"16M"}' \
+        | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    one() {
+        d=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$v/attach -d '{"transport":"ublk"}' \
+            | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+        [ -b "$d" ] && dd if=$d of=/dev/null bs=4096 count=1 iflag=direct 2>/dev/null
+        curl -s -m 30 -o /dev/null -H 'Authorization: Bearer t' -X DELETE http://127.0.0.1:$port/api/v1/volumes/$v/attach
+    }
+    one; one
+    f0=$(ls /proc/$pid/fd | wc -l)
+    for i in $(seq 1 40); do one; done
+    f1=$(ls /proc/$pid/fd | wc -l)
+    echo "LOG fd-cycles: engine fds $f0 before 40 attach/detach cycles, $f1 after"
+    [ $((f1 - f0)) -lt 10 ] && r fd-cycles PASS || r fd-cycles "FAIL ($f0 -> $f1)"
+    h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
+    case "$h" in *'"fds":{"open":'*'"limit":'*) r fd-health PASS ;; *) r fd-health "FAIL ($h)" ;; esac
+}
+
 # #505: health says what the kernel offers, what the device uses, and how
 # the rings were built (tuned unless asked plain).
 features() {
@@ -582,7 +606,7 @@ echo "fast reads (#505, median of 5): tuned rings + batch I/O $(t concurrent fas
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
-         parallel-attach attach-delete-race plain-round-trip split-round-trip features-tuned features-plain features-split \
+         parallel-attach attach-delete-race plain-round-trip split-round-trip features-tuned features-plain features-split fd-cycles fd-health \
          mount-detach-refused mount-detach-mounted mount-detach-no-deleted-read mount-detach-after; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done

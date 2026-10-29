@@ -88,8 +88,8 @@ fn reports() -> &'static Mutex<VecDeque<Report>> {
     R.get_or_init(Default::default)
 }
 
-fn runtimes() -> &'static Mutex<Vec<(String, tokio::runtime::Handle)>> {
-    static R: OnceLock<Mutex<Vec<(String, tokio::runtime::Handle)>>> = OnceLock::new();
+fn runtimes() -> &'static Mutex<Vec<(u64, String, tokio::runtime::Handle)>> {
+    static R: OnceLock<Mutex<Vec<(u64, String, tokio::runtime::Handle)>>> = OnceLock::new();
     R.get_or_init(Default::default)
 }
 
@@ -102,11 +102,41 @@ fn since_start_ms() -> u64 {
 }
 
 /// Name a runtime, so `/debug/tasks` and the watchdog dump its tasks too.
-pub fn register_runtime(name: impl Into<String>, handle: tokio::runtime::Handle) {
-    let mut r = runtimes().lock().unwrap_or_else(|e| e.into_inner());
-    // A runtime that has gone (an export torn down) is dropped from the list
-    // when a dump finds it closed; the list stays small.
-    r.push((name.into(), handle));
+///
+/// Listed for as long as the returned registration lives: drop it before the
+/// runtime (#510). A `Handle` keeps its runtime's I/O driver, and with it an
+/// epoll fd and an eventfd, open: the list kept every ublk export's handle
+/// for the life of the process (it was only ever pruned by a dump, and dumps
+/// are on demand), and pvetest1 ran out of file descriptors after ~805
+/// exports.
+#[must_use = "the runtime is listed only while the registration lives"]
+pub fn register_runtime(name: impl Into<String>, handle: tokio::runtime::Handle) -> RuntimeRegistration {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    runtimes().lock().unwrap_or_else(|e| e.into_inner()).push((id, name.into(), handle));
+    RuntimeRegistration(id)
+}
+
+/// A runtime's place in the list `/debug/tasks` dumps (#510): removed, with
+/// the handle, when dropped.
+pub struct RuntimeRegistration(u64);
+
+impl RuntimeRegistration {
+    /// Listed for the life of the process (the API's own runtime).
+    pub fn forever(self) {
+        std::mem::forget(self)
+    }
+}
+
+impl Drop for RuntimeRegistration {
+    fn drop(&mut self) {
+        runtimes().lock().unwrap_or_else(|e| e.into_inner()).retain(|(id, _, _)| *id != self.0);
+    }
+}
+
+/// Runtimes listed now (#510).
+pub fn runtimes_listed() -> usize {
+    runtimes().lock().unwrap_or_else(|e| e.into_inner()).len()
 }
 
 struct Registered {
@@ -468,8 +498,12 @@ pub async fn task_dump(limit: Duration) -> String {
     }
     #[cfg(all(tokio_unstable, target_os = "linux"))]
     {
-        let handles: Vec<(String, tokio::runtime::Handle)> =
-            runtimes().lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let handles: Vec<(String, tokio::runtime::Handle)> = runtimes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(_, n, h)| (n.clone(), h.clone()))
+            .collect();
         let mut out = String::new();
         for (name, h) in handles {
             out.push_str(&format!("=== runtime {name} ===\n"));
@@ -525,7 +559,7 @@ pub fn start(_state: Arc<AppState>) {
         return;
     }
     start_instant();
-    register_runtime("api", tokio::runtime::Handle::current());
+    register_runtime("api", tokio::runtime::Handle::current()).forever();
     tokio::spawn(async {
         loop {
             HEARTBEAT.store(since_start_ms(), Ordering::Relaxed);
@@ -787,7 +821,7 @@ mod tests {
         });
         let h = rx.recv().unwrap();
         ready.recv().unwrap();
-        register_runtime("ublk-adopt-test (#334)", h.clone());
+        let _listed = register_runtime("ublk-adopt-test (#334)", h.clone());
 
         io.complete(); // A's I/O done underneath; A not woken yet
         let api = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
@@ -807,6 +841,6 @@ mod tests {
 
         stop.store(true, Ordering::SeqCst);
         device.join().expect("the device's runtime ends cleanly");
-        runtimes().lock().unwrap().retain(|(n, _)| !n.starts_with("ublk-adopt-test"));
+        drop(_listed);
     }
 }

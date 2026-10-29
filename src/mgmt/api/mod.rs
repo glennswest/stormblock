@@ -167,6 +167,11 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// the node's volumes are what cannot be reached.
         #[serde(flatten)]
         networks: crate::mgmt::config::NetworkReport,
+        /// This process's open file descriptors and its soft limit (#510): a
+        /// leak shows long before EMFILE; a warning goes to the log past 80 %.
+        #[cfg(target_os = "linux")]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fds: Option<crate::fdlimit::Fds>,
     }
     #[derive(Serialize)]
     struct FlowOver {
@@ -229,6 +234,8 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         ublk_features: crate::drive::ublk::feature_report(),
         drives_unreachable: crate::drive::ridethrough::stalls(),
         networks: state.config.network_report(),
+        #[cfg(target_os = "linux")]
+        fds: crate::fdlimit::report(),
     })
     .into_response()
 }
