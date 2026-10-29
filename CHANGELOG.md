@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.8.0] — 2026-10-29
+
+### Added
+- #290: `POST /api/v1/forge/default` puts a node's forge back to its default (forge.json forgotten, `from: default`; the daemon's default is off), so stormcluster needs no copy of `default_settings`.
+
 ### 2026-10-29
 - **feat:** #290 (stormcluster#16): `POST /api/v1/forge/default` (admin) puts a node's forge back to its default with no copy of it: `forge.json` is forgotten and the engine's default is served now — on a node (`adopt-ublk`) the target with `default_settings` (`from: default`, nothing written, so a later engine with another default applies its own); on the daemon, off. A forge already serving the default (a PUT copy of it) is only relabelled, not restarted; other settings are replaced (the old target stops accepting, its connections finish); a default that cannot be served leaves the node as it was and the file in place. A target the command line or `--config` set up: 409. A repeat changes nothing. Tests: `integration_forge::a_node_goes_back_to_its_default_forge_without_a_copy_of_it` (off → default → on and listening, nothing written, kept across a restart; a PUT copy forgotten; other settings replaced; the daemon off; configured 409), the admin gate in `serve::api` and `integration_destructive`.
 
