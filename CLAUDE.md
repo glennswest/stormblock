@@ -1065,12 +1065,16 @@ should be working": merge and ship. Rebased onto main as
       stormcluster#21 told; closed. Metal: a real node through a reboot
       (stormcluster#21's step)
 
-### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — PARKED until the single-node pacing lifts
+### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — IN PROGRESS
 
-To build on a wip/ branch: `POST /api/v1/forge/default` (admin): remove
-forge.json, serve `default_settings` (restart if on with other settings),
-GET `from: default`; 409 for a config-owned target; idempotent; tests incl.
-a restart. stormcluster PUTs a copy until then. Nothing built.
+Unheld (owner, 2026-10-28). Inert until called: on main.
+- [x] `forge::to_default` + `POST /api/v1/forge/default` (admin): forget
+      forge.json, serve the default `restore` was given (a node's; the
+      daemon's: off); same settings only relabelled; configured → 409
+- [x] tests: integration_forge (off → default → restart, PUT copy, other
+      settings, daemon, configured), auth gate (unit + destructive list);
+      README, auth.md, CHANGELOG
+- [ ] build VM; check.sh; release; stormcluster#16 told; close
 
 ### Data volumes for a staged upgrade (2026-10-17, #280, P3) — CLOSED as superseded
 
