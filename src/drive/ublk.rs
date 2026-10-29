@@ -1084,7 +1084,21 @@ impl UblkServer {
         tracing::info!("ublk device started: {}", blk_path);
 
         // --- Wait for shutdown signal ---
-        let _ = shutdown.changed().await;
+        //
+        // Or for the device to be taken away by another process (#299): its
+        // DEL_DEV waits until this server lets go of /dev/ublkcN, so the
+        // server lets go at once (sending no STOP_DEV/DEL_DEV of its own).
+        loop {
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {
+                    if self.taken.load(Ordering::SeqCst) {
+                        tracing::warn!("ublk: /dev/ublkb{assigned_id} was taken away: letting go of it (#299)");
+                        break;
+                    }
+                }
+            }
+        }
 
         // A recoverable device is **let go of**, not stopped.
         //

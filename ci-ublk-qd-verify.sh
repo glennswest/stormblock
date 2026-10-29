@@ -488,7 +488,7 @@ taken() {
         | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
     n=${d#/dev/ublkb}
     echo "LOG taken: $d ($v)"
-    ublk_take "$n" 2>&1 | sed 's/^/LOG ublk_take: /'
+    timeout 30 ublk_take "$n" 2>&1 | sed 's/^/LOG ublk_take: /'
     sleep 2
     h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
     echo "LOG taken health: $(echo "$h" | grep -o '"status":"[a-z]*"' | head -1) $(echo "$h" | grep -o '"ublk_lost":\[[^]]*\]')"
