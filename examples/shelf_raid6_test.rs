@@ -168,11 +168,14 @@ async fn wait_clean(api: &Api, id: &str, limit: Duration) -> Option<f64> {
     let t = Instant::now();
     while t.elapsed() < limit {
         let a = array(api, id).await;
-        if state_of(&a) == "clean" && a["status"]["rebuild"].is_null() {
+        // A finished rebuild may stay listed, not running.
+        let rebuilding = a["status"]["rebuild"]["running"].as_bool().unwrap_or(false);
+        if state_of(&a) == "clean" && !rebuilding {
             return Some(t.elapsed().as_secs_f64());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+    println!("TIMEOUT {id}: {}", array(api, id).await["status"]);
     None
 }
 

@@ -109,7 +109,7 @@ start() {
 api() { curl -s -m 30 -H 'Authorization: Bearer t' -H 'Content-Type: application/json' "$@"; }
 H="--api http://127.0.0.1:9097 --token t --state /run/state.json"
 start
-shelf_raid6_test run $H --drives $SHELF --extra $EXTRA --fill-pct 50 --rebuild-limit 600 2>&1 | sed 's/^/H /'
+shelf_raid6_test run $H --drives $SHELF --extra $EXTRA --fill-pct 50 --rebuild-limit 240 2>&1 | sed 's/^/H /'
 
 echo "GUEST step 8a: the engine killed mid-write"
 shelf_raid6_test writeloop $H > /dev/null 2>&1 &
