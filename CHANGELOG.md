@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.9.0] — 2026-10-29
+
+### Added
+- #318: `POST /api/v1/arrays/{id}/grow` grows a RAID-1 into legs made larger (members asked their size again, NVMe/TCP legs identified again) and its dedicated slab with it; new dedicated slabs have room to grow.
+
 ### 2026-10-29
 - **feat:** #318 (stormstorage#73, volume expand): `POST /api/v1/arrays/{id}/grow` (destructive) grows a RAID-1 whose legs were each made larger. Every member is asked its size again: `BlockDevice::refresh_capacity` (a file its length, a block device `BLKGETSIZE64`, an NVMe/TCP namespace Identify Namespace again, since the initiator read it once at connect). The new room (up to the smallest leg) is zeroed on every leg, the bitmap gets its bits (same chunk; a size needing a larger chunk is refused), the superblocks are written with the new size and the events bumped, then the capacity is served and the array's slab grown. New dedicated array slabs are formatted with fourfold room in their slot table; an older one grows as far as its table reaches and says so (`slab_short`). 409 naming each member and its size when none has room, while a member is out, a rebuild, scrub or replace runs, or for a parity set. A grow cut off after the superblocks assembles at the new size; calling again grows the slab. Tests: `integration_array_pin::an_array_grows_into_its_grown_legs_and_its_slab_follows` (refused, one leg grown still refused, both grown with a writer busy: 127 MiB a member, slab grown, old data intact, a 90 MiB volume in the new room, the legs byte-equal past the superblocks; grown again and cut before the slab, released, assembled by a second engine at 191 MiB, the call grows the slab, then 409, every volume read back), `integration_nvmeof::a_namespace_grown_on_its_engine_is_seen_once_identified_again`, the destructive list.
 
