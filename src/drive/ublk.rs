@@ -120,6 +120,22 @@ const UBLK_F_CMD_IOCTL_ENCODE: u64 = 1 << 6;
 /// the kernel does not know makes ADD_DEV fail outright, so a node on an older
 /// kernel must ask for the device without it and lose only the resize (#19).
 const UBLK_F_UPDATE_SIZE: u64 = 1 << 10;
+/// Batch I/O (#505, Linux 7.0): PREP/FETCH/COMMIT_IO_CMDS in place of a
+/// command per request. Exclusive with PER_IO_DAEMON (the kernel drops it).
+const UBLK_F_BATCH_IO: u64 = 1 << 15;
+
+/// Whether a device created now asks for batch I/O (#505). A device in batch
+/// mode can only be served in batch mode, so one that is handed to another
+/// process (recoverable: the initramfs engine's, taken over by a successor
+/// that may be an older build, #189) asks for it only with
+/// `STORMBLOCK_UBLK_BATCH=always`; `=0` never asks.
+fn wants_batch(recoverable: bool) -> bool {
+    match std::env::var("STORMBLOCK_UBLK_BATCH").as_deref() {
+        Ok("0") | Ok("off") => false,
+        Ok("always") => true,
+        _ => !recoverable,
+    }
+}
 /// The device outlives its server: if this process goes, the block device
 /// stays and another process may adopt it.
 ///
@@ -605,7 +621,7 @@ impl UblkServer {
         // geometry — the queue count and depth are fixed at creation, and a
         // server that comes back with different ones leaves the kernel holding
         // requests on queues nobody is fetching from.
-        let (assigned_id, nr_queues, queue_depth, capacity) = if let Some(id) = self.adopt {
+        let (assigned_id, nr_queues, queue_depth, capacity, dev_flags) = if let Some(id) = self.adopt {
             let mut info = UblkCtrlDevInfo::default();
             submit_ctrl_cmd(
                 &mut ctrl_ring,
@@ -701,7 +717,7 @@ impl UblkServer {
                 "ublk: adopting /dev/ublkb{id} — {} queue(s), depth {}, serving {} bytes",
                 info.nr_hw_queues, info.queue_depth, capacity
             );
-            (id, info.nr_hw_queues, info.queue_depth, capacity)
+            (id, info.nr_hw_queues, info.queue_depth, capacity, info.flags)
         } else {
             let req_id = self.requested_dev_id.unwrap_or(u32::MAX);
 
@@ -730,6 +746,9 @@ impl UblkServer {
                     "ublk: this kernel does not offer UBLK_F_UPDATE_SIZE — the device \
                      will not follow a volume resize"
                 );
+            }
+            if kernel_features & UBLK_F_BATCH_IO != 0 && wants_batch(self.recoverable) {
+                flags |= UBLK_F_BATCH_IO;
             }
             if self.recoverable {
                 if kernel_features & UBLK_F_USER_RECOVERY != 0 {
@@ -785,8 +804,10 @@ impl UblkServer {
                     ""
                 }
             );
-            (assigned_id, nr_queues, queue_depth, capacity)
+            (assigned_id, nr_queues, queue_depth, capacity, dev_info.flags)
         };
+        // Served in batch mode exactly when the device was made so (#505).
+        let batch = dev_flags & UBLK_F_BATCH_IO != 0;
 
         // --- SET_PARAMS ---
         //
@@ -976,7 +997,7 @@ impl UblkServer {
                     let desc_base = desc_base;
                     queue_worker(
                         q, raw_char_fd, desc_base.0, depth, max_io,
-                        device, running, rt_handle, barrier, track,
+                        device, running, rt_handle, barrier, track, batch,
                     );
                 })
                 .map_err(|e| DriveError::Other(anyhow::anyhow!(
@@ -1622,6 +1643,12 @@ fn submit_ctrl_cmd(
 
 /// `user_data` of the eventfd read that says requests have finished.
 const WAKE: u64 = u64::MAX;
+/// Batch I/O's commands (#505): the PREP, the multishot fetch, and each
+/// COMMIT_IO_CMDS (this bit and a sequence number). A tag's own CQE carries
+/// the tag, under 4096.
+const BATCH_PREP: u64 = u64::MAX - 1;
+const BATCH_FETCH: u64 = u64::MAX - 2;
+const BATCH_COMMIT: u64 = 1 << 62;
 
 /// Requests a device has been given and not yet answered, by tag (#337).
 ///
@@ -1892,6 +1919,7 @@ fn queue_worker(
     rt_handle: tokio::runtime::Handle,
     startup_barrier: Arc<std::sync::Barrier>,
     track: Arc<QueueTrack>,
+    batch: bool,
 ) {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -1937,12 +1965,52 @@ fn queue_worker(
         .map(|_| vec![0u8; max_io_bytes])
         .collect();
 
-    // Submit initial FETCH_REQ for all tags — registers this queue with kernel
-    for tag in 0..queue_depth {
-        if submit_io_fetch(&mut ring, char_fd, queue_id, tag, &bufs[tag as usize]).is_err() {
-            tracing::error!("ublk queue {}: initial FETCH_REQ failed for tag {}", queue_id, tag);
+    // Batch I/O (#505): every tag prepared with its buffer in one command
+    // (answered before the device can start), the fetch buffer ring, and one
+    // multishot fetch. COMMIT_IO_CMDS buffers live until their completion.
+    let mut fetch: Option<crate::drive::ublk_batch::FetchRing> = None;
+    let mut commits: std::collections::HashMap<u64, Vec<u8>> = std::collections::HashMap::new();
+    let mut commit_seq: u64 = 0;
+    if batch {
+        use crate::drive::ublk_batch as b;
+        let mut prep = Vec::with_capacity(queue_depth as usize * b::ELEM_BYTES);
+        for tag in 0..queue_depth {
+            b::put_elem(&mut prep, tag, 0, bufs[tag as usize].as_ptr() as u64);
+        }
+        let sqe = b::elems_sqe(char_fd, b::UBLK_U_IO_PREP_IO_CMDS, queue_id, &prep, BATCH_PREP);
+        let prepared = unsafe { ring.submission().push(&sqe).is_ok() }
+            && ring.submit_and_wait(1).is_ok()
+            && ring.completion().any(|c| c.user_data() == BATCH_PREP && c.result() == 0);
+        drop(prep);
+        if !prepared {
+            tracing::error!("ublk queue {}: PREP_IO_CMDS failed (batch I/O)", queue_id);
             startup_barrier.wait();
             return;
+        }
+        let mut fr = match b::FetchRing::register(&ring, queue_id, queue_depth) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::error!("ublk queue {}: the fetch buffer ring: {e}", queue_id);
+                startup_barrier.wait();
+                return;
+            }
+        };
+        fr.provide();
+        let sqe = b::fetch_sqe(char_fd, queue_id, fr.buf.len(), queue_id, BATCH_FETCH);
+        if unsafe { ring.submission().push(&sqe).is_err() } {
+            tracing::error!("ublk queue {}: SQ full on the batch fetch", queue_id);
+            startup_barrier.wait();
+            return;
+        }
+        fetch = Some(fr);
+    } else {
+        // Submit initial FETCH_REQ for all tags — registers this queue with kernel
+        for tag in 0..queue_depth {
+            if submit_io_fetch(&mut ring, char_fd, queue_id, tag, &bufs[tag as usize]).is_err() {
+                tracing::error!("ublk queue {}: initial FETCH_REQ failed for tag {}", queue_id, tag);
+                startup_barrier.wait();
+                return;
+            }
         }
     }
     if !arm_wake(&mut ring, completions.efd.as_raw_fd(), wake_buf) {
@@ -2000,22 +2068,66 @@ fn queue_worker(
         }
 
         // Collect completions first (avoids double mutable borrow of ring)
-        let cqes: Vec<(u64, i32)> = ring.completion()
-            .map(|cqe| (cqe.user_data(), cqe.result()))
+        let cqes: Vec<(u64, i32, bool)> = ring.completion()
+            .map(|cqe| (cqe.user_data(), cqe.result(), io_uring::cqueue::more(cqe.flags())))
             .collect();
 
-        for (user_data, res) in cqes {
+        // Requests to serve this round: a tag's own CQE (FETCH/COMMIT_AND_
+        // FETCH), or every tag a batch fetch wrote (#505).
+        let mut arrived: Vec<u16> = Vec::new();
+        let mut done_now: Vec<Done> = Vec::new();
+        for (user_data, res, more) in cqes {
             if user_data == WAKE {
                 if res < 0 && res != -libc::EINTR && res != -libc::EAGAIN {
                     tracing::warn!("ublk queue {}: completion eventfd read: {}", queue_id, res);
                 }
-                let done = std::mem::take(&mut *completions.list.lock().unwrap());
-                for d in done {
-                    bufs[d.tag as usize] = d.buf;
-                    push_commit(&mut ring, char_fd, queue_id, d.tag, d.result, &bufs[d.tag as usize]);
-                }
+                done_now.extend(std::mem::take(&mut *completions.list.lock().unwrap()));
                 if !arm_wake(&mut ring, completions.efd.as_raw_fd(), wake_buf) {
                     tracing::error!("ublk queue {}: SQ full re-arming the eventfd", queue_id);
+                }
+                continue;
+            }
+            if user_data == BATCH_FETCH {
+                let Some(fr) = fetch.as_mut() else { continue };
+                if res > 0 {
+                    arrived.extend(fr.take(res as usize));
+                }
+                if res < 0 && res != -libc::ENOBUFS {
+                    if res != -(libc::ENODEV) && running.load(Ordering::Relaxed) {
+                        tracing::warn!("ublk queue {}: batch fetch ended: {}", queue_id, res);
+                    }
+                    continue;
+                }
+                if !more || res == -libc::ENOBUFS {
+                    // The buffer back, and a fetch again.
+                    fr.provide();
+                    let sqe = crate::drive::ublk_batch::fetch_sqe(char_fd, queue_id, fr.buf.len(), queue_id, BATCH_FETCH);
+                    if unsafe { ring.submission().push(&sqe).is_err() } {
+                        tracing::error!("ublk queue {}: SQ full re-arming the batch fetch", queue_id);
+                    }
+                }
+                continue;
+            }
+            if user_data & BATCH_COMMIT != 0 {
+                let elems = commits.remove(&user_data);
+                let sent = elems.as_ref().map(|e| e.len()).unwrap_or(0);
+                if res < 0 {
+                    if res != -(libc::ENODEV) {
+                        tracing::warn!("ublk queue {}: COMMIT_IO_CMDS failed: {}", queue_id, res);
+                    }
+                } else if (res as usize) < sent {
+                    // Partly taken: what was not is sent again.
+                    if let Some(e) = elems {
+                        let rest = e[res as usize..].to_vec();
+                        commit_seq += 1;
+                        let ud = BATCH_COMMIT | commit_seq;
+                        let sqe = crate::drive::ublk_batch::elems_sqe(
+                            char_fd, crate::drive::ublk_batch::UBLK_U_IO_COMMIT_IO_CMDS, queue_id, &rest, ud);
+                        commits.insert(ud, rest);
+                        if unsafe { ring.submission().push(&sqe).is_err() } {
+                            tracing::error!("ublk queue {}: SQ full re-sending a commit", queue_id);
+                        }
+                    }
                 }
                 continue;
             }
@@ -2030,7 +2142,10 @@ fn queue_worker(
                 }
                 continue;
             }
+            arrived.push(tag);
+        }
 
+        for tag in arrived {
             // Read the I/O descriptor for this tag
             let desc = unsafe { &*desc_base.add(tag as usize) };
             let op = (desc.op_flags & 0xFF) as u8;
@@ -2043,8 +2158,7 @@ fn queue_worker(
             if serial {
                 let (result, buf) = rt_handle.block_on(serve(&*device, op, fua, offset, length, buf));
                 track.end(tag);
-                bufs[tag as usize] = buf;
-                push_commit(&mut ring, char_fd, queue_id, tag, result, &bufs[tag as usize]);
+                done_now.push(Done { tag, result, buf });
                 continue;
             }
             completions.in_flight.fetch_add(1, Ordering::SeqCst);
@@ -2056,6 +2170,31 @@ fn queue_worker(
                 track.end(tag);
                 completions.post(Done { tag, result, buf });
             });
+        }
+
+        // Answer what finished: one COMMIT_IO_CMDS for all of it (#505), or a
+        // COMMIT_AND_FETCH_REQ each.
+        if !done_now.is_empty() {
+            if batch {
+                let mut elems = Vec::with_capacity(done_now.len() * crate::drive::ublk_batch::ELEM_BYTES);
+                for d in done_now {
+                    bufs[d.tag as usize] = d.buf;
+                    crate::drive::ublk_batch::put_elem(&mut elems, d.tag, d.result, bufs[d.tag as usize].as_ptr() as u64);
+                }
+                commit_seq += 1;
+                let ud = BATCH_COMMIT | commit_seq;
+                let sqe = crate::drive::ublk_batch::elems_sqe(
+                    char_fd, crate::drive::ublk_batch::UBLK_U_IO_COMMIT_IO_CMDS, queue_id, &elems, ud);
+                commits.insert(ud, elems);
+                if unsafe { ring.submission().push(&sqe).is_err() } {
+                    tracing::error!("ublk queue {}: SQ full on the batch commit", queue_id);
+                }
+            } else {
+                for d in done_now {
+                    bufs[d.tag as usize] = d.buf;
+                    push_commit(&mut ring, char_fd, queue_id, d.tag, d.result, &bufs[d.tag as usize]);
+                }
+            }
         }
     }
 

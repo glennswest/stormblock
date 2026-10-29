@@ -142,8 +142,9 @@ discovery_disabled = true
 reconcile_secs = 1
 EOT
     if [ "$mode" = serial ]; then export STORMBLOCK_UBLK_SERIAL=1; else unset STORMBLOCK_UBLK_SERIAL; fi
-    # #505: plain io_uring rings (no SINGLE_ISSUER + DEFER_TASKRUN), served at once.
-    if [ "$mode" = plain ]; then export STORMBLOCK_URING_PLAIN=1; else unset STORMBLOCK_URING_PLAIN; fi
+    # #505: the engine as before it: plain io_uring rings (no SINGLE_ISSUER +
+    # DEFER_TASKRUN) and a command per request (no batch I/O), served at once.
+    if [ "$mode" = plain ]; then export STORMBLOCK_URING_PLAIN=1 STORMBLOCK_UBLK_BATCH=0; else unset STORMBLOCK_URING_PLAIN STORMBLOCK_UBLK_BATCH; fi
     RUST_LOG=stormblock=info stormblock --config /run/sb$disk.toml --data-dir /run/sb$disk \
         --no-iscsi > /run/engine-$mode.log 2>&1 &
     pid=$!
@@ -442,7 +443,8 @@ features() {
     h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
     echo "LOG $mode ublk_features: $(echo "$h" | grep -o '"ublk_features":{[^}]*}')"
     case "$mode:$h" in
-    concurrent:*'"offered":['*'"rings_tuned":'[1-9]*) r features-tuned PASS ;;
+    concurrent:*'"offered":['*'"used":['*'BATCH_IO'*'"rings_tuned":'[1-9]*) r features-tuned PASS ;;
+    plain:*'"used":['*'BATCH_IO'*) r features-plain "FAIL (batch I/O used)" ;;
     plain:*'"offered":['*'"rings_tuned":0,"rings_plain":'[1-9]*) r features-plain PASS ;;
     *) r features-$mode "FAIL" ;;
     esac
@@ -557,7 +559,7 @@ SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
 SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
-echo "fast reads (#505): tuned rings $(t concurrent fast-reads) ms, engine CPU $(t concurrent fast-reads-cpu) ms; plain $(t plain fast-reads) ms, CPU $(t plain fast-reads-cpu) ms"
+echo "fast reads (#505): tuned rings + batch I/O $(t concurrent fast-reads) ms, engine CPU $(t concurrent fast-reads-cpu) ms; as before (plain, no batch) $(t plain fast-reads) ms, CPU $(t plain fast-reads-cpu) ms"
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \

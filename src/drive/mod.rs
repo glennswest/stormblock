@@ -33,6 +33,8 @@ pub mod slottable;
 #[cfg(target_os = "linux")]
 pub mod ublk;
 #[cfg(target_os = "linux")]
+pub mod ublk_batch;
+#[cfg(target_os = "linux")]
 pub mod ringsetup;
 pub mod uring_channel;
 pub mod uring_server;
