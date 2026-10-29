@@ -211,7 +211,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
-### Time to `laid`: the install boot's grace (2026-10-14, #448, P2) — IN PROGRESS
+### Time to `laid`: the install boot's grace (2026-10-14, #448, P2) — DONE (v23.3.0), closed; metal pending
 
 Not a boot regression (master): stormcentral measured after `laid`
 (stormcentral#891, fixed in golden-stormcentral-7691e7f64fa3). What is left:
@@ -220,8 +220,10 @@ quiet for 10 s: every pve install says `the boot grace of 90s ran out`).
 - [x] `flow_boot_grace_for(install)`: an install boot 20 s
       (`STORMBLOCK_FLOW_INSTALL_GRACE_SECS`), a resumed flow-over 90 s;
       README, CHANGELOG
-- [ ] test; check.sh; release; close. Metal: the next pve install's
-      `Flow-over: starting after …` and stormcentral's `boot_to_installed_ms`
+- [x] test; check.sh at 0b914d96 ALL PASS (1291/1291); v23.3.0 (`stormblock
+      23.3.0` from a `--locked` build); stage requested (33194e156c08);
+      closed. Metal: the next pve install's `Flow-over: starting after …`
+      (≤ 20 s) and stormcentral's `boot_to_installed_ms` (~70 s less)
 
 ### 4096 + T10 PI drives (2026-10-10, #389, P2) — DONE (steps 1, 2), closed; step 3 is #511
 
