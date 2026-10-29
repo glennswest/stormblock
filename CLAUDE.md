@@ -3763,16 +3763,16 @@ initramfs through `/init`'s follower, on the node through stormpump's echo.
   under sh and busybox sh. Not on metal: server8's console on a release with
   this engine
 
-### A stormupdate reboot or rollback reads as the same release (2026-10-07, #265, P1) — WAITS ON stormupdate#3
+### A stormupdate reboot or rollback reads as the same release (2026-10-07, #265, P1) — WAITS ON stormupdate#19
 
 Engine side done in #122 (staged goldens keep the release's ids; N's set
-aside as `<name>@<N>`; held counts sealed goldens only). Re-verified on dev at
-b30cecf: #122's four tests pass. Since #311 a misread is a system-half
-re-lay, not a wipe; #244 fixed the same-id data loss in that path. Left:
-the on-metal stage → reboot → rollback → reboot check, which needs
-stormupdate's sequence (stormupdate#3, v0.0.0 today) and a stormcos release
-with the #122 engine (11.88 is 9cbe6ca, before it). Proposed after
-stormupdate#3.
+aside as `<name>@<N>`; held counts sealed goldens only). Re-verified on a
+build VM at 847fd20c (2026-10-28): #122's four tests and #385's install back
+to N, 5/5. Since #311 a misread is a system-half re-lay, not a wipe; #244
+fixed the same-id data loss in that path. Left: the on-metal stage → reboot
+→ rollback → reboot check, which is stormupdate's sequence: stormupdate#3
+(open) and its end-to-end run on pvetest1, stormupdate#19 (P1, open).
+Proposed after stormupdate#19.
 
 ### A local root that does not come up falls back to the claimed image (2026-10-07, #244, P1) — DONE
 
