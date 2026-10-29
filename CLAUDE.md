@@ -251,8 +251,14 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
       `STORMBLOCK_URING_PLAIN=1`); the ublk queue rings and the O_DIRECT ring
       (now built on its own thread); offered/used ublk features logged and in
       health `ublk_features` (with ring counts)
-- [ ] 1a verified: units; ci-ublk-qd-verify.sh; numbers plain vs tuned
-- [ ] 1b: BATCH_IO queue worker (fallback FETCH/COMMIT); QEMU
+- [x] 1a verified: units; ci-ublk-qd-verify.sh ALL PASS (kernel 7.2.11);
+      fast reads tuned 1219 ms / plain 1240 ms: no measurable difference
+- [x] 1b: BATCH_IO queue worker (`drive::ublk_batch`), devices this engine
+      attaches (recoverable boot devices only with `=always`: a successor of
+      another build could not serve them, #189); ci-ublk-qd-verify.sh ALL
+      PASS at 1f…: tuned + batch 829 ms / 1690 ms CPU vs as before 1099 ms /
+      2090 ms (one run each). README, CHANGELOG. The kernel grants
+      PER_IO_DAEMON on every device unasked
 - [ ] 1c: PER_IO_DAEMON (when no BATCH_IO): tags of a queue over N threads
 - [ ] 2: zero copy fast path; 3: SHMEM_ZC; docs, CHANGELOG
 

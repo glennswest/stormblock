@@ -133,7 +133,16 @@ the volume's slabs are on SSDs and one when they are on a spinning disk
 (`STORMBLOCK_UBLK_QUEUES`, 1–16, overrides; 128 in flight shared out, at
 least 32 a queue; an adopted device keeps the count it was created with), and FUA
 writes taken as FUA: durable on their own, with no device-wide flush when
-their slot is already on the drive (#409, `docs/durability.md` rule 15); a shared NVMe-oF/TCP subsystem
+their slot is already on the drive (#409, `docs/durability.md` rule 15). Each
+queue's io_uring ring, and each O_DIRECT drive's, is set up with
+`SINGLE_ISSUER` + `DEFER_TASKRUN` when the kernel takes them (Linux 6.1+;
+`STORMBLOCK_URING_PLAIN=1` builds them as before), and a device this engine
+attaches uses ublk **batch I/O** when the kernel offers it (Linux 7.0+: one
+PREP, a multishot FETCH into a buffer ring, one COMMIT for every request
+finished since the last; `STORMBLOCK_UBLK_BATCH=0` off, `=always` also on
+the recoverable boot devices, which a successor of another build would have
+to serve the same way, #189); #505. Health `ublk_features` says what the
+kernel offers, what the devices use and how the rings were built. A shared NVMe-oF/TCP subsystem
 with namespace hot-add, and per-volume subsystems; a shared iSCSI target
 (CHAP, MC/S, ALUA, thousands of LUNs). `/serve/v1`'s NVMe exports are each
 a subsystem of their own (`<nqn_prefix>:vol-<uuid>`, the volume as namespace
