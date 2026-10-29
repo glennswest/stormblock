@@ -786,15 +786,29 @@ Design (engine choices, said on #350):
   legs (either drive boots alone)
 - `POST /api/v1/system/move {to}` (admin) + a pointer on the old drive;
   `/init` follows it and says "set BIOS boot order to <drive>"
-- [ ] FlowOver.twin, take_pair (fresh, update), plan accepts the twin's data
-- [ ] restore keeps a mirror whose primary slab is missing
-- [ ] pair_up after the flow-over's validation; digest check; local boot ×2
-- [ ] test: install onto a pair, each drive alone reads every byte; a
-      reinstall over the pair keeps the node's data
-- [ ] health `pair` (paired | degraded, the partner); re-pair at start
-- [ ] /init: `system_drive:` list → `--pair-disk`; a pair message; degraded
-- [ ] move API + pointer + /init follow
-- [ ] docs (boot-hooks.md, README), CHANGELOG; check.sh; QEMU check
+- [x] FlowOver.twin, take_pair (fresh, update), plan accepts the twin's data
+      and an extent with any leg in the half
+- [x] restore keeps a mirror whose primary slab is missing, and one whose
+      slot-table slot is a later-generation leg the record names
+- [x] pair_up after the flow-over's validation; legs compared; local boot ×2;
+      new volumes on a pair mirror:2; an install mends the pair first
+- [x] test `a_system_pair_installs_onto_two_drives_and_either_boots_alone`
+      PASSES on a build VM (fresh pair, each drive alone; reinstall over the
+      pair keeps state + a PVC, each drive alone)
+- [x] health `slabs.pair` (paired | degraded); mend at start (adopt-ublk)
+- [x] /init: `system_drive:` list → `--pair-disk`; existing pair found; a
+      degraded pair said; initramfs-system-moved.sh PASS (sh, busybox sh)
+- [x] move: `POST/GET /api/v1/system/move`, header `moved_to` (168..184),
+      `slab moved`, /init follows it, health `slabs.boot_order`
+- [ ] **paused for P0 #508 (2026-10-28)**: last run (tmp/b6.log, commit
+      after a7… "test(#350): the move's admin class") checks the move test,
+      `a_system_move_is_the_admins`, and boot-hook's pair cases. The run
+      before it: the move test's only failure was the auth assertion (this
+      router has no auth layer; moved to the classify test). Next: read that
+      result; `ci-pair-verify.sh` (QEMU); check.sh on the branch; merge when
+      fit; comment on #350 (engine choices: a pair is asked for, never
+      guessed; pointer in the slab header); stormdrive#62 told
+- [x] docs (boot-hooks.md, README), CHANGELOG
 
 ### Multicast appliance discovery (2026-10-17, #104, P3) — PARKED until the single-node pacing lifts
 
