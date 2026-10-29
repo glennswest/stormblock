@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.11.0] — 2026-10-29
+
+### Added
+- #295: a live mirror of an in-use volume to a peer engine's NVMe/TCP namespace (`POST`/`DELETE /api/v1/volumes/{id}/mirror`, `mirror` on the volume), for a VM disk's migration and a node's evacuation.
+
 ### 2026-10-29
 - **feat:** #295 (stormstorage#44, stormcluster#53): a live mirror of an in-use volume to a peer engine's NVMe/TCP namespace. `POST /api/v1/volumes/{id}/mirror {target}` (admin) connects as this node's host NQN, refuses a smaller target, a second mirror or a secret volume, and from then on sends every write to the target under a per-extent lock held across both copies (acknowledged once both have it), makes the target read zeros where a discard unmapped a whole extent, and flushes it with the volume; a background copy walks the extents mapped at the start under the same lock, skips all-zero ones (the target stays thin) and yields to foreground I/O. `GET /api/v1/volumes/{id}` says `mirror {target, state: copying|synced|failed, bytes_total, bytes_remaining, message}`; an error on the target fails the mirror, never the guest. `DELETE …/mirror` waits for in-flight writes, flushes the target and drops it (switch-over and abort). `<data_dir>/mirrors.json` makes a mirror a restart left behind report `failed`. A resize is refused while mirrored. Tests: `integration_mirror` (2: byte-equal at synced and after the stop with a writer and discards throughout; a failing target never reaches the writer; a restart's record), `ci-mirror-verify.sh` (QEMU: a mounted ext2 on ublk written throughout, T equal byte for byte and mounted with every file), the destructive list. Node-level evacuation is this verb per volume, driven by stormcluster.
 
