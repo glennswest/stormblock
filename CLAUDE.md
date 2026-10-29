@@ -259,7 +259,13 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
       PASS at 1f…: tuned + batch 829 ms / 1690 ms CPU vs as before 1099 ms /
       2090 ms (one run each). README, CHANGELOG. The kernel grants
       PER_IO_DAEMON on every device unasked
-- [ ] 1c: PER_IO_DAEMON (when no BATCH_IO): tags of a queue over N threads
+- [x] 1c: PER_IO_DAEMON (when no BATCH_IO): `STORMBLOCK_UBLK_QUEUE_THREADS`
+      splits a queue's tags over N threads (default 1); ci-ublk-qd-verify.sh
+      `split` mode ALL PASS. check.sh at 2ab8395f ALL PASS (1287/1287)
+- [x] numbers, 5 rounds a mode (5415ffbd): tuned+batch ~1690 ms, as before
+      ~1700, split ~1510, rounds 879–1770 in every mode: no difference a
+      build VM can measure; the earlier single-run gains were noise. pve and
+      the Dell (stormcentral's perf stage) once a release carries it
 - [ ] 2: zero copy fast path; 3: SHMEM_ZC; docs, CHANGELOG
 
 ### A deleted volume behind a live ublk device after server1's reboot (2026-10-28, #502, P0) — DONE (v23.0.3), closed; metal pending

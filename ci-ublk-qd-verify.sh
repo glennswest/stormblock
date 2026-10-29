@@ -440,7 +440,10 @@ fast_reads() {
         cpu1=$(awk '{print $14 + $15}' /proc/$pid/stat)
         walls="$walls $(ms $t0 $t1)"; cpus="$cpus $(( (cpu1 - cpu0) * 10 ))"
     done
-    med() { echo $* | tr ' ' '\n' | sort -n | sed -n 3p; }
+    # The guest's busybox has no sort: the median by awk.
+    med() { echo $* | awk '{ for (i = 1; i <= NF; i++) a[i] = $i
+        for (i = 2; i <= NF; i++) { v = a[i]; j = i - 1; while (j > 0 && a[j] > v) { a[j + 1] = a[j]; j-- } a[j + 1] = v }
+        print a[int((NF + 1) / 2)] }'; }
     echo "TIME $mode fast-reads $(med $walls)"
     echo "TIME $mode fast-reads-cpu $(med $cpus)"
     echo "LOG $mode fast-reads rounds (ms):$walls; engine CPU (ms):$cpus"

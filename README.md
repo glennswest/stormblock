@@ -141,7 +141,10 @@ attaches uses ublk **batch I/O** when the kernel offers it (Linux 7.0+: one
 PREP, a multishot FETCH into a buffer ring, one COMMIT for every request
 finished since the last; `STORMBLOCK_UBLK_BATCH=0` off, `=always` also on
 the recoverable boot devices, which a successor of another build would have
-to serve the same way, #189); #505. Health `ublk_features` says what the
+to serve the same way, #189); without batch I/O,
+`STORMBLOCK_UBLK_QUEUE_THREADS` (1–8, default 1) serves each queue's tags
+from that many threads (PER_IO_DAEMON, which 7.2 grants on every device and
+batch I/O excludes); #505. Health `ublk_features` says what the
 kernel offers, what the devices use and how the rings were built. A shared NVMe-oF/TCP subsystem
 with namespace hot-add, and per-volume subsystems; a shared iSCSI target
 (CHAP, MC/S, ALUA, thousands of LUNs). `/serve/v1`'s NVMe exports are each
