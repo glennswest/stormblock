@@ -3,6 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.4.0] — 2026-10-29
+
+### Added
+- #159: erasure coding `ec:K+M` (Cauchy Reed-Solomon, M 3–4, K+M ≤ 24, 8+3 by default), **off by default** (`[redundancy] erasure_coding`): until a node turns it on, `ec:K+M` answers 409 and nothing a node writes changes.
+- #390: `examples/shelf_raid6_test` and `ci-shelf-raid6-verify.sh`, the shelf test's harness.
+
+### Fixed
+- #390: a repairing RAID-6 scrub puts a single bad strip (data included) right from the two parities, instead of rewriting parity over a flipped data block.
+
 ### 2026-10-29
 - **feat:** #159 step 2 (decision A; merged at the owner's word, 2026-10-28): **erasure coding** `ec:K+M`. Reed–Solomon over a Cauchy matrix, so any M of the K+M members and legs, mixed, are recovered. M is 3 or 4, K+M at most 24, 8+3 when no width is given (`ec`), 16+4 at scale.
   - **Write and rebuild:** read-modify-write by delta, as for RAID-5/6; rebuild, resync, verify and scrub recompute every leg.
