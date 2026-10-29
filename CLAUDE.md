@@ -211,7 +211,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
-### Out of file descriptors after ~805 ublk exports (2026-10-29, #510, P1) — IN PROGRESS
+### Out of file descriptors after ~805 ublk exports (2026-10-29, #510, P1) — DONE (v23.2.0), closed; metal pending
 
 pvetest1 12.58: EMFILE everywhere after ~805 attach/detach cycles in 5 h.
 Found by reading: every export registered its runtime's `Handle` for
@@ -227,7 +227,10 @@ eventfd, open.
       (50 runtimes left 200 fds: 4 an export); ci-ublk-qd-verify.sh ALL
       PASS, `fd-cycles` 40 → 40 fds over 40 attach/detach cycles; README,
       CHANGELOG
-- [ ] check.sh; v23.2.0 (with #505 step 1); stage; close
+- [x] check.sh at 86ad20f0 ALL PASS (1289/1289); v23.2.0 (be07ea39,
+      `stormblock 23.2.0` from a `--locked` build; with #505 step 1); stage
+      requested (79e90d6687cc); closed. Metal: health `fds` flat on a test
+      machine through a night of runs
 
 ### 12.18's first boot ~2× slower than 12.16 (2026-10-13, #421, P1) — RE-MEASURED: gone, closed
 
