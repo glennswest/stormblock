@@ -622,7 +622,9 @@ impl UblkServer {
                 ))
             })?;
 
+            note_used(id, Some(info.flags));
             if info.flags & UBLK_F_USER_RECOVERY == 0 {
+                note_used(id, None);
                 return Err(DriveError::Other(anyhow::anyhow!(
                     "ublk: /dev/ublkb{id} was created without UBLK_F_USER_RECOVERY and \
                      cannot be adopted — the flag is fixed at creation, so whoever made \
@@ -718,6 +720,7 @@ impl UblkServer {
             // unsupported UBLK_F_UPDATE_SIZE must cost the resize and not the
             // device (#19).
             let kernel_features = query_features(&mut ctrl_ring, ctrl_fd).unwrap_or(0);
+            note_offered(kernel_features);
             let resizable = kernel_features & UBLK_F_UPDATE_SIZE != 0;
             let mut flags = UBLK_F_URING_CMD_COMP_IN_TASK | UBLK_F_CMD_IOCTL_ENCODE;
             if resizable {
@@ -768,6 +771,8 @@ impl UblkServer {
 
             let assigned_id = dev_info.dev_id;
             self.dev_id.store(assigned_id as i32, Ordering::Relaxed);
+            note_used(assigned_id, Some(dev_info.flags));
+            tracing::info!("ublk: /dev/ublkb{assigned_id} uses {} (#505)", feature_names(dev_info.flags).join(", "));
             // What the kernel echoed back, not what was asked for.
             self.resizable
                 .store(dev_info.flags & UBLK_F_UPDATE_SIZE != 0, Ordering::Relaxed);
@@ -1092,6 +1097,7 @@ impl UblkServer {
             }
         }
         drop(char_file);
+        note_used(assigned_id, None);
 
         if recoverable {
             tracing::info!("ublk device /dev/ublkb{assigned_id} released");
@@ -1114,6 +1120,94 @@ impl UblkServer {
 // ===========================================================================
 
 /// Submit a control command on `/dev/ublk-control` and wait for the CQE.
+/// The ublk features this kernel offers and the ones the engine's devices
+/// use (#505), for the log and health.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct FeatureReport {
+    /// What `GET_FEATURES` answered, by name; absent until a device was made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offered: Option<Vec<&'static str>>,
+    /// What the devices served now were created with (an adopted device's
+    /// flags are its creator's), by name, the union across devices.
+    pub used: Vec<&'static str>,
+    /// io_uring rings built with SINGLE_ISSUER + DEFER_TASKRUN, and plain.
+    pub rings_tuned: u64,
+    pub rings_plain: u64,
+}
+
+/// `UBLK_F_*` bits by name (7.2's uapi).
+const FEATURE_NAMES: [(u64, &str); 20] = [
+    (1 << 0, "SUPPORT_ZERO_COPY"),
+    (1 << 1, "URING_CMD_COMP_IN_TASK"),
+    (1 << 2, "NEED_GET_DATA"),
+    (1 << 3, "USER_RECOVERY"),
+    (1 << 4, "USER_RECOVERY_REISSUE"),
+    (1 << 5, "UNPRIVILEGED_DEV"),
+    (1 << 6, "CMD_IOCTL_ENCODE"),
+    (1 << 7, "USER_COPY"),
+    (1 << 8, "ZONED"),
+    (1 << 9, "USER_RECOVERY_FAIL_IO"),
+    (1 << 10, "UPDATE_SIZE"),
+    (1 << 11, "AUTO_BUF_REG"),
+    (1 << 12, "QUIESCE"),
+    (1 << 13, "PER_IO_DAEMON"),
+    (1 << 14, "BUF_REG_OFF_DAEMON"),
+    (1 << 15, "BATCH_IO"),
+    (1 << 16, "INTEGRITY"),
+    (1 << 17, "SAFE_STOP_DEV"),
+    (1 << 18, "NO_AUTO_PART_SCAN"),
+    (1 << 19, "SHMEM_ZC"),
+];
+
+/// A `UBLK_F_*` mask by name; bits this build does not know as `bit<N>`.
+pub fn feature_names(mask: u64) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = FEATURE_NAMES.iter().filter(|(b, _)| mask & b != 0).map(|(_, n)| *n).collect();
+    let known: u64 = FEATURE_NAMES.iter().map(|(b, _)| b).sum();
+    if mask & !known != 0 {
+        out.push("unknown bits");
+    }
+    out
+}
+
+static OFFERED: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+static USED: std::sync::Mutex<Option<std::collections::HashMap<u32, u64>>> = std::sync::Mutex::new(None);
+
+/// Record what the kernel offered (once a device asked).
+fn note_offered(mask: u64) {
+    let mut o = OFFERED.lock().unwrap_or_else(|e| e.into_inner());
+    if *o != Some(mask) {
+        tracing::info!("ublk: this kernel offers {} (#505)", feature_names(mask).join(", "));
+    }
+    *o = Some(mask);
+}
+
+/// Record a device's flags while it is served; `None` when it goes.
+fn note_used(dev_id: u32, flags: Option<u64>) {
+    let mut u = USED.lock().unwrap_or_else(|e| e.into_inner());
+    let m = u.get_or_insert_with(std::collections::HashMap::new);
+    match flags {
+        Some(f) => {
+            m.insert(dev_id, f);
+        }
+        None => {
+            m.remove(&dev_id);
+        }
+    }
+}
+
+/// What is offered and used now (#505).
+pub fn feature_report() -> FeatureReport {
+    let offered = OFFERED.lock().unwrap_or_else(|e| e.into_inner()).map(feature_names);
+    let used_mask = USED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|m| m.values().fold(0u64, |a, f| a | f))
+        .unwrap_or(0);
+    let (rings_tuned, rings_plain) = crate::drive::ringsetup::counts();
+    FeatureReport { offered, used: feature_names(used_mask), rings_tuned, rings_plain }
+}
+
 /// Ask the kernel for its `UBLK_F_*` feature mask.
 ///
 /// Older kernels do not implement `GET_FEATURES` at all; that is not an error
@@ -1805,8 +1899,10 @@ fn queue_worker(
 
     // Room for a commit per tag and the wake read at once.
     let entries = (queue_depth as u32 + 1).next_power_of_two();
-    let mut ring: IoUring<squeue::Entry128> = match IoUring::builder().build(entries) {
-        Ok(r) => r,
+    // Built here, on the worker that submits to it (#505: SINGLE_ISSUER +
+    // DEFER_TASKRUN when the kernel takes them).
+    let mut ring: IoUring<squeue::Entry128> = match crate::drive::ringsetup::build(entries) {
+        Ok((r, _)) => r,
         Err(e) => {
             tracing::error!("ublk queue {}: io_uring create failed: {e}", queue_id);
             startup_barrier.wait(); // unblock main even on failure
@@ -2024,6 +2120,14 @@ mod tests {
 
     /// #337: a request a device has not answered is listed with its op and
     /// age, oldest first; an answered one, or a dropped device, is not.
+    #[test]
+    fn feature_masks_read_by_name() {
+        assert_eq!(feature_names(0), Vec::<&str>::new());
+        assert_eq!(feature_names((1 << 15) | (1 << 10)), vec!["UPDATE_SIZE", "BATCH_IO"]);
+        assert_eq!(feature_names(1 << 40), vec!["unknown bits"]);
+        assert_eq!(feature_names(1 << 19), vec!["SHMEM_ZC"]);
+    }
+
     #[test]
     fn an_unanswered_request_is_listed_until_it_is_answered() {
         let t = QueueTrack::new(9337, 1, "volume:fastetcd".into(), 4);

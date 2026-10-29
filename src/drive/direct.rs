@@ -93,7 +93,6 @@ impl DirectIo {
     }
 
     fn uring(fd: RawFd) -> std::io::Result<Engine> {
-        let ring = io_uring::IoUring::new(256)?;
         let wake = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
         if wake < 0 {
             return Err(std::io::Error::last_os_error());
@@ -104,10 +103,33 @@ impl DirectIo {
             return Err(std::io::Error::last_os_error());
         }
         let (tx, rx) = mpsc::channel::<Op>();
+        // The ring is built on its own thread (#505): with SINGLE_ISSUER the
+        // kernel takes the task that creates it as the only one that submits.
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<std::io::Result<()>>(1);
         let thread = std::thread::Builder::new()
             .name("stormblock-uring".into())
-            .spawn(move || ring_thread(ring, dup, wake, rx))?;
-        Ok(Engine::Uring { tx: Some(tx), wake, thread: Some(thread) })
+            .spawn(move || match crate::drive::ringsetup::build::<io_uring::squeue::Entry, io_uring::cqueue::Entry>(256) {
+                Ok((ring, _)) => {
+                    let _ = ready_tx.send(Ok(()));
+                    ring_thread(ring, dup, wake, rx)
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                    unsafe { libc::close(dup) };
+                }
+            })?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Engine::Uring { tx: Some(tx), wake, thread: Some(thread) }),
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                unsafe { libc::close(wake) };
+                Err(e)
+            }
+            Err(_) => {
+                unsafe { libc::close(wake) };
+                Err(std::io::Error::other("the io_uring thread ended before its ring was built"))
+            }
+        }
     }
 
     async fn submit(&self, kind: Kind, offset: u64, buf: DmaBuf, len: usize) -> DriveResult<(usize, DmaBuf)> {

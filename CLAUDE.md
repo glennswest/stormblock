@@ -226,17 +226,35 @@ modules' dependency closure taken over the kernel's full modules.dep, which
 stops the build on anything missing): registry/initramfs:blob-aafea1b1d512d74b
 (vmlinuz blob-515dcb6e407dff32). #350 paused on wip/350-system-pair for it.
 
-### ublk zero copy, batch I/O, io_uring ring flags (2026-10-28, #505, P1) — WAITING ON THE OWNER (scope)
+### ublk zero copy, batch I/O, io_uring ring flags (2026-10-28, #505, P1) — IN PROGRESS
 
-Read the 7.2.11 uapi (`ublk_cmd.h` on a build VM). Zero copy / AUTO_BUF_REG:
-the server never touches the data, only io_uring fixed-buffer ops on the
-queue's ring, but CoW (every clone's first write), parity, NVMe/TCP slabs
-and the fence/gate/ride-through paths need it in userspace, on tokio. So
-zero copy = a second data path under the thin layer. SHMEM_ZC fits only a
-VMM sharing guest memory (stormvm). PER_IO_DAEMON alone changes nothing
-here. BATCH_IO and SINGLE_ISSUER + DEFER_TASKRUN fit as they are. Asked on
-#505: A (ring flags, BATCH_IO, feature report; recommended), B (+ a
-zero-copy mode for plain volumes), C (+ SHMEM_ZC for stormvm). Nothing built.
+Master's decision (for the owner, "why not do all?"): all of it, in order:
+1. SINGLE_ISSUER + DEFER_TASKRUN, BATCH_IO, PER_IO_DAEMON, each behind
+   feature detection with today's path as the fallback; offered/used in the
+   log and health;
+2. zero copy (SUPPORT_ZERO_COPY + AUTO_BUF_REG) as a fast path for requests
+   in place on one local O_DIRECT slab, nothing shared; every other request
+   on today's copy path, decided per request, never a memfd bounce; the same
+   crash/power-cut tests;
+3. SHMEM_ZC for stormvm's guest memory (stormvm side filed).
+Numbers before/after each step (QEMU on build VMs, then pve and the Dell).
+Found in 7.2's driver (ublk_drv.c, the selftests): **BATCH_IO and
+PER_IO_DAEMON are exclusive** (ADD_DEV clears PER_IO_DAEMON under BATCH_IO):
+BATCH_IO when offered, else PER_IO_DAEMON. pread/pwrite on /dev/ublkcN is
+gated on user copy, not zero copy (step 2's per-request copy path: check
+USER_COPY with ZERO_COPY). BATCH_IO: PREP/COMMIT take a buffer of 16-byte
+elements (tag u16, buf_index u16, result s32, buf_addr u64 with
+HAS_BUF_ADDR) at sqe->addr/len; FETCH_IO_CMDS is multishot
+(IORING_URING_CMD_MULTISHOT in rw_flags) on a provided buffer ring (one
+entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
+- [x] 1a: `drive::ringsetup` (SINGLE_ISSUER + DEFER_TASKRUN, plain fallback,
+      `STORMBLOCK_URING_PLAIN=1`); the ublk queue rings and the O_DIRECT ring
+      (now built on its own thread); offered/used ublk features logged and in
+      health `ublk_features` (with ring counts)
+- [ ] 1a verified: units; ci-ublk-qd-verify.sh; numbers plain vs tuned
+- [ ] 1b: BATCH_IO queue worker (fallback FETCH/COMMIT); QEMU
+- [ ] 1c: PER_IO_DAEMON (when no BATCH_IO): tags of a queue over N threads
+- [ ] 2: zero copy fast path; 3: SHMEM_ZC; docs, CHANGELOG
 
 ### A deleted volume behind a live ublk device after server1's reboot (2026-10-28, #502, P0) — DONE (v23.0.3), closed; metal pending
 

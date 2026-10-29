@@ -146,6 +146,10 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// every device does.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         ublk_stuck: Vec<crate::drive::ublk::Stuck>,
+        /// The ublk features this kernel offers and the devices use, and how
+        /// the engine's io_uring rings were set up (#505).
+        #[cfg(target_os = "linux")]
+        ublk_features: crate::drive::ublk::FeatureReport,
         /// Local drives whose I/O fails with transport errors (a controller
         /// reset, a dropped link) (#391): `path`, `since` (unix s),
         /// `last_error`, `retries`, and `gave_up` once the ride-through
@@ -221,6 +225,8 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         slabs: super::slab_report::for_health(&state),
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
+        #[cfg(target_os = "linux")]
+        ublk_features: crate::drive::ublk::feature_report(),
         drives_unreachable: crate::drive::ridethrough::stalls(),
         networks: state.config.network_report(),
     })
