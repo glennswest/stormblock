@@ -211,6 +211,25 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
+### Shelf test: two RAID-6 sets on the DS224C, 4K+PI (2026-10-10, #390, P2) — IN PROGRESS (engine half); the run waits on hardware
+
+The run itself is on the Dell's shelf and waits on: shelf drives inducted
+(none in stormcentral's assets), stormdrive#82 (4K+PI formats) and #75
+(induction), and the master's gate (#391's host reset proven on the Dell
+itself; #391 was proven in QEMU). Engine work now:
+- [x] found reading step 6: a RAID-6 scrub with `repair` recomputed P and Q
+      from the data, so a flipped *data* strip (written through the kernel:
+      PI would not catch it) was baked into the parity. Now a scrub locates
+      one bad strip from the two parity differences (raid6check's rule:
+      P alone, Q alone, or data strip z with `qd = g^z·pd`), rewrites it,
+      reports more than one and leaves it; a crash resync still recomputes
+      parity from the data
+- [ ] tests: `parity::…a_single_bad_strip_of_a_raid6_stripe_is_located`,
+      `raid::tests::a_scrub_puts_a_flipped_data_strip_right_…` (an 11-wide set)
+- [ ] the harness: the test plan as one program against an engine's API (runs
+      on the Dell as in QEMU), and a QEMU run on 28 scsi_debug 4K+PI drives
+- [ ] docs, CHANGELOG; wait-hardware / propose --after for the run
+
 ### Time to `laid`: the install boot's grace (2026-10-14, #448, P2) — DONE (v23.3.0), closed; metal pending
 
 Not a boot regression (master): stormcentral measured after `laid`

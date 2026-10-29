@@ -319,6 +319,58 @@ pub fn gf_pow2(n: usize) -> u8 {
     GF.0[n % 255]
 }
 
+/// The discrete log of a non-zero a: g^log(a) = a.
+#[inline]
+pub fn gf_log(a: u8) -> u8 {
+    assert!(a != 0, "zero has no logarithm in GF(2^8)");
+    GF.1[a as usize]
+}
+
+/// Which strip of a RAID-6 stripe is wrong, from the differences between the
+/// stored and the recomputed parities (#390): `pd = P ^ P'`, `qd = Q ^ Q'`.
+/// One bad strip is told apart, as Linux's `raid6check` does: only P differs
+/// (P is bad), only Q (Q is bad), or both with `qd = g^z · pd` at every byte
+/// for one data index `z < data_count` (data strip `z` is bad, and
+/// `data[z] ^ pd` is what it held). Anything else is more than one bad strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Raid6Fault {
+    None,
+    P,
+    Q,
+    Data(usize),
+    /// More than one strip: what each held cannot be told.
+    Several,
+}
+
+pub fn locate_raid6_fault(pd: &[u8], qd: &[u8], data_count: usize) -> Raid6Fault {
+    let p_bad = pd.iter().any(|b| *b != 0);
+    let q_bad = qd.iter().any(|b| *b != 0);
+    match (p_bad, q_bad) {
+        (false, false) => return Raid6Fault::None,
+        (true, false) => return Raid6Fault::P,
+        (false, true) => return Raid6Fault::Q,
+        _ => {}
+    }
+    let mut z: Option<usize> = None;
+    for (p, q) in pd.iter().zip(qd) {
+        match (*p, *q) {
+            (0, 0) => continue,
+            (0, _) | (_, 0) => return Raid6Fault::Several,
+            (p, q) => {
+                let zi = (gf_log(q) as usize + 255 - gf_log(p) as usize) % 255;
+                if z.is_some_and(|z| z != zi) {
+                    return Raid6Fault::Several;
+                }
+                z = Some(zi);
+            }
+        }
+    }
+    match z {
+        Some(z) if z < data_count => Raid6Fault::Data(z),
+        _ => Raid6Fault::Several,
+    }
+}
+
 /// The multiplicative inverse of a non-zero a.
 #[inline]
 pub fn gf_inv(a: u8) -> u8 {
@@ -891,6 +943,47 @@ mod tests {
 
     fn pattern(seed: u32, len: usize) -> Vec<u8> {
         (0..len).map(|i| ((i as u32).wrapping_mul(2654435761).wrapping_add(seed * 97) >> 13) as u8).collect()
+    }
+
+    /// #390: one bad strip of a RAID-6 stripe is found from the two parity
+    /// differences: P alone, Q alone, or the data strip whose index the
+    /// differences give, at every position; two bad data strips are not
+    /// taken for one.
+    #[test]
+    fn a_single_bad_strip_of_a_raid6_stripe_is_located() {
+        let engine = ParityEngine::detect();
+        let len = 64;
+        let data: Vec<Vec<u8>> = (0..9u8).map(|d| (0..len).map(|i| (i as u8).wrapping_mul(31) ^ d.wrapping_mul(77)).collect()).collect();
+        let refs: Vec<&[u8]> = data.iter().map(|d| d.as_slice()).collect();
+        let (mut p, mut q) = (vec![0u8; len], vec![0u8; len]);
+        engine.compute_raid6_parity(&refs, &mut p, &mut q);
+        let diff = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x ^ y).collect::<Vec<u8>>();
+        let check = |strips: &[Vec<u8>], sp: &[u8], sq: &[u8]| {
+            let refs: Vec<&[u8]> = strips.iter().map(|d| d.as_slice()).collect();
+            let (mut p2, mut q2) = (vec![0u8; len], vec![0u8; len]);
+            engine.compute_raid6_parity(&refs, &mut p2, &mut q2);
+            (locate_raid6_fault(&diff(sp, &p2), &diff(sq, &q2), strips.len()), diff(sp, &p2))
+        };
+        assert_eq!(check(&data, &p, &q).0, Raid6Fault::None);
+        let mut bad_p = p.clone();
+        bad_p[5] ^= 0x40;
+        assert_eq!(check(&data, &bad_p, &q).0, Raid6Fault::P);
+        let mut bad_q = q.clone();
+        bad_q[63] ^= 1;
+        assert_eq!(check(&data, &p, &bad_q).0, Raid6Fault::Q);
+        for z in 0..9 {
+            let mut bad = data.clone();
+            bad[z][3] ^= 0xA5;
+            bad[z][40] ^= 0x01;
+            let (fault, pd) = check(&bad, &p, &q);
+            assert_eq!(fault, Raid6Fault::Data(z), "data strip {z}");
+            // And it is put right by P's difference.
+            assert_eq!(diff(&bad[z], &pd), data[z], "strip {z} restored");
+        }
+        let mut two = data.clone();
+        two[1][7] ^= 0x10;
+        two[4][7] ^= 0x22;
+        assert_eq!(check(&two, &p, &q).0, Raid6Fault::Several, "two bad strips are not one");
     }
 
     #[test]

@@ -1484,11 +1484,16 @@ impl RaidArray {
             let _g = self.locks.lock(key).await;
             let moff = key * lu;
             let len = lu.min(self.data_size - moff) as usize;
-            if self.resync_unit(key, moff, len, repair).await? {
+            // A scrub locates a bad strip (#390); a resync after a cut
+            // recomputes parity from the data (a write cut off between its
+            // data and its parity is consistent either way, and the data may
+            // already be acknowledged by a later flush).
+            let (differ, repaired) = self.resync_unit(key, moff, len, repair, progress.is_some()).await?;
+            if differ {
                 found += 1;
                 if let Some(p) = progress {
                     p.errors_found.fetch_add(1, Ordering::Relaxed);
-                    if repair {
+                    if repaired {
                         p.errors_repaired.fetch_add(1, Ordering::Relaxed);
                     }
                 }
@@ -1503,7 +1508,11 @@ impl RaidArray {
     }
 
     /// One lock unit; `true` when the members disagreed.
-    async fn resync_unit(&self, key: u64, moff: u64, len: usize, repair: bool) -> Result<bool, RaidError> {
+    /// One lock unit: `(the members disagreed, it was put right)`. With
+    /// `locate` (a scrub, #390), a RAID-6 stripe with one bad strip has that
+    /// strip rewritten, data included, from the two parities; one with more
+    /// is reported and left (what each strip held cannot be told).
+    async fn resync_unit(&self, key: u64, moff: u64, len: usize, repair: bool, locate: bool) -> Result<(bool, bool), RaidError> {
         let geo = self.geometry();
         match self.level {
             RaidLevel::Raid5 | RaidLevel::Raid6 => {
@@ -1512,7 +1521,7 @@ impl RaidArray {
                 if strips.data.iter().any(|d| d.is_none()) {
                     // A data strip is missing: what parity should say cannot
                     // be told from what it does say.
-                    return Ok(false);
+                    return Ok((false, false));
                 }
                 let data: Vec<&[u8]> = strips.data.iter().map(|d| d.as_deref().unwrap()).collect();
                 let mut p = vec![0u8; len];
@@ -1523,6 +1532,48 @@ impl RaidArray {
                     self.parity_engine.compute_xor_parity(&data, &mut p);
                 }
                 let at = DATA_OFFSET + moff;
+                // A scrub of a whole RAID-6 stripe: which strip is bad (#390).
+                if locate && self.level == RaidLevel::Raid6 {
+                    if let (Some(sp), Some(Some(sq))) = (strips.p.as_ref(), strips.q.as_ref()) {
+                        let pd: Vec<u8> = sp.iter().zip(&p).map(|(a, b)| a ^ b).collect();
+                        let qd: Vec<u8> = sq.iter().zip(&q).map(|(a, b)| a ^ b).collect();
+                        use crate::raid::parity::{locate_raid6_fault, Raid6Fault};
+                        let fault = locate_raid6_fault(&pd, &qd, data.len());
+                        let write = match fault {
+                            Raid6Fault::None => return Ok((false, false)),
+                            Raid6Fault::P => Some((geo.p_member(stripe), p.clone())),
+                            Raid6Fault::Q => Some((geo.q_member(stripe), q.clone())),
+                            Raid6Fault::Data(z) => {
+                                let fixed: Vec<u8> = data[z].iter().zip(&pd).map(|(a, b)| a ^ b).collect();
+                                Some((geo.data_member(stripe, z), fixed))
+                            }
+                            Raid6Fault::Several => None,
+                        };
+                        let Some((member, bytes)) = write else {
+                            tracing::warn!(
+                                "{} {} stripe {stripe}: more than one strip disagrees; not repaired (#390)",
+                                self.level, self.id
+                            );
+                            return Ok((true, false));
+                        };
+                        tracing::warn!(
+                            "{} {} stripe {stripe}: {} disagrees with the rest{} (#390)",
+                            self.level,
+                            self.id,
+                            match fault {
+                                Raid6Fault::Data(z) => format!("data strip {z} (member {member})"),
+                                Raid6Fault::P => format!("P (member {member})"),
+                                _ => format!("Q (member {member})"),
+                            },
+                            if repair { "; rewritten from the two parities" } else { "" }
+                        );
+                        if repair {
+                            let holders = self.holders(moff + len as u64);
+                            self.issue_writes(&holders, vec![(member, at, bytes)]).await?;
+                        }
+                        return Ok((true, repair));
+                    }
+                }
                 let mut writes = Vec::new();
                 if strips.p.as_ref().is_some_and(|sp| *sp != p) {
                     writes.push((geo.p_member(stripe), at, p));
@@ -1537,7 +1588,7 @@ impl RaidArray {
                     let holders = self.holders(moff + len as u64);
                     self.issue_writes(&holders, writes).await?;
                 }
-                Ok(differ)
+                Ok((differ, differ && repair))
             }
             RaidLevel::Raid1 | RaidLevel::Raid10 => {
                 let sets: Vec<Vec<usize>> = if self.level == RaidLevel::Raid1 {
@@ -1574,7 +1625,7 @@ impl RaidArray {
                         }
                     }
                 }
-                Ok(differ)
+                Ok((differ, differ && repair))
             }
         }
     }

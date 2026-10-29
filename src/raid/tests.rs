@@ -614,6 +614,51 @@ async fn scrub_finds_and_repairs() {
     }
 }
 
+/// #390 (the shelf test's silent corruption): on an owner's RAID-6 set of 11,
+/// a block flipped on a *data* member (written by the drive's own path, so T10
+/// PI would not catch it) is found by a scrub, put right from the two
+/// parities by a repairing scrub, and the data reads as written. Before, the
+/// repair recomputed P and Q from the data and kept the flipped block. So
+/// does a flipped P or Q; two flipped strips in one stripe are reported, not
+/// "repaired" into something else.
+#[tokio::test]
+async fn a_scrub_puts_a_flipped_data_strip_right_from_the_two_parities() {
+    let scrub = |a: Arc<RaidArray>, repair: bool| async move {
+        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair });
+        while !p.is_finished() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        (p.found(), p.repaired())
+    };
+    let (a, mems) = make(RaidLevel::Raid6, 11).await;
+    let model = fill(&a, 390).await;
+    let geo = crate::raid::layout::Geometry { level: RaidLevel::Raid6, n: 11, unit: UNIT };
+    // Stripe 0: each data strip in turn, then P, then Q.
+    for d in [0usize, 4, 8] {
+        let m = geo.data_member(0, d);
+        mems[m].poke(DATA_OFFSET + 700, &[0xC3; 16]);
+        assert_eq!(scrub(a.clone(), false).await, (1, 0), "data strip {d}: found, not repaired");
+        assert_eq!(scrub(a.clone(), true).await, (1, 1), "data strip {d}: repaired");
+        assert_eq!(scrub(a.clone(), false).await.0, 0, "data strip {d}: clean after");
+        assert_eq!(read_all(&a).await, model, "data strip {d}: the data reads as written");
+    }
+    for m in [geo.p_member(0), geo.q_member(0)] {
+        mems[m].poke(DATA_OFFSET + 9, &[0x11; 4]);
+        assert_eq!(scrub(a.clone(), true).await, (1, 1));
+        assert_eq!(scrub(a.clone(), false).await.0, 0);
+        assert_eq!(read_all(&a).await, model);
+    }
+    // Two data strips of one stripe: reported, left alone.
+    let (m1, m2) = (geo.data_member(0, 1), geo.data_member(0, 2));
+    let before = (mems[m1].peek(DATA_OFFSET, 64), mems[m2].peek(DATA_OFFSET, 64));
+    mems[m1].poke(DATA_OFFSET + 3, &[0x77; 8]);
+    mems[m2].poke(DATA_OFFSET + 3, &[0x99; 8]);
+    let flipped = (mems[m1].peek(DATA_OFFSET, 64), mems[m2].peek(DATA_OFFSET, 64));
+    assert_ne!(before, flipped);
+    assert_eq!(scrub(a.clone(), true).await, (1, 0), "two bad strips: found, not repaired");
+    assert_eq!((mems[m1].peek(DATA_OFFSET, 64), mems[m2].peek(DATA_OFFSET, 64)), flipped, "nothing written over them");
+}
+
 #[tokio::test]
 async fn two_sets_are_two_failure_domains() {
     let (a, _) = make(RaidLevel::Raid6, 4).await;
