@@ -249,6 +249,8 @@ volumes) shift 2; for d in "$@"; do sed -n '2,$p' "$STUB_ANSWERS/$(basename "$d"
 holds)   echo "$*" > "$STUB_ANSWERS/holds.args"; echo "holds? (stub)"; exit "${STUB_HOLDS:-2}" ;;
 # `slab partner` (#402): the drive named in <device>.partner, else none.
 partner) [ -s "$answers.partner" ] || exit 1; cat "$answers.partner" ;;
+# `slab moved` (#350): the drive named in <device>.moved, else not moved (1).
+moved)   [ -s "$answers.moved" ] || { echo "$3: the system did not move off it"; exit 1; }; cat "$answers.moved" ;;
 esac
 exit 0
 STUBEOF

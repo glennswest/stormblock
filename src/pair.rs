@@ -164,7 +164,7 @@ pub async fn mend_at_start(vm: &TrackedMutex<VolumeManager>) -> Option<PairRepor
 pub async fn pair_up(mgr: VolumeManager) -> (VolumeManager, PairReport) {
     let vm = TrackedMutex::new(mgr);
     let r = pair_up_unlocked(&vm).await;
-    (vm.into_inner(), r)
+    (vm.into_inner().expect("nothing else holds the manager after the pairing"), r)
 }
 
 /// Every sealed volume's extents with two legs: both legs read and compared

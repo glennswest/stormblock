@@ -6142,7 +6142,7 @@ pub async fn run() -> anyhow::Result<()> {
             if srcs.is_empty() {
                 continue;
             }
-            match flow_slabs(&state.gem, &state.slab_registry, srcs, dest, persist, None, 0).await {
+            match flow_slabs_held(&state.gem, &state.slab_registry, srcs, dest, persist, None, 0, None).await {
                 Some((m, 0)) => moved += m,
                 Some((_, f)) => anyhow::bail!("{f} extent(s) of the {what} half did not move off {from}; it stays the node's"),
                 None => anyhow::bail!("the {what} half stopped moving off {from}; it stays the node's"),
@@ -9124,7 +9124,7 @@ async fn handle_adopt_ublk(
                     if !crate::pair::is_pair(&*st.volume_manager.lock().await).await {
                         return;
                     }
-                    let grace = flow_boot_grace();
+                    let grace = flow_boot_grace_for(false);
                     if !grace.is_zero() {
                         wait_for_boot_quiet(grace, FLOW_BOOT_QUIET).await;
                     }
