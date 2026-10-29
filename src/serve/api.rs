@@ -386,6 +386,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
             // add a member; `{m}/fail`, `{m}/replace`
             return seg.len() == 6 || matches!(seg.last(), Some(&"fail") | Some(&"replace"));
         }
+        // Moving the system to another drive (#350): what the node boots from.
+        if p == "/api/v1/system/move" {
+            return true;
+        }
         if matches!(p, "/api/v1/pallets/gpt" | "/api/v1/pallets/convert" | "/api/v1/pallets/prune" | "/api/v1/pallets/adopt") {
             return true;
         }
@@ -1811,6 +1815,13 @@ mod tests {
         assert!(!d(Method::GET, "/api/v1/releases/generations"));
         assert!(!d(Method::POST, "/api/v1/releases"));
         assert!(!d(Method::GET, "/api/v1/releases/11.91/image.img"));
+    }
+
+    #[test]
+    fn a_system_move_is_the_admins() {
+        let d = |m: Method, p: &str| matches!(classify(&m, p, None), Class::Destructive);
+        assert!(d(Method::POST, "/api/v1/system/move"), "moving the system (#350)");
+        assert!(!d(Method::GET, "/api/v1/system/move"), "its state is ordinary");
     }
 
     #[test]

@@ -785,7 +785,8 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
         . "$WORK/survey.sh" > "$WORK/msurvey.log" 2>&1
         echo "$LOCAL_DISK_ID" > "$WORK/msurvey.id"
         echo "$SYSTEM_DISK_ID" > "$WORK/msurvey.sysid"
-        echo "$LOCAL_DISK${FORCE_LOCAL:+ force}${SYSTEM_DISK:+ system=$SYSTEM_DISK}"
+        echo "$PAIR_DISK_ID" > "$WORK/msurvey.pairid"
+        echo "$LOCAL_DISK${FORCE_LOCAL:+ force}${SYSTEM_DISK:+ system=$SYSTEM_DISK}${PAIR_DISK:+ pair=$PAIR_DISK}"
     )
 }
 
@@ -981,6 +982,32 @@ check "system_drive names a drive with partitions: taken over (#478)" "/dev/sdb 
     "$(SDMEDIA="$WORK/ic-ssd.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|foreign)"
 check "system_drive names a #402 pair's SSD: the only drive taken, no split" "/dev/sdb force" \
     "$(SDMEDIA="$WORK/ic-ssd.yaml" PAIR=sda:sdb STUB_DESIGNATED=/dev/sda STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|dataonly sdb\|sysonly)"
+# #350: a system pair, named as a list of two in system_drive; or found as
+# this node's two whole node disks, each data slab naming the other.
+printf 'system_drive:\n  - serial: SER-sdb\n  - serial: SER-sdc\n    model: MODEL-sdc\n' > "$WORK/ic-pair.yaml"
+check "system_drive lists two drives: a system pair, both taken (#350)" "/dev/sdb force pair=/dev/sdc" \
+    "$(SDMEDIA="$WORK/ic-pair.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank sdc\|blank)"
+grep -q "SYSTEM PAIR: /dev/sdb and /dev/sdc, as system_drive in ic-pair.yaml names them" "$WORK/msurvey.log" \
+    && check "  the console says so" yes yes || check "  the console says so: $(grep -i pair "$WORK/msurvey.log")" yes no
+check "  the second drive's identity goes to boot-local" "wwn=naa.5000c500sdc;serial=SER-sdc;model=MODEL-sdc;size=4194304" \
+    "$(cat "$WORK/msurvey.pairid")"
+printf 'system_drive:\n  - serial: SER-sda\n  - serial: SER-sdb\n  - serial: SER-sdc\n' > "$WORK/ic-three.yaml"
+check "system_drive lists three drives: STOP, nothing taken" "" \
+    "$(SDMEDIA="$WORK/ic-three.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank sdc\|blank)"
+grep -q "lists 3 drives: a system pair is two" "$WORK/msurvey.log" \
+    && check "  said why" yes yes || check "  said why" yes no
+printf 'system_drive:\n  - serial: SER-sda\n  - model: MODEL-sda\n' > "$WORK/ic-same.yaml"
+check "system_drive's two entries name one drive: STOP" "" \
+    "$(SDMEDIA="$WORK/ic-same.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
+printf 'system_drive:\n  - serial: SER-sda\n  - serial: NOSUCH\n' > "$WORK/ic-half.yaml"
+check "system_drive's pair entry matching no drive: STOP" "" \
+    "$(SDMEDIA="$WORK/ic-half.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank)"
+check "an existing pair (two whole node disks naming each other): both, data kept" "/dev/sda pair=/dev/sdb" \
+    "$(PAIR=sda:sdb STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|layout sdb\|layout)"
+grep -q "SYSTEM PAIR: /dev/sda and /dev/sdb hold this node" "$WORK/msurvey.log" \
+    && check "  the console says so" yes yes || check "  the console says so" yes no
+check "a #402 split is not a pair (the partner holds no data half)" "/dev/sda system=/dev/sdb" \
+    "$(PAIR=sda:sdb STUB_HOLDS=1 CLAIMED_T="$CLAIM_URI" survey_m any sda\|dataonly sdb\|sysonly)"
 printf 'system_drive:\n  wwn: 5000C500SDC\n' > "$WORK/ic-wwn.yaml"
 check "system_drive by WWN, any case, no naa. prefix" "/dev/sdc force" \
     "$(SDFORGE="$WORK/ic-wwn.yaml" CLAIMED_T="$CLAIM_URI" survey_m any sda\|blank sdb\|blank sdc\|blank)"

@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod drain;
 #[cfg(target_os = "linux")]
 pub mod fdlimit;
+pub mod pair;
 pub mod rebalance;
 pub mod rebuild;
 pub mod release_erase;

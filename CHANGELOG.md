@@ -3,6 +3,35 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-29
+- **feat:** #350 (owner 2026-10-08, decided 1B + 2A): a **system pair** and
+  **moving the system**. A pair is two drives, each laid as a whole node disk
+  (boot area, system slab, data slab), their data slabs naming each other in
+  the header `partner` field: asked for with `system_drive:` as a list of two
+  mappings (else found as the two drives already holding the node's pair),
+  handed to `boot-local --pair-disk` (`--pair-disk-id`). After the flow-over's
+  validation every volume becomes `mirror:2` spread at `drive` and is
+  resynced onto the second drive, the goldens' two legs compared byte for
+  byte, and the second drive gets its own boot area. A volume made on a pair
+  is `mirror:2` from its first write. A restore reads a mirror whose primary
+  leg's drive is missing from the leg that is here, and keeps a mirror whose
+  slot-table slot is a later-generation leg the record names (a resync's
+  leg was taken for a newer slot table, dropping the other leg). An install
+  over a pair mirrors anything on one drive first, lays both system halves
+  again and keeps both data halves; the install plan takes an extent with any
+  leg in the data half as kept, not "outside". Health `slabs.pair`
+  (`paired`|`degraded`); `/init` boots either drive alone and says a degraded
+  pair. `POST /api/v1/system/move {to, from?, force?}` (admin; `GET` its
+  state) moves the system onto another drive live and leaves a pointer in the
+  old drive's slab headers (`moved_to`, v2 header bytes 168..184, ignored by
+  older engines); `stormblock slab moved <drive>`; a boot from the old drive
+  follows it, boots the moved system and says `SET THE BIOS BOOT ORDER TO
+  <drive>` (health `slabs.boot_order`). Tests:
+  `install_tests::a_system_pair_installs_onto_two_drives_and_either_boots_alone`,
+  `install_tests::the_system_moves_to_another_drive_and_the_old_one_points_to_it`,
+  `slab_report::tests::a_pair_with_its_other_drive_missing_is_degraded_and_says_so`,
+  the header round trip, boot-hook pair cases, `tests/initramfs-system-moved.sh`.
+
 ## [v23.11.0] — 2026-10-29
 
 ### Added

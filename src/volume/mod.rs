@@ -1612,13 +1612,31 @@ impl VolumeManager {
     /// now, rather than the first write finding out. Thin sizing is not
     /// checked — a volume larger than any one drive is the normal case,
     /// since each extent picks its own slabs.
+    /// Whether this node is a system pair with both drives here (#350): a
+    /// registered data slab names another registered data slab as its
+    /// partner. (#402's split names a data slab from a system slab.)
+    pub async fn is_system_pair(&self) -> bool {
+        let reg = self.registry.read().await;
+        let paired = reg
+            .iter()
+            .filter(|(_, s)| s.is_data())
+            .any(|(_, s)| s.partner().is_some_and(|p| reg.get(&p).is_some_and(|q| q.is_data())));
+        paired
+    }
+
     pub async fn create_volume_with(
         &mut self,
         name: &str,
         virtual_size: u64,
-        opts: CreateOptions,
+        mut opts: CreateOptions,
     ) -> Result<VolumeId, VolumeError> {
         self.refuse_if_undurable().await?;
+        // On a system pair (#350) every volume is mirrored across its two
+        // drives, the new ones from their first write: a volume made with no
+        // policy of its own is `mirror:2` spread at `drive`.
+        if opts.redundancy.is_none() && opts.placement.pinned.is_none() && self.is_system_pair().await {
+            opts.redundancy = RedundancyPolicy::mirror(2).at("drive");
+        }
         self.refuse_erasure_off(&opts.redundancy)?;
         // The role is settled here, once, and written onto the handle: an
         // unspecified role means "wherever this node keeps volumes", which is
@@ -4459,6 +4477,29 @@ fn reconcile_record(
         view.get(leg).filter(|s| s.state.is_owned()).map(|s| s.generation)
     };
     for (vext, loc) in &vrec.extents {
+        // A mirror whose primary leg's slab is not here (#350: one drive of a
+        // system pair booting alone) is read from a leg that is: that leg
+        // first, the others still named (degraded; a resync rebuilds them).
+        let swapped;
+        let loc = if reg.get(&loc.slab_id).is_none() {
+            match loc.mirrors.iter().position(|l| reg.get(&l.slab_id).is_some()) {
+                Some(i) => {
+                    let mut rest: Vec<gem::Leg> = loc.legs().collect();
+                    let first = rest.remove(i + 1);
+                    swapped = gem::ExtentLocation {
+                        slab_id: first.slab_id,
+                        slot_idx: first.slot_idx,
+                        ref_count: loc.ref_count,
+                        generation: loc.generation,
+                        mirrors: rest,
+                    };
+                    &swapped
+                }
+                None => loc,
+            }
+        } else {
+            loc
+        };
         match rebuilt.lookup(vrec.id, *vext) {
             None => {
                 if reg.get(&loc.slab_id).is_some() {
@@ -4516,8 +4557,13 @@ fn reconcile_record(
                 }
             }
             Some(rloc) => {
-                let recorded_is_live = rloc.legs().any(|l| l == loc.primary());
-                let newer_on_disk = rloc.primary() != loc.primary()
+                // The slot table's slot is one the record names as a leg (a
+                // mirror leg a resync added is allocated at a later
+                // generation than the primary, #350): the record is live.
+                let named = loc.legs().any(|m| m == rloc.primary());
+                let recorded_is_live = named || rloc.legs().any(|l| l == loc.primary());
+                let newer_on_disk = !named
+                    && rloc.primary() != loc.primary()
                     && slot_gen(rloc.primary()) > slot_gen(loc.primary());
                 if recorded_is_live && !newer_on_disk {
                     // Legs the record names that are gone stay

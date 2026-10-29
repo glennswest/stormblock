@@ -123,6 +123,63 @@ install and is left, with the reason said. The node then runs from the
 appliance and #427's refusal follows. `force` clears it only on a drive
 named outright (`system_drive`, `rd.stormblock.slab=`).
 
+**A system pair** (#350, owner 2026-10-08; decided 1B + 2A). Two drives,
+each laid as a whole node disk (its own boot area, system slab and data
+slab), so either one boots the node alone. A pair is asked for, never
+guessed: `system_drive:` as a list of two mappings, each naming exactly one
+drive,
+
+   ```yaml
+   system_drive:
+     - serial: TF512A2210000123
+     - serial: TF512A2210000456
+   ```
+
+or the two drives that already hold this node's pair (each with a system
+and a data slab, their data slabs naming each other in their headers). A
+list of any other length, two entries naming one drive, or an entry matching
+no drive or several is a STOP like rule 1's. `/init` hands the engine
+`boot-local --local-disk <first> --pair-disk <second>` (and `--pair-disk-id`,
+proved like `--local-disk-id`). The install lays the first drive as a single
+drive is laid (an install over it keeps its data half, #311) and the second
+alike; once the flow-over has moved and validated everything, **every volume
+of the node is mirrored onto the second drive** (per-volume `mirror:2` at the
+`drive` rung, #146, not a drive-level RAID): the goldens' two copies compared
+byte for byte, the data's mirrored, the second drive made bootable too. A
+volume made later on a pair is `mirror:2` from its first write. An install
+over a pair first mirrors anything that has a leg on one drive only, then
+lays both system halves again and keeps both data halves.
+
+At a boot, the probe finds the other drive of the pair from either
+(`stormblock slab partner`) and boots through the one named:
+
+   ```
+   /dev/sda and /dev/sdb are this node's system pair, each a whole node disk: booting through /dev/sda (#350)
+   ```
+
+A pair with one drive missing boots from the other alone, said and never
+silent (`WARNING: SYSTEM PAIR DEGRADED: …`), and health's `slabs.pair` is
+`degraded`; when the drive is back (or a new one is laid in its place) the
+next start mirrors everything onto it again.
+
+**Moving the system** (#350, stormdrive's `move-system`): `POST
+/api/v1/system/move {to, from?}` (admin) lays `to` as a whole node disk,
+moves both halves onto it live (as a flow-over moves them), copies the boot
+area, lets go of the old drive and leaves in its slab headers a pointer to
+where the system went (`moved_to`, the new drive's data slab id).
+`stormblock slab moved <drive>` finds the new drive by that id. A boot from
+the old drive (the BIOS boot order not changed yet) follows the pointer and
+boots the moved system, never the stale one:
+
+   ```
+   URGENT: this node's system was moved off /dev/sda to /dev/sdc (#350).
+   URGENT: SET THE BIOS BOOT ORDER TO /dev/sdc. Booting the moved system from it now.
+   ```
+
+and health's `slabs.boot_order` carries the message until a boot comes from
+the new drive. A pointer to a drive that is not on the machine asks the
+appliance instead, said.
+
 **After the install the choice is kept** (#478): the system-data block
 writes it as stormdrive's designation
 (`<system-data>/stormdrive/system-drives.json`: `wwn`, `serial`, `model`,

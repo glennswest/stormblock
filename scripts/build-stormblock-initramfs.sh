@@ -3165,6 +3165,39 @@ if [ "$BOOT_MODE" = "local" ]; then
             PROBE_STOP="$1"
         fi
     }
+    # --- BEGIN system moved (covered by tests/initramfs-system-moved.sh)
+    # A drive this node's system was moved off (#350, stormdrive's
+    # move-system) keeps a pointer to the drive it went to. Booted from it
+    # (the BIOS boot order not changed yet), the boot follows the pointer and
+    # boots the moved system, never the stale drive, and says it urgently;
+    # health carries it until a boot comes from the new drive.
+    BOOT_ORDER_FILE="${STORM_RUN:-/run/stormblock}/boot-order.json"
+    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ]; then
+        case "$SLAB" in
+        *://*) ;;
+        *)
+            _md=$(disk_of "$SLAB")
+            _mto=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab moved "$_md" 2>/dev/null); _mrc=$?
+            if [ "$_mrc" -eq 0 ]; then
+                _mto=$(printf '%s\n' "$_mto" | tail -n 1)
+                echo "URGENT: this node's system was moved off $_md to $_mto (#350)."
+                echo "URGENT: SET THE BIOS BOOT ORDER TO $_mto. Booting the moved system from it now."
+                mkdir -p "${BOOT_ORDER_FILE%/*}"
+                printf '{"set_to": "%s", "booted_from": "%s", "message": "set BIOS boot order to %s"}\n' \
+                    "$_mto" "$_md" "$_mto" > "$BOOT_ORDER_FILE"
+                SLAB="$_mto"
+            elif [ "$_mrc" -eq 2 ]; then
+                echo "URGENT: this node's system was moved off $_md, to a drive that is not on this machine (#350):"
+                printf '%s\n' "$_mto" | sed 's/^/  /'
+                mkdir -p "${BOOT_ORDER_FILE%/*}"
+                printf '{"set_to": null, "booted_from": "%s", "message": "the system moved off %s to a drive not here"}\n' \
+                    "$_md" "$_md" > "$BOOT_ORDER_FILE"
+                probe_fallback "$_md is a drive the system moved off, and the drive it went to is not here"
+            fi
+            ;;
+        esac
+    fi
+    # --- END system moved
     # The node's two drives (#402): the drive named and the one holding its
     # other half, each found from the other by slab id. The boot goes through
     # the drive with the system half (where the root is), the other beside it
@@ -3177,7 +3210,9 @@ if [ "$BOOT_MODE" = "local" ]; then
         *)
             _pd=$(disk_of "$SLAB")
             if PARTNER=$(partner_of "$_pd"); then
-                if carries_system_half "$_pd"; then
+                if carries_system_half "$_pd" && carries_system_half "$PARTNER"; then
+                    echo "$_pd and $PARTNER are this node's system pair, each a whole node disk: booting through $_pd (#350)"
+                elif carries_system_half "$_pd"; then
                     echo "$_pd holds this node's system half, $PARTNER its data half (#402)"
                 else
                     echo "$_pd holds this node's data half, $PARTNER its system half: booting through $PARTNER (#402)"
@@ -3187,6 +3222,13 @@ if [ "$BOOT_MODE" = "local" ]; then
                 PAIRED_SLAB="$SLAB"
             else
                 PARTNER=""
+                # One drive of a system pair, its other missing (#350): it
+                # boots alone, and says so - never silently.
+                if carries_system_half "$_pd" && "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab list "$_pd" 2>/dev/null | grep -q "role=data" \
+                   && "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab partner "$_pd" 2>/dev/null | grep -q "is on no drive here"; then
+                    echo "WARNING: SYSTEM PAIR DEGRADED: the other drive of $_pd's pair is not on this machine."
+                    echo "  Booting from $_pd alone; every volume runs on one copy until it is back or replaced (#350)."
+                fi
             fi
             ;;
         esac
@@ -3842,6 +3884,12 @@ if [ "$BOOT_MODE" = "local" ]; then
                 ins = 1; next
             }
             ins && /^[^ \t#]/ { exit }
+            # A list of two mappings is a system pair (#350): each item
+            # starts with "- ", the items said apart by a "--" line.
+            ins && /^[ \t]+-[ \t]+/ {
+                if (items++) print "--"
+                sub(/-[ \t]+/, "  ")
+            }
             ins && /^[ \t]+[A-Za-z_]+:/ {
                 l = $0; sub(/^[ \t]+/, "", l)
                 k = l; sub(/:.*/, "", k)
@@ -3912,6 +3960,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     SD_FROM=""          # which install-config gave the system_drive
     SD_SPEC=""
     SD_CHOSEN=""        # the drive system_drive names
+    SD_PAIR=""          # the second drive, when system_drive is a pair (#350)
     CHOSEN_BY=""        # system_drive | named | node | first
     for _icf in "${INSTALL_CONFIG_STAGED:-}" "${INSTALL_CONFIG_FORGE:-${STORM_RUN:-/run/stormblock}/install-config.forge.yaml}"; do
         [ -n "$_icf" ] && [ -f "$_icf" ] || continue
@@ -3926,11 +3975,41 @@ if [ "$BOOT_MODE" = "local" ]; then
         =*) SD_STOP="system_drive in ${SD_FROM##*/} is '${SD_SPEC#=}': it is a mapping of serial, wwn, model or shelf + bay, never a device name (they move)" ;;
         esac
         if [ -z "$SD_STOP" ]; then
-            for _kv in $(printf '%s\n' "$SD_SPEC" | cut -d= -f1); do
+            for _kv in $(printf '%s\n' "$SD_SPEC" | grep -v '^--$' | cut -d= -f1); do
                 case " $SD_KEYS " in *" $_kv "*) ;; *) SD_STOP="system_drive in ${SD_FROM##*/} has '$_kv', which is none of: $SD_KEYS" ;; esac
             done
         fi
-        if [ -z "$SD_STOP" ]; then
+        # A system pair (#350): system_drive as a list of two mappings, each
+        # naming exactly one drive, the two drives different.
+        if [ -z "$SD_STOP" ] && printf '%s\n' "$SD_SPEC" | grep -q '^--$'; then
+            _sd_n=$(( $(printf '%s\n' "$SD_SPEC" | grep -c '^--$') + 1 ))
+            if [ "$_sd_n" -ne 2 ]; then
+                SD_STOP="system_drive in ${SD_FROM##*/} lists $_sd_n drives: a system pair is two (#350)"
+            else
+                _sd_a=$(printf '%s\n' "$SD_SPEC" | sed '/^--$/,$d')
+                _sd_b=$(printf '%s\n' "$SD_SPEC" | sed '1,/^--$/d')
+                for _sd_which in a b; do
+                    if [ "$_sd_which" = a ]; then _sd_s="$_sd_a"; else _sd_s="$_sd_b"; fi
+                    _sdm=""
+                    for _d in $(sd_drives); do
+                        sd_matches "$_d" "$_sd_s" && _sdm="$_sdm /dev/${_d##*/}"
+                    done
+                    _sd_said_i=$(printf '%s\n' "$_sd_s" | grep . | tr '\n' ' ' | sed 's/ $//')
+                    case "$(echo $_sdm | wc -w)" in
+                    1) if [ "$_sd_which" = a ]; then SD_CHOSEN="${_sdm# }"; else SD_PAIR="${_sdm# }"; fi ;;
+                    0) SD_STOP="system_drive's pair entry ($_sd_said_i, from ${SD_FROM##*/}) matches no drive on this machine" ;;
+                    *) SD_STOP="system_drive's pair entry ($_sd_said_i, from ${SD_FROM##*/}) matches more than one drive:$_sdm" ;;
+                    esac
+                    [ -n "$SD_STOP" ] && break
+                done
+                if [ -z "$SD_STOP" ] && [ "$SD_CHOSEN" = "$SD_PAIR" ]; then
+                    SD_STOP="system_drive's two entries name the same drive, $SD_CHOSEN: a system pair is two drives (#350)"
+                fi
+                [ -n "$SD_STOP" ] && SD_CHOSEN="" && SD_PAIR=""
+            fi
+            SD_SPEC_DONE=1
+        fi
+        if [ -z "$SD_STOP" ] && [ -z "${SD_SPEC_DONE:-}" ]; then
             _sdm=""
             for _d in $(sd_drives); do
                 sd_matches "$_d" "$SD_SPEC" && _sdm="$_sdm /dev/${_d##*/}"
@@ -3954,13 +4033,19 @@ if [ "$BOOT_MODE" = "local" ]; then
         fi
         NAMED_DISK="${SD_CHOSEN##*/}"
         CHOSEN_BY=system_drive
-        echo "  SYSTEM DRIVE: $SD_CHOSEN, as system_drive ($_sd_said) in ${SD_FROM##*/} names it (#478)"
+        if [ -n "$SD_PAIR" ]; then
+            echo "  SYSTEM PAIR: $SD_CHOSEN and $SD_PAIR, as system_drive in ${SD_FROM##*/} names them (#350):"
+            echo "  each laid as a whole node disk, every volume mirrored across the two; either boots alone"
+        else
+            echo "  SYSTEM DRIVE: $SD_CHOSEN, as system_drive ($_sd_said) in ${SD_FROM##*/} names it (#478)"
+        fi
         if [ -n "${INSTALL_OVER:-}" ] && [ "$(disk_of "$INSTALL_OVER")" != "$SD_CHOSEN" ]; then
             echo "  this node is on $INSTALL_OVER now; system_drive moves the install to $SD_CHOSEN"
             INSTALL_OVER=""
         fi
         for _d in $(sd_drives); do
             [ "/dev/${_d##*/}" = "$SD_CHOSEN" ] && continue
+            [ "/dev/${_d##*/}" = "$SD_PAIR" ] && continue
             if "$SURVEY_SB" slab list "/dev/${_d##*/}" 2>/dev/null | grep -q "role=data"; then
                 echo "  /dev/${_d##*/} carries a data half; it is left as it is. Move what it holds with"
                 echo "  stormdrive's move-system (stormdrive#62) - this install does not take it"
@@ -4445,7 +4530,24 @@ $1|$_svp|$3"
     # None of them: one drive takes both halves, as before. A system drive
     # that carries a data half is never laid over (the engine refuses too).
     SYSTEM_DISK=""
-    if [ -n "$LOCAL_DISK" ] && [ "${CHOSEN_BY:-}" = system_drive ]; then
+    # A system pair (#350): named by system_drive (a list of two), or the
+    # drive holding this node's other whole half - a drive that carries both
+    # a system and a data slab and that this node's data slab names. Each
+    # drive is a whole node disk; nothing is split.
+    PAIR_DISK=""
+    if [ -n "$LOCAL_DISK" ] && [ -n "${SD_PAIR:-}" ]; then
+        PAIR_DISK="$SD_PAIR"
+    elif [ -n "$LOCAL_DISK" ] && [ "${CHOSEN_BY:-}" != system_drive ] \
+       && _pd2=$(partner_of "$LOCAL_DISK") && carries_system_half "$_pd2" && has_data_slab "$_pd2"; then
+        PAIR_DISK="$_pd2"
+        echo "  SYSTEM PAIR: $LOCAL_DISK and $PAIR_DISK hold this node, each a whole node disk (#350)"
+    fi
+    if [ -n "$PAIR_DISK" ]; then
+        # A pair's data halves are kept, never forced over.
+        if [ -n "${FORCE_LOCAL:-}" ] && has_data_slab "$LOCAL_DISK"; then
+            FORCE_LOCAL=""
+        fi
+    elif [ -n "$LOCAL_DISK" ] && [ "${CHOSEN_BY:-}" = system_drive ]; then
         # system_drive names the only drive taken (#478): both halves on it,
         # whatever stormdrive designated or a partner holds.
         :
@@ -4493,6 +4595,11 @@ $1|$_svp|$3"
     if [ -n "$SYSTEM_DISK" ] && [ -e "$SURVEY_SYS/${SYSTEM_DISK##*/}" ]; then
         SYSTEM_DISK_ID=$(drive_ident "$SURVEY_SYS/${SYSTEM_DISK##*/}")
         echo "  $SYSTEM_DISK is $(drive_desc "$SURVEY_SYS/${SYSTEM_DISK##*/}" "$SYSTEM_DISK" | cut -d: -f2-)"
+    fi
+    PAIR_DISK_ID=""
+    if [ -n "$PAIR_DISK" ] && [ -e "$SURVEY_SYS/${PAIR_DISK##*/}" ]; then
+        PAIR_DISK_ID=$(drive_ident "$SURVEY_SYS/${PAIR_DISK##*/}")
+        echo "  $PAIR_DISK is $(drive_desc "$SURVEY_SYS/${PAIR_DISK##*/}" "$PAIR_DISK" | cut -d: -f2-)"
     fi
     # --- END system drive
 
@@ -4549,6 +4656,8 @@ $1|$_svp|$3"
         ${LOCAL_DISK_ID:+--local-disk-id "$LOCAL_DISK_ID"} \
         ${SYSTEM_DISK:+--system-disk "$SYSTEM_DISK"} \
         ${SYSTEM_DISK_ID:+--system-disk-id "$SYSTEM_DISK_ID"} \
+        ${PAIR_DISK:+--pair-disk "$PAIR_DISK"} \
+        ${PAIR_DISK_ID:+--pair-disk-id "$PAIR_DISK_ID"} \
         ${LOCAL_DISK:+${FORCE_LOCAL:+--local-disk-force}} \
         ${META:+--meta "$META"} \
         ${IMAGE_STORE:+--image-store "$IMAGE_STORE"} \

@@ -48,6 +48,53 @@ pub struct SlabReport {
     /// reason here, instead of a bare `remote`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_disk: Option<LocalDisk>,
+    /// A system pair (#350): both drives here (`paired`), or one missing
+    /// (`degraded`, never silent: every volume runs on one leg). Absent on a
+    /// node that is not a pair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pair: Option<PairState>,
+    /// The boot came from a drive the system was moved off (#350): urgent,
+    /// `{set_to, booted_from, message}`, until a boot comes from the new one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_order: Option<serde_json::Value>,
+}
+
+/// Where `/init` says the boot came from a drive the system moved off (#350).
+pub const BOOT_ORDER_PATH: &str = "/run/stormblock/boot-order.json";
+
+/// The boot-order message `/init` left, when it left one.
+pub fn read_boot_order() -> Option<serde_json::Value> {
+    std::fs::read(BOOT_ORDER_PATH).ok().and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+/// A system pair's state (#350), from the data slabs' headers.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PairState {
+    /// `paired` or `degraded`.
+    pub state: &'static str,
+    /// The local data slab(s) and the partner each names.
+    pub data_slab: String,
+    pub partner: String,
+    /// Why degraded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The pair state from the registered data slabs' `(id, partner, partner here)`.
+pub fn pair_state(pairs: &[(SlabId, SlabId, bool)]) -> Option<PairState> {
+    let (ours, partner, here) = pairs.iter().find(|(_, _, h)| !*h).or_else(|| pairs.first())?;
+    Some(PairState {
+        state: if *here { "paired" } else { "degraded" },
+        data_slab: ours.0.to_string(),
+        partner: partner.0.to_string(),
+        reason: (!*here).then(|| {
+            format!(
+                "the pair's other drive (data slab {}) is not here: every volume runs on this drive's leg alone; \
+                 it is mirrored again when that drive is back or replaced (#350)",
+                partner.0
+            )
+        }),
+    })
 }
 
 /// The boot's verdict on the machine's own disk (#344), written to
@@ -219,6 +266,8 @@ pub fn build(slabs: &[SlabFact], volumes: Option<&[HashSet<SlabId>]>) -> SlabRep
             data: half(true),
             items,
             local_disk: None,
+            pair: None,
+            boot_order: None,
         };
     };
     let fact = |id: &SlabId| slabs.iter().find(|s| s.id == *id);
@@ -245,7 +294,7 @@ pub fn build(slabs: &[SlabFact], volumes: Option<&[HashSet<SlabId>]>) -> SlabRep
     let any_local = vols
         .iter()
         .any(|v| v.iter().any(|id| fact(id).is_some_and(|s| s.remote.is_none())));
-    SlabReport { diskless: !any_local, system: half(false), data: half(true), items, local_disk: None }
+    SlabReport { diskless: !any_local, system: half(false), data: half(true), items, local_disk: None, pair: None, boot_order: None }
 }
 
 /// The report now, without waiting: `None` when the registry or the extent
@@ -254,8 +303,14 @@ pub fn snapshot(
     registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
     gem: &crate::lockwatch::TrackedRwLock<crate::volume::gem::GlobalExtentMap>,
 ) -> Option<SlabReport> {
+    let mut pairs: Vec<(SlabId, SlabId, bool)> = Vec::new();
     let facts: Vec<SlabFact> = {
         let reg = registry.try_read().ok()?;
+        for (id, s) in reg.iter().filter(|(_, s)| s.is_data()) {
+            if let Some(p) = s.partner() {
+                pairs.push((*id, p, reg.get(&p).is_some_and(|q| q.is_data())));
+            }
+        }
         let mut v: Vec<SlabFact> = reg
             .iter()
             .map(|(id, s)| {
@@ -273,8 +328,11 @@ pub fn snapshot(
         v.sort_by(|a, b| (a.data, a.remote.is_some(), &a.device).cmp(&(b.data, b.remote.is_some(), &b.device)));
         v
     };
+    let pair = pair_state(&pairs);
     if facts.iter().all(|f| f.remote.is_none()) {
-        return Some(build(&facts, None));
+        let mut r = build(&facts, None);
+        r.pair = pair;
+        return Some(r);
     }
     let vols: Vec<HashSet<SlabId>> = {
         let g = gem.try_read().ok()?;
@@ -292,7 +350,9 @@ pub fn snapshot(
         }
         out
     };
-    Some(build(&facts, Some(&vols)))
+    let mut r = build(&facts, Some(&vols));
+    r.pair = pair;
+    Some(r)
 }
 
 /// The cached report for health: fresh within [`TTL`], else made again if
@@ -307,6 +367,7 @@ pub fn for_health(state: &crate::mgmt::AppState) -> Option<SlabReport> {
     match snapshot(&state.slab_registry, &state.gem) {
         Some(mut r) => {
             r.local_disk = read_local_disk();
+            r.boot_order = read_boot_order();
             *cache = Some((Instant::now(), r.clone()));
             Some(r)
         }
@@ -336,6 +397,19 @@ mod tests {
         assert_eq!(j["items"][0]["integrity"], "T10-DIF-TYPE1-CRC");
         assert!(j["items"][1].get("integrity").is_none(), "a remote slab says neither: {j}");
         assert_eq!(integrity_of("/dev/no-such-disk-389"), None);
+    }
+
+    #[test]
+    fn a_pair_with_its_other_drive_missing_is_degraded_and_says_so() {
+        let (a, b) = (SlabId(uuid::Uuid::from_u128(1)), SlabId(uuid::Uuid::from_u128(2)));
+        assert_eq!(pair_state(&[]), None, "not a pair");
+        let ok = pair_state(&[(a, b, true), (b, a, true)]).unwrap();
+        assert_eq!((ok.state, ok.reason.is_none()), ("paired", true));
+        let deg = pair_state(&[(a, b, false)]).unwrap();
+        assert_eq!(deg.state, "degraded");
+        assert!(deg.reason.unwrap().contains(&b.0.to_string()));
+        let j = serde_json::to_value(SlabReport { diskless: false, system: "local", data: "local", items: vec![], local_disk: None, pair: pair_state(&[(a, b, false)]), boot_order: None }).unwrap();
+        assert_eq!(j["pair"]["state"], "degraded");
     }
 
     fn vols(sets: &[&[u8]]) -> Vec<HashSet<SlabId>> {
