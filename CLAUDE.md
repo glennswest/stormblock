@@ -211,7 +211,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
 
-### 4096 + T10 PI drives (2026-10-10, #389, P2) — IN PROGRESS
+### 4096 + T10 PI drives (2026-10-10, #389, P2) — DONE (steps 1, 2), closed; step 3 is #511
 
 Owner: "can we support 4096 with pi?"; stormdrive formats shelf drives 4096 +
 PI type 1 (else 512 + PI1). Recommended on the issue: 1 and 2 now, 3 (PI from
@@ -228,7 +228,8 @@ checks).
       ublk round trip, ext4 clone mounted, health, no protection errors:
       ALL PASS (kernel 7.2.11)
 - [x] docs (README, durability.md), CHANGELOG; step 3 is #511
-- [ ] check.sh; close. Metal: the Dell's shelf once stormdrive formats PI
+- [x] check.sh at 95a4bbd5 ALL PASS (1290/1290); closed. Metal: the Dell's
+      shelf once stormdrive formats PI (health `integrity` says so)
 
 ### Out of file descriptors after ~805 ublk exports (2026-10-29, #510, P1) — DONE (v23.2.0), closed; metal pending
 
