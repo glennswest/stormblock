@@ -883,7 +883,7 @@ drop slab + volumes from memory with no persist/erase; stop the array with
 no superblock/bitmap/flush write; forget the members); test: assemble on a
 second engine, every member byte unchanged. Nothing built.
 
-### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P1; stormcluster#21, P1) — MERGING (owner 2026-10-28: ship it)
+### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P1; stormcluster#21, P1) — DONE (v23.1.0, ba53377d), closed; metal pending
 
 Decided (master, 2026-10-17): 1B, a ticket then a reboot; the initramfs
 engine erases and re-lays before anything is mounted. Keep: sealed release
@@ -895,9 +895,11 @@ should be working": merge and ship. Rebased onto main as
 - [x] `src/release_erase.rs`, `POST/GET/DELETE /api/v1/release`, the run in
       `boot-local`; tests; erase.md, README, auth.md, CHANGELOG
 - [x] rebased onto main (847fd20c + #265's work plan)
-- [ ] check.sh on the rebased branch; main fast-forwarded; minor bump + tag;
-      stage requested; stormcluster#21 told; closed. Metal: a real node
-      through a reboot (stormcluster#21's step)
+- [x] check.sh at 4b7b1838 ALL PASS (1283/1283, no warnings); main
+      fast-forwarded; v23.1.0 (ba53377d, `stormblock 23.1.0` from a
+      `--locked` build); stage requested (build 6581a925f128);
+      stormcluster#21 told; closed. Metal: a real node through a reboot
+      (stormcluster#21's step)
 
 ### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — PARKED until the single-node pacing lifts
 
