@@ -173,3 +173,81 @@ async fn a_shared_array_joins_the_pool() {
     let (s, v) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "anything", "size": "4M" }))).await;
     assert!(s == 200 || s == 201, "{v}");
 }
+
+fn file_sum(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+/// A RAID head handed to another engine (#296): released with nothing
+/// written to any member (every byte of both drive files the same), the
+/// array, its volumes and its drives gone from this engine; assembled on a
+/// second engine, the volume's data is there. Served, it is refused unless
+/// forced; a second release is a 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_array_is_released_to_another_engine_with_nothing_written() {
+    let dir = TempDir::new().unwrap();
+    let (state, base, c) = start(&dir).await;
+    let api = format!("{base}/api/v1");
+    let (a, apath) = open_drive(&c, &api, &dir, "leg-a.img").await;
+    let (b, bpath) = open_drive(&c, &api, &dir, "leg-b.img").await;
+    let (s, arr) = call(&c, reqwest::Method::POST, format!("{api}/arrays"), Some(json!({ "level": "Raid1", "drive_uuids": [a, b] }))).await;
+    assert_eq!(s, 201, "{arr}");
+    let array = arr["id"].as_str().unwrap().to_string();
+    let (s, pv) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "dist-vol", "size": "8M", "array_id": array }))).await;
+    assert!(s == 200 || s == 201, "{pv}");
+    let pv = pv["id"].as_str().unwrap().to_string();
+    fill(&state, &pv, 8, 70).await;
+    let v = state.volume_manager.lock().await.get_volume(&VolumeId(pv.parse().unwrap())).unwrap();
+    v.flush().await.unwrap();
+    drop(v);
+    state.volume_manager.lock().await.persist().await;
+
+    // Served (a namespace recorded for it): refused without force, naming it.
+    state.v1.lock().await.nvme_nsids.insert(pv.clone(), 7);
+    let (s, e) = call(&c, reqwest::Method::POST, format!("{api}/arrays/{array}/release"), None).await;
+    assert_eq!(s, 409, "{e}");
+    assert!(e.to_string().contains("dist-vol") && e.to_string().contains("NVMe namespace 7"), "{e}");
+
+    let before = (file_sum(&apath), file_sum(&bpath));
+    let (s, r) = call(&c, reqwest::Method::POST, format!("{api}/arrays/{array}/release?force=true"), None).await;
+    assert_eq!(s, 200, "{r}");
+    assert_eq!(r["volumes"][0]["name"], "dist-vol", "{r}");
+    assert_eq!(r["drives_closed"].as_array().unwrap().len(), 2, "{r}");
+    assert!(!state.v1.lock().await.nvme_nsids.contains_key(&pv), "the namespace was withdrawn");
+    // Nothing in this engine names it any more, and nothing was written.
+    let (s, _) = call(&c, reqwest::Method::GET, format!("{api}/volumes/{pv}"), None).await;
+    assert_eq!(s, 404);
+    let (s, _) = call(&c, reqwest::Method::GET, format!("{api}/arrays/{array}"), None).await;
+    assert_eq!(s, 404);
+    let (s, _) = call(&c, reqwest::Method::POST, format!("{api}/arrays/{array}/release"), None).await;
+    assert_eq!(s, 404, "a second release finds nothing");
+    assert!(state.drives.read().await.is_empty(), "its member drives are closed");
+    // This engine goes on persisting its own records: still nothing on them.
+    state.volume_manager.lock().await.persist().await;
+    assert_eq!((file_sum(&apath), file_sum(&bpath)), before, "a member byte changed");
+
+    // The other engine assembles it and reads the data.
+    let dir2 = TempDir::new().unwrap();
+    let (state2, base2, c2) = start(&dir2).await;
+    let api2 = format!("{base2}/api/v1");
+    let mut uuids = Vec::new();
+    for p in [&apath, &bpath] {
+        let (s, d) = call(&c2, reqwest::Method::POST, format!("{api2}/drives"), Some(json!({ "path": p, "size_bytes": 64 * MIB }))).await;
+        assert!(s == 200 || s == 201, "{d}");
+        uuids.push(d["uuid"].as_str().unwrap().to_string());
+    }
+    let (s, rep) = call(&c2, reqwest::Method::POST, format!("{api2}/arrays/assemble"), Some(json!({ "drive_uuids": uuids }))).await;
+    assert_eq!(s, 200, "{rep}");
+    let (s, got) = call(&c2, reqwest::Method::GET, format!("{api2}/arrays/{array}"), None).await;
+    assert_eq!(s, 200, "assembled under its own id: {rep}");
+    assert_eq!(got["status"]["state"], "clean", "{got:#}");
+    let id = state2.volume_manager.lock().await.find_volume("dist-vol").await.expect("the volume came with it");
+    assert_eq!(id.0.to_string(), pv);
+    let v = state2.volume_manager.lock().await.get_volume(&id).unwrap();
+    let mut buf = vec![0u8; MIB as usize];
+    for i in 0..8u64 {
+        v.read(i * MIB, &mut buf).await.unwrap();
+        assert!(buf.iter().all(|&x| x == 70u8.wrapping_add(i as u8)), "extent {i}");
+    }
+}

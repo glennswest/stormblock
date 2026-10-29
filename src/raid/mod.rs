@@ -281,6 +281,11 @@ impl Member {
     }
 }
 
+/// The error of I/O on a set handed to another engine (#296).
+fn released_error() -> DriveError {
+    DriveError::Other(anyhow::anyhow!("the array was released to another engine (#296)"))
+}
+
 /// How an array is doing, for the API and health.
 #[derive(Debug, Clone, Serialize)]
 pub struct ArrayStatus {
@@ -352,6 +357,9 @@ pub struct RaidArray {
     scrub_progress: std::sync::Mutex<Option<Arc<ScrubProgress>>>,
     rebuild_config: std::sync::Mutex<RebuildConfig>,
     stopped: AtomicBool,
+    /// Handed to another engine (#296): nothing is written to a member from
+    /// here, and I/O is refused.
+    released: AtomicBool,
 }
 
 fn device_id_for(id: RaidArrayId, level: RaidLevel) -> DeviceId {
@@ -469,6 +477,7 @@ impl RaidArray {
             scrub_progress: std::sync::Mutex::new(None),
             rebuild_config: std::sync::Mutex::new(RebuildConfig::default()),
             stopped: AtomicBool::new(false),
+            released: AtomicBool::new(false),
         }
     }
 
@@ -932,6 +941,9 @@ impl RaidArray {
     /// that cannot take it is failed and the round is repeated, so the
     /// members that remain all say the same thing.
     pub async fn write_superblocks(&self) -> Result<(), RaidError> {
+        if self.is_released() {
+            return Ok(());
+        }
         let _g = self.sb_write.lock().await;
         for _ in 0..=MAX_SLOTS {
             self.sb_dirty.store(false, Ordering::SeqCst);
@@ -980,6 +992,9 @@ impl RaidArray {
 
     /// Zero the bitmap area on every attached member (or one).
     async fn zero_bitmaps(&self, only: Option<usize>) -> Result<(), RaidError> {
+        if self.is_released() {
+            return Ok(());
+        }
         let zeros = vec![0u8; self.bitmap.bytes as usize];
         for (i, d) in self.attached_devices() {
             if only.is_some_and(|o| o != i) {
@@ -997,6 +1012,9 @@ impl RaidArray {
     /// Write the bitmap pages that differ from the disk to every attached
     /// member, and flush them.
     async fn write_bitmap_pages(&self) -> DriveResult<()> {
+        if self.is_released() {
+            return Ok(());
+        }
         let _io = self.bitmap.io.lock().await;
         let w = self.bitmap.pending();
         if w.pages.is_empty() {
@@ -1448,6 +1466,9 @@ impl RaidArray {
     /// missing, or rebuilding and not this far yet). A member that fails is
     /// failed; refused failures are returned.
     async fn issue_writes(&self, holders: &[Option<Arc<dyn BlockDevice>>], writes: Vec<(usize, u64, Vec<u8>)>) -> DriveResult<()> {
+        if self.is_released() {
+            return Err(released_error());
+        }
         let results = join_all(writes.iter().filter_map(|(m, at, bytes)| {
             holders[*m].as_ref().map(|d| async move { (*m, d.write(*at, bytes).await) })
         }))
@@ -2244,6 +2265,35 @@ impl RaidArray {
         self.failures.notify_one();
     }
 
+    /// Why the set cannot be released now (#296): a rebuild or a scrub runs.
+    pub fn release_blocker(&self) -> Option<String> {
+        if self.rebuilding_count() > 0 {
+            return Some("a rebuild is running: wait for it or cancel it".into());
+        }
+        if self.scrub_progress().is_some_and(|p| !p.is_finished()) {
+            return Some("a scrub is running: cancel it first".into());
+        }
+        None
+    }
+
+    /// Let go of the set for another engine to assemble (#296): stopped, and
+    /// from here nothing is written to any member (superblocks, bitmap, data)
+    /// and every I/O is refused. Refused while a rebuild or a scrub runs:
+    /// their workers write members directly.
+    pub fn release(&self) -> Result<(), String> {
+        if let Some(why) = self.release_blocker() {
+            return Err(why);
+        }
+        self.released.store(true, Ordering::SeqCst);
+        self.stop();
+        Ok(())
+    }
+
+    /// Whether the set was handed to another engine (#296).
+    pub fn is_released(&self) -> bool {
+        self.released.load(Ordering::SeqCst)
+    }
+
     /// Clear every idle bit and rewrite the superblocks — a clean stop.
     pub async fn close(&self) -> DriveResult<()> {
         self.flush_members().await?;
@@ -2410,6 +2460,9 @@ impl BlockDevice for RaidArray {
     }
 
     async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        if self.is_released() {
+            return Err(released_error());
+        }
         let len = buf.len() as u64;
         let cap = self.capacity_bytes();
         if offset + len > cap {
@@ -2424,6 +2477,9 @@ impl BlockDevice for RaidArray {
     }
 
     async fn flush(&self) -> DriveResult<()> {
+        if self.is_released() {
+            return Err(released_error());
+        }
         let started = Instant::now();
         let res = self.flush_members().await;
         // What was idle before this flush began is durable now: its bits can go.
@@ -2437,6 +2493,9 @@ impl BlockDevice for RaidArray {
     }
 
     async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        if self.is_released() {
+            return Err(released_error());
+        }
         // Only a mirror passes a discard down: on a parity set a discarded
         // strip would no longer agree with its parity. Advisory either way —
         // nothing relies on a discard reading back as zeros.

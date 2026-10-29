@@ -168,6 +168,7 @@ async fn the_node_token_keeps_the_ordinary_verbs_and_only_those() {
         (M::DELETE, format!("/slabs/{id}"), None),
         (M::POST, "/arrays".to_string(), Some(json!({}))),
         (M::POST, format!("/arrays/{id}/members/0/fail"), None),
+        (M::POST, format!("/arrays/{id}/release"), None),
         (M::PUT, "/forge".to_string(), Some(json!({}))),
         (M::DELETE, "/forge".to_string(), None),
         (M::POST, "/spares".to_string(), Some(json!({}))),

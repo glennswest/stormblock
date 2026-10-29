@@ -373,6 +373,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if matches!(p, "/api/v1/slabs" | "/api/v1/arrays" | "/api/v1/spares") {
             return true;
         }
+        // Handing an array to another engine (#296).
+        if seg.len() == 6 && seg[3] == "arrays" && seg[5] == "release" {
+            return true;
+        }
         if seg.len() >= 6 && seg[3] == "arrays" && seg[5] == "members" {
             // add a member; `{m}/fail`, `{m}/replace`
             return seg.len() == 6 || matches!(seg.last(), Some(&"fail") | Some(&"replace"));

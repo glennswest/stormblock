@@ -452,6 +452,135 @@ async fn delete_array(
     axum::http::StatusCode::NO_CONTENT.into_response()
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct ReleaseQuery {
+    /// Withdraw what serves the array's volumes (exports, LUNs, NVMe
+    /// namespaces, ublk and vhost devices) instead of refusing.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/v1/arrays/{id}/release[?force]` (#296, stormstorage#33): let go
+/// of an array for another engine to assemble, **writing nothing to any
+/// member**: its volumes and its slab dropped from memory (no persist, no
+/// slot-table sync, no erase), the set stopped with no superblock, bitmap or
+/// flush write (and refusing any I/O from then on), its member drives closed.
+/// Then `POST /api/v1/arrays/assemble` on the other engine brings it up as if
+/// this one had died. 404 when the array is not held here (so a repeat is a
+/// 404); 409 while a consumer is served one of its volumes (unless `force`,
+/// which withdraws them), while it rebuilds or scrubs, or for a volume with
+/// extents off the array.
+async fn release_array(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ReleaseQuery>,
+) -> Response {
+    let (array_id, info) = match array_of(&state, &id).await {
+        Ok(x) => x,
+        Err(r) => return r,
+    };
+    if let Some(why) = info.array.release_blocker() {
+        return ApiError::conflict(format!("cannot release array {array_id}: {why}"));
+    }
+    let vols = state.volume_manager.lock().await.volumes_of_array(&array_id).await;
+    let mut serving = Vec::new();
+    for (v, name) in &vols {
+        let w = super::what_is_serving(&state, v.0).await;
+        if !w.is_empty() {
+            serving.push(format!("{name} ({})", w.join(", ")));
+        }
+    }
+    if !serving.is_empty() {
+        if !q.force {
+            return ApiError::conflict(format!(
+                "cannot release array {array_id}: its volumes are served: {}; detach them, or release with force",
+                serving.join("; ")
+            ));
+        }
+        for (v, _) in &vols {
+            let exports: Vec<Uuid> =
+                state.exports.read().await.iter().filter(|e| e.volume_id == v.0).map(|e| e.id).collect();
+            for e in exports {
+                super::exports::drop_export(&state, e).await;
+            }
+            #[cfg(feature = "iscsi")]
+            {
+                let luns: Vec<u64> = state
+                    .lun_entries
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|(_, e)| matches!(e.backing, crate::mgmt::LunBacking::Volume { volume_id: x } if x == v.0))
+                    .map(|(l, _)| *l)
+                    .collect();
+                for l in luns {
+                    super::luns::detach_lun(&state, l).await;
+                }
+            }
+            let stopping = state.ublk_exports.lock().await.remove(&v.0.to_string());
+            stopping.settle(crate::mgmt::ublk_export::DETACH_WAIT).await;
+            #[cfg(target_os = "linux")]
+            {
+                let gone = state.vhost_exports.lock().await.detach(v.0);
+                crate::mgmt::vhost_export::stop(gone.into_iter().collect()).await;
+            }
+            super::v1::release_nvme_namespace(&state, &v.0.to_string()).await;
+            crate::mgmt::nvme_hosts::detach(&state, v.0, None, crate::mgmt::nvme_hosts::Release::All).await;
+        }
+        tracing::warn!("array {array_id}: released with force; withdrawn: {}", serving.join("; "));
+        // What force does not withdraw (a published release, a StormFS pin)
+        // still refuses: those are let go of deliberately, not by a handover.
+        let mut left = Vec::new();
+        for (v, name) in &vols {
+            let w = super::what_is_serving(&state, v.0).await;
+            if !w.is_empty() {
+                left.push(format!("{name} ({})", w.join(", ")));
+            }
+        }
+        if !left.is_empty() {
+            return ApiError::conflict(format!(
+                "cannot release array {array_id}: still held after withdrawing what serves it: {}",
+                left.join("; ")
+            ));
+        }
+    }
+    let released = match state.volume_manager.lock().await.release_array(&array_id).await {
+        Ok(r) => r,
+        Err(e) => return ApiError::conflict(format!("cannot release array {array_id}: {e}")),
+    };
+    if let Err(why) = info.array.release() {
+        // A rebuild began in between: the volumes are already let go of in
+        // memory, written nowhere; the set stays here, stopped.
+        info.array.stop();
+        tracing::error!("array {array_id}: released its volumes but not the set: {why}");
+    }
+    let members: Vec<Uuid> = info.array.members_view().iter().filter_map(|m| m.drive.as_ref().map(|d| d.uuid)).collect();
+    state.arrays.write().await.remove(&array_id);
+    let mut closed = Vec::new();
+    {
+        let mut drives = state.drives.write().await;
+        drives.retain(|d| {
+            let member = members.contains(&d.device.id().uuid);
+            if member {
+                closed.push(d.path.clone());
+            }
+            !member
+        });
+    }
+    metrics::gauge!("stormblock_arrays_total").set(state.arrays.read().await.len() as f64);
+    tracing::info!(
+        "array {array_id}: released to another engine (#296): {} volume(s) let go of, {} drive(s) closed, nothing written",
+        released.len(),
+        closed.len()
+    );
+    Json(serde_json::json!({
+        "released": array_id,
+        "volumes": released.iter().map(|(id, n)| serde_json::json!({"id": id.0, "name": n})).collect::<Vec<_>>(),
+        "drives_closed": closed,
+    }))
+    .into_response()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AddMemberRequest {
     pub drive_uuid: Uuid,
@@ -643,6 +772,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(list_arrays).post(create_array))
         .route("/assemble", post(assemble))
         .route("/{id}", get(get_array).delete(delete_array))
+        .route("/{id}/release", post(release_array))
         .route("/{id}/members", post(add_member))
         // `{m}`: a member uuid to remove one from a mirror; a slot number to
         // fail or replace one.

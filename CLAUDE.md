@@ -1029,14 +1029,21 @@ lock, paced; `mirror {state copying|synced|failed, bytes_*}` on GET; leg
 errors → failed, never the guest's; `mirrors.json`, failed after a restart;
 node-level evacuate settled with stormcluster. Nothing built.
 
-### Release an array with no write to its members (2026-10-17, #296, P3) — PARKED until the single-node pacing lifts
+### Release an array with no write to its members (2026-10-17, #296, P3) — IN PROGRESS
 
 For a live RAID-head handover (stormstorage#33; failover already works).
-To build on a wip/ branch: `POST /api/v1/arrays/{id}/release[?force]`
-(409 while a consumer holds a volume, #292's connections; withdraw exports;
-drop slab + volumes from memory with no persist/erase; stop the array with
-no superblock/bitmap/flush write; forget the members); test: assemble on a
-second engine, every member byte unchanged. Nothing built.
+Inert until called, so on main (as #104, #299).
+- [x] `POST /api/v1/arrays/{id}/release[?force]` (destructive): 409 while a
+      volume is served (`what_is_serving`) unless force (exports, LUNs, ublk,
+      vhost, NVMe namespaces withdrawn; a release or pin still refuses), or
+      while it rebuilds/scrubs; `VolumeManager::release_array` drops volumes
+      and slab from memory, no persist; `RaidArray::release` latches: no
+      superblock/bitmap write, I/O refused; member drives closed; 404 after
+- [x] test `integration_array_pin::an_array_is_released_to_another_engine_
+      with_nothing_written` (members' sha256 unchanged, assembled on a second
+      engine, data read back); destructive list
+- [ ] build VM; check.sh; docs (raid-sets.md, README, auth.md), CHANGELOG;
+      release; stormstorage#33 told; close
 
 ### Release erase: everything a node holds for a cluster, once (2026-10-17, #291, P1; stormcluster#21, P1) — DONE (v23.1.0, ba53377d), closed; metal pending
 

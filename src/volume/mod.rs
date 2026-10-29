@@ -1485,6 +1485,79 @@ impl VolumeManager {
         Ok(())
     }
 
+    /// Every volume on an array's slab, or pinned to it (one with no extent
+    /// yet has no leg to find it by), by id and name.
+    pub async fn volumes_of_array(&self, array_id: &RaidArrayId) -> Vec<(VolumeId, String)> {
+        let Some(slab) = self.array_slabs.get(array_id).copied() else {
+            return Vec::new();
+        };
+        let mut ids: Vec<(VolumeId, String)> = self.volumes_on_slab(slab).await.into_iter().map(|(id, n, _)| (id, n)).collect();
+        for (id, h) in &self.volumes {
+            if h.pinned_slab() == Some(slab) && !ids.iter().any(|(i, _)| i == id) {
+                ids.push((*id, h.name().await));
+            }
+        }
+        ids
+    }
+
+    /// Let go of an array's slab and every volume on it **without writing
+    /// anything** (#296: a RAID head handed to another engine, stormstorage#33):
+    /// no persist, no slot-table sync, no erase, no metadata write. The
+    /// volumes are dropped from memory (a handle still held is refused from
+    /// here), the slab from the registry. The members then belong to the
+    /// engine that assembles them next, as if this one had died. Refused for
+    /// a volume held (attached: the caller withdraws first) and for one with
+    /// legs off the array (it cannot be let go of in half). The volumes let
+    /// go of, by id and name.
+    pub async fn release_array(&mut self, array_id: &RaidArrayId) -> Result<Vec<(VolumeId, String)>, VolumeError> {
+        let Some(slab) = self.array_slabs.get(array_id).copied() else {
+            return Ok(Vec::new());
+        };
+        let ids = self.volumes_of_array(array_id).await;
+        for (id, name) in &ids {
+            gem::ensure_resident(&self.gem, *id)
+                .await
+                .map_err(|e| VolumeError::AllocatorError(format!("{name}: loading its map: {e}")))?;
+            let off = {
+                let g = self.gem.read().await;
+                g.get_volume_map(id).is_some_and(|m| {
+                    m.all_legs().any(|l| l.slab_id != slab) || m.parity.values().any(|grp| grp.legs.iter().any(|l| l.slab_id != slab))
+                })
+            };
+            if off {
+                return Err(VolumeError::AllocatorError(format!(
+                    "{name} has extents off array {array_id}: it cannot be released with it"
+                )));
+            }
+            let by = self.holds.held_by(id.0);
+            if !by.is_empty() {
+                return Err(VolumeError::InUse { id: *id, by });
+            }
+        }
+        for (id, _) in &ids {
+            if let Some(h) = self.volumes.remove(id) {
+                h.refuse(format!("volume {} was released to another engine with its array (#296)", id.0));
+            }
+            self.present.remove(id);
+            self.parents.remove(id);
+            self.fs_info.remove(id);
+            self.owners.remove(id);
+            self.origins.remove(id);
+            self.digests.remove(id);
+            self.to_digest.remove(id);
+            self.schemes.remove(id);
+            self.namespaces.remove(id);
+            self.retentions.remove(id);
+            self.secrets.remove(id);
+            self.gem.write().await.remove_volume(*id);
+        }
+        self.registry.write().await.remove(&slab);
+        self.array_slabs.remove(array_id);
+        self.metadata_slabs.retain(|s| *s != slab);
+        self.records_on_slab.lock().unwrap_or_else(|e| e.into_inner()).remove(&slab);
+        Ok(ids)
+    }
+
     /// Create a new thin volume without binding it to a specific array.
     ///
     /// Slab placement happens at write time via the registry, so the volume
