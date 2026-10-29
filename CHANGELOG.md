@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.1.0] — 2026-10-28
+
+### Added
+- #291 (stormcluster#14/#21): a release erase. `POST /api/v1/release` (admin) records a ticket; at the next boot from the node's own disk everything the node holds for its cluster is erased (overwritten once), the release's goldens, `system-data` and the node's declaration kept, the release's unsealed volumes laid again fresh. `GET` the ticket and report, `DELETE` cancels; health `release`.
+
 ### 2026-10-28
 - **feat:** #291 (stormcluster#14/#21; decided 1B, master for the owner): a release erase, everything a node holds for its cluster overwritten once, at the next boot. `POST /api/v1/release {erase?, force?, dry_run?}` (destructive) answers the plan and records a ticket, captured to `stormblock-state` before the answer (409: no state volume, a flow-over moving, a remote host attached unless `force`); `GET` the ticket and the last report, `DELETE` cancels; health `release: pending`. At the next boot from the node's own disk, `boot-local` runs it before the root is resolved: keeps the release's sealed goldens and `system-data`; lays the release's unsealed volumes again as fresh clones of their goldens (new identities, no image copy); erases everything else, unmarked included, every freed slot `Erasing` at least `once` and overwritten by the successor's eraser (`/api/v1/erasures`). The node's declaration (`stormcos.toml`'s `[node]` and `[network]`, not `[cluster]`; install-node.toml, install-config.yaml, the ssh keys) is saved in the ticket first and written into the fresh `stormcos-state`; `release-report.json` in the fresh `stormblock-state`. A cut repeats the run (the state volume is laid again last, through a temporary name). `src/release_erase.rs`, `mgmt/api/release_erase.rs`; tests `cli::release_erase_tests::…`, `integration_destructive::a_release_erase_is_planned_…`, the declaration unit; docs/erase.md, README, auth.md. Merged to main at the owner's word (2026-10-28: "Hardware ones and multi-node ones should be working").
 - **chore:** #508: kernel set 7.2.10-200.fc44 → 7.2.11-200.fc44. No code change: `stormcentral component initramfs --commit f8b965b5` built the initramfs for 7.2.11-200.fc44.x86_64 (its dependency closure over the kernel's modules.dep passed): registry/initramfs:blob-aafea1b1d512d74b.
