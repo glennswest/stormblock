@@ -424,18 +424,26 @@ fast_reads() {
     t8=$(dmsetup table slow$disk)
     dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$(echo "$t8" | awk '{$6=0; $9=0; print}')" \
         && dmsetup resume slow$disk || echo "LOG fast-reads: the delay stays on"
-    cpu0=$(awk '{print $14 + $15}' /proc/$pid/stat)
-    t0=$(now)
-    jobs=
-    for j in $(seq 0 15); do
-        dd if=$dev of=/dev/null bs=4096 count=4000 skip=$((j * 1000)) iflag=direct 2>/dev/null &
-        jobs="$jobs $!"
+    # Five rounds: a build VM's timings move between runs; the median and
+    # the spread say more than one.
+    walls=; cpus=
+    for round in 1 2 3 4 5; do
+        cpu0=$(awk '{print $14 + $15}' /proc/$pid/stat)
+        t0=$(now)
+        jobs=
+        for j in $(seq 0 15); do
+            dd if=$dev of=/dev/null bs=4096 count=4000 skip=$((j * 1000)) iflag=direct 2>/dev/null &
+            jobs="$jobs $!"
+        done
+        wait $jobs
+        t1=$(now)
+        cpu1=$(awk '{print $14 + $15}' /proc/$pid/stat)
+        walls="$walls $(ms $t0 $t1)"; cpus="$cpus $(( (cpu1 - cpu0) * 10 ))"
     done
-    wait $jobs
-    t1=$(now)
-    cpu1=$(awk '{print $14 + $15}' /proc/$pid/stat)
-    echo "TIME $mode fast-reads $(ms $t0 $t1)"
-    echo "TIME $mode fast-reads-cpu $(( (cpu1 - cpu0) * 10 ))"
+    med() { echo $* | tr ' ' '\n' | sort -n | sed -n 3p; }
+    echo "TIME $mode fast-reads $(med $walls)"
+    echo "TIME $mode fast-reads-cpu $(med $cpus)"
+    echo "LOG $mode fast-reads rounds (ms):$walls; engine CPU (ms):$cpus"
     dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$t8" && dmsetup resume slow$disk
 }
 
@@ -567,7 +575,7 @@ SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
 SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
-echo "fast reads (#505): tuned rings + batch I/O $(t concurrent fast-reads) ms, engine CPU $(t concurrent fast-reads-cpu) ms; as before (plain, no batch) $(t plain fast-reads) ms, CPU $(t plain fast-reads-cpu) ms; no batch, 4 threads a queue $(t split fast-reads) ms, CPU $(t split fast-reads-cpu) ms"
+echo "fast reads (#505, median of 5): tuned rings + batch I/O $(t concurrent fast-reads) ms, engine CPU $(t concurrent fast-reads-cpu) ms; as before (plain, no batch) $(t plain fast-reads) ms, CPU $(t plain fast-reads-cpu) ms; no batch, 4 threads a queue $(t split fast-reads) ms, CPU $(t split fast-reads-cpu) ms"
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
