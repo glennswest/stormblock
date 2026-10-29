@@ -31,6 +31,8 @@ extract() { # name file
     [ -s "$WORK/$2" ] || { echo "FAIL: could not extract the $1 block"; exit 1; }
 }
 extract "appliance discovery" discovery.sh
+# The probe asks `disk_of` (#350's system-moved block): the node-halves block.
+extract "node halves" halves.sh
 extract "local-slab probe" probe.sh
 extract "mount list" mounts.sh
 extract "engine report" report.sh
@@ -135,6 +137,8 @@ answers="$STUB_ANSWERS/$(basename "$3")"
 case "$2" in
 list)    sed -n '1p' "$answers" 2>/dev/null ;;
 volumes) sed -n '2,$p' "$answers" 2>/dev/null ;;
+# `slab moved` (#350): nothing here was moved off.
+moved)   echo "$3: the system did not move off it"; exit 1 ;;
 esac
 exit 0
 STUBEOF
@@ -151,6 +155,7 @@ probe() { # slab mounts -> "SLAB|PROBE_STOP" ; console output in $WORK/probe.out
         BOOTHOST=""; BOOTHOST_WHY="the boothost the network names (http://forge:9090) did not answer in 90s (31 tries)"
         mounts_from() { MOUNTS="$TEST_MOUNTS"; MOUNTS_FROM="the command line"; }
         TEST_MOUNTS="$2"
+        . "$WORK/halves.sh"
         . "$WORK/probe.sh" > "$WORK/probe.out" 2>&1
         echo "$SLAB|$PROBE_STOP"
     )
@@ -191,6 +196,7 @@ r=$( (
     HOOK_DECIDED=""; SLAB="$old"; VOLUME=""; META=""; ASSIMILATE=off
     BOOTHOST="http://forge:9090"
     mounts_from() { MOUNTS="kubelet-data:/var/lib/kubelet"; }
+    . "$WORK/halves.sh"
     . "$WORK/probe.sh" > /dev/null 2>&1
     echo "$SLAB|$PROBE_STOP"
 ) )
