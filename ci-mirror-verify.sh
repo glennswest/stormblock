@@ -114,8 +114,8 @@ api -f -X PUT $T/forge -d '{"listen_addr":"127.0.0.1:4420","nqn":"nqn.2026-10.ci
 v=$(api -X POST $S/volumes -d '{"name":"vm-disk","size":"192M"}' | idof)
 dev=$(api -X POST $S/volumes/$v/attach -d '{"transport":"ublk"}' | hint)
 [ -b "$dev" ] || bail s-attach "'$dev'"
-mke2fs -q $dev >/dev/null 2>&1 || bail mkfs mke2fs
-mount -t ext2 $dev /mnt || bail mount "mount $dev"
+mke2fs -q -b 4096 $dev >/dev/null 2>&1 || bail mkfs mke2fs
+mount -t ext2 $dev /mnt || { dmesg | tail -5 | sed "s/^/LOG dmesg: /"; bail mount "mount $dev"; }
 for i in $(seq 1 30); do dd if=/dev/urandom of=/mnt/before$i bs=1M count=1 2>/dev/null; done
 sync
 echo "GUEST S: volume $v on $dev, 30 MiB of files"
