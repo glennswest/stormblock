@@ -169,6 +169,7 @@ reuses it.
 | `POST /api/v1/arrays` | one array: `{"level", "drive_uuids", "stripe_kb", "name", "pool", "spares": […], "dedicated"}`. `dedicated` defaults to true (#150, a consumer's array); a set on a shelf is `false`. |
 | `GET /api/v1/arrays[/{id}]` | `name`, `pool`, `status` (`clean` / `rebuilding` / `degraded` / `failed`, `failed`, `tolerated`, `dirty_chunks`, `rebuild`, `scrub`), `events`, `members` (slot, uuid, state, `drive`, `labels`, `rebuilt_bytes`), the slab and its `domain`, the volumes on it |
 | `POST /api/v1/arrays/assemble` | see Assembly |
+| `POST /api/v1/arrays/{id}/grow` | a RAID-1 whose legs were each made larger takes the room (#318, stormstorage#73). Every member is asked its size again (a file its length, a block device `BLKGETSIZE64`, an NVMe/TCP leg Identify Namespace again: its size is otherwise read once, at connect). The array becomes as large as its smallest leg: the new room is zeroed on every leg (so the legs agree there), the bitmap gets bits for it (the chunk stays: a size that would need a larger chunk, past ~488 TiB a member, is refused), the superblocks are written with the new size and the event count bumped, and only then is the capacity served; then the array's slab grows into it. Dedicated slabs are formatted with room in their slot table to grow fourfold; one formatted before #318 grows as far as its table reaches and says why (`slab_short`). A grow cut off after the superblocks assembles at the new size, and calling it again grows the slab. 409 naming every member and its size when none has room past what the array uses, when a member is not in service, while it rebuilds, scrubs or replaces, and for a parity set (#387). Admin (destructive). Answers `{grown, was, data_size, capacity_bytes, members, slab_slots_before, slab_slots, slab_grown, slab_short}`; the served volume is then resized as any volume is (`PATCH /api/v1/volumes/{id}/resize`). |
 | `POST /api/v1/arrays/{id}/release[?force]` | hand the array to another engine (#296, a live RAID-head handover, stormstorage#33), **writing nothing to any member**: its volumes and its slab are dropped from this engine's memory (no persist, no slot-table sync, no erase), the set stops with no superblock, bitmap or flush write and refuses any I/O after, and its member drives are closed. The other engine then `POST /api/v1/arrays/assemble`s it exactly as if this one had died. 409 while one of its volumes is served (exports, LUNs, NVMe namespaces, ublk or vhost devices) unless `force`, which withdraws them first (a published release or a StormFS pin still refuses); 409 while it rebuilds or scrubs, or for a volume with legs off the array; 404 when the array is not held here (so a repeat is a 404). Admin (destructive). Answers `{released, volumes, drives_closed}`. |
 | `POST /api/v1/arrays/{id}/members/{slot}/fail` | fail a member (to pull its drive). 409 when it would lose data. |
 | `POST /api/v1/arrays/{id}/members/{slot}/replace` | `{"drive_uuid"}`: put a drive into a failed slot and rebuild onto it, or replace an **active** slot while it serves (#256) |
@@ -194,8 +195,9 @@ any. Metrics: `stormblock_raid_state{array,name}` (0 clean, 1 rebuilding,
 - **Bay identity and LEDs**: enclosure + slot from SES, and lighting a failed
   bay's LED, are stormdrive's. The engine shows the labels a drive was
   registered with.
-- **Growing or reshaping a set**, adding a member to a parity set, or changing
-  its level (#387). A set's width is fixed at creation.
+- **Reshaping a set**, growing a parity set, adding a member to one, or
+  changing its level (#387). A set's width is fixed at creation; a RAID-1
+  grows only into larger legs (#318).
 - **`degraded`** on a drive is reported, not acted on (`failing` is replaced,
   `failed` and `missing` are failed: see above).
 - **A member that comes back while the set is running** is re-added at the

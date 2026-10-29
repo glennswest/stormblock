@@ -72,7 +72,7 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
   /api/v1/drives/{id}/format`;
 - slabs: `POST /api/v1/slabs` (format), `DELETE`, and a GC that is not a dry
   run;
-- arrays: create, delete, release to another engine (#296), and members
+- arrays: create, delete, release to another engine (#296), grow (#318), and members
   added, failed or replaced;
 - spares;
 - forge on and off (`PUT`/`DELETE /api/v1/forge`), back to the node's
