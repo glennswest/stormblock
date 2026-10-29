@@ -266,7 +266,12 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
       ~1700, split ~1510, rounds 879–1770 in every mode: no difference a
       build VM can measure; the earlier single-run gains were noise. pve and
       the Dell (stormcentral's perf stage) once a release carries it
-- [ ] 2: zero copy fast path; 3: SHMEM_ZC; docs, CHANGELOG
+- [ ] check.sh at 47c55218 (PER_IO_DAEMON on top of 2ab8395f's pass)
+- [ ] 2: zero copy fast path (SUPPORT_ZERO_COPY + AUTO_BUF_REG; the copy
+      path per request: USER_COPY with ZERO_COPY, pread/pwrite of
+      /dev/ublkcN, to check against the driver), crash/power-cut tests
+- [ ] 3: SHMEM_ZC: stormvm#105 filed (the guest memfd handed over at
+      attach); the engine half once its shape is agreed there
 
 ### A deleted volume behind a live ublk device after server1's reboot (2026-10-28, #502, P0) — DONE (v23.0.3), closed; metal pending
 
