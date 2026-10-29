@@ -142,6 +142,8 @@ discovery_disabled = true
 reconcile_secs = 1
 EOT
     if [ "$mode" = serial ]; then export STORMBLOCK_UBLK_SERIAL=1; else unset STORMBLOCK_UBLK_SERIAL; fi
+    # #505: plain io_uring rings (no SINGLE_ISSUER + DEFER_TASKRUN), served at once.
+    if [ "$mode" = plain ]; then export STORMBLOCK_URING_PLAIN=1; else unset STORMBLOCK_URING_PLAIN; fi
     RUST_LOG=stormblock=info stormblock --config /run/sb$disk.toml --data-dir /run/sb$disk \
         --no-iscsi > /run/engine-$mode.log 2>&1 &
     pid=$!
@@ -199,6 +201,8 @@ EOT
     dd if=$dev of=/tmp/back bs=64k skip=2048 count=256 iflag=direct 2>/dev/null
     cmp -s /tmp/pat /tmp/back && r $mode-round-trip PASS || r $mode-round-trip FAIL
 
+    [ "$mode" != serial ] && fast_reads
+    [ "$mode" != serial ] && features
     [ "$mode" = concurrent ] && in_use
     [ "$mode" = concurrent ] && parallel_attach
     [ "$mode" = concurrent ] && attach_delete_race
@@ -409,6 +413,41 @@ mount_detach() {
 # #496: the engine's fsck of a mounted volume. A mounted ext4 under directory
 # churn (creates, renames, deletes; its journal busy) is checked again and
 # again. Read live, block by block over time and its journal not replayed,
+# #505: the rings with and without SINGLE_ISSUER + DEFER_TASKRUN, on a fast
+# disk (the delay off): 16 readers, each 4000 sequential 4 KiB O_DIRECT reads
+# in one process (no process start per I/O), wall time and the engine's CPU.
+fast_reads() {
+    step fast-reads
+    t8=$(dmsetup table slow$disk)
+    dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$(echo "$t8" | awk '{$6=0; $9=0; print}')" \
+        && dmsetup resume slow$disk || echo "LOG fast-reads: the delay stays on"
+    cpu0=$(awk '{print $14 + $15}' /proc/$pid/stat)
+    t0=$(now)
+    jobs=
+    for j in $(seq 0 15); do
+        dd if=$dev of=/dev/null bs=4096 count=4000 skip=$((j * 1000)) iflag=direct 2>/dev/null &
+        jobs="$jobs $!"
+    done
+    wait $jobs
+    t1=$(now)
+    cpu1=$(awk '{print $14 + $15}' /proc/$pid/stat)
+    echo "TIME $mode fast-reads $(ms $t0 $t1)"
+    echo "TIME $mode fast-reads-cpu $(( (cpu1 - cpu0) * 10 ))"
+    dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$t8" && dmsetup resume slow$disk
+}
+
+# #505: health says what the kernel offers, what the device uses, and how
+# the rings were built (tuned unless asked plain).
+features() {
+    h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
+    echo "LOG $mode ublk_features: $(echo "$h" | grep -o '"ublk_features":{[^}]*}')"
+    case "$mode:$h" in
+    concurrent:*'"offered":['*'"rings_tuned":'[1-9]*) r features-tuned PASS ;;
+    plain:*'"offered":['*'"rings_tuned":0,"rings_plain":'[1-9]*) r features-plain PASS ;;
+    *) r features-$mode "FAIL" ;;
+    esac
+}
+
 # the check sees blocks from different moments: checksums and counts no
 # mount would see. Checked the default way (a point-in-time snapshot, its
 # journal replayed) it must be clean every time, and after the unmount the
@@ -495,20 +534,22 @@ unanswered() {
 
 run serial vda 9091
 run concurrent vdb 9092
+run plain vdc 9093
 echo "GUEST done"
 poweroff -f
 EOF
 chmod +x "$I/init"
 (cd "$I" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$W/initrd.gz"
-truncate -s 1G "$W/a.img" "$W/b.img"
+truncate -s 1G "$W/a.img" "$W/b.img" "$W/c.img"
 
 say "boot $KERNEL in QEMU"
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
-timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4 \
+timeout 900 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4 \
     -nographic -no-reboot -kernel "$KERNEL" -initrd "$W/initrd.gz" \
     -append "console=ttyS0 panic=-1 loglevel=4" \
     -drive file="$W/a.img",if=virtio,format=raw \
-    -drive file="$W/b.img",if=virtio,format=raw > "$W/guest.log" 2>&1
+    -drive file="$W/b.img",if=virtio,format=raw \
+    -drive file="$W/c.img",if=virtio,format=raw > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG|STEP|STACK|PS|WATCHDOG)|ERROR|panick'
 
 t() { tr -d '\r' < "$W/guest.log" | awk -v m="$1" -v w="$2" '$1=="TIME" && $2==m && $3==w {print $4}'; }
@@ -516,10 +557,11 @@ SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
 SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
+echo "fast reads (#505): tuned rings $(t concurrent fast-reads) ms, engine CPU $(t concurrent fast-reads-cpu) ms; plain $(t plain fast-reads) ms, CPU $(t plain fast-reads-cpu) ms"
 for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
-         parallel-attach attach-delete-race \
+         parallel-attach attach-delete-race plain-round-trip features-tuned features-plain \
          mount-detach-refused mount-detach-mounted mount-detach-no-deleted-read mount-detach-after; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
