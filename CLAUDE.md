@@ -924,7 +924,7 @@ slab on each, data volumes `mirror:2`; a missing partner = degraded in
 pointer into the old drive's system-data; /init follows it and raises "set
 BIOS boot order to <drive>". Nothing built.
 
-### Multicast appliance discovery (2026-10-17, #104, P3) — IN PROGRESS (owner 2026-10-28: unheld)
+### Multicast appliance discovery (2026-10-17, #104, P3) — DONE (v23.5.0), closed
 
 Master's decision B: last in the order, off by default,
 `rd.stormblock.discover=on`. stormbootx#159 filed.
@@ -937,7 +937,8 @@ Master's decision B: last in the order, off by default,
 - [x] units 2/2; the shell tests under sh and busybox sh; ci-finder-verify.sh
       ALL PASS (kernel 7.2.11: off silent, on `http://10.0.2.15:9098`, its
       health); README, CHANGELOG
-- [ ] check.sh; close; stormbootx#159 told
+- [x] check.sh at ccab816c ALL PASS (1304/1304); v23.5.0; stage; closed;
+      stormbootx#159 told
 
 ### A privileged pod stops/deletes the node's ublk device (2026-10-17, #299, P3) — PARKED until the single-node pacing lifts
 
