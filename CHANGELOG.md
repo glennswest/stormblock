@@ -3,6 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.2.0] — 2026-10-29
+
+### Added
+- #505 step 1: io_uring rings with SINGLE_ISSUER + DEFER_TASKRUN (a plain ring when refused); ublk batch I/O on the devices this engine attaches when the kernel offers it; PER_IO_DAEMON's split queues (`STORMBLOCK_UBLK_QUEUE_THREADS`); offered/used features in the log and health `ublk_features`.
+- Health `fds` (`{open, limit}`, #510).
+
+### Fixed
+- #510: an engine ran out of file descriptors after ~805 ublk attach/detach cycles: every export's runtime stayed listed for `/debug/tasks`, with its fds, for the life of the process. Unlisted with its export now; a serving engine raises its soft fd limit to the hard one.
+
 ### 2026-10-29
 - **fix:** #510 (pvetest1, 12.58): the engine ran out of file descriptors after ~805 ublk attach/detach cycles in 5 h; then every export, the NVMe listener, state writes and HTTP accepts failed with EMFILE. Found: every export (and every adopted boot device) registered its runtime's `Handle` for `/debug/tasks`, and nothing removed it: the list was pruned only by a dump, and dumps are on demand since #365. A `Handle` keeps its runtime's I/O driver open: 4 fds per export, for the life of the process. Now `register_runtime` returns a guard that unlists the runtime when dropped, before the runtime goes; a runtime that fails to start says its server exited. Health `fds` (`{open, limit}`), a WARN past 80 %; a serving engine raises its soft fd limit to the hard one at start. Tests: `fdlimit::tests::a_registered_runtime_dropped_gives_its_fds_back` (50 runtimes; with the registration kept, as before: 200 fds left); `ci-ublk-qd-verify.sh` `fd-cycles` (QEMU, kernel 7.2.11: the engine's fds 40 before 40 ublk attach/detach cycles, 40 after) and `fd-health`.
 
