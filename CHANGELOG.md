@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.7.0] — 2026-10-29
+
+### Added
+- #296: `POST /api/v1/arrays/{id}/release[?force]` hands an array to another engine with nothing written to its members (no persist, no superblock/bitmap/flush write; the drives closed), for stormstorage's live RAID-head handover.
+
 ### 2026-10-29
 - **feat:** #296 (stormstorage#33: a RAID head handed to another engine while it is still alive): `POST /api/v1/arrays/{id}/release[?force]` (destructive) lets go of an array **with no write to its members**. Its volumes and its slab are dropped from memory with no persist, slot-table sync or erase; the set is stopped with no superblock, bitmap or flush write and refuses any I/O after (a latch on the array); its member drives are closed. Another engine then assembles it (`POST /api/v1/arrays/assemble`) as if this one had died. 409 while a volume on it is served (exports, LUNs, NVMe namespaces, ublk, vhost) unless `force`, which withdraws them (a published release or a StormFS pin still refuses); 409 while it rebuilds or scrubs, or for a volume with legs off it; 404 when not held here. Test: `integration_array_pin::an_array_is_released_to_another_engine_with_nothing_written` (refused while a namespace serves it, released with force, the members' sha256 unchanged by the release and by this engine's next persist, 404 after, then a second engine assembles it under its own id, clean, and reads every extent back).
 
