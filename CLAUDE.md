@@ -223,9 +223,11 @@ eventfd, open.
       says the server exited
 - [x] health `fds {open, limit}`, WARN past 80 %; a serving engine raises its
       soft limit to the hard one
-- [ ] tests: `fdlimit` units (50 runtimes registered and dropped; negative
-      control `FD_LEAK_510=1`); ci-ublk-qd-verify.sh `fd-cycles` (40
-      attach/detach, the engine's fds before and after); check.sh
+- [x] tests: `fdlimit` units pass; negative control `FD_LEAK_510=1` fails
+      (50 runtimes left 200 fds: 4 an export); ci-ublk-qd-verify.sh ALL
+      PASS, `fd-cycles` 40 → 40 fds over 40 attach/detach cycles; README,
+      CHANGELOG
+- [ ] check.sh; v23.2.0 (with #505 step 1); stage; close
 
 ### 12.18's first boot ~2× slower than 12.16 (2026-10-13, #421, P1) — RE-MEASURED: gone, closed
 

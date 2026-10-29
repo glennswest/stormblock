@@ -670,6 +670,13 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   `write`, …) and `secs`. A `flush` there is a consumer's fsync that has not
   returned. Left out when there is none; `status` stays `ok`. The watchdog
   logs the same list (WARN) every 30 s while it lasts.
+  And `"fds"` (#510): `{open, limit}`, this process's open file descriptors
+  and its soft limit; past 80 % the log says so (WARN, once a minute). A
+  serving engine starts with its soft limit raised to the hard one.
+  And `"ublk_features"` (#505): `offered` (the kernel's ublk features),
+  `used` (what the devices served were made with), `rings_tuned` and
+  `rings_plain` (io_uring rings with and without SINGLE_ISSUER +
+  DEFER_TASKRUN).
   And `"drives_unreachable"` (#391): every local drive whose I/O is failing
   with transport errors (a controller reset, a link down), with `path`,
   `since` (unix s), `last_error`, `retries` and `gave_up`. While `gave_up`

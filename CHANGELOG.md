@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-29
+- **fix:** #510 (pvetest1, 12.58): the engine ran out of file descriptors after ~805 ublk attach/detach cycles in 5 h; then every export, the NVMe listener, state writes and HTTP accepts failed with EMFILE. Found: every export (and every adopted boot device) registered its runtime's `Handle` for `/debug/tasks`, and nothing removed it: the list was pruned only by a dump, and dumps are on demand since #365. A `Handle` keeps its runtime's I/O driver open: 4 fds per export, for the life of the process. Now `register_runtime` returns a guard that unlists the runtime when dropped, before the runtime goes; a runtime that fails to start says its server exited. Health `fds` (`{open, limit}`), a WARN past 80 %; a serving engine raises its soft fd limit to the hard one at start. Tests: `fdlimit::tests::a_registered_runtime_dropped_gives_its_fds_back` (50 runtimes; with the registration kept, as before: 200 fds left); `ci-ublk-qd-verify.sh` `fd-cycles` (QEMU, kernel 7.2.11: the engine's fds 40 before 40 ublk attach/detach cycles, 40 after) and `fd-health`.
+
 ### 2026-10-28
 - **docs:** #421: the 12.18 first-boot slowdown is gone. Re-measured from the pve consoles of 2026-10-28/29 (engine v23.0.4): `root ready` 7.3 / 7.0 s (12.16: 26.0 / 26.4 s), system-half flow-over 17.5 / 4.8 s at 160–389 MB/s after the boot grace (12.16: 77 / 70 s). No code change.
 
