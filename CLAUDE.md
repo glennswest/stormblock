@@ -1065,7 +1065,7 @@ should be working": merge and ship. Rebased onto main as
       stormcluster#21 told; closed. Metal: a real node through a reboot
       (stormcluster#21's step)
 
-### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — IN PROGRESS
+### forge: a verb back to the node's default (2026-10-17, #290, P3, stormcluster#16) — DONE (v23.8.0), closed
 
 Unheld (owner, 2026-10-28). Inert until called: on main.
 - [x] `forge::to_default` + `POST /api/v1/forge/default` (admin): forget
@@ -1074,7 +1074,9 @@ Unheld (owner, 2026-10-28). Inert until called: on main.
 - [x] tests: integration_forge (off → default → restart, PUT copy, other
       settings, daemon, configured), auth gate (unit + destructive list);
       README, auth.md, CHANGELOG
-- [ ] build VM; check.sh; release; stormcluster#16 told; close
+- [x] check.sh at b9f48c88 ALL PASS (1307/1307); v23.8.0 (`stormblock
+      23.8.0` from a `--locked` build); stage requested (3b28320cdfc5);
+      stormcluster#16 told; closed
 
 ### Data volumes for a staged upgrade (2026-10-17, #280, P3) — CLOSED as superseded
 
