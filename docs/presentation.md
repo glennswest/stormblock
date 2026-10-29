@@ -25,7 +25,7 @@ Drives in; thin, copy-on-write, per-volume-redundant volumes out — as local
 block devices (ublk), over NVMe/TCP and over iSCSI. It also builds and boots
 the disks stormcos nodes run from.
 
-v23.9.0 · `glennswest/stormblock` · Rust, one static binary
+v23.10.0 · `glennswest/stormblock` · Rust, one static binary
 
 ---
 

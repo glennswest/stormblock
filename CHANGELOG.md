@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.10.0] — 2026-10-29
+
+### Added
+- #450: the initramfs leases every other cabled port (address and subnet route only), so the flow-over has an NVMe/TCP path by each NIC; `rd.stormblock.path-nics=off`, `rd.stormblock.path-skip=`.
+
 ### 2026-10-29
 - **feat:** #450 (the master's A for the owner; held on `wip/450-path-nics` until the pacing lifted, owner 2026-10-28): the initramfs leases every other cabled port, so the flow-over has an NVMe/TCP path by each NIC. Each physical port with carrier, not the uplink and not a bond or bridge port, gets its own DHCP lease (`path.script`).
   - **What it gets:** an address and its subnet route at metric 1024, below the uplink's; no default route, no resolv.conf, no hostname. `arp_ignore=1` and `arp_announce=2` are set.
