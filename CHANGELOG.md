@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-29
+- **feat:** #104 (master's decision B): a node can find its appliance on a network nobody prepared. An engine serving boot claims (forge mode on, daemon or `adopt-ublk`) answers a query on 239.255.42.99:7448 with one line of JSON, its API's URL (the advertised host, else the address its reply leaves from); `stormblock discover` asks on every IPv4 interface and prints each URL once. `/init` asks only with `rd.stormblock.discover=on` (off by default: an answer is unauthenticated) and tries what answered **last**, after every configured source, asked `/api/v1/health` like the rest. Tests: `mgmt::finder::tests` (2), `tests/initramfs-no-appliance.sh` (+5: not asked without the switch, found with it, a configured boothost first, nothing answering said), `ci-finder-verify.sh` (QEMU, kernel 7.2.11, a virtio NIC: forge off silent, on answered `http://10.0.2.15:9098`, its health answers).
+
 ## [v23.4.0] — 2026-10-29
 
 ### Added

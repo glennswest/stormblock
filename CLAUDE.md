@@ -934,9 +934,10 @@ Master's decision B: last in the order, off by default,
       asks on every IPv4 interface, prints each URL once
 - [x] /init: `rd.stormblock.discover=on` adds what answered last, asked
       /api/v1/health like the rest; tests/initramfs-no-appliance.sh (+5)
-- [ ] units; the shell tests (sh, busybox sh); ci-finder-verify.sh (QEMU,
-      a virtio NIC: off silent, on answered, its health); check.sh; docs;
-      close; stormbootx#159 told
+- [x] units 2/2; the shell tests under sh and busybox sh; ci-finder-verify.sh
+      ALL PASS (kernel 7.2.11: off silent, on `http://10.0.2.15:9098`, its
+      health); README, CHANGELOG
+- [ ] check.sh; close; stormbootx#159 told
 
 ### A privileged pod stops/deletes the node's ublk device (2026-10-17, #299, P3) — PARKED until the single-node pacing lifts
 

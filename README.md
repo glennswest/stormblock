@@ -592,6 +592,7 @@ file that still sets it loads, with a warning.
 | TCP 3261 | `/serve/v1`'s NVMe/TCP listener: every per-volume subsystem (`[serve] portal_base`, #188) | when `/serve/v1` serves an NVMe export |
 | TCP 3262–3388 | per-export iSCSI portals (`[serve] portal_span`) | when `/serve/v1` serves an iSCSI export |
 | UDP 7447, group 239.255.42.99 | node discovery beacon | daemon, unless `discovery_disabled`; on `[management] interface` when set |
+| UDP 7448, group 239.255.42.99 | the appliance finder (#104): answers a node's query with this engine's API URL (the advertised host, else the address the reply leaves from) | daemon and `adopt-ublk`, only while forge mode is on; `stormblock discover` asks |
 
 With a storage network (`[storage] interface`, #85) the data ports (4420,
 3260, 3261, the per-export portals) listen on its address and 9090 and the
@@ -2218,6 +2219,7 @@ from DHCP and the name from the firmware.
 | parameter | default | |
 |---|---|---|
 | `rd.stormblock.boothost=<url>` | DHCP option 17, then `http://boothost.<domain>:<port>`, `http://boothost:<port>` | the appliance to claim from |
+| `rd.stormblock.discover=on` | off | also ask the network for an appliance (#104): a query on 239.255.42.99:7448 that every engine serving boot claims (forge mode) answers with its API's URL; what answers is tried **last**, after every configured source, and asked `/api/v1/health` like the rest. Off by default: an answer is unauthenticated, and anyone on the segment can give one (the master's decision B) |
 | `rd.stormblock.bootport=<port>` | `9090` | port for the derived appliance addresses |
 | `rd.stormblock.tag=<name>` | the firmware's `StormBootTag`, else this, else SMBIOS serial/UUID | the name claimed as (`boothost/<name>`); a firmware name that differs wins, with a warning (#249) |
 | `rd.stormblock.hostnqn=<nqn>` | the firmware's `StormBootHostNqn` | the NQN presented on every NVMe/TCP connect |
