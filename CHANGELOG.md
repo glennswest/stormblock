@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-29
+- **fix:** #390: a RAID-6 scrub with `repair` recomputed P and Q from the data, so a block flipped on a *data* member (written through the drive's own path: T10 PI regenerates its tags, so only parity can tell) was baked into the parity. A scrub now finds the one bad strip of a stripe from the two parity differences (raid6check's rule: P alone, Q alone, or data strip `z` where `Q' = g^z·P'` at every byte), rewrites it (data included) and counts it repaired; two bad strips are reported and left; a resync of dirty chunks after a cut still recomputes parity from the data. Tests: `parity::…a_single_bad_strip_of_a_raid6_stripe_is_located`, `raid::tests::a_scrub_puts_a_flipped_data_strip_right_from_the_two_parities` (an 11-wide set).
+- **test:** #390: the shelf test as a harness, `examples/shelf_raid6_test` (`run`, `writeloop`, `verify`), the owner's plan against an engine's API: 4K + PI drives only, two RAID-6 sets of 11 and 2 spares (`POST /api/v1/shelves`), filled half and read back, one drive lost per set (rebuilt, timed), two lost in one set (readable), a third refused, new spares, a flipped block found and put right, a full scrub timed, both sets busy, one while the other rebuilds; power cuts mid-write and mid-rebuild by its caller. `ci-shelf-raid6-verify.sh` runs it in QEMU on 28 scsi_debug drives at 4096 + PI type 1. It runs as it is on the Dell's DS224C once its drives are inducted.
+- **chore:** the unused `flow_boot_grace()` (since #448) removed: it was a build warning.
+
 ## [v23.3.0] — 2026-10-29
 
 ### Added
