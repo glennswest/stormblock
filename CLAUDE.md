@@ -1281,7 +1281,7 @@ every image). Either way the node listens for the engine's existing beacon
 (239.255.42.99:7447) last in the order; stormbootx needs the same answer.
 Nothing built.
 
-### Flow-over over every NIC that's up (2026-10-17, #450, P2) — ENGINE ON MAIN; INITRAMFS HALF ON wip/450-path-nics (after stormpump#169 and pacing)
+### Flow-over over every NIC that's up (2026-10-17, #450, P2) — IN PROGRESS: initramfs half being merged (pacing unheld 2026-10-28)
 
 Owner: "can we use both nics in flowover if there up?" A path was per
 *target* address, its NIC picked from configured `[storage] interfaces`;
@@ -1312,8 +1312,12 @@ forge has one address, so the flow-over had one NIC.
       ends; keep the branch rebased. Rebased 2026-10-22 onto main (v22.2.0,
       #492; 181 behind): check.sh ALL PASS (1269/1269),
       ci-path-nics-verify.sh ALL PASS; parked until the pacing lifts
-- [ ] merge when the master queues it (rebase + check again); golden; close.
-      Metal: the Dell's ConnectX-4 Lx must be cabled to g16 to carry a path
+- [x] owner unheld it (2026-10-28) and it was handed over: the three commits
+      cherry-picked onto main as **wip/450-path-nics-v2** (changelog moved
+      to Unreleased)
+- [ ] check.sh + ci-path-nics-verify.sh on the branch; fast-forward main;
+      release; stage; close. Metal: the blades' second port (if cabled), the
+      Dell's ConnectX-4 Lx only if cabled to g16
 
 ### Attach a peer's volume over NVMe/TCP, return a device (2026-10-17, #328, P3, stormvm#46) — DONE (golden-stormblock-0a9fe2d97cf9), closed
 
