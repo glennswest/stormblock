@@ -906,7 +906,7 @@ the named drive (#273), stormdrive's designation outranking install-over
 - [x] golden golden-stormblock-b18302ba6cea (5062192 ⊇ 9c7bedb,
       stormcos#601); closed. Not on metal: the X9 blades (SSD + HDD) and the Dell with its shelf
 
-### System pair and moving the system (2026-10-17, #350, P2) — IN PROGRESS on wip/350-system-pair-v2
+### System pair and moving the system (2026-10-17, #350, P2) — DONE (v23.12.0), closed; metal pending
 
 Decided 1B + 2A (master, 2026-10-17); released from the pacing hold by the
 owner (2026-10-28: "unhold the pacing hardware ones"). Built on a `wip/`
@@ -944,9 +944,15 @@ Design (engine choices, said on #350):
 - [x] resumed 2026-10-29: the branch squashed onto main as
       **wip/350-system-pair-v2** (conflicts: lib.rs, slab_report tests,
       create's default policy before the EC check, the changelog)
-- [ ] the move test, the pair test, boot-hook pair cases and
-      initramfs-system-moved.sh on a build VM; `ci-pair-verify.sh` (QEMU);
-      check.sh; fast-forward main; release; stormdrive#62 told; close
+- [x] found on resuming: the move wrote its pointer through a read-only
+      open (now `open_storage`); the boot-hook and no-appliance tests' stubs
+      did not answer `slab moved` and the latter lacked the node-halves block
+- [x] the pair and move tests (50/50 targeted), every initramfs test under
+      sh and busybox sh; `ci-pair-verify.sh` ALL PASS (QEMU: the pair from
+      either drive, each drive alone said DEGRADED, the moved-off drive
+      followed); check.sh at the branch head ALL PASS (1315/1315); main
+      fast-forwarded; v23.12.0; stage; stormdrive#62 told; closed. Metal:
+      two system drives in one machine
 - [x] docs (boot-hooks.md, README), CHANGELOG
 
 ### Multicast appliance discovery (2026-10-17, #104, P3) — DONE (v23.5.0), closed

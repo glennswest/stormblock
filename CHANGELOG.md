@@ -3,6 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+## [v23.12.0] — 2026-10-29
+
+### Added
+- #350: a system pair (two drives asked for with `system_drive:` as a list of two, each a whole node disk, every volume `mirror:2` across them, either boots alone; health `slabs.pair`) and moving the system (`POST /api/v1/system/move {to}`: the old drive points to the new one, and a boot from it follows and says "set the BIOS boot order"; health `slabs.boot_order`).
+
 ### 2026-10-29
 - **feat:** #350 (owner 2026-10-08, decided 1B + 2A): a **system pair** and
   **moving the system**. A pair is two drives, each laid as a whole node disk
