@@ -2625,14 +2625,14 @@ What earlier docs described and the code does not do, each with its issue:
 - **The StormFS shared-ring IPC server** (`drive/uring_server.rs`): built and
   tested, started by nothing; the counterpart of StormFS's client (#169).
   vhost-user-blk (#82) did not need it.
-- **Erasure coding beyond P+Q** (#159): only step 1 is on main — a volume
-  whose header names a scheme this engine does not read is refused (kept and
-  written back as it was, deletable). The coder waits on a `wip/` branch, off
-  by default. Also not built: a per-block checksum to tell which of two
-  copies is right (#160's option (b)), and the work parked on `wip/` branches
-  until the single-node pacing lifts (grow a RAID1 array #318, live mirror of
-  an in-use volume #295, release an array #296, multicast discovery #104, a
-  lost ublk device #299, namespaces and quotas #408).
+- **Erasure coding** (#159, v23.4.0): built (`ec:K+M`) but off by default
+  (`[redundancy] erasure_coding`) until every release a node could roll back
+  to refuses an unknown scheme; until then `ec:K+M` answers 409. Also not
+  built: a per-block checksum to tell which of two copies is right (#160's
+  option (b)), and the growth of a parity RAID set (#387). Grow of a RAID-1
+  array (#318), live mirror (#295), array release (#296), multicast discovery
+  (#104), a taken ublk device (#299), namespaces and quotas (#408) and
+  release erase (#291) are on main since v23.1.0–v23.11.0.
 - **"No C dependencies"** was never true: TLS brings in `ring` (the only
   backend since #209; `aws-lc-sys` is gone).
 - **NVMe/TCP access** (#210, `docs/nvme-access.md`): a `/serve/v1` export

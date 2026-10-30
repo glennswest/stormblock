@@ -152,6 +152,22 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
+**v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
+system drive known per machine (`system_drive`, first drive, #351, #478),
+system pair and moving the system (#350), release erase (#291), erasure
+coding `ec:K+M` off by default (#159), grow of a RAID-1 array (#318), release
+of an array (#296), live mirror of an in-use volume (#295), forge back to
+default (#290), multicast discovery (#104, off by default), a taken ublk
+device survived (#299), path-per-NIC flow-over (#450), ublk ring/batch/
+PER_IO_DAEMON tuning (#505), the fd leak fixed (#510), T10 PI in health
+(#389), RAID-6 scrub locating a bad strip (#390), strict NVMe/TCP PDUs (#392),
+admin-only image build (#393), the engine's commit in health (#466), logcast
+(#477), the install boot's 20 s grace (#448), git dependencies by rev (#480).
+The README is the reference for what the code does, refreshed from the code
+on 2026-10-30; "Not built, or not wired" lists what is promised and not done.
+The older state follows.
+
 **v21.0.0** (2026-10-17, #353, f23b508, golden-stormblock-595bf69e5baa):
 version and changelog only, over everything below; breaking for callers:
 #274/#382 (destructive verbs need the admin token or a `destroy` review),
@@ -209,7 +225,7 @@ A release wave takes every component's newest golden, so main is the next
 release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 #74 (secret volumes) and #450's engine half stay on main (master's A): both
 are inert until used, and an unmarked volume's record is byte-identical to
-the format before #74. Newest golden: golden-stormblock-53e5e1bb9d06 (d94520a, v21.2.0, #466); v23.0.0 (#393), v23.0.1 (#392) and v23.0.3 (#502) and v23.0.4 (#480) stages requested.
+the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
 ### Shelf test: two RAID-6 sets on the DS224C, 4K+PI (2026-10-10, #390, P2) — ENGINE HALF DONE; the run WAITS ON HARDWARE (stormdrive#82)
 

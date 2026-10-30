@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-10-30
+- **docs:** refreshed from the code since 2026-10-23: README "Not built" (EC, grow, live mirror, release, discovery, taken ublk device are built and on main), CLAUDE.md current state (v23.12.0) and pacing note.
+
 ## [v23.12.0] — 2026-10-29
 
 ### Added
