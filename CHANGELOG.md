@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-02
+- **chore:** #517: kernel set 7.2.13-200.fc44 → 7.2.14-200.fc44. No code change: `stormcentral component initramfs --commit c0112c10` built the initramfs for 7.2.14-200.fc44.x86_64 (its dependency closure over the kernel's modules.dep passed): registry/initramfs:blob-c7ac26d946aa3875 (vmlinuz blob-b82308161ea1790b).
+
 ### 2026-10-30
 - **docs:** refreshed from the code since 2026-10-23: README "Not built" (EC, grow, live mirror, release, discovery, taken ublk device are built and on main), CLAUDE.md current state (v23.12.0) and pacing note.
 

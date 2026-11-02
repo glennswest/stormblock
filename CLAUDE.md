@@ -318,13 +318,14 @@ v23.0.4; `tmp/tl.py`): first boot `root ready` 7.32 / 7.04 s (12.16: 26.03 /
 current engine (MDTS 8 MiB) since 2026-10-14 and #410/#411/#278 reworked the
 flow-over; no bisect needed. No code change.
 
-### Kernel → 7.2.14-200.fc44: initramfs for it (2026-11-02, #517, P0) — IN PROGRESS
+### Kernel → 7.2.14-200.fc44: initramfs for it (2026-11-02, #517, P0) — DONE, no code change
 
 As #509: `stormcentral component initramfs --commit c0112c10` (main's head,
 v23.12.0 + docs) builds the initramfs for 7.2.14-200.fc44.x86_64 on a build
-VM (dependency closure over the kernel's modules.dep). No code change
-expected unless that build fails.
-- [ ] the build's blob; comment on #517
+VM (dependency closure over the kernel's modules.dep passed): build
+2b9ec7175d94, registry/initramfs:blob-c7ac26d946aa3875 (vmlinuz
+blob-b82308161ea1790b, 7.2.14-200.fc44.x86_64). stormcentral closes the
+issue when each member has a golden for the kernel.
 
 ### Kernel → 7.2.13-200.fc44: initramfs for it (2026-10-28, #509, P0) — DONE, no code change
 
