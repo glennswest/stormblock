@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -318,7 +318,7 @@ v23.0.4; `tmp/tl.py`): first boot `root ready` 7.32 / 7.04 s (12.16: 26.03 /
 current engine (MDTS 8 MiB) since 2026-10-14 and #410/#411/#278 reworked the
 flow-over; no bisect needed. No code change.
 
-### server8's install out of fds at its boot exports (2026-11-03, #522, P0) — IN PROGRESS
+### server8's install out of fds at its boot exports (2026-11-03, #522, P0) — DONE (v23.13.1), closed; server8 after pve
 
 12.58's engine is cba2b73 (before v23.2.0: neither #510's leak fix nor its
 limit raise). Counted: an export holds ~8 fds + 2 a queue (15 measured at four), so
@@ -331,7 +331,10 @@ reaches only the kernel's 4096 for an initramfs's PID 1.
 - [x] unit test; `ci-fd-boot-verify.sh` (QEMU: 1024:1024 start, 90 exports at
       4 queues, fds per export measured, the limit cut → refusals said);
       README, CHANGELOG
-- [ ] QEMU run passes; check.sh; tag; stage; #522 answered; server8 after pve
+- [x] ci-fd-boot-verify.sh ALL PASS (90 of 90 at 4 queues, 1351 fds = 15 an
+      export, limit 1024:1024 → 65536; cut limit: 8 refused with the fds
+      named, no EMFILE); check.sh at 0f6b13a4 ALL PASS; v23.13.1; stage;
+      closed. Metal: server8's install of a release with it (after pve)
 
 ### Fabric peers from the cluster's Nodes (2026-11-03, #520, P3, stormcos#600) — DONE (v23.13.0), closed; on a node after stormcos#600/#374
 
