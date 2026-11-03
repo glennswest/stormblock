@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -318,7 +318,7 @@ v23.0.4; `tmp/tl.py`): first boot `root ready` 7.32 / 7.04 s (12.16: 26.03 /
 current engine (MDTS 8 MiB) since 2026-10-14 and #410/#411/#278 reworked the
 flow-over; no bisect needed. No code change.
 
-### Fabric peers from the cluster's Nodes (2026-11-03, #520, P3, stormcos#600) — IN PROGRESS
+### Fabric peers from the cluster's Nodes (2026-11-03, #520, P3, stormcos#600) — DONE (v23.13.0), closed; on a node after stormcos#600/#374
 
 Owner's option A on stormcos#600. Inert unless `peers_from` is set: on main.
 - [x] `[fabric] peers_from = "kubernetes"`, `peers_port` (9090); unknown value
@@ -327,7 +327,8 @@ Owner's option A on stormcos#600. Inert unless `peers_from` is set: on main.
 - [x] tests: units (nodes → peers, self by name/first label, validation);
       integration_peers (stand-in apiserver, A joins after B's start); README,
       CHANGELOG
-- [ ] check.sh green; tag; stage; stormcos#600 told; close
+- [x] check.sh at d7b6b33a ALL PASS (no new clippy lint); v23.13.0; stage
+      requested; stormcos#600 told; closed
 
 ### Kernel → 7.2.14-200.fc44: initramfs for it (2026-11-02, #517, P0) — DONE, no code change
 
