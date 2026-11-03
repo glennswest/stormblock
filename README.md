@@ -691,7 +691,14 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   otherwise `degraded`.
   And `"fds"` (#510): `{open, limit}`, this process's open file descriptors
   and its soft limit; past 80 % the log says so (WARN, once a minute). A
-  serving engine starts with its soft limit raised to the hard one.
+  serving engine (daemon, `boot-local`, `adopt-ublk`) starts with its limit
+  raised: soft and hard to 65536 (within `fs.nr_open`) as root, else the soft
+  one to the hard one (#522: an initramfs's PID 1 hands down 1024/4096). A
+  ublk export holds ~6 fds plus 2 a queue (14 at four queues); `boot-local`
+  and `adopt-ublk` count the whole set first and refuse it, FATAL, with the
+  numbers, when it does not fit with 256 to spare, and an API attach that
+  would not fit is refused, said, never half-made (`ci-fd-boot-verify.sh`).
+  `boot-local`'s exports are each served on one thread, as `adopt-ublk`'s.
   And `"ublk_features"` (#505): `offered` (the kernel's ublk features),
   `used` (what the devices served were made with), `rings_tuned` and
   `rings_plain` (io_uring rings with and without SINGLE_ISSUER +

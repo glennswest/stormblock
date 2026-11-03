@@ -222,6 +222,27 @@ fn queues_for(device: &dyn BlockDevice) -> u16 {
     }
 }
 
+/// File descriptors one export holds besides its queues (#522): the
+/// `/dev/ublk-control` file and its ring, `/dev/ublkcN`, and the runtime it
+/// is served on (epoll and its waker), plus one for what comes and goes
+/// (a sysfs read, the control file reopened for a stop).
+pub const EXPORT_FIXED_FDS: u64 = 6;
+
+/// The file descriptors a device over `device` will hold while it is
+/// served (#522): [`EXPORT_FIXED_FDS`], and an io_uring and an eventfd per
+/// queue thread. Counted before the device is created, so per-queue threads
+/// (`STORMBLOCK_UBLK_QUEUE_THREADS`) are counted as asked, the most it can
+/// take.
+pub fn fds_for(device: &dyn BlockDevice) -> u64 {
+    let queues = queues_for(device) as u64;
+    let threads = std::env::var("STORMBLOCK_UBLK_QUEUE_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1)
+        .clamp(1, 8);
+    EXPORT_FIXED_FDS + 2 * queues * threads
+}
+
 /// `STORMBLOCK_FUA_BY_FLUSH=1`: no FUA declared to the kernel (#409).
 fn fua_by_flush() -> bool {
     std::env::var("STORMBLOCK_FUA_BY_FLUSH").is_ok_and(|v| v == "1")

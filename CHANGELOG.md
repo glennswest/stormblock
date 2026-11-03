@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-03
+- **fix:** #522 (P0): server8 (X9, 12.58) ran out of file descriptors in the first second of an install: the initramfs engine's 85 boot exports (~14 fds each at four queues) against the 1024 PID 1 hands down; 26 volumes never appeared, nothing on the console. A serving engine running as root now raises its fd limit, soft and hard, to 65536 (within `fs.nr_open`; the soft-to-hard raise of #510 could only reach the kernel's 4096 in an initramfs). `boot-local` and `adopt-ublk` count every export's fds first (`ublk::fds_for`: 6 + 2 a queue) and refuse the set, FATAL with the numbers, when it does not fit with 256 kept free; an API attach that would not fit is refused and said, never half-made. `boot-local`'s exports run on a current-thread runtime each (as `adopt-ublk`'s), not a worker per CPU each. `ci-fd-boot-verify.sh` (QEMU).
+
 ## [v23.13.0] — 2026-11-03
 
 ### Added

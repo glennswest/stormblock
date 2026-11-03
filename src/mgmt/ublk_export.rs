@@ -688,6 +688,13 @@ impl UblkExportManager {
     fn start(&mut self, volume_id: &str, device: Arc<dyn BlockDevice>) -> Option<Launch> {
         use crate::drive::ublk::UblkServer;
 
+        // One more export must fit under the fd limit (#522): refused here,
+        // said, rather than half-made with EMFILE in one of its queues.
+        if let Err(why) = crate::fdlimit::room_for(crate::drive::ublk::fds_for(&*device)) {
+            tracing::error!("ublk export of {volume_id} refused: {why}");
+            return None;
+        }
+
         // **The kernel picks the number, not us.**
         //
         // This asked for `/dev/ublkb0`, then `1`, and so on from a counter

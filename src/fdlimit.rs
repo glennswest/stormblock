@@ -5,6 +5,15 @@
 //! then on, and nothing had said it was coming. The count is in health, a
 //! warning goes to the log past 80 %, and a serving engine starts with its
 //! soft limit raised to the hard one.
+//!
+//! server8 (12.58, #522) ran out in the first second of an install: the
+//! initramfs engine starts every boot export at once (85 of them, 4 queues
+//! each, ~14 fds an export) against PID 1's inherited 1024, and the kernel's
+//! hard limit for it is only 4096. A serving engine running as root now
+//! raises the hard limit as well ([`TARGET`], within `fs.nr_open`), and a
+//! set of exports that would still not fit is refused before the first one
+//! is created, naming the numbers ([`room_for`]), instead of 26 volumes
+//! quietly never appearing.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -41,25 +50,79 @@ pub fn report() -> Option<Fds> {
     Some(f)
 }
 
-/// Raise the soft fd limit to the hard one (a serving engine, at start). A
-/// node's engine holds a ring, a device and a runtime per volume it serves;
-/// a supervisor's 1024 is not the ceiling it should meet.
+/// What a serving engine asks for: hard and soft (#522). 65536 is ~4,500
+/// exports at four queues, past anything a node serves.
+pub const TARGET: u64 = 65536;
+
+/// Kept free beyond what a set of exports needs (#522): slabs, sockets,
+/// state and log writes, the API's accepts.
+pub const RESERVE: u64 = 256;
+
+/// Raise the fd limit for a serving engine, at start: soft and hard to
+/// [`TARGET`] (no higher than `fs.nr_open`) when the engine may (root, or
+/// CAP_SYS_RESOURCE, as on every node), else the soft one to the hard one.
+/// A node's engine holds a ring, a device and a runtime per volume it
+/// serves: a supervisor's 1024 is not the ceiling it should meet, nor the
+/// kernel's 4096 for an initramfs's PID 1 (#510, #522).
 pub fn raise_soft_limit() {
+    let nr_open = std::fs::read_to_string("/proc/sys/fs/nr_open").ok().and_then(|s| s.trim().parse::<u64>().ok());
     let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     unsafe {
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) == 0 && r.rlim_cur < r.rlim_max {
-            let was = r.rlim_cur;
-            r.rlim_cur = r.rlim_max;
-            if libc::setrlimit(libc::RLIMIT_NOFILE, &r) == 0 {
-                tracing::info!("file descriptor limit raised from {was} to {} (#510)", r.rlim_max);
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) != 0 {
+            return;
+        }
+        let (was_soft, was_hard) = (r.rlim_cur as u64, r.rlim_max as u64);
+        let want = TARGET.min(nr_open.unwrap_or(TARGET)).max(was_hard);
+        if want > was_hard {
+            let up = libc::rlimit { rlim_cur: want as _, rlim_max: want as _ };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &up) == 0 {
+                tracing::info!("file descriptor limit raised from {was_soft}/{was_hard} to {want} (#510, #522)");
+                return;
             }
         }
+        if was_soft < was_hard {
+            r.rlim_cur = r.rlim_max;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &r) == 0 {
+                tracing::info!("file descriptor limit raised from {was_soft} to {was_hard} (#510)");
+            }
+        }
+    }
+}
+
+/// Whether `needed` more fds fit under the limit with [`RESERVE`] to spare:
+/// the limit and what is open, or why not, numbers named (#522).
+pub fn room_for(needed: u64) -> Result<Fds, String> {
+    let (Some(open), Some(limit)) = (open_now(), limit()) else {
+        return Ok(Fds { open: 0, limit: 0 });
+    };
+    check_room(open, limit, needed)
+}
+
+fn check_room(open: u64, limit: u64, needed: u64) -> Result<Fds, String> {
+    let f = Fds { open, limit };
+    if open + needed + RESERVE <= limit {
+        Ok(f)
+    } else {
+        Err(format!(
+            "{needed} file descriptors needed, {open} open, limit {limit} (with {RESERVE} kept free): \
+             raise RLIMIT_NOFILE for the engine (#522)"
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_set_of_exports_that_does_not_fit_is_named() {
+        // server8's boot (#522): 85 exports at 14 fds against 1024.
+        let e = check_room(40, 1024, 85 * 14).unwrap_err();
+        assert!(e.contains("1190 file descriptors needed") && e.contains("limit 1024"), "{e}");
+        assert!(check_room(40, TARGET, 85 * 14).is_ok());
+        assert!(check_room(40, 4096, 85 * 14).is_ok(), "the kernel's hard limit alone fits 85");
+        assert!(check_room(40, 4096, 300 * 14).is_err());
+    }
 
     #[test]
     fn the_count_and_the_limit_are_read() {

@@ -8787,6 +8787,12 @@ async fn handle_adopt_ublk(
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut threads = Vec::new();
+    // As boot-local's (#522): the whole set counted against the limit first.
+    let needed: u64 = serving.iter().map(|(_, _, d)| crate::drive::ublk::fds_for(&**d)).sum();
+    match crate::fdlimit::room_for(needed) {
+        Ok(f) => tracing::info!("{} device(s) need {needed} fds; {} open, limit {} (#522)", serving.len(), f.open, f.limit),
+        Err(why) => adopt_failed(&format!("{} device(s) cannot all be served: {why}", serving.len()), &dev_ids),
+    }
     for (dev_id, name, dev) in serving {
         let rx = shutdown_rx.clone();
         let thread = std::thread::Builder::new()
@@ -10055,6 +10061,17 @@ async fn handle_boot_local(
         let (done_tx, mut done_rx) =
             tokio::sync::mpsc::unbounded_channel::<(u32, Result<(), String>)>();
         let total = exports.len();
+        // Every export at once holds its rings, eventfds and runtime (#522:
+        // server8's 85 ran out at ~65 and 26 volumes never appeared, with
+        // nothing on the console). Counted first, refused whole, named.
+        let needed: u64 = exports.iter().map(|(_, _, d)| crate::drive::ublk::fds_for(&**d)).sum();
+        match crate::fdlimit::room_for(needed) {
+            Ok(f) => tracing::info!("{total} ublk export(s) need {needed} fds; {} open, limit {} (#522)", f.open, f.limit),
+            Err(why) => {
+                tracing::error!("FATAL: {total} ublk export(s) cannot all be served: {why}");
+                anyhow::bail!("{total} ublk export(s) cannot all be served: {why}");
+            }
+        }
         let mut ublk_threads = Vec::new();
         for (dev_id, name, dev) in exports {
             // Recoverable, always, on the boot path. The process creating
@@ -10076,7 +10093,12 @@ async fn handle_boot_local(
             let thread = std::thread::Builder::new()
                 .name(format!("ublk-local-{dev_id}"))
                 .spawn(move || {
-                    let rt = tokio::runtime::Runtime::new()
+                    // One thread, as adopt-ublk serves the same device after
+                    // the handover: a multi-thread runtime here was a worker
+                    // per CPU for every export (#522: 85 × the X9's CPUs).
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
                         .expect("failed to create ublk tokio runtime");
                     rt.block_on(async move {
                         let res = server.run(rx).await;
