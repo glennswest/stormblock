@@ -348,6 +348,11 @@ Owner's option A on stormcos#600. Inert unless `peers_from` is set: on main.
 - [x] check.sh at d7b6b33a ALL PASS (no new clippy lint); v23.13.0; stage
       requested; stormcos#600 told; closed
 
+### Kernel → 7.2.15-200.fc44: initramfs for it (2026-11-03, #523, P0) — IN PROGRESS
+
+As #517: `stormcentral component initramfs --commit <main's head>` builds the
+initramfs for 7.2.15-200.fc44.x86_64 on a build VM; expected no code change.
+
 ### Kernel → 7.2.14-200.fc44: initramfs for it (2026-11-02, #517, P0) — DONE, no code change
 
 As #509: `stormcentral component initramfs --commit c0112c10` (main's head,
