@@ -23,6 +23,14 @@
 //! 4. a detach takes the ublk device down and releases the peer's
 //!    namespace (`DELETE …/attach?host_nqn=&holder=`).
 //!
+//! With `[fabric] peers_from = "kubernetes"` (#520, stormcos#600) the
+//! peers are also every Node of the cluster but this one, at
+//! `https://<InternalIP>:9090`, listed with the `[management.kubernetes]`
+//! client and kept for 30 s; a lookup that misses lists them again (at most
+//! once a second), so a node that joined after start is found. An apiserver
+//! that does not answer is an unreachable peer: warned, and the lookup goes
+//! on with what it has (an unknown volume is a 404, never a 500).
+//!
 //! What is attached is kept in `<data_dir>/peer_attaches.json`. A ublk
 //! export does not outlive the engine that serves it, so at start every
 //! record left there is released at its peer and dropped.
@@ -134,9 +142,91 @@ impl PeerError {
     }
 }
 
-/// Whether any peer is configured.
+/// Whether any peer is configured: a static list, or the cluster's Nodes.
 pub fn configured(state: &AppState) -> bool {
-    !state.config.fabric.peers.is_empty()
+    !state.config.fabric.peers.is_empty() || state.config.fabric.peers_from_kubernetes()
+}
+
+/// How long a listing of the cluster's Nodes is used before it is asked
+/// again, and how soon after one a miss may ask again (#520).
+const NODES_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+const RELIST_MIN: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The cluster's Nodes as peers (#520): when they were listed, and what.
+#[derive(Debug, Default)]
+pub struct NodePeers {
+    listed: Option<(std::time::Instant, Vec<String>)>,
+}
+
+/// Whether a Node is this one: its name, or the name's first label, is
+/// this node's (a Node may be named by its FQDN and the engine by its
+/// short name, or the other way).
+fn is_self(node: &str, me: &str) -> bool {
+    let first = |s: &str| s.split('.').next().unwrap_or(s).to_ascii_lowercase();
+    node.eq_ignore_ascii_case(me) || first(node) == first(me)
+}
+
+/// The peers a Node list gives: every Node but this one, its first
+/// `InternalIP`, on `port`.
+pub fn peers_of_nodes(nodes: &[(String, Vec<String>)], me: &str, port: u16) -> Vec<String> {
+    nodes
+        .iter()
+        .filter(|(name, _)| !is_self(name, me))
+        .filter_map(|(_, ips)| ips.first())
+        .map(|ip| format!("https://{}", format_addr(ip, port)))
+        .collect()
+}
+
+/// The cluster's Nodes as peers: the listing kept, or a new one when it is
+/// older than [`NODES_FRESH`], or `relist` and older than [`RELIST_MIN`].
+/// An apiserver that does not answer leaves what was listed before, said.
+async fn node_peers(state: &AppState, relist: bool) -> Vec<String> {
+    if !state.config.fabric.peers_from_kubernetes() {
+        return Vec::new();
+    }
+    let mut g = state.fabric_nodes.lock().await;
+    if let Some((at, list)) = &g.listed {
+        let age = at.elapsed();
+        if age < NODES_FRESH && !(relist && age >= RELIST_MIN) {
+            return list.clone();
+        }
+    }
+    let old = g.listed.take().map(|(_, l)| l).unwrap_or_default();
+    let list = match state.kube_auth.as_ref() {
+        None => {
+            tracing::warn!(
+                "fabric: peers_from = \"kubernetes\" and no apiserver is configured \
+                 ([management.kubernetes] api_url, or $STORMBLOCK_KUBE_API): no Node is a peer"
+            );
+            old
+        }
+        Some(kube) => match kube.list_nodes().await {
+            Ok(nodes) => {
+                let peers = peers_of_nodes(&nodes, &state.local_node_name(), state.config.fabric.peers_port());
+                if peers != old {
+                    tracing::info!("fabric: {} peer(s) from the cluster's Nodes: {}", peers.len(), peers.join(", "));
+                }
+                peers
+            }
+            Err(e) => {
+                tracing::warn!("fabric: listing the cluster's Nodes: {e}; using the {} listed before", old.len());
+                old
+            }
+        },
+    };
+    g.listed = Some((std::time::Instant::now(), list.clone()));
+    list
+}
+
+/// Every peer to ask: `[fabric] peers`, then the cluster's Nodes, once each.
+async fn all_peers(state: &AppState, relist: bool) -> Vec<String> {
+    let mut v: Vec<String> = state.config.fabric.peers.clone();
+    for p in node_peers(state, relist).await {
+        if !v.iter().any(|q| base(q) == base(&p)) {
+            v.push(p);
+        }
+    }
+    v
 }
 
 /// The host NQN this node connects to a peer as: `[fabric] host_nqn`, else
@@ -182,27 +272,28 @@ fn base(peer: &str) -> &str {
 
 /// The peer holding `key` (a volume id or name) and what it says of it, or
 /// `None` when no peer does. A peer that does not answer is skipped, said.
+/// A miss lists the cluster's Nodes again (#520) and asks the new ones.
 pub async fn find(state: &AppState, key: &str) -> Result<Option<(String, serde_json::Value)>, PeerError> {
     if !configured(state) {
         return Ok(None);
     }
     let c = client(state)?;
     let mut refused = Vec::new();
-    for peer in &state.config.fabric.peers {
-        let url = format!("{}/api/v1/volumes/{key}", base(peer));
-        match c.get(&url).send().await {
-            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
-                Ok(v) => return Ok(Some((peer.clone(), v))),
-                Err(e) => tracing::warn!("fabric: {url}: {e}"),
-            },
-            Ok(r) if r.status().as_u16() == 404 => {}
-            Ok(r) => {
-                let code = r.status().as_u16();
-                let body = r.text().await.unwrap_or_default();
-                tracing::warn!("fabric: {url}: {code} {body}");
-                refused.push(format!("{peer}: {code}"));
+    let mut asked: Vec<String> = Vec::new();
+    for peer in all_peers(state, false).await {
+        if let Some(v) = ask(&c, &peer, key, &mut refused).await {
+            return Ok(Some((peer, v)));
+        }
+        asked.push(peer);
+    }
+    if state.config.fabric.peers_from_kubernetes() {
+        for peer in all_peers(state, true).await {
+            if asked.iter().any(|q| base(q) == base(&peer)) {
+                continue;
             }
-            Err(e) => tracing::warn!("fabric: {url}: not reachable: {e}"),
+            if let Some(v) = ask(&c, &peer, key, &mut refused).await {
+                return Ok(Some((peer, v)));
+            }
         }
     }
     if !refused.is_empty() {
@@ -213,6 +304,27 @@ pub async fn find(state: &AppState, key: &str) -> Result<Option<(String, serde_j
         );
     }
     Ok(None)
+}
+
+/// What `peer` says of volume `key`, or `None` (not there, refused, or not
+/// answering: the last two said).
+async fn ask(c: &crate::http::Client, peer: &str, key: &str, refused: &mut Vec<String>) -> Option<serde_json::Value> {
+    let url = format!("{}/api/v1/volumes/{key}", base(peer));
+    match c.get(&url).send().await {
+        Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+            Ok(v) => return Some(v),
+            Err(e) => tracing::warn!("fabric: {url}: {e}"),
+        },
+        Ok(r) if r.status().as_u16() == 404 => {}
+        Ok(r) => {
+            let code = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            tracing::warn!("fabric: {url}: {code} {body}");
+            refused.push(format!("{peer}: {code}"));
+        }
+        Err(e) => tracing::warn!("fabric: {url}: not reachable: {e}"),
+    }
+    None
 }
 
 /// A clone of a peer's volume, made on that peer: its status and body, or
@@ -428,6 +540,39 @@ mod tests {
         let mut b = b;
         assert_eq!(b.take_all().len(), 1);
         assert!(PeerAttaches::load(Some(dir.path())).all().is_empty());
+    }
+
+    #[test]
+    fn the_clusters_nodes_but_this_one_are_peers() {
+        let list = serde_json::json!({"items": [
+            {"metadata": {"name": "nodea.g16.lo"}, "status": {"addresses": [
+                {"type": "Hostname", "address": "nodea"},
+                {"type": "InternalIP", "address": "192.168.16.11"}]}},
+            {"metadata": {"name": "nodeb"}, "status": {"addresses": [
+                {"type": "InternalIP", "address": "192.168.16.12"}]}},
+            {"metadata": {"name": "nodec"}, "status": {"addresses": [
+                {"type": "InternalIP", "address": "fd00::13"}]}},
+            {"metadata": {"name": "noip"}, "status": {"addresses": []}}
+        ]});
+        let nodes = crate::mgmt::kubeauth::nodes_of(&list);
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(
+            peers_of_nodes(&nodes, "nodeb.g16.lo", 9090),
+            vec!["https://192.168.16.11:9090".to_string(), "https://[fd00::13]:9090".to_string()]
+        );
+        assert_eq!(peers_of_nodes(&nodes, "NODEA", 9443).len(), 2, "this node by its short name");
+    }
+
+    #[test]
+    fn peers_from_takes_kubernetes_or_nothing() {
+        let mut f = crate::mgmt::config::FabricSection::default();
+        assert!(f.validate().is_ok() && !f.peers_from_kubernetes());
+        f.peers_from = Some("kubernetes".into());
+        assert!(f.validate().is_ok() && f.peers_from_kubernetes());
+        f.peers_from = Some("kubernets".into());
+        assert!(f.validate().is_err(), "a typo refuses the config");
+        let c: crate::mgmt::config::StormBlockConfig = toml::from_str("[fabric]\npeers_from = \"dns\"\n").unwrap();
+        assert!(c.validate().is_err());
     }
 
     #[test]

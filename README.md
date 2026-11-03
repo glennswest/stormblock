@@ -989,6 +989,30 @@ ca          = "/data/stormcert/node-ca.pem"
 host_nqn    = "nqn.2026-09.lo.storm:host-nodeb"
 ```
 
+**Peers from the cluster (#520, stormcos#600).** `peers_from = "kubernetes"`
+adds every Node of the cluster but this one (by name, or its first label) as
+a peer, at `https://<its first InternalIP>:<peers_port>` (9090), listed with
+the `[management.kubernetes]` client, whose `token_file` must be allowed
+`list nodes`. The listing is kept for 30 s; a lookup that misses lists the
+Nodes again (at most once a second), so a node that joined after the engine
+started is found with no restart. They are added to any static `peers`. An
+apiserver that does not answer (or none configured) is warned of and treated
+as an unreachable peer: the lookup goes on with what it has, and an unknown
+volume is a 404, never a 500. Any other `peers_from` value refuses the config
+(the file is read without `deny_unknown_fields`, so a typo would otherwise
+turn the fabric off silently).
+
+```toml
+[fabric]
+peers_from = "kubernetes"
+# peers_port = 9090
+
+[management.kubernetes]
+api_url    = "https://127.0.0.1:6443"
+ca_file    = "/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+token_file = "/run/secrets/kubernetes.io/serviceaccount/token"
+```
+
 ### Block size: 4096, or 512 when a volume asks
 
 Every volume is presented at 4096-byte logical blocks unless it says 512

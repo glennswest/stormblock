@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-03
+- **feat:** #520 (stormcos#600, owner's option A): `[fabric] peers_from = "kubernetes"`: the cluster's Nodes but this one are fabric peers, `https://<InternalIP>:<peers_port, 9090>`, listed with the `[management.kubernetes]` client (`KubeAuth::list_nodes`; it needs `list nodes`), kept 30 s and listed again on a miss (≥ 1 s apart), so a node that joined after start is found. Added to static `peers`. An apiserver that does not answer is an unreachable peer (warned, 404, never 500). An unknown `peers_from` refuses the config (`validate` and `StormBlockConfig::load`). Test `integration_peers::a_peer_is_found_among_the_clusters_nodes_even_one_that_joined_after_start` (stand-in apiserver, A joins after B started); README.
+
 ### 2026-11-02
 - **chore:** #517: kernel set 7.2.13-200.fc44 → 7.2.14-200.fc44. No code change: `stormcentral component initramfs --commit c0112c10` built the initramfs for 7.2.14-200.fc44.x86_64 (its dependency closure over the kernel's modules.dep passed): registry/initramfs:blob-c7ac26d946aa3875 (vmlinuz blob-b82308161ea1790b).
 

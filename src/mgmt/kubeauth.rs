@@ -127,6 +127,26 @@ impl KubeAuth {
         Ok(v)
     }
 
+    /// The cluster's Nodes (#520, `[fabric] peers_from = "kubernetes"`): each
+    /// Node's name and its `InternalIP`s, as the apiserver lists them. The
+    /// engine's own bearer must be allowed `list nodes`.
+    pub async fn list_nodes(&self) -> Result<Vec<(String, Vec<String>)>, String> {
+        let url = format!("{}/api/v1/nodes", self.api_url);
+        let r = self
+            .client
+            .get(&url)
+            .bearer(self.own_token().as_deref())
+            .send()
+            .await
+            .map_err(|e| format!("{url}: {e}"))?;
+        let status = r.status();
+        let v: Value = r.json().await.map_err(|e| format!("{url}: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("{url} answered {status}: {}", v["message"].as_str().unwrap_or("")));
+        }
+        Ok(nodes_of(&v))
+    }
+
     /// May `bearer` `verb` the `storage.storm.io` resource `resource` (named
     /// `name`, when there is one)?
     pub async fn review(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>) -> Review {
@@ -207,6 +227,31 @@ impl KubeAuth {
             Review::Denied(user, why)
         }
     }
+}
+
+/// Each Node of a `NodeList`: its name and `InternalIP` addresses.
+pub fn nodes_of(list: &Value) -> Vec<(String, Vec<String>)> {
+    list["items"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|n| {
+                    let name = n["metadata"]["name"].as_str()?.to_string();
+                    let ips = n["status"]["addresses"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter(|x| x["type"] == "InternalIP")
+                                .filter_map(|x| x["address"].as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((name, ips))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One destructive call, as the audit log keeps it (#274).

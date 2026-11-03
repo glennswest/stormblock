@@ -318,6 +318,17 @@ v23.0.4; `tmp/tl.py`): first boot `root ready` 7.32 / 7.04 s (12.16: 26.03 /
 current engine (MDTS 8 MiB) since 2026-10-14 and #410/#411/#278 reworked the
 flow-over; no bisect needed. No code change.
 
+### Fabric peers from the cluster's Nodes (2026-11-03, #520, P3, stormcos#600) — IN PROGRESS
+
+Owner's option A on stormcos#600. Inert unless `peers_from` is set: on main.
+- [x] `[fabric] peers_from = "kubernetes"`, `peers_port` (9090); unknown value
+      refused (validate, load); `KubeAuth::list_nodes`; `peers::NodePeers`
+      (30 s, relist on a miss ≥ 1 s apart); apiserver down = unreachable peer
+- [x] tests: units (nodes → peers, self by name/first label, validation);
+      integration_peers (stand-in apiserver, A joins after B's start); README,
+      CHANGELOG
+- [ ] check.sh green; tag; stage; stormcos#600 told; close
+
 ### Kernel → 7.2.14-200.fc44: initramfs for it (2026-11-02, #517, P0) — DONE, no code change
 
 As #509: `stormcentral component initramfs --commit c0112c10` (main's head,

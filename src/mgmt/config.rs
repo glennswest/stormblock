@@ -122,6 +122,15 @@ impl ImagesSection {
 pub struct FabricSection {
     /// Each peer's management API, `https://nodeA.g16.lo:9090`.
     pub peers: Vec<String>,
+    /// Where more peers come from (#520, stormcos#600): `"kubernetes"` =
+    /// every Node of the cluster but this one, `https://<InternalIP>:<peers_port>`,
+    /// listed with the `[management.kubernetes]` client (its `token_file`
+    /// must be allowed `list nodes`), re-listed when a lookup misses. Added
+    /// to `peers`. Unset (or empty): `peers` only. Any other value refuses
+    /// the config.
+    pub peers_from: Option<String>,
+    /// The port a Node's engine answers on, for `peers_from`: 9090.
+    pub peers_port: Option<u16>,
     /// The certificate presented to a peer; `[management] tls_cert` when absent.
     pub client_cert: Option<String>,
     /// Its key; `[management] tls_key` when absent.
@@ -135,6 +144,21 @@ pub struct FabricSection {
 }
 
 impl FabricSection {
+    /// Whether the cluster's Nodes are peers (`peers_from = "kubernetes"`).
+    pub fn peers_from_kubernetes(&self) -> bool {
+        self.peers_from.as_deref().map(str::trim) == Some("kubernetes")
+    }
+    pub fn peers_port(&self) -> u16 {
+        self.peers_port.unwrap_or(9090)
+    }
+    /// `peers_from` is unset, empty or `kubernetes`: a typo would switch the
+    /// fabric off silently (the config has no `deny_unknown_fields`).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        match self.peers_from.as_deref().map(str::trim) {
+            None | Some("") | Some("kubernetes") => Ok(()),
+            Some(o) => anyhow::bail!("[fabric] peers_from = {o:?}: the only source is \"kubernetes\""),
+        }
+    }
     pub fn client_cert<'a>(&'a self, m: &'a ManagementConfig) -> Option<&'a str> {
         self.client_cert.as_deref().or(m.tls_cert.as_deref())
     }
@@ -1150,6 +1174,9 @@ impl StormBlockConfig {
         }
         let contents = std::fs::read_to_string(path)?;
         let mut config: StormBlockConfig = toml::from_str(&contents)?;
+        // Every command that reads the file refuses a typo here, not only
+        // the daemon's `validate` (#520).
+        config.fabric.validate().map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
         if let Some(why) = config.adopt_old_registration(&contents) {
             tracing::warn!("{path}: {why}");
         }
@@ -1473,6 +1500,8 @@ impl StormBlockConfig {
                 _ => {}
             }
         }
+        self.fabric.validate()?;
+
         // Check management listen address parses
         self.management.listen_addr.parse::<SocketAddr>()
             .map_err(|e| anyhow::anyhow!("invalid management listen_addr '{}': {e}", self.management.listen_addr))?;

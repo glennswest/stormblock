@@ -114,11 +114,17 @@ async fn start_target(state: &Arc<AppState>) {
 /// B, with `[fabric]` naming A; its own API over plain HTTP, open (the
 /// caller is stormvm on B; how B admits it is not what is tested here).
 async fn node_b(dir: &Path, peer: &str, pki: Option<&Path>) -> (Arc<AppState>, String) {
+    let peer = peer.to_string();
+    node_b_with(dir, pki, move |c| c.fabric.peers = vec![peer]).await
+}
+
+/// B as [`node_b`], its `[fabric]` peers set by `peers`.
+async fn node_b_with(dir: &Path, pki: Option<&Path>, peers: impl FnOnce(&mut StormBlockConfig)) -> (Arc<AppState>, String) {
     let mut c = StormBlockConfig::default();
     c.management.node_name = Some("nodeb".into());
     c.management.data_dir = Some(dir.display().to_string());
     c.management.require_auth = Some(false);
-    c.fabric.peers = vec![peer.to_string()];
+    peers(&mut c);
     c.fabric.host_nqn = Some(B_NQN.into());
     let p = |f: &str| pki.unwrap().join(f).display().to_string();
     if pki.is_some() {
@@ -294,4 +300,157 @@ async fn a_peers_volume_is_cloned_and_attached_through_this_nodes_engine() {
     assert!(stormblock::mgmt::peers::find(&b2, &golden.to_string()).await.unwrap().is_none());
     let r = c.post(format!("{api2}/{clone}/attach")).json(&serde_json::json!({})).send().await.unwrap();
     assert_eq!(r.status().as_u16(), 404);
+}
+
+/// A stand-in apiserver's `GET /api/v1/nodes`: the Node list it is given,
+/// which the test changes as it goes.
+async fn apiserver(nodes: Arc<std::sync::Mutex<serde_json::Value>>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = axum::Router::new().route(
+        "/api/v1/nodes",
+        axum::routing::get(move || {
+            let nodes = nodes.clone();
+            async move { axum::Json(nodes.lock().unwrap().clone()) }
+        }),
+    );
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    common::wait_for_listener(addr).await;
+    format!("http://{addr}")
+}
+
+fn node(name: &str, ip: &str) -> serde_json::Value {
+    serde_json::json!({
+        "metadata": {"name": name},
+        "status": {"addresses": [{"type": "Hostname", "address": name}, {"type": "InternalIP", "address": ip}]}
+    })
+}
+
+/// #520 (stormcos#600): `[fabric] peers_from = "kubernetes"`. B has no
+/// static peers; its peers are the cluster's Nodes but itself. A joins the
+/// cluster after B started, and B's next miss finds it. An apiserver that
+/// does not answer is an unreachable peer: a 404, never a 500.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_is_found_among_the_clusters_nodes_even_one_that_joined_after_start() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let pki = tmp.path().join("pki");
+    std::fs::create_dir_all(&pki).unwrap();
+    ca(&pki, "node-ca");
+    leaf(&pki, "node-ca", "nodea", "serverAuth", "IP:127.0.0.2");
+    leaf(&pki, "node-ca", "nodeb", "clientAuth", "DNS:nodeb.g16.lo");
+    let p = |f: &str| pki.join(f).display().to_string();
+
+    // Node A at 127.0.0.2: a sealed golden, its API over TLS, closed.
+    let port = free_port();
+    let mut ac = StormBlockConfig::default();
+    ac.management.node_name = Some("nodea".into());
+    ac.management.api_token = Some("node-a-token".into());
+    ac.management.listen_addr = format!("127.0.0.2:{port}");
+    ac.management.data_dir = Some(tmp.path().join("a").display().to_string());
+    ac.management.tls_cert = Some(p("nodea.crt"));
+    ac.management.tls_key = Some(p("nodea.key"));
+    ac.management.tls_client_ca = Some(p("node-ca.crt"));
+    ac.nvmeof = Some(NvmeofExportConfig {
+        listen_addr: "127.0.0.1:0".into(),
+        nqn: "nqn.2026-09.test:node-a".into(),
+        export_drives: false,
+        allow_any_host: false,
+        allowed_hosts: Vec::new(),
+        require_dhchap: false,
+        boothost_host_nqn: None,
+    });
+    let (a, array) = engine(&tmp.path().join("a"), ac).await;
+    let pattern: Vec<u8> = (0..MIB as usize).map(|i| (i % 251) as u8 + 1).collect();
+    let golden = {
+        let mut vm = a.volume_manager.lock().await;
+        let g = vm.create_volume("rocky-golden", 8 * MIB, array).await.unwrap();
+        let dev = vm.get_volume(&g).unwrap();
+        dev.write(0, &pattern).await.unwrap();
+        dev.flush().await.unwrap();
+        vm.seal_volume(g, None).await.unwrap();
+        g.0
+    };
+    start_target(&a).await;
+    tokio::spawn(stormblock::mgmt::start_management_server(a.clone()));
+    common::wait_for_listener(format!("127.0.0.2:{port}").parse().unwrap()).await;
+
+    // The cluster at B's start: B itself and a Node whose engine does not
+    // answer (127.0.0.3). A has not joined.
+    let nodes = Arc::new(std::sync::Mutex::new(serde_json::json!({
+        "kind": "NodeList",
+        "items": [node("nodeb.g16.lo", "127.0.0.1"), node("ghost", "127.0.0.3")]
+    })));
+    let api_url = apiserver(nodes.clone()).await;
+    let (b, api) = node_b_with(&tmp.path().join("b"), Some(&pki), |c| {
+        c.fabric.peers_from = Some("kubernetes".into());
+        c.fabric.peers_port = Some(port);
+        c.management.kubernetes =
+            Some(stormblock::mgmt::config::KubeAuthConfig { api_url: api_url.clone(), ca_file: None, token_file: None });
+    })
+    .await;
+    b.config.validate().expect("B's config validates");
+    let c = reqwest::Client::builder().timeout(Duration::from_secs(30)).build().unwrap();
+
+    assert!(stormblock::mgmt::peers::configured(&b));
+    assert!(
+        stormblock::mgmt::peers::find(&b, &golden.to_string()).await.unwrap().is_none(),
+        "A is not a Node yet"
+    );
+    let r = c.post(format!("{api}/{golden}/attach")).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 404, "{}", r.text().await.unwrap());
+
+    // A joins. B's next miss (past the one-second floor) lists the Nodes
+    // again and finds it, with no restart.
+    nodes.lock().unwrap()["items"].as_array_mut().unwrap().push(node("nodea", "127.0.0.2"));
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let peer_a = format!("https://127.0.0.2:{port}");
+    let (at, v) = stormblock::mgmt::peers::find(&b, &golden.to_string()).await.unwrap().expect("A, once it joined");
+    assert_eq!(at, peer_a);
+    assert_eq!(v["id"], golden.to_string());
+
+    // A clone asked of B is made on A; B's initiator reads the golden's
+    // bytes through it.
+    let r = c.post(format!("{api}/{golden}/clone")).json(&serde_json::json!({"name": "vm2-root"})).send().await.unwrap();
+    let code = r.status().as_u16();
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert!((200..300).contains(&code), "{code} {v}");
+    assert_eq!(v["peer"], peer_a, "{v}");
+    let clone: Uuid = v["id"].as_str().unwrap().parse().unwrap();
+    let (dev, rec) = stormblock::mgmt::peers::connect(&b, &clone.to_string(), false).await.unwrap().expect("on A");
+    assert_eq!(rec.peer, peer_a);
+    let mut back = vec![0u8; pattern.len()];
+    dev.read(0, &mut back).await.unwrap();
+    assert!(back == pattern, "B reads A's golden through the clone");
+    drop(dev);
+
+    // Attached through B's API: `device_hint` with ublk
+    // (ci-peer-attach-verify.sh), else said and A's namespace let go.
+    let r = c.post(format!("{api}/{clone}/attach")).json(&serde_json::json!({})).send().await.unwrap();
+    let code = r.status().as_u16();
+    let v: serde_json::Value = r.json().await.unwrap();
+    if code == 200 {
+        assert!(v["device_hint"].as_str().unwrap().starts_with("/dev/ublkb"), "{v}");
+        let r = c.delete(format!("{api}/{clone}/attach")).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 200);
+    } else {
+        assert_eq!(code, 409, "{v}");
+        assert!(v.to_string().contains("ublk is not available"), "{v}");
+    }
+
+    // An apiserver that does not answer: warned, a 404, never a 500.
+    let dead = format!("http://127.0.0.1:{}", free_port());
+    let (b2, api2) = node_b_with(&tmp.path().join("b2"), Some(&pki), |c| {
+        c.fabric.peers_from = Some("kubernetes".into());
+        c.fabric.peers_port = Some(port);
+        c.management.kubernetes =
+            Some(stormblock::mgmt::config::KubeAuthConfig { api_url: dead, ca_file: None, token_file: None });
+    })
+    .await;
+    assert!(stormblock::mgmt::peers::find(&b2, &golden.to_string()).await.unwrap().is_none());
+    let r = c.post(format!("{api2}/{golden}/attach")).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 404, "{}", r.text().await.unwrap());
 }

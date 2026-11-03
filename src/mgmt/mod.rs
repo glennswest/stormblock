@@ -360,6 +360,8 @@ pub struct AppState {
     pub creators: std::sync::Mutex<creators::Creators>,
     /// Peers' volumes attached here as ublk devices (#328).
     pub peer_attaches: tokio::sync::Mutex<peers::PeerAttaches>,
+    /// The cluster's Nodes as fabric peers, as last listed (#520).
+    pub fabric_nodes: tokio::sync::Mutex<peers::NodePeers>,
     /// What each namespace may hold (#408), `quotas.json`.
     pub quotas: std::sync::Mutex<namespaces::Quotas>,
     /// What each drive opened on this node held when it was opened (#154),
@@ -632,6 +634,7 @@ impl AppState {
             peer_attaches: tokio::sync::Mutex::new(peers::PeerAttaches::load(
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),
+            fabric_nodes: tokio::sync::Mutex::new(peers::NodePeers::default()),
             quotas: std::sync::Mutex::new(namespaces::Quotas::load(
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),
