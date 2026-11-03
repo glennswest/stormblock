@@ -2106,6 +2106,10 @@ async fn attach_volume(
             Ok(None) => {}
         }
         if want == WantTransport::Ublk {
+            #[cfg(target_os = "linux")]
+            if let Err(why) = crate::mgmt::ublk_export::room_for_one(&*device) {
+                return ApiError::conflict(format!("ublk device not made: {why}"));
+            }
             return ApiError::conflict(
                 "ublk was asked for but is not available on this node (kernel ublk_drv, or ublk_transport is off)",
             );

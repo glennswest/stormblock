@@ -224,9 +224,10 @@ fn queues_for(device: &dyn BlockDevice) -> u16 {
 
 /// File descriptors one export holds besides its queues (#522): the
 /// `/dev/ublk-control` file and its ring, `/dev/ublkcN`, and the runtime it
-/// is served on (epoll and its waker), plus one for what comes and goes
-/// (a sysfs read, the control file reopened for a stop).
-pub const EXPORT_FIXED_FDS: u64 = 6;
+/// is served on (epoll and its waker), with room for what comes and goes (a
+/// sysfs read, the control file reopened for a stop). Measured in a guest
+/// (`ci-fd-boot-verify.sh`): an API attach at four queues holds 15.
+pub const EXPORT_FIXED_FDS: u64 = 8;
 
 /// The file descriptors a device over `device` will hold while it is
 /// served (#522): [`EXPORT_FIXED_FDS`], and an io_uring and an eventfd per

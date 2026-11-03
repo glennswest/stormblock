@@ -321,8 +321,8 @@ flow-over; no bisect needed. No code change.
 ### server8's install out of fds at its boot exports (2026-11-03, #522, P0) — IN PROGRESS
 
 12.58's engine is cba2b73 (before v23.2.0: neither #510's leak fix nor its
-limit raise). Counted: an export holds ~6 fds + 2 a queue (14 at four), so
-85 exports need ~1,190 against PID 1's 1024; and #510's soft-to-hard raise
+limit raise). Counted: an export holds ~8 fds + 2 a queue (15 measured at four), so
+85 exports need ~1,275 against PID 1's 1024; and #510's soft-to-hard raise
 reaches only the kernel's 4096 for an initramfs's PID 1.
 - [x] root raises soft and hard to 65536 (≤ nr_open); `ublk::fds_for`;
       `fdlimit::room_for` (256 reserve): boot-local and adopt-ublk refuse the

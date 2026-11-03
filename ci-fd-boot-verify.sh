@@ -12,10 +12,11 @@
 #   all-served  90 volumes attached over ublk: every one a block device that
 #               reads, no EMFILE anywhere in the log
 #   per-export  the fds they hold, measured, at most the engine's own
-#               estimate (`ublk::fds_for`: 6 + 2 × queues = 14)
+#               estimate (`ublk::fds_for`: 8 + 2 × queues = 16)
 #   refused     the running engine's limit cut to what is open + 300 (the
-#               reserve, 256, plus room for ~3): the next attaches are refused
-#               whole and said ("file descriptors needed"), never half-made
+#               reserve, 256, plus room for ~2): the next attaches are refused
+#               whole and said to the caller and in the log ("file descriptors
+#               needed"), never half-made
 #               (no "eventfd failed", no "io_uring create failed"), and the 90
 #               still read
 #
@@ -122,10 +123,10 @@ for n in $(seq 1 $N); do
     if [ -b "$d" ] && dd if=$d of=/dev/null bs=4096 count=1 iflag=direct 2>/dev/null; then ok=$((ok + 1)); else bad="$bad $n"; fi
 done
 f1=$(ls /proc/$pid/fd | wc -l)
-per=$(( (f1 - f0 + N - 1) / N ))
+per=$(( (f1 - f0 + N - 1) / N ))  # rounded up
 echo "GUEST $ok of $N exports served; engine fds $f0 -> $f1 ($((f1 - f0)) for $N, ~$per an export)"
 [ "$ok" = "$N" ] && r all-served PASS || r all-served "FAIL (not served:$bad)"
-[ "$per" -le 14 ] && r per-export PASS || r per-export "FAIL ($per > 14)"
+[ $((f1 - f0)) -le $((N * 16)) ] && r per-export PASS || r per-export "FAIL ($((f1 - f0)) > $N x 16)"
 grep -E "os error 24|No file descriptors" /run/engine.log | head -3 | sed 's/^/LOG emfile: /'
 grep -qE "os error 24|No file descriptors" /run/engine.log && r no-emfile FAIL || r no-emfile PASS
 
@@ -133,17 +134,18 @@ grep -qE "os error 24|No file descriptors" /run/engine.log && r no-emfile FAIL |
 open=$(ls /proc/$pid/fd | wc -l)
 prlimit --pid $pid --nofile=$((open + 300)):$((open + 300))
 echo "LOG limit cut to $((open + 300)) with $open open"
-refused=0 served=0
+refused=0 served=0 said=0
 for n in $(seq 1 10); do
     v=$(api -X POST http://127.0.0.1:$port/api/v1/volumes -d "{\"name\":\"more$n\",\"size\":\"16M\"}" \
         | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
     c=$(curl -s -m 60 -o /tmp/a -w '%{http_code}' -H 'Authorization: Bearer t' -H 'Content-Type: application/json' \
         -X POST http://127.0.0.1:$port/api/v1/volumes/$v/attach -d '{"transport":"ublk"}')
+    grep -q "file descriptors needed" /tmp/a && said=1
     case "$c" in 200) served=$((served + 1)) ;; *) refused=$((refused + 1)); [ "$refused" = 1 ] && echo "LOG first refusal: $c $(head -c 300 /tmp/a)" ;; esac
 done
 echo "GUEST under the cut limit: $served served, $refused refused"
 grep "file descriptors needed" /run/engine.log | head -1 | sed 's/^/LOG said: /'
-[ "$refused" -ge 5 ] && grep -q "file descriptors needed" /run/engine.log && r refused PASS || r refused "FAIL ($served served, $refused refused)"
+[ "$refused" -ge 5 ] && [ "$said" = 1 ] && grep -q "file descriptors needed" /run/engine.log && r refused PASS || r refused "FAIL ($served served, $refused refused)"
 grep -qE "eventfd failed|io_uring create failed|os error 24" /run/engine.log && r refused-whole FAIL || r refused-whole PASS
 still=0
 for d in $(cat /tmp/devs); do dd if=$d of=/dev/null bs=4096 count=1 iflag=direct 2>/dev/null && still=$((still + 1)); done

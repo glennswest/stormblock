@@ -690,7 +690,7 @@ impl UblkExportManager {
 
         // One more export must fit under the fd limit (#522): refused here,
         // said, rather than half-made with EMFILE in one of its queues.
-        if let Err(why) = crate::fdlimit::room_for(crate::drive::ublk::fds_for(&*device)) {
+        if let Err(why) = room_for_one(&*device) {
             tracing::error!("ublk export of {volume_id} refused: {why}");
             return None;
         }
@@ -1180,4 +1180,10 @@ mod tests {
         // No panic, just None — nvme-tcp fallback. (device is never touched.)
         assert!(mgr.device_path("vol-x").is_none());
     }
+}
+
+/// Whether one more export over `device` fits under the fd limit (#522),
+/// or why not: what an attach that got no device says to its caller.
+pub fn room_for_one(device: &dyn BlockDevice) -> Result<(), String> {
+    crate::fdlimit::room_for(crate::drive::ublk::fds_for(device)).map(|_| ())
 }

@@ -694,7 +694,7 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   serving engine (daemon, `boot-local`, `adopt-ublk`) starts with its limit
   raised: soft and hard to 65536 (within `fs.nr_open`) as root, else the soft
   one to the hard one (#522: an initramfs's PID 1 hands down 1024/4096). A
-  ublk export holds ~6 fds plus 2 a queue (14 at four queues); `boot-local`
+  ublk export holds ~8 fds plus 2 a queue (15 measured at four queues, 16 counted); `boot-local`
   and `adopt-ublk` count the whole set first and refuse it, FATAL, with the
   numbers, when it does not fit with 256 to spare, and an API attach that
   would not fit is refused, said, never half-made (`ci-fd-boot-verify.sh`).
