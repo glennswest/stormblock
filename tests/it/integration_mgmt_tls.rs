@@ -903,3 +903,99 @@ async fn a_required_listener_refuses_plain_and_counts_nothing() {
         assert_eq!(health["tls"]["mode"], "required");
     }
 }
+
+/// #524: with TLS on the API, the boot port answers the boot verbs in plain,
+/// with no credential, and a full claim works through it; anything else there
+/// is 404 whatever is presented; the reply names the management API.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_boot_port_answers_the_boot_verbs_beside_a_tls_api() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    stormblock::mgmt::metrics::init_metrics();
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    let (api, boot) = (free_port(), free_port());
+    let mut cfg = config(&pki, &format!("127.0.0.1:{api}"));
+    cfg.management.boot_listen = Some(format!("127.0.0.1:{boot}"));
+    cfg.validate().expect("the config validates");
+    let mut same = cfg.clone();
+    same.management.boot_listen = Some(format!("127.0.0.1:{api}"));
+    assert!(same.validate().unwrap_err().to_string().contains("boot_listen"), "a port of its own");
+    let state = state_with(&tmp, cfg).await;
+    tokio::spawn(stormblock::mgmt::start_management_server(state.clone()));
+    wait_listening(api).await;
+    wait_listening(boot).await;
+    let tls = format!("https://127.0.0.1:{api}");
+    let plain = format!("http://127.0.0.1:{boot}");
+    let c = reqwest::Client::new();
+    let admin = pki.client(None);
+    let host = format!("{plain}/api/v1/synonyms/boothost/server8");
+
+    // The API is TLS, and this port is not.
+    assert!(c.get(format!("http://127.0.0.1:{api}/api/v1/health")).send().await.map(|r| !r.status().is_success()).unwrap_or(true));
+    let health: serde_json::Value = c.get(format!("{plain}/api/v1/health")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(health["boot_listen"]["listening"], true, "{health}");
+    assert_eq!(health["tls"]["serving"], "https");
+
+    // A sealed image, assigned over TLS.
+    let r: serde_json::Value = admin.post(format!("{tls}/api/v1/volumes")).bearer_auth(TOKEN)
+        .json(&serde_json::json!({"name": "release", "size": "4M"})).send().await.unwrap().json().await.unwrap();
+    let id = r["id"].as_str().expect("a volume id").to_string();
+    let r = admin.post(format!("{tls}/api/v1/volumes/{id}/seal")).bearer_auth(TOKEN).send().await.unwrap();
+    assert!(r.status().is_success(), "seal: {}", r.status());
+    let r = admin.post(format!("{tls}/api/v1/synonyms")).bearer_auth(TOKEN)
+        .json(&serde_json::json!({"namespace": "boothost", "name": "server8", "volume": id})).send().await.unwrap();
+    assert!(r.status().is_success(), "synonym: {}", r.status());
+
+    // Everything a machine asks, with nothing presented.
+    let r = c.get(format!("{host}/intent")).send().await.unwrap();
+    assert_eq!(r.status(), 200, "intent");
+    let r = c.post(format!("{host}/claim")).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(r.status(), 200, "claim");
+    let claim: serde_json::Value = r.json().await.unwrap();
+    let clone = claim["volume"]["id"].as_str().expect("a clone").to_string();
+    assert_ne!(clone, id, "a clone, not the image");
+    assert!(claim["host_secret"].is_string(), "{claim}");
+    // The secret's verbs are not here: the reply says where they are.
+    assert_eq!(claim["management_url"], format!("https://127.0.0.1:{api}"));
+
+    let r = c.post(format!("{plain}/api/v1/synonyms/boothost/default/claim"))
+        .json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(r.status(), 400, "the default claim is reached, and wants a MAC");
+    let r = c.get(format!("{host}/command")).send().await.unwrap();
+    assert!(r.status().is_success(), "command: {}", r.status());
+    let not_filtered = |b: &str| !b.contains("not on the boot port");
+    let r = c.post(format!("{host}/command/done")).json(&serde_json::json!({"id": 1, "result": "ok"})).send().await.unwrap();
+    assert!(not_filtered(&r.text().await.unwrap()), "command/done is on the list");
+    let r = c.post(format!("{host}/installed")).json(&serde_json::json!({"volume": clone})).send().await.unwrap();
+    assert!(not_filtered(&r.text().await.unwrap()), "installed is on the list");
+
+    // Anything else: 404, the token making no difference.
+    for path in ["/api/v1/volumes", "/metrics", "/api/v1/version", "/debug/stalls", "/api/v1/synonyms/boothost/server8", "/nothing"] {
+        for token in [None, Some(TOKEN)] {
+            let mut q = c.get(format!("{plain}{path}"));
+            if let Some(t) = token {
+                q = q.bearer_auth(t);
+            }
+            let r = q.send().await.unwrap();
+            assert_eq!(r.status(), 404, "{path} with {token:?}");
+            assert!(!not_filtered(&r.text().await.unwrap()), "{path}");
+        }
+    }
+    let r = c.put(format!("{host}/intent")).bearer_auth(TOKEN).json(&serde_json::json!({"intent": "install"})).send().await.unwrap();
+    assert_eq!(r.status(), 404, "setting an intent is not a machine's");
+    let r = c.delete(format!("{plain}/api/v1/volumes/{clone}")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(r.status(), 404, "a delete");
+    let r = admin.get(format!("{tls}/api/v1/volumes/{clone}")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(r.status(), 200, "and the clone is still there");
+
+    // This port is not who is left on the API (#525).
+    let body = admin.get(format!("{tls}/metrics")).bearer_auth(TOKEN).send().await.unwrap().text().await.unwrap();
+    assert!(!body.contains("/api/v1/synonyms/…\"} "), "the boot port counted as plain on the API: {body}");
+
+    // The finder sends a machine to this port.
+    let url = stormblock::mgmt::finder::answer_url(&state, "127.0.0.1:1".parse().unwrap());
+    assert_eq!(url, Some(format!("http://127.0.0.1:{boot}")));
+}

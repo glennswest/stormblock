@@ -413,6 +413,7 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 |---|---|---|
 | `listen_addr` | `0.0.0.0:9090` | API address (an IP, not a hostname) |
 | `tls_cert`, `tls_key` | — | HTTPS; both or neither. Not there yet: plain HTTP until both are, then HTTPS with no restart (#483, [docs/auth.md](docs/auth.md#tls)); `/api/v1/health` `tls {serving, missing, mode}` |
+| `boot_listen` | — | a plain listener for the boot verbs alone (#524; 9089 by convention, stormbootx asks it first); anything else there is 404, and what a claim answers crosses it in the clear ([docs/auth.md](docs/auth.md#tls)); `/api/v1/health` `boot_listen {addr, listening}` |
 | `tls_mode` | `required` | `optional`: plain and TLS on one port by a connection's first byte, while callers move (#525, [docs/auth.md](docs/auth.md#tls)); `stormblock_mgmt_plain_requests_total{caller,route}` says who is left. Tokens cross in the clear from such a caller; for the move only |
 | `tls_client_ca` | — | the node CA: a client certificate it issued is a credential at the node token's tier (#203, [docs/auth.md](docs/auth.md#tls)); asked for, not required; needs `tls_cert`/`tls_key`. The pair and the CA are re-read when renewed |
 | `tls_admin_ca` | — | forge's CA (#379, stormcentral#416): a client certificate it issued to a CN in `tls_admin_subjects` or a name in `tls_admin_names`, not revoked by `tls_admin_crl`, is the admin token's tier. Any other certificate it issued and has not revoked (every enrolled node has one) may read a sealed volume's content and a release's manifest, nothing else (#383). Re-read on change |
@@ -588,6 +589,7 @@ file that still sets it loads, with a warning.
 | port | what | when |
 |---|---|---|
 | TCP 9090 | management API, `/metrics`, cluster and Raft RPCs | always (daemon, and `adopt-ublk --api`) |
+| TCP 9089 | the boot verbs alone, plain (#524) | `[management] boot_listen`, unset by default |
 | TCP 4420 | NVMe-oF/TCP: the shared subsystem, every host's own subsystem, and discovery (each host is shown only its own, [docs/nvme-access.md](docs/nvme-access.md)) | daemon, with something to export at startup; `adopt-ublk` in forge mode, on by default (#287) |
 | TCP 3260 | iSCSI shared target | daemon, unless `--no-iscsi` |
 | TCP 3261 | `/serve/v1`'s NVMe/TCP listener: every per-volume subsystem (`[serve] portal_base`, #188) | when `/serve/v1` serves an NVMe export |

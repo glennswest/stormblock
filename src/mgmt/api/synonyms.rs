@@ -894,7 +894,7 @@ fn add_paths(v: &mut serde_json::Value, hosts: &[String], port: u16, rest: &str)
     v["uri_multipath"] = json!(format!("nvme-tcp://{}/{rest}", paths.join(",")));
 }
 
-async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequest) -> Response {
+async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequest, reached: Option<String>) -> Response {
     // A machine claiming its boot image is the one caller that arrives with
     // no credential, so its claim is a different, narrower verb (#107).
     if namespace == BOOTHOST_NS {
@@ -917,7 +917,7 @@ async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequ
             }
         };
         let claimed = crate::lockwatch::spawn_owing(
-            async move { claim_boothost(state, &name, mac.as_deref(), serial.as_deref(), extra, maint).await },
+            async move { claim_boothost(state, &name, mac.as_deref(), serial.as_deref(), extra, maint, reached).await },
             move || async move {
                 if let Err(e) = crate::volume::VolumeManager::persist_detached_checked(&vm).await {
                     tracing::error!("boot claim: its clones were not written to the volume metadata: {e}");
@@ -1147,6 +1147,7 @@ async fn claim_boothost(
     serial: Option<&str>,
     (agent, inventory): (Option<serde_json::Value>, Option<serde_json::Value>),
     maint: bool,
+    reached: Option<String>,
 ) -> Response {
     // Where a claim's time goes (#424), said once per claim.
     let mut timing = ClaimTiming::start();
@@ -1227,7 +1228,7 @@ async fn claim_boothost(
     // The maintenance image (#497): a clone of its own, nothing of the host's
     // own boot touched.
     if maint {
-        return claim_maint(&state, tag, claimed_as, host.as_ref(), &names, (claim_mac, mac, new_machine), (agent, inventory), timing).await;
+        return claim_maint(&state, tag, claimed_as, host.as_ref(), &names, (claim_mac, mac, new_machine), (agent, inventory), timing, reached.as_deref()).await;
     }
 
     // 0. A boot override for this machine (#354): stormipmi's, read here.
@@ -1512,6 +1513,9 @@ async fn claim_boothost(
         "intent": intent_word,
         "override": ov,
         "host_secret": host_secret,
+        // Where that secret is used (#524): the management API, whichever
+        // port this claim came in on.
+        "management_url": state.management_url(reached.as_deref()),
         "install_config": install_config.as_ref().map(|(_, t)| t),
         "install_config_sha256": install_config.as_ref().map(|(d, _)| d),
         // Forge's CA, apiserver and bootstrap token, for the node's
@@ -1587,6 +1591,7 @@ async fn claim_maint(
     (claim_mac, mac, new_machine): (Option<String>, Option<String>, bool),
     (agent, inventory): (Option<serde_json::Value>, Option<serde_json::Value>),
     mut timing: ClaimTiming,
+    reached: Option<&str>,
 ) -> Response {
     let Some(syn) = state.synonyms.read().await.get(BOOTHOST_NS, MAINT_IMAGE).cloned() else {
         return ApiError::not_found(format!(
@@ -1689,6 +1694,7 @@ async fn claim_maint(
         "intent": MAINT_IMAGE,
         "image": MAINT_IMAGE,
         "host_secret": host_secret,
+        "management_url": state.management_url(reached),
         "forge_trust": crate::mgmt::forge_trust::claim_answer(state),
         "host": {
             "name": tag,
@@ -1843,26 +1849,33 @@ fn chrono_now() -> String {
     format!("at unix {secs}")
 }
 
+/// The name this request reached the node by.
+fn reached_as(headers: &HeaderMap) -> Option<String> {
+    headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()).map(str::to_string)
+}
+
 async fn claim_one(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
     Query(q): Query<ClaimQuery>,
+    headers: HeaderMap,
     body: Option<Json<ClaimRequest>>,
 ) -> Response {
     let mut req = body.map(|b| b.0).unwrap_or_default();
     req.mac = req.mac.or(q.mac);
-    claim(state, DEFAULT_NAMESPACE, &name, req).await
+    claim(state, DEFAULT_NAMESPACE, &name, req, reached_as(&headers)).await
 }
 
 async fn claim_two(
     State(state): State<Arc<AppState>>,
     Path((namespace, name)): Path<(String, String)>,
     Query(q): Query<ClaimQuery>,
+    headers: HeaderMap,
     body: Option<Json<ClaimRequest>>,
 ) -> Response {
     let mut req = body.map(|b| b.0).unwrap_or_default();
     req.mac = req.mac.or(q.mac);
-    claim(state, &namespace, &name, req).await
+    claim(state, &namespace, &name, req, reached_as(&headers)).await
 }
 
 /// The intent routes live in the `boothost` namespace only.

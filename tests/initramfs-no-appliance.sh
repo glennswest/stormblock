@@ -115,6 +115,24 @@ start=$(date +%s); discover "" > /dev/null; took=$(( $(date +%s) - start ))
 [ "$took" -lt 5 ] && echo "  ok    and it does not wait (${took}s)" \
     || { echo "  FAIL  it waited ${took}s with no named boothost"; fail=1; }
 
+# #524: the firmware's engine, then the boot port before :9090 on every host.
+r=$(FW_ENGINE=10.0.0.5:9089 ANSWERS=http://10.0.0.5:9089 discover "")
+check "the engine that answered the firmware is the appliance" "http://10.0.0.5:9089" "${r%%|*}"
+check "  and it was asked first" "1" "${r##*|}"
+r=$(FW_ENGINE=10.0.0.5:9089 ANSWERS=http://10.0.0.5:9089 ANSWER_AFTER=9 STORM_BOOTHOST_WAIT=30 discover "")
+check "  and it is waited for, as one named to this boot" "http://10.0.0.5:9089" "${r%%|*}"
+r=$(FW_ENGINE=10.0.0.5:9089 ANSWERS=http://boothost:9089 discover "")
+check "  and when it is gone the network is asked" "http://boothost:9089" "${r%%|*}"
+r=$(ANSWERS=http://boothost:9089 discover "")
+check "the boot port of a host is found" "http://boothost:9089" "${r%%|*}"
+check "  before anything else is asked" "1" "${r##*|}"
+r=$(ANSWERS=http://boothost:9090 discover "")
+check "an engine with no boot port still answers on 9090" "http://boothost:9090" "${r%%|*}"
+r=$(BOOTPORT=7777 ANSWERS=http://boothost:7777 discover "")
+check "rd.stormblock.bootport= names the one port" "http://boothost:7777" "${r%%|*}"
+r=$(BOOTPORT=7777 ANSWERS=http://boothost:9089 discover "")
+check "  and no other is asked" "" "${r%%|*}"
+
 # ---------------------------------------------------------------------------
 echo "local-slab probe without an appliance:"
 

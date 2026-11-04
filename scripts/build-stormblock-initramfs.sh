@@ -974,6 +974,9 @@ efi_value() { # name -> the variable's value, if it is set and plausible
 }
 FW_TAG=$(efi_value StormBootTag)
 FW_NQN=$(efi_value StormBootHostNqn)
+# <addr>:<port> of the engine whose health answered the firmware on this boot
+# (stormbootx#183): the appliance discovery asks it first.
+FW_ENGINE=$(efi_value StormBootEngine)
 if [ -n "$FW_TAG" ]; then
     if [ -n "$BOOTTAG" ] && [ "$BOOTTAG" != "$FW_TAG" ]; then
         echo "WARNING: rd.stormblock.tag=$BOOTTAG, but the firmware claimed as $FW_TAG - using $FW_TAG"
@@ -2742,6 +2745,8 @@ if [ "$BOOT_MODE" = "local" ]; then
     # being rebuilt:
     #
     #   rd.stormblock.boothost=   an operator overriding, or a lab with no DHCP
+    #   StormBootEngine           the engine that answered the firmware on this
+    #                             boot (an EFI variable, stormbootx#183)
     #   DHCP option 17            root-path, when the lease carries a URL
     #   boothost.<search domain>  one A record, and the name is the same
     #                             everywhere - each network answers with its own
@@ -2762,10 +2767,16 @@ if [ "$BOOT_MODE" = "local" ]; then
     # matters (the release check it skips, a disk that cannot boot, #294).
     BOOTHOST_WHY=""
     if [ -z "$BOOTHOST" ]; then
-        BOOTPORT="${BOOTPORT:-9090}"
+        # The boot port first (#524): :9090 goes TLS, which this cannot speak,
+        # and an engine with no boot port still answers plain there.
+        BOOTPORTS="${BOOTPORT:-9089 9090}"
+        at_bootports() { # host -> its URLs, one per port
+            for _p in $BOOTPORTS; do printf ' http://%s:%s' "$1" "$_p"; done
+        }
         CANDIDATE_HOSTS=""
         [ -s "${STORM_BOOTHOST_FILE:-/run/stormblock-boothost}" ] \
             && CANDIDATE_HOSTS="$(cat "${STORM_BOOTHOST_FILE:-/run/stormblock-boothost}")"
+        [ -n "${FW_ENGINE:-}" ] && CANDIDATE_HOSTS="http://$FW_ENGINE $CANDIDATE_HOSTS"
         # The network named its boothost: it is there to be asked, so a
         # silence is a link that has just come up (server8's ConnectX-3:
         # carrier, then ARP, then forge), not an answer. Ask again for a
@@ -2797,10 +2808,10 @@ if [ "$BOOT_MODE" = "local" ]; then
                 [ -n "$BOOTDOM" ] && { echo "  domain from the resolver's own PTR: $BOOTDOM"; break; }
             done
         fi
-        [ -n "$BOOTDOM" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://boothost.$BOOTDOM:$BOOTPORT"
-        CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://boothost:$BOOTPORT"
+        [ -n "$BOOTDOM" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS$(at_bootports "boothost.$BOOTDOM")"
+        CANDIDATE_HOSTS="$CANDIDATE_HOSTS$(at_bootports boothost)"
         for f in /run/dhcp-siaddr /run/dhcp-serverid; do
-            [ -s "$f" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS http://$(cat "$f"):$BOOTPORT"
+            [ -s "$f" ] && CANDIDATE_HOSTS="$CANDIDATE_HOSTS$(at_bootports "$(cat "$f")")"
         done
         # Last, and only when asked (#104, the master's decision B): what
         # answers a query on the multicast group. Unauthenticated - anyone
@@ -5457,7 +5468,7 @@ echo ""
 echo "Boot kernel cmdline:"
 echo "  iSCSI: rd.stormblock.portal=<ip> rd.stormblock.iqn=<iqn> rd.stormblock.layout=esp:256M,boot:512M,root:7G,swap:1G,home:rest"
 echo "  netboot: root=/dev/ublkb0   — both parameters below are optional:"
-echo "           rd.stormblock.boothost=<url>  overrides DHCP option 17, then http://boothost:9090"
+echo "           rd.stormblock.boothost=<url>  overrides the firmware's StormBootEngine, DHCP option 17, then boothost on 9089 and 9090 (rd.stormblock.bootport=<one port>)"
 echo "           [rd.stormblock.discover=on]   also ask the network (multicast), last (#104)"
 echo "           the name: the firmware's StormBootTag EFI variable (stormbootx), else"
 echo "           rd.stormblock.tag=<tag>, else the SMBIOS serial/UUID - a guess, which"

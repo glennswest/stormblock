@@ -47,7 +47,13 @@ pub fn answer_url(state: &AppState, asker: SocketAddr) -> Option<String> {
         Some(h) => h,
         None => crate::netif::route_source(asker)?.to_string(),
     };
-    let scheme = state.api_scheme();
+    // Who asks is a machine booting: the port made for it, when there is one
+    // (#524), which is plain whatever the API serves.
+    let boot_port = m.boot_listen.as_deref().and_then(|b| b.rsplit_once(':')).map(|(_, p)| p);
+    let (scheme, port) = match boot_port {
+        Some(p) => ("http", p),
+        None => (state.api_scheme(), port),
+    };
     let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
     Some(format!("{scheme}://{host}:{port}"))
 }

@@ -427,6 +427,7 @@ the claim reply gives one) and, before it starts the loader, sets two
 | variable | value (ASCII, no NUL) |
 |---|---|
 | `StormBootTag` | the name it claimed `boothost/<name>` on |
+| `StormBootEngine` | `<addr>:<port>` of the engine whose health answered it on this boot, set only then (stormbootx#183, #524). `/init` asks it first in its appliance discovery, after an explicit `rd.stormblock.boothost=`, and waits for it as for a boothost the network names. Discovery asks every other host on 9089 and then 9090 (`rd.stormblock.bootport=` names one port) |
 | `StormBootHostNqn` | the host NQN it attached as |
 | `StormBootInstallConfig` | the boot media's `install-config.yaml`: `v1:<length>:<chunks>:<sha256>`, the bytes in `StormBootInstallConfig0..N-1` (768 each). Used only when length and digest match, every variable deleted once read, written to `/state/config/install-config.yaml` (0600) only when `/state` has none (#275, stormbootx#79). Taken before forge's per-host one (#459), which an install writes over `/state`'s |
 

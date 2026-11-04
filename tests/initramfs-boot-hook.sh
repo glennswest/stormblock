@@ -429,6 +429,22 @@ efivars() { # dir tag [nqn] -> a fake efivarfs with stormbootx's variables
     return 0
 }
 
+# #524: the engine the firmware reached, for the appliance discovery.
+fw_engine() { # value
+    (
+        set +e
+        rm -rf "$WORK/fe"; mkdir -p "$WORK/fe"
+        printf '\006\000\000\000%s' "$1" > "$WORK/fe/StormBootEngine-$GUID"
+        STORM_EFIVARS="$WORK/fe"; STORM_DMI="$DMI"; BOOTTAG=""; HOSTNQN=""; BOOTTAG_FROM=""
+        . "$WORK/identity.sh" >/dev/null 2>&1
+        echo "$FW_ENGINE"
+    )
+}
+[ "$(fw_engine 192.168.8.10:9089)" = "192.168.8.10:9089" ] && echo "  ok    StormBootEngine is read" \
+    || { echo "  FAIL  StormBootEngine: '$(fw_engine 192.168.8.10:9089)'"; FAIL=1; }
+[ -z "$(fw_engine 'x/$(reboot)')" ] && echo "  ok    and what is not an address is not used" \
+    || { echo "  FAIL  StormBootEngine took a value that is no address"; FAIL=1; }
+
 # What boothost_claim claims as: <tag>|<source>|<host NQN>|<what boot-claim was asked>
 identity() { # efivars-dir [cmdline tag] [cmdline nqn]
     (

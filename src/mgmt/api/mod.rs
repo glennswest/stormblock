@@ -185,6 +185,14 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// names only, never a path. Left out with no TLS configured.
         #[serde(skip_serializing_if = "Option::is_none")]
         tls: Option<crate::mgmt::tls::TlsStatus>,
+        /// `[management] boot_listen`, when set (#524): whether it is bound.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        boot_listen: Option<BootListen>,
+    }
+    #[derive(Serialize)]
+    struct BootListen {
+        addr: String,
+        listening: bool,
     }
     #[derive(Serialize)]
     struct FlowOver {
@@ -264,6 +272,10 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         #[cfg(target_os = "linux")]
         fds: crate::fdlimit::report(),
         tls: state.mgmt_tls.get().map(|r| r.status()),
+        boot_listen: state.config.management.boot_listen.clone().map(|addr| BootListen {
+            addr,
+            listening: state.boot_listening.load(std::sync::atomic::Ordering::Relaxed),
+        }),
     })
     .into_response()
 }

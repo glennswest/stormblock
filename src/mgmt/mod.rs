@@ -17,6 +17,7 @@ pub mod debug;
 pub mod slab_report;
 pub mod tls;
 pub mod plain;
+pub mod boot_listen;
 pub mod raid_sets;
 pub mod nvme_hosts;
 pub mod ana;
@@ -295,6 +296,8 @@ pub struct AppState {
     pub serve: std::sync::OnceLock<Arc<crate::serve::ctx::ServeContext>>,
     /// The management listener's TLS, once it is listening with TLS configured.
     pub mgmt_tls: std::sync::OnceLock<Arc<tls::Reloader>>,
+    /// Whether `[management] boot_listen` is bound (#524).
+    pub boot_listening: std::sync::atomic::AtomicBool,
     /// `stormblock-state`, where the data directory is captured: set by
     /// `adopt-ublk` (#291: a release ticket reaches the next boot through it).
     pub state_store: std::sync::OnceLock<Arc<crate::state::StateStore>>,
@@ -474,6 +477,17 @@ impl AppState {
             None => self.config.management.tls_cert.is_some(),
         };
         if tls { "https" } else { "http" }
+    }
+
+    /// This node's management API, for a caller that reached it as `reached`
+    /// (a `Host` header, or an address): the advertised host when one is set,
+    /// the listener's port, whichever port the caller asked on (#524).
+    pub fn management_url(&self, reached: Option<&str>) -> Option<String> {
+        let m = &self.config.management;
+        let port = m.listen_addr.rsplit_once(':').map(|(_, p)| p).unwrap_or("9090");
+        let host = m.advertised_host().or_else(|| reached.and_then(host_of))?;
+        let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
+        Some(format!("{}://{host}:{port}", self.api_scheme()))
     }
 
     pub fn auth(&self) -> Arc<crate::serve::api::AuthConfig> {
@@ -658,6 +672,7 @@ impl AppState {
             )),
             serve: std::sync::OnceLock::new(),
             mgmt_tls: std::sync::OnceLock::new(),
+            boot_listening: std::sync::atomic::AtomicBool::new(false),
             state_store: std::sync::OnceLock::new(),
             pool_pressure: None,
             kube_auth: kubeauth::KubeAuth::from_config(config.management.kubernetes.as_ref()).map(Arc::new),
@@ -692,6 +707,17 @@ impl AppState {
             cluster: None,
         }
     }
+}
+
+/// The host of a `Host` header: `forge:9089` → `forge`, `[fd00::1]:9089` →
+/// `[fd00::1]`.
+fn host_of(reached: &str) -> Option<String> {
+    let reached = reached.trim();
+    let host = match reached.rsplit_once(':') {
+        Some((h, p)) if !p.contains(']') && (!h.contains(':') || h.ends_with(']')) => h,
+        _ => reached,
+    };
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 /// A TLS connection's first byte: a handshake record (#525).
@@ -868,6 +894,11 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
     let router = api::router(state.clone());
 
     let listener = TcpListener::bind(listen_addr).await?;
+
+    // Beside it, what firmware asks (#524).
+    if let Some(boot) = &state.config.management.boot_listen {
+        boot_listen::spawn(state.clone(), boot.clone(), router.clone());
+    }
 
     // Check if TLS is configured
     if let (Some(cert_path), Some(key_path)) = (

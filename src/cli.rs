@@ -9493,7 +9493,11 @@ fn note_host_secret(base: &str, reply: &serde_json::Value) {
     ) else {
         return;
     };
-    let s = HostSecret { appliance: base.to_string(), host: host.to_string(), secret: secret.to_string() };
+    // The secret works on the management API, and `base` may be the boot port,
+    // which answers none of its verbs (#524). An engine that names no URL has
+    // no boot port either.
+    let appliance = reply.get("management_url").and_then(|u| u.as_str()).unwrap_or(base);
+    let s = HostSecret { appliance: appliance.to_string(), host: host.to_string(), secret: secret.to_string() };
     if let Err(e) = s.write(std::path::Path::new(HOST_SECRET_PATH)) {
         eprintln!("boot-claim: {HOST_SECRET_PATH}: {e}");
     }

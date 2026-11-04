@@ -573,6 +573,11 @@ pub struct ManagementConfig {
     /// there, then HTTPS, and `/api/v1/health` says what is missing.
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    /// A plain listener for the boot verbs alone (#524): health, a machine's
+    /// claim, intent, command and install report; anything else is 404.
+    /// Firmware cannot do TLS. 9089 by convention (stormbootx asks it first).
+    /// Unset: no such listener. What a claim answers crosses it in the clear.
+    pub boot_listen: Option<String>,
     /// `required` (the default): with a pair, the listener is TLS only.
     /// `optional` (#525): it takes both, by a connection's first byte, while
     /// callers move; a token crosses in the clear from one not moved yet, and
@@ -747,6 +752,7 @@ impl Default for ManagementConfig {
             listen_addr: "0.0.0.0:9090".to_string(),
             tls_cert: None,
             tls_key: None,
+            boot_listen: None,
             tls_mode: None,
             tls_client_ca: None,
             tls_admin_ca: None,
@@ -1530,6 +1536,13 @@ impl StormBlockConfig {
             (Some(_), None) => anyhow::bail!("tls_cert requires tls_key to also be set"),
             (None, Some(_)) => anyhow::bail!("tls_key requires tls_cert to also be set"),
             (None, None) => {} // No TLS, fine
+        }
+        if let Some(boot) = &self.management.boot_listen {
+            let at = boot.parse::<SocketAddr>().map_err(|e| anyhow::anyhow!("invalid boot_listen '{boot}': {e}"))?;
+            let api = self.management.listen_addr.parse::<SocketAddr>().map(|a| a.port()).unwrap_or(0);
+            if at.port() == api && api != 0 {
+                anyhow::bail!("boot_listen {boot} is the management API's port: it is a port of its own");
+            }
         }
         match self.management.tls_mode.as_deref() {
             None | Some("required") | Some("optional") => {}

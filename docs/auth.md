@@ -641,8 +641,36 @@ be verified.
 
 A file that **is** there and does not parse is still an error at start: no API
 is served, and the engine logs it. After start it is a renewal half-written, as
-above. Plain and TLS at once on :9090 while callers move is #525; the boot
-verbs' own plain port is #524.
+above. Plain and TLS at once on :9090 while callers move is #525.
+
+**The boot port (#524).** Pre-boot firmware cannot do TLS, so
+`[management] boot_listen` (9089 by convention; unset, no such listener) serves
+what a machine asks before it has a system, in plain and with no credential:
+
+| verb | who |
+|---|---|
+| `GET /api/v1/health` | stormbootx, the initramfs |
+| `GET /api/v1/synonyms/boothost/<name>/intent` | stormbootx |
+| `POST /api/v1/synonyms/boothost/<name>/claim`, `…/default/claim` | stormbootx, the initramfs (`boot-claim`) |
+| `GET …/boothost/<name>/command`, `POST …/command/done` | stormbootx (#494) |
+| `POST …/boothost/<name>/installed` | the install report |
+
+Anything else there is 404, before any credential is looked at; these verbs'
+own rules are the ones `:9090` has. Health says `boot_listen {addr, listening}`:
+a port something else holds is tried again every 5 s, and the API goes on.
+
+**On this port, what a claim answers crosses the wire in the clear**, as it does
+on a plain `:9090` today: the machine's install-config (with whatever it holds,
+stormupdate's token among it), forge's CA and bootstrap token, and the host
+secret. Anyone on the segment can read them, and, since a claim takes no
+credential, can ask for them. A firmware with no TLS has nothing to protect
+them with; keep the boot network to the machines it boots.
+
+The host secret is used on the management API, not here, so a claim's reply names
+that: `management_url`, the advertised host (else the one the claim reached),
+the API's port, and its scheme (`http` while `tls_mode = "optional"`). `boot-claim`
+keeps it as `appliance` in the host secret's file. A node's copy is as of its
+last claim. The install ticket keeps the boot port: `installed` is on the list.
 
 Not done here: callers switching to `https://` with the node CA and a
 client pair is theirs, and the pair and settings in the node's config are
