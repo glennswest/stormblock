@@ -14669,7 +14669,7 @@ mod forge_mode_tests {
             .await
             .expect("the claim works through the boot port");
         assert!(uri.starts_with("nvme-tcp://"), "{uri}");
-        let dev = crate::drive::open_path(&uri).await.expect("the machine connects with what it got");
+        let dev = crate::drive::open_path(&uri, true).await.expect("the machine connects with what it got");
         let mut back = vec![0u8; MIB as usize];
         dev.read(0, &mut back).await.unwrap();
         assert_eq!(back, image, "the clone reads as the release it was claimed from");
