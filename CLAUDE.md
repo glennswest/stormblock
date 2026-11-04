@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Kept -data volumes that will not mount: orphan file "bad magic" (2026-11-04, #532, P1) — IN PROGRESS
+### Kept -data volumes that will not mount: orphan file "bad magic" (2026-11-04, #532, P1) — DONE (v23.17.0), closed; server8 pending
 
 server8 12.61: 10 kept `-data` volumes refused by the kernel, the mount point
 left on the read-only image, no apiserver. Read from `console/server8/sol.log`:
@@ -237,7 +237,8 @@ mount in that log, **2026-10-12T15:13Z** (superblock `initial error at
 older than the log. So not the cuts of 12.37/12.39/12.58, and 12.58's "no
 errors" is not evidence: its engine aborted as the mounts began (#522), and no
 data volume mounted at all. The bytes' cause cannot be read from logs (a slot
-boundary fits: block 217 of 256 at 1 MiB extents); it needs the disk.
+boundary fits: on a stock 4 GiB mkfs block 217 is at 8960, exactly on a 1 MiB
+boundary, so a whole extent of the volume read wrong, not ext4); it needs the disk.
 Found: mkfs-ext4's fsck never reads the orphan file's blocks, so a check calls
 such a volume clean and its repair would not mend it (filed on mkfs.ext4.rs).
 Plan: only a mount the kernel refused is touched, on any boot:
@@ -245,8 +246,11 @@ Plan: only a mount the kernel refused is touched, on any boot:
 - [x] /init: a refused mount is repaired and tried again, said as a FINDING; what
       still fails is a FATAL line and `/run/stormblock/boot-mounts`
 - [x] health `boot_mounts`, status `failed`
-- [ ] tests; `ci-mount-repair-verify.sh` (the real kernel's refusal, the shipped
-      initramfs); docs, CHANGELOG; check.sh
+- [x] tests; `ci-mount-repair-verify.sh` ALL PASS (kernel 7.2.11: server8's line,
+      a whole 1 MiB extent of zeros, e2fsck -fn clean after, FATAL past repair, off
+      switch); docs, CHANGELOG; check.sh at b0071865 ALL PASS; v23.17.0; stage.
+      Metal: server8's next install (FINDING: `N all zeros` says what the blocks
+      were). No check of kept volumes up front: only a refused mount is repaired
 
 ### A plain boot-only listener beside :9090 (2026-11-03, #524, P2, stormcos#374, stormbootx#183) — DONE (v23.16.0), closed; metal pending
 
