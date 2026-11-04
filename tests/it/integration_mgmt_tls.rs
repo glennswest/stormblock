@@ -919,6 +919,7 @@ async fn the_boot_port_answers_the_boot_verbs_beside_a_tls_api() {
     let (api, boot) = (free_port(), free_port());
     let mut cfg = config(&pki, &format!("127.0.0.1:{api}"));
     cfg.management.boot_listen = Some(format!("127.0.0.1:{boot}"));
+    cfg.management.admin_token = Some("admin-524".into());
     cfg.validate().expect("the config validates");
     let mut same = cfg.clone();
     same.management.boot_listen = Some(format!("127.0.0.1:{api}"));
@@ -943,7 +944,7 @@ async fn the_boot_port_answers_the_boot_verbs_beside_a_tls_api() {
     let r: serde_json::Value = admin.post(format!("{tls}/api/v1/volumes")).bearer_auth(TOKEN)
         .json(&serde_json::json!({"name": "release", "size": "4M"})).send().await.unwrap().json().await.unwrap();
     let id = r["id"].as_str().expect("a volume id").to_string();
-    let r = admin.post(format!("{tls}/api/v1/volumes/{id}/seal")).bearer_auth(TOKEN).send().await.unwrap();
+    let r = admin.post(format!("{tls}/api/v1/volumes/{id}/seal")).bearer_auth("admin-524").send().await.unwrap();
     assert!(r.status().is_success(), "seal: {}", r.status());
     let r = admin.post(format!("{tls}/api/v1/synonyms")).bearer_auth(TOKEN)
         .json(&serde_json::json!({"namespace": "boothost", "name": "server8", "volume": id})).send().await.unwrap();
