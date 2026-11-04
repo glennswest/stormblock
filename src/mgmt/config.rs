@@ -573,6 +573,12 @@ pub struct ManagementConfig {
     /// there, then HTTPS, and `/api/v1/health` says what is missing.
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    /// `required` (the default): with a pair, the listener is TLS only.
+    /// `optional` (#525): it takes both, by a connection's first byte, while
+    /// callers move; a token crosses in the clear from one not moved yet, and
+    /// `stormblock_mgmt_plain_requests_total` says who is left. For the move
+    /// only: remove it when that count stops.
+    pub tls_mode: Option<String>,
     /// The node CA (PEM) a client certificate is verified against (#203).
     /// With it, the HTTPS listener asks every client for a certificate; one
     /// the CA issued is a credential at the node token's tier. A client
@@ -741,6 +747,7 @@ impl Default for ManagementConfig {
             listen_addr: "0.0.0.0:9090".to_string(),
             tls_cert: None,
             tls_key: None,
+            tls_mode: None,
             tls_client_ca: None,
             tls_admin_ca: None,
             tls_admin_crl: None,
@@ -795,6 +802,11 @@ fn is_wildcard_host(host: &str) -> bool {
 }
 
 impl ManagementConfig {
+    /// `tls_mode = "optional"` (#525): plain is taken beside TLS.
+    pub fn tls_optional(&self) -> bool {
+        self.tls_mode.as_deref() == Some("optional")
+    }
+
     /// Host part of the configured advertised address, if any.
     ///
     /// Accepts either a bare host (`10.0.0.5`) or `host:port` — the port is
@@ -1518,6 +1530,10 @@ impl StormBlockConfig {
             (Some(_), None) => anyhow::bail!("tls_cert requires tls_key to also be set"),
             (None, Some(_)) => anyhow::bail!("tls_key requires tls_cert to also be set"),
             (None, None) => {} // No TLS, fine
+        }
+        match self.management.tls_mode.as_deref() {
+            None | Some("required") | Some("optional") => {}
+            Some(other) => anyhow::bail!("tls_mode is \"required\" or \"optional\", not \"{other}\""),
         }
         for (key, file) in [
             ("tls_client_ca", &self.management.tls_client_ca),

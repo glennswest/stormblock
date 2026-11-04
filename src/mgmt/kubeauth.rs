@@ -287,7 +287,13 @@ pub fn audit(path: Option<&std::path::Path>, rec: &AuditRecord) {
         who = %rec.who, method = %rec.method, path = %rec.path, decision = %rec.decision,
         status = rec.status.unwrap_or(0), "destructive call"
     );
-    let Some(p) = path else { return };
+    if let Some(p) = path {
+        append_audit(p, rec);
+    }
+}
+
+/// One record's line in the audit log, and nothing else.
+pub fn append_audit(p: &std::path::Path, rec: &AuditRecord) {
     let line = match serde_json::to_string(rec) {
         Ok(l) => l,
         Err(_) => return,

@@ -16,6 +16,7 @@ pub mod vhost_export;
 pub mod debug;
 pub mod slab_report;
 pub mod tls;
+pub mod plain;
 pub mod raid_sets;
 pub mod nvme_hosts;
 pub mod ana;
@@ -463,6 +464,11 @@ impl AppState {
     /// The scheme this node's API is reached at now: what it serves, not what
     /// is configured (a pair may not be there yet, #483).
     pub fn api_scheme(&self) -> &'static str {
+        // While callers move (#525), a URL handed out must work for one who
+        // has not: it may reach this node in plain, and is counted if it does.
+        if self.config.management.tls_optional() {
+            return "http";
+        }
         let tls = match self.mgmt_tls.get() {
             Some(r) => r.serving_tls(),
             None => self.config.management.tls_cert.is_some(),
@@ -688,6 +694,12 @@ impl AppState {
     }
 }
 
+/// A TLS connection's first byte: a handshake record (#525).
+const TLS_HANDSHAKE: u8 = 0x16;
+/// How long a connection may say nothing before `tls_mode = "optional"` can
+/// tell what it speaks.
+const FIRST_BYTE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Serve `router` over TLS on `listener` (#203). Each connection takes the
 /// reloader's current acceptor; a client certificate the node CA verified is
 /// put on every request of that connection as [`tls::ClientCert`].
@@ -717,13 +729,29 @@ pub async fn serve_tls(
         let until = reloader.watch_judged();
         let accepted = reloader.acceptor();
         let app = router.clone();
+        let optional = reloader.optional();
+        let tally = reloader.plain();
         tokio::spawn(async move {
             let Some((acceptor, classifier)) = accepted else {
                 // No pair yet (#483): plain, until there is one.
                 let io = hyper_util::rt::TokioIo::new(tcp_stream);
-                serve_connection(io, app, peer, None, until).await;
+                serve_connection(io, app, peer, None, Some(tally), until).await;
                 return;
             };
+            if optional {
+                // Here, not in the accept loop, so that a caller saying nothing
+                // waits alone; and bounded, or it holds its fd for good (#510).
+                let mut first = [0u8; 1];
+                match tokio::time::timeout(FIRST_BYTE_WAIT, tcp_stream.peek(&mut first)).await {
+                    Ok(Ok(1)) if first[0] == TLS_HANDSHAKE => {}
+                    Ok(Ok(1)) => {
+                        let io = hyper_util::rt::TokioIo::new(tcp_stream);
+                        serve_connection(io, app, peer, None, Some(tally), until).await;
+                        return;
+                    }
+                    _ => return,
+                }
+            }
             let tls_stream = match acceptor.accept(tcp_stream).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -733,19 +761,21 @@ pub async fn serve_tls(
             };
             let cert = tls::client_cert(&tls_stream, &classifier);
             let io = hyper_util::rt::TokioIo::new(tls_stream);
-            serve_connection(io, app, peer, cert, until).await;
+            serve_connection(io, app, peer, cert, None, until).await;
         });
     }
 }
 
 /// One connection of the management listener. `until`: when it changes, end
 /// the connection after its request in flight (#483): what it was judged by no
-/// longer holds, and the caller's next connection is judged afresh.
+/// longer holds, and the caller's next connection is judged afresh. `plain`:
+/// this connection is not TLS, and each request on it is counted (#525).
 async fn serve_connection<IO>(
     io: IO,
     app: axum::Router,
     peer: std::net::SocketAddr,
     cert: Option<tls::ClientCert>,
+    plain: Option<Arc<plain::PlainTally>>,
     mut until: tokio::sync::watch::Receiver<u64>,
 ) where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
@@ -753,8 +783,12 @@ async fn serve_connection<IO>(
     let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
         let app = app.clone();
         let cert = cert.clone();
+        let plain = plain.clone();
         async move {
             use tower::Service;
+            if let Some(tally) = &plain {
+                tally.note(peer.ip(), req.method().as_str(), req.uri().path());
+            }
             let mut svc = app;
             let mut req = req.map(axum::body::Body::new);
             // Never from the client: only what the handshake proved.
@@ -848,7 +882,13 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             admin_crl: state.config.management.tls_admin_crl.as_ref().map(Into::into),
             admin_names: state.config.management.tls_admin_names.clone(),
             admin_subjects: state.config.management.tls_admin_subjects.clone(),
-        })?);
+        })?.with_mode(state.config.management.tls_optional(), state.audit_log.clone()));
+        if reloader.optional() {
+            tracing::warn!(
+                "Management API on {listen_addr} takes plain and TLS (tls_mode = optional, #525): a token crosses in the clear from a caller not moved yet; {} names who is left",
+                plain::PLAIN_REQUESTS
+            );
+        }
         if state.config.management.tls_admin_ca.is_some() {
             if state.config.management.tls_admin_names.is_empty() && state.config.management.tls_admin_subjects.is_empty() {
                 tracing::warn!("tls_admin_ca is set and neither tls_admin_subjects nor tls_admin_names lists anyone: no certificate is admin (#379, #453)");
@@ -876,6 +916,9 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
         serve_tls(listener, router, reloader).await?;
     } else {
         tracing::info!("Management API listening on {listen_addr} (HTTP)");
+        if state.config.management.tls_optional() {
+            tracing::warn!("tls_mode = optional with no tls_cert/tls_key: nothing to be optional about, and plain requests are not counted (#525)");
+        }
         // Readiness asks whether this is listening, and only this code knows.
         // Set through the serving context when there is one — a node that is
         // not serving /serve/v1 has nobody to tell.

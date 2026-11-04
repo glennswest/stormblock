@@ -417,6 +417,8 @@ pub struct TlsStatus {
     pub serving: &'static str,
     /// The configured keys whose file is not there yet.
     pub missing: Vec<&'static str>,
+    /// `required`, or `optional` (#525): plain is taken beside TLS.
+    pub mode: &'static str,
 }
 
 /// The acceptor, re-made when the files change.
@@ -429,6 +431,8 @@ pub struct Reloader {
     /// judged at its handshake, and a CA that was not there asked for none).
     /// Open connections end after their request in flight and come back.
     judged: tokio::sync::watch::Sender<u64>,
+    optional: bool,
+    plain: Arc<super::plain::PlainTally>,
 }
 
 impl Reloader {
@@ -453,7 +457,27 @@ impl Reloader {
             current: Mutex::new(Current { acceptor, classifier, stamps, missing, checked: Instant::now() }),
             check_every,
             judged,
+            optional: false,
+            plain: Arc::new(super::plain::PlainTally::new(None)),
         })
+    }
+
+    /// `tls_mode` (#525), and where the first plain request of a caller and
+    /// route is written down.
+    pub fn with_mode(mut self, optional: bool, audit: Option<std::path::PathBuf>) -> Self {
+        self.optional = optional;
+        self.plain = Arc::new(super::plain::PlainTally::new(audit));
+        self
+    }
+
+    /// Whether plain is taken beside TLS once there is a pair.
+    pub fn optional(&self) -> bool {
+        self.optional
+    }
+
+    /// What counts this listener's plain requests.
+    pub fn plain(&self) -> Arc<super::plain::PlainTally> {
+        self.plain.clone()
     }
 
     pub fn files(&self) -> &TlsFiles {
@@ -478,7 +502,11 @@ impl Reloader {
 
     pub fn status(&self) -> TlsStatus {
         let cur = self.lock();
-        TlsStatus { serving: if cur.acceptor.is_some() { "https" } else { "http" }, missing: cur.missing.clone() }
+        TlsStatus {
+            serving: if cur.acceptor.is_some() { "https" } else { "http" },
+            missing: cur.missing.clone(),
+            mode: if self.optional { "optional" } else { "required" },
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Current> {

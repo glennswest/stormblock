@@ -412,7 +412,8 @@ Every section is optional; unknown keys are ignored silently. Sizes take
 | key | default | |
 |---|---|---|
 | `listen_addr` | `0.0.0.0:9090` | API address (an IP, not a hostname) |
-| `tls_cert`, `tls_key` | — | HTTPS; both or neither. Not there yet: plain HTTP until both are, then HTTPS with no restart (#483, [docs/auth.md](docs/auth.md#tls)); `/api/v1/health` `tls {serving, missing}` |
+| `tls_cert`, `tls_key` | — | HTTPS; both or neither. Not there yet: plain HTTP until both are, then HTTPS with no restart (#483, [docs/auth.md](docs/auth.md#tls)); `/api/v1/health` `tls {serving, missing, mode}` |
+| `tls_mode` | `required` | `optional`: plain and TLS on one port by a connection's first byte, while callers move (#525, [docs/auth.md](docs/auth.md#tls)); `stormblock_mgmt_plain_requests_total{caller,route}` says who is left. Tokens cross in the clear from such a caller; for the move only |
 | `tls_client_ca` | — | the node CA: a client certificate it issued is a credential at the node token's tier (#203, [docs/auth.md](docs/auth.md#tls)); asked for, not required; needs `tls_cert`/`tls_key`. The pair and the CA are re-read when renewed |
 | `tls_admin_ca` | — | forge's CA (#379, stormcentral#416): a client certificate it issued to a CN in `tls_admin_subjects` or a name in `tls_admin_names`, not revoked by `tls_admin_crl`, is the admin token's tier. Any other certificate it issued and has not revoked (every enrolled node has one) may read a sealed volume's content and a release's manifest, nothing else (#383). Re-read on change |
 | `tls_admin_crl` | — | forge's CRL, PEM or DER (stormcert#61); unset, a revoked certificate stays admin (said at start); set and not there yet, no certificate from forge's CA proves anything until it is (#483) |

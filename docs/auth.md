@@ -602,6 +602,30 @@ looked at every 5 s, connection or not):
 | `tls_admin_ca` | no certificate is admin, nor a forge node |
 | `tls_admin_crl` (with the key set) | **fails closed**: whether a certificate from forge's CA is revoked cannot be told, so none is admin or a forge node. Unlike the key unset, where revocation is not checked and the start says so |
 
+**While callers move: `tls_mode` (#525, stormcos#374).** `required`, the
+default, is what is described here: with a pair, the port is TLS and a plain
+connection fails its handshake. `optional` takes both on one port for as long
+as a release train moves its callers one golden at a time: a connection whose
+first byte is 0x16 is a TLS handshake, any other is served plain (one that says
+nothing for 30 s is closed). A plain connection carries no certificate, so only
+a token is a credential on it, and **that token crosses in the clear**, as it
+does from such a caller today. Nothing else changes: the same routes, the same
+checks, on both.
+
+The exit test is `stormblock_mgmt_plain_requests_total{caller,route}` on
+`/metrics`: every request served in plain on a listener with TLS configured, in
+either mode, by caller address and route family (`GET /api/v1/volumes/…`, never
+an id, a name or a ticket). A new caller + route also writes one `audit.log`
+line (`verb: plain-request`) and a WARN. A made-up path cannot grow it past 1024
+pairs: the rest count as `other`. When a release shows it no longer moving past
+boot, set `required` and remove the key. Health says `tls.mode`.
+
+While `optional`, the URLs this engine hands out (the finder's answer, a
+golden's ticket) stay `http`, whatever is served: they must work for a caller
+who has not moved. They become `https` with `required`, so whoever follows one
+needs the CA by then, and the count cannot show that in advance: it shows only
+that they are still plain.
+
 A certificate is judged at its handshake, so when a CA or CRL changes (appears,
 is replaced or goes) open connections end after their request in flight and the
 caller's next one is judged afresh: a caller connected before the CA appeared

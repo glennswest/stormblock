@@ -719,3 +719,187 @@ async fn a_tls_file_that_is_there_and_broken_is_still_an_error() {
     .await;
     assert!(reloader.serving_tls());
 }
+
+/// The value of one line of `/metrics`: the plain count of a caller and route.
+async fn plain_count(pki: &Pki, base: &str, route: &str) -> u64 {
+    let body = pki.client(None).get(format!("{base}/metrics")).bearer_auth(TOKEN).send().await.unwrap().text().await.unwrap();
+    let want = format!("route=\"{route}\"");
+    body.lines()
+        .filter(|l| l.starts_with("stormblock_mgmt_plain_requests_total") && l.contains(&want))
+        .map(|l| l.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
+        .sum()
+}
+
+/// #525: with a pair and `tls_mode = "optional"`, one port answers the same
+/// request over both; only the plain one is counted, once per request, by
+/// caller and route; its first request from a caller and route is in the audit
+/// log once. A plain connection carries no credential but a token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_optional_listener_answers_both_and_counts_only_the_plain_one() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    stormblock::mgmt::metrics::init_metrics();
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    let port = free_port();
+    let audit = tmp.path().join("audit.log");
+    let mut cfg = config(&pki, &format!("127.0.0.1:{port}"));
+    cfg.management.tls_mode = Some("optional".into());
+    cfg.management.audit_log = Some(audit.display().to_string());
+    cfg.validate().expect("the config validates");
+    let state = state_with(&tmp, cfg).await;
+    tokio::spawn(stormblock::mgmt::start_management_server(state.clone()));
+    wait_listening(port).await;
+    let tls = format!("https://127.0.0.1:{port}");
+    let plain = format!("http://127.0.0.1:{port}");
+
+    // A caller saying nothing keeps nobody else waiting.
+    let _silent = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    // The same request, both ways, the same answer.
+    let over_tls = pki.client(None).get(format!("{tls}/api/v1/volumes")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(over_tls.status(), 200);
+    let over_tls = over_tls.text().await.unwrap();
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, 0, "TLS is not counted");
+
+    let client = reqwest::Client::new();
+    let over_plain = client.get(format!("{plain}/api/v1/volumes")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(over_plain.status(), 200);
+    assert_eq!(over_plain.text().await.unwrap(), over_tls);
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, 1, "the plain one is");
+
+    // Each request, also on a connection kept; a refused one too (its token
+    // would have crossed in the clear all the same).
+    let r = client.get(format!("{plain}/api/v1/volumes")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "plain changes nothing about who may call");
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, 2);
+
+    // A body comes through the peek whole.
+    let r = client
+        .post(format!("{plain}/api/v1/volumes"))
+        .bearer_auth(TOKEN)
+        .json(&serde_json::json!({"name": "by-plain", "size": "4M"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "a plain create: {}", r.status());
+    assert_eq!(plain_count(&pki, &tls, "POST /api/v1/volumes").await, 1);
+
+    // No id in a route, and the caller by address alone.
+    let _ = client.get(format!("{plain}/api/v1/volumes/some-name-525")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes/…").await, 1);
+    let body = pki.client(None).get(format!("{tls}/metrics")).bearer_auth(TOKEN).send().await.unwrap().text().await.unwrap();
+    assert!(!body.contains("some-name-525"), "an id in a label");
+    assert!(
+        body.contains(r#"stormblock_mgmt_plain_requests_total{caller="127.0.0.1",route="GET /api/v1/volumes"} 2"#),
+        "{body}"
+    );
+
+    // One audit line per caller + route, however many requests.
+    let mut lines = Vec::new();
+    for _ in 0..100 {
+        lines = std::fs::read_to_string(&audit).unwrap_or_default().lines().map(str::to_string).collect();
+        if lines.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    let first: serde_json::Value = lines.iter().map(|l| serde_json::from_str(l).unwrap()).find(|v: &serde_json::Value| v["method"] == "GET" && v["path"] == "/api/v1/volumes").unwrap();
+    assert_eq!(first["who"], "127.0.0.1");
+    assert_eq!(first["verb"], "plain-request");
+
+    // A handed-out URL works for a caller who has not moved.
+    assert_eq!(state.api_scheme(), "http");
+    let health: serde_json::Value = client.get(format!("{plain}/api/v1/health")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(health["tls"]["serving"], "https");
+    assert_eq!(health["tls"]["mode"], "optional");
+
+    // A certificate still means what it meant, over TLS.
+    let r = pki.client(Some("kubelet")).get(format!("{tls}/api/v1/volumes")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+/// #525 with #483: `optional` with no pair yet is plain; when the pair appears
+/// it is both, with no restart. Plain with no pair is counted too: a caller
+/// that has moved fails its handshake then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_optional_listener_with_no_pair_yet_is_plain_then_both() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    stormblock::mgmt::metrics::init_metrics();
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    let mut files = pki.files();
+    files.cert = pki.p("later.crt");
+    files.key = pki.p("later.key");
+    let mut cfg = config(&pki, "127.0.0.1:0");
+    cfg.management.tls_mode = Some("optional".into());
+    let state = state_with(&tmp, cfg).await;
+    let reloader = Arc::new(Reloader::with_interval(files, Duration::ZERO).unwrap().with_mode(true, None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(stormblock::mgmt::serve_tls(listener, stormblock::mgmt::api::router(state), reloader));
+    wait_listening(port).await;
+    let tls = format!("https://127.0.0.1:{port}");
+    let plain = format!("http://127.0.0.1:{port}");
+
+    let r = reqwest::Client::new().get(format!("{plain}/api/v1/slabs")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(r.status(), 200, "no pair yet: plain");
+    assert!(pki.client(None).get(format!("{tls}/api/v1/health")).send().await.is_err(), "no pair yet: no TLS");
+
+    std::fs::copy(pki.p("server.key"), pki.p("later.key")).unwrap();
+    std::fs::copy(pki.p("server.crt"), pki.p("later.crt")).unwrap();
+    let mut up = false;
+    for _ in 0..100 {
+        if pki.client(None).get(format!("{tls}/api/v1/health")).send().await.is_ok() {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(up, "the pair was never taken up");
+
+    let r = reqwest::Client::new().get(format!("{plain}/api/v1/slabs")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(r.status(), 200, "a pair, and plain still answers");
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/slabs").await, 2, "both plain requests, either side of the pair");
+}
+
+/// #525: `required`, also when it is not written down, refuses plain once there
+/// is a pair, and nothing is counted. An unknown mode is refused at validate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_required_listener_refuses_plain_and_counts_nothing() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    stormblock::mgmt::metrics::init_metrics();
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    let port = free_port();
+    let mut bad = config(&pki, &format!("127.0.0.1:{port}"));
+    bad.management.tls_mode = Some("sometimes".into());
+    assert!(bad.validate().unwrap_err().to_string().contains("tls_mode"));
+
+    for mode in [None, Some("required")] {
+        let port = free_port();
+        let mut cfg = config(&pki, &format!("127.0.0.1:{port}"));
+        cfg.management.tls_mode = mode.map(Into::into);
+        cfg.validate().expect("the config validates");
+        let state = state_with(&tmp, cfg).await;
+        tokio::spawn(stormblock::mgmt::start_management_server(state.clone()));
+        wait_listening(port).await;
+        let tls = format!("https://127.0.0.1:{port}");
+
+        let plain = reqwest::Client::new().get(format!("http://127.0.0.1:{port}/api/v1/arrays")).bearer_auth(TOKEN).send().await;
+        assert!(plain.map(|r| !r.status().is_success()).unwrap_or(true), "plaintext answered under {mode:?}");
+        assert_eq!(plain_count(&pki, &tls, "GET /api/v1/arrays").await, 0);
+        assert_eq!(state.api_scheme(), "https");
+        let health: serde_json::Value = pki.client(None).get(format!("{tls}/api/v1/health")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(health["tls"]["mode"], "required");
+    }
+}

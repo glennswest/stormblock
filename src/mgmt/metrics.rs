@@ -241,6 +241,10 @@ impl Recorder for RegistryHandle {
 
 /// Register metric descriptions for drives, arrays, volumes, API.
 pub fn register_metrics() {
+    metrics::describe_counter!(
+        "stormblock_mgmt_plain_requests_total",
+        "Requests served in plain on a management listener with TLS configured, by caller and route (#525)"
+    );
     metrics::describe_gauge!("stormblock_drives_total", "Number of opened drives");
     metrics::describe_gauge!("stormblock_arrays_total", "Number of RAID arrays");
     metrics::describe_gauge!(

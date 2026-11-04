@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-03
+- **feat:** #525: `[management] tls_mode = "required"` (default, as before) `| "optional"`: with a pair, `optional` serves TLS and plain on one port, by a connection's first byte, while callers move one golden at a time (stormcos#374). Every plain request on a listener with TLS configured is counted, `stormblock_mgmt_plain_requests_total{caller,route}` (route family only, 1024 pairs, then `other`), with an `audit.log` line per new caller + route; health `tls.mode`. While optional, the URLs the engine hands out (finder, golden tickets) stay `http`: they must work for a caller not moved. A token crosses in the clear from such a caller, as it does today; the mode is for the move only.
+
 ## [v23.14.0] — 2026-11-03
 
 ### Fixed
