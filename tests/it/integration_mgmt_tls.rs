@@ -314,6 +314,26 @@ fn a_client_ca_needs_tls() {
     assert!(e.contains("tls_client_ca needs tls_cert"), "{e}");
 }
 
+/// Forge's CA, stormcentral's certificate, another node's, and a revoked
+/// stormcentral's, with the CRL that says so (stormcert#61).
+fn forge_pki(d: &Path) {
+    ca(d, "forge-ca");
+    leaf_san(d, "forge-ca", "stormcentral", "clientAuth", 365, "DNS:stormcentral.g8.lo");
+    leaf_san(d, "forge-ca", "server7", "clientAuth", 365, "DNS:server7.g8.lo");
+    leaf_san(d, "forge-ca", "old-stormcentral", "clientAuth", 365, "DNS:stormcentral.g8.lo");
+    // Forge revokes one (stormcert#61): its CRL.
+    std::fs::write(d.join("index.txt"), "").unwrap();
+    std::fs::write(d.join("crlnumber"), "1000\n").unwrap();
+    std::fs::write(
+        d.join("ca.cnf"),
+        "[ ca ]\ndefault_ca = d\n[ d ]\ndir = .\ndatabase = index.txt\ncrlnumber = crlnumber\n\
+         default_md = sha256\ndefault_crl_days = 30\ncertificate = forge-ca.crt\nprivate_key = forge-ca.key\n",
+    )
+    .unwrap();
+    openssl(d, &["ca", "-config", "ca.cnf", "-revoke", "old-stormcentral.crt"]);
+    openssl(d, &["ca", "-config", "ca.cnf", "-gencrl", "-out", "forge.crl"]);
+}
+
 /// #379 (stormcentral#416): a client certificate forge's CA issued to a
 /// listed admin identity is the admin token's tier, with nothing handed over
 /// by hand; one forge issued to another node is no credential here at all;
@@ -328,21 +348,7 @@ async fn a_forge_issued_certificate_for_a_listed_identity_is_admin_and_revocable
     let tmp = TempDir::new().unwrap();
     let pki = Pki::new(&tmp);
     let d = pki.dir.clone();
-    ca(&d, "forge-ca");
-    leaf_san(&d, "forge-ca", "stormcentral", "clientAuth", 365, "DNS:stormcentral.g8.lo");
-    leaf_san(&d, "forge-ca", "server7", "clientAuth", 365, "DNS:server7.g8.lo");
-    leaf_san(&d, "forge-ca", "old-stormcentral", "clientAuth", 365, "DNS:stormcentral.g8.lo");
-    // Forge revokes one (stormcert#61): its CRL.
-    std::fs::write(d.join("index.txt"), "").unwrap();
-    std::fs::write(d.join("crlnumber"), "1000\n").unwrap();
-    std::fs::write(
-        d.join("ca.cnf"),
-        "[ ca ]\ndefault_ca = d\n[ d ]\ndir = .\ndatabase = index.txt\ncrlnumber = crlnumber\n\
-         default_md = sha256\ndefault_crl_days = 30\ncertificate = forge-ca.crt\nprivate_key = forge-ca.key\n",
-    )
-    .unwrap();
-    openssl(&d, &["ca", "-config", "ca.cnf", "-revoke", "old-stormcentral.crt"]);
-    openssl(&d, &["ca", "-config", "ca.cnf", "-gencrl", "-out", "forge.crl"]);
+    forge_pki(&d);
 
     let port = free_port();
     let mut cfg = config(&pki, &format!("127.0.0.1:{port}"));
@@ -458,4 +464,238 @@ async fn a_forge_client_certificate_is_admin_by_its_subject_cn() {
 /// The first certificate of a PEM file, as DER.
 fn pem_der(pem: &[u8]) -> Vec<u8> {
     rustls_pemfile::certs(&mut std::io::BufReader::new(pem)).next().unwrap().unwrap().as_ref().to_vec()
+}
+
+/// The configured files, each in `live/`, where nothing is yet.
+fn config_on_live(pki: &Pki, live: &Path, port: u16, data: &Path) -> StormBlockConfig {
+    let at = |f: &str| Some(live.join(f).display().to_string());
+    let mut c = config(pki, &format!("127.0.0.1:{port}"));
+    c.management.admin_token = Some("admin-483".into());
+    c.management.data_dir = Some(data.display().to_string());
+    c.management.tls_cert = at("server.crt");
+    c.management.tls_key = at("server.key");
+    c.management.tls_client_ca = at("node-ca.crt");
+    c.management.tls_admin_ca = at("forge-ca.crt");
+    c.management.tls_admin_crl = at("forge.crl");
+    c.management.tls_admin_subjects = vec!["stormcentral".into()];
+    c
+}
+
+/// A renamed copy: how a file appears, whole.
+fn appear(pki: &Pki, live: &Path, f: &str) {
+    let tmp = live.join(format!(".{f}.tmp"));
+    std::fs::copy(pki.p(f), &tmp).unwrap();
+    std::fs::rename(&tmp, live.join(f)).unwrap();
+}
+
+async fn eventually<F, Fut>(what: &str, mut f: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..150 {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("never: {what}");
+}
+
+fn plain_client() -> reqwest::Client {
+    reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().unwrap()
+}
+
+async fn missing_of(r: reqwest::Response) -> (String, Vec<String>) {
+    let v: serde_json::Value = r.json().await.unwrap();
+    let t = &v["tls"];
+    (
+        t["serving"].as_str().unwrap_or_default().to_string(),
+        t["missing"].as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_string()).collect(),
+    )
+}
+
+/// #483, the node's first boot from its config through the real listener: every
+/// file named and none there. The config validates, the API answers plain with
+/// its credential checks on, and health names what is missing. Then each file
+/// appears and is taken up with no restart: the pair turns the listener to TLS
+/// and ends an open plain connection; a missing CRL fails closed; the pair going
+/// away never turns it back to plain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_tls_file_is_taken_up_as_it_appears_and_a_missing_crl_fails_closed() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    forge_pki(&pki.dir);
+    let live = tmp.path().join("live");
+    let data = tmp.path().join("data");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let port = free_port();
+    let cfg = config_on_live(&pki, &live, port, &data);
+    cfg.validate().expect("files not there yet are no reason to refuse the config");
+    let state = state_with(&tmp, cfg).await;
+    tokio::spawn(stormblock::mgmt::start_management_server(state.clone()));
+    wait_listening(port).await;
+    let http = format!("http://127.0.0.1:{port}");
+    let https = format!("https://127.0.0.1:{port}");
+    let asker: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let url_scheme = || stormblock::mgmt::finder::answer_url(&state, asker).unwrap();
+
+    // Nothing there: plain, and the token is still required.
+    let plain = plain_client();
+    let (serving, missing) = missing_of(plain.get(format!("{http}/api/v1/health")).send().await.unwrap()).await;
+    assert_eq!(serving, "http");
+    assert_eq!(missing, ["tls_cert", "tls_key", "tls_client_ca", "tls_admin_ca", "tls_admin_crl"]);
+    assert_eq!(plain.get(format!("{http}/api/v1/volumes")).send().await.unwrap().status(), 401);
+    let r = plain.get(format!("{http}/api/v1/volumes")).bearer_auth(TOKEN).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert!(url_scheme().starts_with("http://"), "{}", url_scheme());
+
+    // Half a pair: still plain.
+    appear(&pki, &live, "server.crt");
+    eventually("the cert is seen", || async {
+        let (_, m) = missing_of(plain.get(format!("{http}/api/v1/health")).send().await.unwrap()).await;
+        !m.iter().any(|k| k == "tls_cert")
+    })
+    .await;
+    assert_eq!(plain.get(format!("{http}/api/v1/health")).send().await.unwrap().status(), 200);
+
+    // A plain connection held open, as a caller's keep-alive is.
+    let mut held = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    held.write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: n1\r\n\r\n").await.unwrap();
+    let mut first = [0u8; 16];
+    held.read_exact(&mut first).await.unwrap();
+    assert!(first.starts_with(b"HTTP/1.1 200"));
+
+    // The whole pair: HTTPS, the held connection ended, plain refused.
+    appear(&pki, &live, "server.key");
+    let anon = pki.client(None);
+    eventually("the listener serves TLS", || async {
+        anon.get(format!("{https}/api/v1/health")).send().await.is_ok()
+    })
+    .await;
+    let mut rest = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), held.read_to_end(&mut rest))
+        .await
+        .expect("the plain connection ends when the pair appears")
+        .unwrap();
+    assert!(plain.get(format!("{http}/api/v1/health")).send().await.is_err(), "no plain once TLS is up");
+    let (serving, missing) = missing_of(anon.get(format!("{https}/api/v1/health")).send().await.unwrap()).await;
+    assert_eq!(serving, "https");
+    assert_eq!(missing, ["tls_client_ca", "tls_admin_ca", "tls_admin_crl"]);
+    assert!(url_scheme().starts_with("https://"), "{}", url_scheme());
+
+    // The node CA: its client certificate becomes a credential.
+    let kubelet = pki.client(Some("kubelet"));
+    assert_eq!(kubelet.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 401);
+    appear(&pki, &live, "node-ca.crt");
+    eventually("a node-CA certificate is a credential", || async {
+        kubelet.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status() == 200
+    })
+    .await;
+
+    // Forge's CA with no CRL: fails closed, for admin and a forge node alike.
+    let trust = serde_json::json!({
+        "ca": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        "bootstrap_token": "abc.def"
+    });
+    appear(&pki, &live, "forge-ca.crt");
+    eventually("forge's CA is seen", || async {
+        let (_, m) = missing_of(anon.get(format!("{https}/api/v1/health")).send().await.unwrap()).await;
+        m == ["tls_admin_crl"]
+    })
+    .await;
+    let manifest = format!("{https}/api/v1/releases/nosuch/manifest");
+    let sc = pki.client(Some("stormcentral"));
+    let node = pki.client(Some("server7"));
+    assert_eq!(sc.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 401, "no CRL: not admin");
+    assert_eq!(sc.put(format!("{https}/api/v1/forge/trust")).json(&trust).send().await.unwrap().status(), 401);
+    assert_eq!(node.get(&manifest).send().await.unwrap().status(), 401, "no CRL: not a forge node");
+
+    // The CRL: admin by certificate, a forge node's read, the revoked one not.
+    appear(&pki, &live, "forge.crl");
+    eventually("forge's certificate is admin", || async {
+        sc.put(format!("{https}/api/v1/forge/trust")).json(&trust).send().await.unwrap().status() == 200
+    })
+    .await;
+    assert_eq!(node.get(&manifest).send().await.unwrap().status(), 404, "a forge node reads; there is no such release");
+    let old = pki.client(Some("old-stormcentral"));
+    assert_eq!(old.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 401);
+    assert!(missing_of(anon.get(format!("{https}/api/v1/health")).send().await.unwrap()).await.1.is_empty());
+
+    // The CRL gone again: closed again. The pair gone: never plain again.
+    std::fs::remove_file(live.join("forge.crl")).unwrap();
+    std::fs::remove_file(live.join("server.crt")).unwrap();
+    std::fs::remove_file(live.join("server.key")).unwrap();
+    eventually("the files going is seen", || async {
+        let (s, m) = missing_of(anon.get(format!("{https}/api/v1/health")).send().await.unwrap()).await;
+        s == "https" && m == ["tls_cert", "tls_key", "tls_admin_crl"]
+    })
+    .await;
+    assert_eq!(sc.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 401);
+    assert_eq!(kubelet.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 200);
+    assert!(plain.get(format!("{http}/api/v1/health")).send().await.is_err(), "the pair held is still served");
+}
+
+/// #483: "not there" is the only leniency. A file that is there and does not
+/// parse refuses at start, whichever it is, pair or not; half a pair in the
+/// config is still refused; and at run time a broken file is retried, with the
+/// listener staying as it was until a good one arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tls_file_that_is_there_and_broken_is_still_an_error() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    let live = tmp.path().join("live");
+    std::fs::create_dir_all(&live).unwrap();
+    let files = TlsFiles {
+        cert: live.join("server.crt"),
+        key: live.join("server.key"),
+        client_ca: Some(live.join("node-ca.crt")),
+        admin_ca: Some(live.join("forge-ca.crt")),
+        admin_crl: Some(live.join("forge.crl")),
+        admin_names: Vec::new(),
+        admin_subjects: Vec::new(),
+    };
+    Reloader::new(files.clone()).expect("nothing there: no error");
+    for f in ["server.crt", "server.key", "node-ca.crt", "forge-ca.crt", "forge.crl"] {
+        std::fs::write(live.join(f), b"not what it should be").unwrap();
+        assert!(Reloader::new(files.clone()).is_err(), "{f} broken, the rest not there");
+        std::fs::remove_file(live.join(f)).unwrap();
+    }
+
+    let mut c = StormBlockConfig::default();
+    c.management.tls_cert = Some("/nonexistent/server.crt".into());
+    assert!(c.validate().unwrap_err().to_string().contains("tls_cert requires tls_key"));
+
+    // At run time: a broken pair leaves it plain, a good one turns it to TLS.
+    let state = state_with(&tmp, config(&pki, "127.0.0.1:0")).await;
+    let reloader = Arc::new(Reloader::with_interval(files, Duration::from_millis(50)).unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = stormblock::mgmt::api::router(state);
+    tokio::spawn(stormblock::mgmt::serve_tls(listener, router, reloader.clone()));
+    wait_listening(port).await;
+    let plain = plain_client();
+    std::fs::write(live.join("server.crt"), b"half written").unwrap();
+    std::fs::write(live.join("server.key"), b"half written").unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!reloader.serving_tls());
+    assert_eq!(plain.get(format!("http://127.0.0.1:{port}/api/v1/health")).send().await.unwrap().status(), 200);
+    appear(&pki, &live, "server.crt");
+    appear(&pki, &live, "server.key");
+    let anon = pki.client(None);
+    eventually("the good pair is served", || async {
+        anon.get(format!("https://127.0.0.1:{port}/api/v1/health")).send().await.is_ok()
+    })
+    .await;
+    assert!(reloader.serving_tls());
 }

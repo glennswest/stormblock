@@ -27,7 +27,7 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 /// The URL this node is reached at, as the caller reached it.
 fn base(state: &AppState, headers: &HeaderMap) -> String {
-    let scheme = if state.config.management.tls_cert.is_some() { "https" } else { "http" };
+    let scheme = state.api_scheme();
     match headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
         Some(h) => format!("{scheme}://{h}"),
         None => String::new(),

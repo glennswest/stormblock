@@ -10,6 +10,20 @@
 //! checks (at most every few seconds) whether one changed, and a set that
 //! loads replaces the one being served. One that does not load is said and
 //! the old one kept — a half-written renewal must not take the API down.
+//!
+//! A configured file that is not there is "not yet" (#483): on a stormcos node
+//! the engine serves the volumes stormcert runs from, so the pair, the node
+//! CA, forge's CA and its CRL all appear after it starts. Each is taken up when
+//! it appears, and `/api/v1/health` says which are still missing:
+//!
+//! | missing | meanwhile |
+//! |---|---|
+//! | `tls_cert` or `tls_key` | plain HTTP, as with no TLS configured; once a pair has been served, never plain again in this process |
+//! | `tls_client_ca` | no certificate is a credential at the node token's tier |
+//! | `tls_admin_ca` | no certificate is admin, nor a forge node |
+//! | `tls_admin_crl` | forge's CA proves nothing: revocation cannot be checked, so no certificate is admin, nor a forge node (with the key unset, revocation is simply not checked) |
+//!
+//! A file that is there and does not parse is an error at start, as ever.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -227,36 +241,77 @@ pub struct TlsFiles {
 }
 
 impl TlsFiles {
-    fn paths(&self) -> Vec<&Path> {
-        let mut v = vec![self.cert.as_path(), self.key.as_path()];
-        for p in [&self.client_ca, &self.admin_ca, &self.admin_crl].into_iter().flatten() {
-            v.push(p.as_path());
+    /// Every configured file, by its key in `[management]`.
+    fn named(&self) -> Vec<(&'static str, &Path)> {
+        let mut v = vec![("tls_cert", self.cert.as_path()), ("tls_key", self.key.as_path())];
+        for (name, p) in [
+            ("tls_client_ca", &self.client_ca),
+            ("tls_admin_ca", &self.admin_ca),
+            ("tls_admin_crl", &self.admin_crl),
+        ] {
+            if let Some(p) = p {
+                v.push((name, p.as_path()));
+            }
         }
         v
     }
 
     fn stamps(&self) -> Vec<Option<SystemTime>> {
-        self.paths()
+        self.named()
             .into_iter()
-            .map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+            .map(|(_, p)| std::fs::metadata(p).and_then(|m| m.modified()).ok())
             .collect()
+    }
+
+    /// The keys of `stamps` whose file is not there.
+    fn missing(&self, stamps: &[Option<SystemTime>]) -> Vec<&'static str> {
+        self.named().into_iter().zip(stamps).filter(|(_, s)| s.is_none()).map(|((name, _), _)| name).collect()
     }
 }
 
-fn read_certs(path: &Path) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    let f = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("failed to open TLS cert '{}': {e}", path.display()))?;
-    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::BufReader::new(f))
+/// What a missing file means until it appears (#483), for the log.
+fn meanwhile(key: &str) -> &'static str {
+    match key {
+        "tls_cert" | "tls_key" => "the API serves plain HTTP until the pair is there",
+        "tls_client_ca" => "no client certificate is a credential at the node token's tier until it is there",
+        "tls_admin_ca" => "no certificate is admin until it is there",
+        _ => "forge's revocations cannot be checked: no certificate from forge's CA proves anything until it is there",
+    }
+}
+
+/// The bytes of `path`; `None` when it is not there yet (#483). Anything else
+/// that stops the read (permissions, an I/O error) is an error.
+fn read_present(path: &Path, what: &str) -> anyhow::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("failed to open {what} '{}': {e}", path.display())),
+    }
+}
+
+type Certs = Vec<rustls::pki_types::CertificateDer<'static>>;
+
+fn read_certs(path: &Path) -> anyhow::Result<Option<Certs>> {
+    let Some(bytes) = read_present(path, "TLS cert")? else { return Ok(None) };
+    let certs: Vec<_> = rustls_pemfile::certs(&mut bytes.as_slice())
         .collect::<Result<_, _>>()
         .map_err(|e| anyhow::anyhow!("failed to parse certificates in {}: {e}", path.display()))?;
     if certs.is_empty() {
         anyhow::bail!("no certificates found in {}", path.display());
     }
-    Ok(certs)
+    Ok(Some(certs))
 }
 
-fn read_crls(path: &Path) -> anyhow::Result<Vec<webpki::CertRevocationList<'static>>> {
-    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("forge CRL {}: {e}", path.display()))?;
+fn read_key(path: &Path) -> anyhow::Result<Option<rustls::pki_types::PrivateKeyDer<'static>>> {
+    let Some(bytes) = read_present(path, "TLS key")? else { return Ok(None) };
+    rustls_pemfile::private_key(&mut bytes.as_slice())
+        .map_err(|e| anyhow::anyhow!("failed to parse TLS key: {e}"))?
+        .ok_or_else(|| anyhow::anyhow!("no private key found in {}", path.display()))
+        .map(Some)
+}
+
+fn read_crls(path: &Path) -> anyhow::Result<Option<Vec<webpki::CertRevocationList<'static>>>> {
+    let Some(bytes) = read_present(path, "forge CRL")? else { return Ok(None) };
     let ders: Vec<Vec<u8>> = if bytes.starts_with(b"-----") {
         rustls_pemfile::crls(&mut std::io::BufReader::new(bytes.as_slice()))
             .map(|r| r.map(|c| c.as_ref().to_vec()))
@@ -275,40 +330,55 @@ fn read_crls(path: &Path) -> anyhow::Result<Vec<webpki::CertRevocationList<'stat
                 .map(webpki::CertRevocationList::from)
                 .map_err(|e| anyhow::anyhow!("forge CRL {}: {e:?}", path.display()))
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map(Some)
 }
 
 /// What client certificates prove, for these files (#379).
 pub fn classifier(files: &TlsFiles) -> anyhow::Result<Classifier> {
+    let node_cas = match &files.client_ca { Some(p) => read_certs(p)?.unwrap_or_default(), None => Vec::new() };
+    let admin_cas = match &files.admin_ca { Some(p) => read_certs(p)?.unwrap_or_default(), None => Vec::new() };
+    let crls = match &files.admin_crl { Some(p) => read_crls(p)?, None => Some(Vec::new()) };
+    // A CRL configured and not held fails closed (#483): whether a certificate
+    // from forge's CA is revoked cannot be told, so it proves nothing, the
+    // forge-node tier included. With no CRL configured it is the other way:
+    // an operator's choice, warned of at start.
+    let (admin_cas, crls) = match crls {
+        Some(crls) => (admin_cas, crls),
+        None => (Vec::new(), Vec::new()),
+    };
     Ok(Classifier {
-        node_cas: match &files.client_ca { Some(p) => read_certs(p)?, None => Vec::new() },
-        admin_cas: match &files.admin_ca { Some(p) => read_certs(p)?, None => Vec::new() },
-        crls: match &files.admin_crl { Some(p) => read_crls(p)?, None => Vec::new() },
+        node_cas,
+        admin_cas,
+        crls,
         admin_names: files.admin_names.clone(),
         admin_subjects: files.admin_subjects.clone(),
     })
 }
 
-/// The server configuration for these files.
-pub fn load(files: &TlsFiles) -> anyhow::Result<ServerConfig> {
+/// The server configuration for these files; `None` while the pair is not
+/// all there (#483). Whatever is there is parsed either way.
+pub fn load(files: &TlsFiles) -> anyhow::Result<Option<ServerConfig>> {
     let certs = read_certs(&files.cert)?;
-    let key_file = std::fs::File::open(&files.key)
-        .map_err(|e| anyhow::anyhow!("failed to open TLS key '{}': {e}", files.key.display()))?;
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
-        .map_err(|e| anyhow::anyhow!("failed to parse TLS key: {e}"))?
-        .ok_or_else(|| anyhow::anyhow!("no private key found in {}", files.key.display()))?;
+    let key = read_key(&files.key)?;
+    let mut cas = Vec::new();
+    for ca in [&files.client_ca, &files.admin_ca].into_iter().flatten() {
+        if let Some(certs) = read_certs(ca)? {
+            cas.push((ca, certs));
+        }
+    }
+    let (Some(certs), Some(key)) = (certs, key) else { return Ok(None) };
 
     crate::http::ensure_crypto_provider();
     let builder = ServerConfig::builder();
     // Either CA is a root the handshake accepts; what a certificate proves
     // is decided after it, against each CA alone (`Classifier`).
-    let cas: Vec<&PathBuf> = [&files.client_ca, &files.admin_ca].into_iter().flatten().collect();
     let builder = if cas.is_empty() {
         builder.with_no_client_auth()
     } else {
         let mut roots = rustls::RootCertStore::empty();
-        for ca in &cas {
-            for c in read_certs(ca)? {
+        for (ca, certs) in cas {
+            for c in certs {
                 roots
                     .add(c)
                     .map_err(|e| anyhow::anyhow!("client CA {}: {e}", ca.display()))?;
@@ -324,6 +394,7 @@ pub fn load(files: &TlsFiles) -> anyhow::Result<ServerConfig> {
     };
     builder
         .with_single_cert(certs, key)
+        .map(Some)
         .map_err(|e| anyhow::anyhow!("invalid TLS configuration: {e}"))
 }
 
@@ -331,10 +402,21 @@ pub fn load(files: &TlsFiles) -> anyhow::Result<ServerConfig> {
 const CHECK_EVERY: Duration = Duration::from_secs(5);
 
 struct Current {
-    acceptor: TlsAcceptor,
+    /// `None` until a pair has been there (#483): the API is plain.
+    acceptor: Option<TlsAcceptor>,
     classifier: Arc<Classifier>,
     stamps: Vec<Option<SystemTime>>,
+    missing: Vec<&'static str>,
     checked: Instant,
+}
+
+/// What `/api/v1/health` says of the management TLS (#483).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TlsStatus {
+    /// What the listener serves new connections: `https` or `http`.
+    pub serving: &'static str,
+    /// The configured keys whose file is not there yet.
+    pub missing: Vec<&'static str>,
 }
 
 /// The acceptor, re-made when the files change.
@@ -342,23 +424,32 @@ pub struct Reloader {
     files: TlsFiles,
     current: Mutex<Current>,
     check_every: Duration,
+    /// Set once a pair is served: plain connections still open then end.
+    tls_up: tokio::sync::watch::Sender<bool>,
 }
 
 impl Reloader {
-    /// Fails when the files do not load now: a node told to serve TLS must
-    /// not start serving plain HTTP, nor nothing quietly.
+    /// Fails when a file that is there does not load: a node told to serve
+    /// TLS must not start serving plain HTTP over a pair it cannot read. A
+    /// file that is not there yet is no failure (#483), and is said.
     pub fn new(files: TlsFiles) -> anyhow::Result<Self> {
         Self::with_interval(files, CHECK_EVERY)
     }
 
     pub fn with_interval(files: TlsFiles, check_every: Duration) -> anyhow::Result<Self> {
         let stamps = files.stamps();
-        let acceptor = TlsAcceptor::from(Arc::new(load(&files)?));
+        let missing = files.missing(&stamps);
+        let acceptor = load(&files)?.map(|cfg| TlsAcceptor::from(Arc::new(cfg)));
         let classifier = Arc::new(classifier(&files)?);
+        for key in &missing {
+            tracing::warn!("management TLS: {key} is configured and not there yet: {}", meanwhile(key));
+        }
+        let (tls_up, _) = tokio::sync::watch::channel(acceptor.is_some());
         Ok(Reloader {
             files,
-            current: Mutex::new(Current { acceptor, classifier, stamps, checked: Instant::now() }),
+            current: Mutex::new(Current { acceptor, classifier, stamps, missing, checked: Instant::now() }),
             check_every,
+            tls_up,
         })
     }
 
@@ -366,33 +457,99 @@ impl Reloader {
         &self.files
     }
 
-    /// The acceptor for the next connection, and what its client certificate
-    /// proves.
-    pub fn acceptor(&self) -> (TlsAcceptor, Arc<Classifier>) {
-        let mut cur = self.current.lock().unwrap_or_else(|e| e.into_inner());
-        if cur.checked.elapsed() >= self.check_every {
+    /// How often the files are looked at.
+    pub fn check_every(&self) -> Duration {
+        self.check_every
+    }
+
+    /// Whether new connections are served TLS.
+    pub fn serving_tls(&self) -> bool {
+        *self.tls_up.borrow()
+    }
+
+    /// Changes to true when a pair is first served; plain connections watch it.
+    pub fn watch_tls(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.tls_up.subscribe()
+    }
+
+    pub fn status(&self) -> TlsStatus {
+        let missing = self.lock().missing.clone();
+        TlsStatus { serving: if self.serving_tls() { "https" } else { "http" }, missing }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
+        self.current.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Look at the files if it is time to. Nothing is held while they are
+    /// read: on a node they live on a volume this engine serves, and health
+    /// must answer whatever that volume is doing.
+    pub fn refresh(&self) {
+        let before = {
+            let mut cur = self.lock();
+            if cur.checked.elapsed() < self.check_every {
+                return;
+            }
             cur.checked = Instant::now();
-            let stamps = self.files.stamps();
-            if stamps != cur.stamps {
-                match load(&self.files).and_then(|cfg| Ok((cfg, classifier(&self.files)?))) {
-                    Ok((cfg, cls)) => {
-                        cur.acceptor = TlsAcceptor::from(Arc::new(cfg));
-                        cur.classifier = Arc::new(cls);
-                        cur.stamps = stamps;
-                        tracing::info!(
-                            "management TLS: {} re-read (renewed); new connections use it",
-                            self.files.cert.display()
-                        );
-                    }
-                    // Tried again at the next check: the files may be
-                    // mid-write.
-                    Err(e) => tracing::warn!(
-                        "management TLS: the changed files do not load ({e}); still serving the previous pair"
-                    ),
+            cur.stamps.clone()
+        };
+        let stamps = self.files.stamps();
+        let missing = self.files.missing(&stamps);
+        if stamps == before {
+            return;
+        }
+        let loaded = load(&self.files).and_then(|cfg| Ok((cfg, classifier(&self.files)?)));
+        let mut cur = self.lock();
+        let was = std::mem::replace(&mut cur.missing, missing.clone());
+        let (cfg, cls) = match loaded {
+            Ok(l) => l,
+            // Tried again at the next check: the files may be mid-write.
+            Err(e) => {
+                tracing::warn!(
+                    "management TLS: the changed files do not load ({e}); still serving what was loaded before"
+                );
+                return;
+            }
+        };
+        cur.classifier = Arc::new(cls);
+        cur.stamps = stamps;
+        for key in was.iter().filter(|k| !missing.contains(k)) {
+            tracing::info!("management TLS: {key} is there now and taken up");
+        }
+        for key in missing.iter().filter(|k| !was.contains(k)) {
+            tracing::warn!("management TLS: {key} is gone: {}", meanwhile(key));
+        }
+        match cfg {
+            Some(cfg) => {
+                let first = cur.acceptor.is_none();
+                cur.acceptor = Some(TlsAcceptor::from(Arc::new(cfg)));
+                if first {
+                    tracing::info!(
+                        "management TLS: {} is there: new connections are HTTPS, plain ones end after their request",
+                        self.files.cert.display()
+                    );
+                    self.tls_up.send_replace(true);
+                } else {
+                    tracing::info!(
+                        "management TLS: {} re-read (renewed); new connections use it",
+                        self.files.cert.display()
+                    );
                 }
             }
+            // Never back to plain: what was served stays served.
+            None if cur.acceptor.is_some() => tracing::warn!(
+                "management TLS: the pair's files are gone; still serving the pair held in memory"
+            ),
+            None => {}
         }
-        (cur.acceptor.clone(), cur.classifier.clone())
+    }
+
+    /// The acceptor for the next connection and what its client certificate
+    /// proves; `None` while there is no pair (#483): serve it plain.
+    pub fn acceptor(&self) -> Option<(TlsAcceptor, Arc<Classifier>)> {
+        self.refresh();
+        let cur = self.lock();
+        cur.acceptor.clone().map(|a| (a, cur.classifier.clone()))
     }
 }
 

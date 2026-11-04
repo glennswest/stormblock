@@ -251,15 +251,28 @@ pub async fn host_nqn(state: &AppState) -> String {
 fn client(state: &AppState) -> Result<crate::http::Client, PeerError> {
     let (f, m) = (&state.config.fabric, &state.config.management);
     let mut b = crate::http::Client::builder().timeout(std::time::Duration::from_secs(30));
+    // These default to the management pair and CA, which on a node appear after
+    // the engine starts (#483): until then a peer sees no credential and cannot
+    // be verified, so it is skipped like one that does not answer, and a volume
+    // that is nowhere stays a 404.
+    let read = |path: &str, what: &str| match std::fs::read(path) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!("fabric: {what} {path} is not there yet");
+            Ok(None)
+        }
+        Err(e) => Err(PeerError::new(500, format!("fabric {what} {path}: {e}"))),
+    };
     if let Some(ca) = f.ca(m) {
-        let pem = std::fs::read(ca).map_err(|e| PeerError::new(500, format!("fabric CA {ca}: {e}")))?;
-        b = b.add_root_certificate_pem(pem);
+        if let Some(pem) = read(ca, "CA")? {
+            b = b.add_root_certificate_pem(pem);
+        }
     }
     match (f.client_cert(m), f.client_key(m)) {
         (Some(c), Some(k)) => {
-            let cert = std::fs::read(c).map_err(|e| PeerError::new(500, format!("fabric certificate {c}: {e}")))?;
-            let key = std::fs::read(k).map_err(|e| PeerError::new(500, format!("fabric key {k}: {e}")))?;
-            b = b.identity_pem(cert, key);
+            if let (Some(cert), Some(key)) = (read(c, "certificate")?, read(k, "key")?) {
+                b = b.identity_pem(cert, key);
+            }
         }
         _ => tracing::debug!("fabric: no client certificate; a peer sees no credential"),
     }

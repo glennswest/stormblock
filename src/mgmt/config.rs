@@ -568,6 +568,9 @@ impl Default for StormBlockConfig {
 #[serde(default)]
 pub struct ManagementConfig {
     pub listen_addr: String,
+    /// The serving pair: both or neither. A file not there yet is no error
+    /// (#483), here or for the CAs and CRL below: plain HTTP until both are
+    /// there, then HTTPS, and `/api/v1/health` says what is missing.
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     /// The node CA (PEM) a client certificate is verified against (#203).
@@ -586,7 +589,8 @@ pub struct ManagementConfig {
     pub tls_admin_ca: Option<String>,
     /// Forge's CRL (PEM or DER; several PEM blocks allowed, stormcert#61).
     /// Re-read when it changes. Unset: a revoked certificate stays admin
-    /// (said at start).
+    /// (said at start). Set and not there yet: no certificate from forge's CA
+    /// proves anything until it is (#483).
     pub tls_admin_crl: Option<String>,
     /// The identities (SAN DNS names) a forge-issued certificate is admin
     /// for: a server-style certificate. Empty (the default): none.
@@ -1506,16 +1510,11 @@ impl StormBlockConfig {
         self.management.listen_addr.parse::<SocketAddr>()
             .map_err(|e| anyhow::anyhow!("invalid management listen_addr '{}': {e}", self.management.listen_addr))?;
 
-        // Validate TLS config: both cert and key must be provided together
+        // Validate TLS config: both cert and key must be provided together. A
+        // file that is not there yet is no error (#483): on a node it appears
+        // after the engine starts, and `mgmt::tls` takes it up then.
         match (&self.management.tls_cert, &self.management.tls_key) {
-            (Some(cert), Some(key)) => {
-                if !Path::new(cert).exists() {
-                    anyhow::bail!("TLS cert file not found: {cert}");
-                }
-                if !Path::new(key).exists() {
-                    anyhow::bail!("TLS key file not found: {key}");
-                }
-            }
+            (Some(_), Some(_)) => {}
             (Some(_), None) => anyhow::bail!("tls_cert requires tls_key to also be set"),
             (None, Some(_)) => anyhow::bail!("tls_key requires tls_cert to also be set"),
             (None, None) => {} // No TLS, fine
@@ -1525,13 +1524,8 @@ impl StormBlockConfig {
             ("tls_admin_ca", &self.management.tls_admin_ca),
             ("tls_admin_crl", &self.management.tls_admin_crl),
         ] {
-            if let Some(f) = file {
-                if self.management.tls_cert.is_none() {
-                    anyhow::bail!("{key} needs tls_cert and tls_key: client certificates are asked for over TLS only");
-                }
-                if !Path::new(f).exists() {
-                    anyhow::bail!("{key}: file not found: {f}");
-                }
+            if file.is_some() && self.management.tls_cert.is_none() {
+                anyhow::bail!("{key} needs tls_cert and tls_key: client certificates are asked for over TLS only");
             }
         }
 

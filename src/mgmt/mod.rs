@@ -292,6 +292,8 @@ pub struct AppState {
     /// process that serves until it is killed wants anyway, but it is a cycle
     /// and worth saying so.
     pub serve: std::sync::OnceLock<Arc<crate::serve::ctx::ServeContext>>,
+    /// The management listener's TLS, once it is listening with TLS configured.
+    pub mgmt_tls: std::sync::OnceLock<Arc<tls::Reloader>>,
     /// `stormblock-state`, where the data directory is captured: set by
     /// `adopt-ublk` (#291: a release ticket reaches the next boot through it).
     pub state_store: std::sync::OnceLock<Arc<crate::state::StateStore>>,
@@ -458,6 +460,16 @@ impl AppState {
     }
 
     /// What a caller must present, as of now.
+    /// The scheme this node's API is reached at now: what it serves, not what
+    /// is configured (a pair may not be there yet, #483).
+    pub fn api_scheme(&self) -> &'static str {
+        let tls = match self.mgmt_tls.get() {
+            Some(r) => r.serving_tls(),
+            None => self.config.management.tls_cert.is_some(),
+        };
+        if tls { "https" } else { "http" }
+    }
+
     pub fn auth(&self) -> Arc<crate::serve::api::AuthConfig> {
         // A poisoned lock here would mean a panic while swapping the token at
         // startup; the token itself is still whatever was in there, and
@@ -639,6 +651,7 @@ impl AppState {
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),
             serve: std::sync::OnceLock::new(),
+            mgmt_tls: std::sync::OnceLock::new(),
             state_store: std::sync::OnceLock::new(),
             pool_pressure: None,
             kube_auth: kubeauth::KubeAuth::from_config(config.management.kubernetes.as_ref()).map(Arc::new),
@@ -683,11 +696,33 @@ pub async fn serve_tls(
     router: axum::Router,
     reloader: Arc<tls::Reloader>,
 ) -> anyhow::Result<()> {
+    // Files are also looked at with no connection arriving (#483): plain
+    // connections end when a pair appears, and health says what is missing.
+    let mut tick = tokio::time::interval(reloader.check_every().max(std::time::Duration::from_millis(100)));
+    let mut looking: Option<tokio::task::JoinHandle<()>> = None;
     loop {
-        let (tcp_stream, peer) = listener.accept().await?;
-        let (acceptor, classifier) = reloader.acceptor();
+        let (tcp_stream, peer) = tokio::select! {
+            r = listener.accept() => r?,
+            _ = tick.tick() => {
+                // Off the runtime: on a node the files are on a volume this
+                // engine serves. One look at a time, however long it takes.
+                if looking.as_ref().map_or(true, |h| h.is_finished()) {
+                    let r = reloader.clone();
+                    looking = Some(tokio::task::spawn_blocking(move || r.refresh()));
+                }
+                continue;
+            }
+        };
+        let accepted = reloader.acceptor();
         let app = router.clone();
+        let plain_until = reloader.watch_tls();
         tokio::spawn(async move {
+            let Some((acceptor, classifier)) = accepted else {
+                // No pair yet (#483): plain, until there is one.
+                let io = hyper_util::rt::TokioIo::new(tcp_stream);
+                serve_connection(io, app, peer, None, Some(plain_until)).await;
+                return;
+            };
             let tls_stream = match acceptor.accept(tcp_stream).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -697,26 +732,51 @@ pub async fn serve_tls(
             };
             let cert = tls::client_cert(&tls_stream, &classifier);
             let io = hyper_util::rt::TokioIo::new(tls_stream);
-            let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                let app = app.clone();
-                let cert = cert.clone();
-                async move {
-                    use tower::Service;
-                    let mut svc = app;
-                    let mut req = req.map(axum::body::Body::new);
-                    // Never from the client: only what the handshake proved.
-                    req.extensions_mut().remove::<tls::ClientCert>();
-                    if let Some(c) = cert {
-                        req.extensions_mut().insert(c);
-                    }
-                    req.extensions_mut().insert(axum::extract::ConnectInfo(peer));
-                    Ok::<_, std::convert::Infallible>(svc.call(req).await.unwrap())
-                }
-            });
-            let _ = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                .serve_connection(io, service)
-                .await;
+            serve_connection(io, app, peer, cert, None).await;
         });
+    }
+}
+
+/// One connection of the management listener. `plain_until`: end it after its
+/// request in flight when that turns true (a pair appeared, #483).
+async fn serve_connection<IO>(
+    io: IO,
+    app: axum::Router,
+    peer: std::net::SocketAddr,
+    cert: Option<tls::ClientCert>,
+    plain_until: Option<tokio::sync::watch::Receiver<bool>>,
+) where
+    IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+        let app = app.clone();
+        let cert = cert.clone();
+        async move {
+            use tower::Service;
+            let mut svc = app;
+            let mut req = req.map(axum::body::Body::new);
+            // Never from the client: only what the handshake proved.
+            req.extensions_mut().remove::<tls::ClientCert>();
+            if let Some(c) = cert {
+                req.extensions_mut().insert(c);
+            }
+            req.extensions_mut().insert(axum::extract::ConnectInfo(peer));
+            Ok::<_, std::convert::Infallible>(svc.call(req).await.unwrap())
+        }
+    });
+    let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    let conn = builder.serve_connection(io, service);
+    let Some(mut plain_until) = plain_until else {
+        let _ = conn.await;
+        return;
+    };
+    tokio::pin!(conn);
+    tokio::select! {
+        _ = conn.as_mut() => {}
+        _ = plain_until.wait_for(|tls| *tls) => {
+            conn.as_mut().graceful_shutdown();
+            let _ = conn.await;
+        }
     }
 }
 
@@ -798,12 +858,17 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
                 tracing::warn!("tls_admin_ca is set with no tls_admin_crl: a certificate forge revokes stays admin here (#379)");
             }
         }
-        match &state.config.management.tls_client_ca {
-            Some(ca) => tracing::info!(
-                "Management API listening on {listen_addr} (HTTPS; a client certificate from {ca} is a credential)"
-            ),
-            None => tracing::info!("Management API listening on {listen_addr} (HTTPS)"),
+        if !reloader.serving_tls() {
+            tracing::warn!("Management API listening on {listen_addr} (plain HTTP: the TLS pair is not there yet, #483)");
+        } else {
+            match &state.config.management.tls_client_ca {
+                Some(ca) => tracing::info!(
+                    "Management API listening on {listen_addr} (HTTPS; a client certificate from {ca} is a credential)"
+                ),
+                None => tracing::info!("Management API listening on {listen_addr} (HTTPS)"),
+            }
         }
+        let _ = state.mgmt_tls.set(reloader.clone());
         // Readiness asks whether this is listening, and only this code knows.
         // Set through the serving context when there is one — a node that is
         // not serving /serve/v1 has nobody to tell.

@@ -179,6 +179,12 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         #[cfg(target_os = "linux")]
         #[serde(skip_serializing_if = "Option::is_none")]
         fds: Option<crate::fdlimit::Fds>,
+        /// With TLS configured (#483): what the listener `serving` (`https`,
+        /// or `http` while the pair is not there) and the keys of the
+        /// configured files `missing`, none of which stops the engine. Key
+        /// names only, never a path. Left out with no TLS configured.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tls: Option<crate::mgmt::tls::TlsStatus>,
     }
     #[derive(Serialize)]
     struct FlowOver {
@@ -257,6 +263,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         networks: state.config.network_report(),
         #[cfg(target_os = "linux")]
         fds: crate::fdlimit::report(),
+        tls: state.mgmt_tls.get().map(|r| r.status()),
     })
     .into_response()
 }

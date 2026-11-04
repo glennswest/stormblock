@@ -589,6 +589,31 @@ the CA's modification times at most every 5 s, as connections arrive. A set
 that loads is used from the next connection on, with no restart. A set that
 does not load (a renewal half-written) is logged and the previous one is kept.
 
+**A configured file that is not there yet (#483).** On a stormcos node the
+engine serves the volumes stormcert runs from, so the pair, the node CA,
+forge's CA and forge's CRL all appear after it starts. None of them stops the
+engine, and each is taken up when it appears, with no restart (the files are
+looked at every 5 s, connection or not):
+
+| missing | meanwhile |
+|---|---|
+| `tls_cert` or `tls_key` | **plain HTTP**, as with no TLS configured, tokens in the clear with it. When both are there new connections are HTTPS and plain ones end after their request in flight. Once a pair has been served, this process never goes back to plain: if the files go, it keeps the pair it holds. A restart with the pair gone serves plain again, and says so |
+| `tls_client_ca` | no client certificate is a credential at the node token's tier |
+| `tls_admin_ca` | no certificate is admin, nor a forge node |
+| `tls_admin_crl` (with the key set) | **fails closed**: whether a certificate from forge's CA is revoked cannot be told, so none is admin or a forge node. Unlike the key unset, where revocation is not checked and the start says so |
+
+The start logs each one. `GET /api/v1/health` has `tls: {serving: "https"|"http",
+missing: ["tls_admin_crl", …]}` (key names only; left out with no TLS
+configured). The scheme a golden's ticket URL and the appliance finder hand out
+follows what is served. `[fabric]`'s certificate and CA, which default to these
+files, are the same: until they are there a peer sees no credential and cannot
+be verified.
+
+A file that **is** there and does not parse is still an error at start: no API
+is served, and the engine logs it. After start it is a renewal half-written, as
+above. Plain and TLS at once on :9090 while callers move is #525; the boot
+verbs' own plain port is #524.
+
 Not done here: callers switching to `https://` with the node CA and a
 client pair is theirs, and the pair and settings in the node's config are
 stormcos's (stormcos#81).

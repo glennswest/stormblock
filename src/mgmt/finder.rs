@@ -47,7 +47,7 @@ pub fn answer_url(state: &AppState, asker: SocketAddr) -> Option<String> {
         Some(h) => h,
         None => crate::netif::route_source(asker)?.to_string(),
     };
-    let scheme = if m.tls_cert.is_some() { "https" } else { "http" };
+    let scheme = state.api_scheme();
     let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host };
     Some(format!("{scheme}://{host}:{port}"))
 }
