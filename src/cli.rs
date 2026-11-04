@@ -9482,22 +9482,26 @@ fn note_boot_override(reply: &serde_json::Value) {
     }
 }
 
+/// The secret works on the management API, and `base` may be the boot port,
+/// which answers none of its verbs (#524). An engine that names no URL has no
+/// boot port either.
+fn host_secret_of(base: &str, reply: &serde_json::Value) -> Option<crate::drive::handover::HostSecret> {
+    let secret = reply.get("host_secret")?.as_str()?;
+    let host = reply.get("host")?.get("name")?.as_str()?;
+    let appliance = reply.get("management_url").and_then(|u| u.as_str()).unwrap_or(base);
+    Some(crate::drive::handover::HostSecret {
+        appliance: appliance.to_string(),
+        host: host.to_string(),
+        secret: secret.to_string(),
+    })
+}
+
 /// Keep the host secret a claim handed this machine (#247), for stormupdate.
 /// Best effort: a machine without one is one that re-points with a token, as
 /// before.
 fn note_host_secret(base: &str, reply: &serde_json::Value) {
-    use crate::drive::handover::{HostSecret, HOST_SECRET_PATH};
-    let (Some(secret), Some(host)) = (
-        reply.get("host_secret").and_then(|s| s.as_str()),
-        reply.get("host").and_then(|h| h.get("name")).and_then(|n| n.as_str()),
-    ) else {
-        return;
-    };
-    // The secret works on the management API, and `base` may be the boot port,
-    // which answers none of its verbs (#524). An engine that names no URL has
-    // no boot port either.
-    let appliance = reply.get("management_url").and_then(|u| u.as_str()).unwrap_or(base);
-    let s = HostSecret { appliance: appliance.to_string(), host: host.to_string(), secret: secret.to_string() };
+    use crate::drive::handover::HOST_SECRET_PATH;
+    let Some(s) = host_secret_of(base, reply) else { return };
     if let Err(e) = s.write(std::path::Path::new(HOST_SECRET_PATH)) {
         eprintln!("boot-claim: {HOST_SECRET_PATH}: {e}");
     }
@@ -14612,6 +14616,77 @@ mod forge_mode_tests {
         let mut back = vec![0u8; MIB as usize];
         dev.read(0, &mut back).await.unwrap();
         assert_eq!(back, image, "the clone reads as the release it was claimed from");
+    }
+
+    /// #524: the real client through the boot port's filter: the verbs a boot
+    /// uses are all it asks, and the machine reads its image from what it got.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn boot_claim_gets_its_image_through_the_boot_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut config = StormBlockConfig::default();
+        config.management.data_dir = Some(dir.path().to_string_lossy().to_string());
+        config.management.advertised_addr = Some("127.0.0.1".into());
+        config.nvmeof = Some(section(&format!("127.0.0.1:{port}")));
+
+        let mut vm = VolumeManager::new(MIB);
+        let array = RaidArrayId(uuid::Uuid::new_v4());
+        let dev = FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 128 * MIB)
+            .await
+            .unwrap();
+        vm.add_backing_device(array, Arc::new(dev)).await;
+        let golden = vm.create_volume("release", 8 * MIB, array).await.unwrap();
+        let image: Vec<u8> = (0..MIB as usize).map(|i| (i % 251) as u8).collect();
+        let g = vm.get_volume(&golden).unwrap();
+        g.write(0, &image).await.unwrap();
+        g.flush().await.unwrap();
+        vm.seal_volume(golden, None).await.unwrap();
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let state = Arc::new(AppState::new(config.clone(), vm, reg, gem));
+        let target = mgmt::forge::target_from(config.nvmeof.as_ref().unwrap(), &config).unwrap();
+        let reactor = Arc::new(ReactorPool::new(&ReactorConfig { core_count: 1, pin_cores: false }));
+        mgmt::forge::serve(&state, &reactor, Arc::new(target)).await.unwrap();
+
+        // The assignment is made on the API, the claim on the boot port.
+        let full = mgmt::api::router(state.clone());
+        let api = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_at = api.local_addr().unwrap();
+        let app = full.clone();
+        tokio::spawn(async move { axum::serve(api, app).await.unwrap() });
+        let boot = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let boot_at = boot.local_addr().unwrap();
+        let app = mgmt::boot_listen::router(full);
+        tokio::spawn(async move { axum::serve(boot, app).await.unwrap() });
+        let r = reqwest::Client::new()
+            .post(format!("http://{api_at}/api/v1/synonyms"))
+            .json(&serde_json::json!({"namespace": "boothost", "name": "server8", "volume": golden.0.to_string()}))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "boothost synonym: {}", r.status());
+
+        let uri = super::claim_boot_uri(&format!("http://{boot_at}"), "server8", "boothost", 30, None)
+            .await
+            .expect("the claim works through the boot port");
+        assert!(uri.starts_with("nvme-tcp://"), "{uri}");
+        let dev = crate::drive::open_path(&uri).await.expect("the machine connects with what it got");
+        let mut back = vec![0u8; MIB as usize];
+        dev.read(0, &mut back).await.unwrap();
+        assert_eq!(back, image, "the clone reads as the release it was claimed from");
+    }
+
+    #[test]
+    fn the_host_secret_keeps_the_management_api_not_the_boot_port() {
+        let boot = "http://forge:9089";
+        let reply = serde_json::json!({
+            "host_secret": "s", "host": {"name": "server8"}, "management_url": "https://forge:9090",
+        });
+        let s = super::host_secret_of(boot, &reply).unwrap();
+        assert_eq!((s.appliance.as_str(), s.host.as_str(), s.secret.as_str()), ("https://forge:9090", "server8", "s"));
+        // An older engine names none, and has no boot port.
+        let older = serde_json::json!({"host_secret": "s", "host": {"name": "server8"}});
+        assert_eq!(super::host_secret_of("http://forge:9090", &older).unwrap().appliance, "http://forge:9090");
+        assert!(super::host_secret_of(boot, &serde_json::json!({"host": {"name": "x"}})).is_none());
     }
 
     #[test]

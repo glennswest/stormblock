@@ -441,9 +441,9 @@ fw_engine() { # value
     )
 }
 [ "$(fw_engine 192.168.8.10:9089)" = "192.168.8.10:9089" ] && echo "  ok    StormBootEngine is read" \
-    || { echo "  FAIL  StormBootEngine: '$(fw_engine 192.168.8.10:9089)'"; FAIL=1; }
+    || { echo "  FAIL  StormBootEngine: '$(fw_engine 192.168.8.10:9089)'"; fail=1; }
 [ -z "$(fw_engine 'x/$(reboot)')" ] && echo "  ok    and what is not an address is not used" \
-    || { echo "  FAIL  StormBootEngine took a value that is no address"; FAIL=1; }
+    || { echo "  FAIL  StormBootEngine took a value that is no address"; fail=1; }
 
 # What boothost_claim claims as: <tag>|<source>|<host NQN>|<what boot-claim was asked>
 identity() { # efivars-dir [cmdline tag] [cmdline nqn]

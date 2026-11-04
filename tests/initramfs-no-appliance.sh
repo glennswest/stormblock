@@ -125,9 +125,9 @@ r=$(FW_ENGINE=10.0.0.5:9089 ANSWERS=http://boothost:9089 discover "")
 check "  and when it is gone the network is asked" "http://boothost:9089" "${r%%|*}"
 r=$(ANSWERS=http://boothost:9089 discover "")
 check "the boot port of a host is found" "http://boothost:9089" "${r%%|*}"
-check "  before anything else is asked" "1" "${r##*|}"
 r=$(ANSWERS=http://boothost:9090 discover "")
 check "an engine with no boot port still answers on 9090" "http://boothost:9090" "${r%%|*}"
+contains "  and the boot port was asked before it" "no engine at http://boothost:9089" "$(cat "$WORK/discovery.out")"
 r=$(BOOTPORT=7777 ANSWERS=http://boothost:7777 discover "")
 check "rd.stormblock.bootport= names the one port" "http://boothost:7777" "${r%%|*}"
 r=$(BOOTPORT=7777 ANSWERS=http://boothost:9089 discover "")
