@@ -3,8 +3,10 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-11-03
-- **feat:** #524: `[management] boot_listen` (9089 by convention, unset = none): a plain listener for health and the boot verbs alone (claim, intent, command, installed), everything else 404, for firmware that cannot do TLS (stormcos#374). A claim's reply names `management_url`, which `boot-claim` keeps in the host secret's file, since that secret works on the management API and not here. `/init` asks stormbootx's `StormBootEngine` EFI variable first, and each discovered host on 9089 then 9090; the finder answers the boot port. What a claim answers crosses this port in the clear, as on a plain :9090 today (docs/auth.md).
+## [v23.16.0] — 2026-11-03
+
+### Added
+- #524: `[management] boot_listen` (9089 by convention, unset = none): a plain listener for health and the boot verbs alone (claim, intent, command, installed), everything else 404, for firmware that cannot do TLS (stormcos#374). A claim's reply names `management_url`, which `boot-claim` keeps in the host secret's file, since that secret works on the management API and not here. `/init` asks stormbootx's `StormBootEngine` EFI variable first, and each discovered host on 9089 then 9090; the finder answers the boot port. What a claim answers crosses this port in the clear, as on a plain :9090 today (docs/auth.md).
 
 ## [v23.15.0] — 2026-11-03
 

@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,11 +227,12 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### A plain boot-only listener beside :9090 (2026-11-03, #524, P2, stormcos#374, stormbootx#183) — IN PROGRESS
+### A plain boot-only listener beside :9090 (2026-11-03, #524, P2, stormcos#374, stormbootx#183) — DONE (v23.16.0), closed; metal pending
 
 Firmware cannot do TLS. Decided on reading the callers:
 - `[management] boot_listen` (9089 by convention, unset = none): health (GET)
-  and exactly `is_boot_claim`'s verbs; anything else 404, before auth
+  and exactly `is_boot_claim`'s verbs; anything else 404, before auth; a port
+  held is retried every 5 s, the API goes on, health `boot_listen`
 - the host secret keeps the management URL: the claim reply says
   `management_url` (`api_scheme()://advertised or Host's host:listen port`),
   boot-claim keeps it as `HostSecret.appliance`, the base when an older engine
@@ -239,12 +240,15 @@ Firmware cannot do TLS. Decided on reading the callers:
 - /init: `StormBootEngine` (stormbootx v0.36.0) is asked first, as a boothost
   named to it; discovery asks 9089 then 9090 per host unless
   `rd.stormblock.bootport=` names one. The finder answers the boot port
-- [ ] config, listener, health, finder
-- [ ] management_url, boot-claim
-- [ ] /init, shell tests
-- [ ] tests (verbs, 404s with TLS on :9090, a full claim with the real client);
+- [x] config, listener, health, finder; management_url, boot-claim; /init
+- [x] tests: `boot_listen` unit, `integration_mgmt_tls` (the verbs, 404s with TLS
+      on :9090), `boot_claim_gets_its_image_through_the_boot_port` (the real
+      client, then reads the image), initramfs-no-appliance, -boot-hook;
       auth.md (what crosses in the clear), boot-hooks.md, README, CHANGELOG
-- [ ] check.sh; tag; stage; tell stormcos#374, stormbootx#183
+- [x] check.sh at d1f04c3c ALL PASS (1330/1330); v23.16.0; stage; stormcos#374,
+      stormbootx#183 told. Metal: stormbootx v0.36.0 booting with :9090 TLS, once
+      stormcos sets `boot_listen`. The node's copy of `management_url` is as of
+      its last claim, so a flip to `required` reaches it at its next claim
 
 ### Plain and TLS on one :9090 while callers move (2026-11-03, #525, P2, stormcos#374) — DONE (v23.15.0), closed; on a node after stormcos#374
 
