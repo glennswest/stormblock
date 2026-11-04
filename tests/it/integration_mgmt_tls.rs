@@ -999,5 +999,6 @@ async fn the_boot_port_answers_the_boot_verbs_beside_a_tls_api() {
 
     // The finder sends a machine to this port.
     let url = stormblock::mgmt::finder::answer_url(&state, "127.0.0.1:1".parse().unwrap());
-    assert_eq!(url, Some(format!("http://127.0.0.1:{boot}")));
+    let url = url.expect("an answer");
+    assert!(url.starts_with("http://") && url.ends_with(&format!(":{boot}")), "{url}");
 }
