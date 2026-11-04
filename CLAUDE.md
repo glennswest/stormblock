@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,19 +227,23 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Plain and TLS on one :9090 while callers move (2026-11-03, #525, P2, stormcos#374) — IN PROGRESS
+### Plain and TLS on one :9090 while callers move (2026-11-03, #525, P2, stormcos#374) — DONE (v23.15.0), closed; on a node after stormcos#374
 
 `[management] tls_mode = "required"` (default) | `"optional"`. Inert unless set.
 Optional: the connection's first byte (0x16 = TLS) picks; a count of every
 plain request is the exit test.
-- [ ] config, validate (unknown refused); `tls_mode` needs nothing else
-- [ ] listener: peek, bounded so a silent connection cannot hold an fd forever
-- [ ] `mgmt/plain.rs`: `stormblock_mgmt_plain_requests_total{caller,route}`,
-      an audit.log line per new caller + route (off the runtime), bounded table
-- [ ] handed-out URLs (finder, golden tickets) stay http while optional: they
-      must work for a caller who has not moved
-- [ ] test (both schemes, the count, required refuses); auth.md, README, CHANGELOG
-- [ ] check.sh; tag; stage; tell stormcos#374
+- [x] config, validate (unknown refused); health `tls.mode`
+- [x] listener: peek in the connection's own task, 30 s bound (an fd, #510)
+- [x] `mgmt/plain.rs`: `stormblock_mgmt_plain_requests_total{caller,route}`
+      (route family, 1024 pairs then `other`), an audit.log line per new caller
+      + route (off the runtime). Counted in either mode: with no pair yet a
+      moved caller fails its handshake, so plain is an unmoved caller then too
+- [x] handed-out URLs (finder, golden tickets) stay http while optional: they
+      must work for a caller who has not moved; said in auth.md that the flip
+      to required makes them https, which the count cannot foresee
+- [x] tests (`integration_mgmt_tls`, 3 new), auth.md, README, CHANGELOG
+- [x] check.sh at 4e63a681 ALL PASS, no clippy lint in the new lines; v23.15.0;
+      stage; stormcos#374 told
 
 ### A configured TLS file missing at start (2026-11-03, #483, P1, stormcos#497, #374) — DONE (v23.14.0), closed; on a node after stormcos#374/#497
 
