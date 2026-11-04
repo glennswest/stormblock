@@ -227,6 +227,27 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Kept -data volumes that will not mount: orphan file "bad magic" (2026-11-04, #532, P1) — IN PROGRESS
+
+server8 12.61: 10 kept `-data` volumes refused by the kernel, the mount point
+left on the read-only image, no apiserver. Read from `console/server8/sol.log`:
+the same 10 volumes and the same blocks (0; 217 at 4 GiB) failed at their first
+mount in that log, **2026-10-12T15:13Z** (superblock `initial error at
+1791817988`), on the Patriot P210 as it arrived in this machine, its data half
+older than the log. So not the cuts of 12.37/12.39/12.58, and 12.58's "no
+errors" is not evidence: its engine aborted as the mounts began (#522), and no
+data volume mounted at all. The bytes' cause cannot be read from logs (a slot
+boundary fits: block 217 of 256 at 1 MiB extents); it needs the disk.
+Found: mkfs-ext4's fsck never reads the orphan file's blocks, so a check calls
+such a volume clean and its repair would not mend it (filed on mkfs.ext4.rs).
+Plan: only a mount the kernel refused is touched, on any boot:
+- [ ] `fs::ext4::mend_orphan_file` + `repair_refused`; CLI `stormblock ext4-repair <dev>`
+- [ ] /init: a refused mount is repaired and tried again, said as a FINDING; what
+      still fails is a FATAL line and `/run/stormblock/boot-mounts`
+- [ ] health `boot_mounts`, status `failed`
+- [ ] tests; `ci-mount-repair-verify.sh` (the real kernel's refusal, the shipped
+      initramfs); docs, CHANGELOG; check.sh
+
 ### A plain boot-only listener beside :9090 (2026-11-03, #524, P2, stormcos#374, stormbootx#183) — DONE (v23.16.0), closed; metal pending
 
 Firmware cannot do TLS. Decided on reading the callers:
