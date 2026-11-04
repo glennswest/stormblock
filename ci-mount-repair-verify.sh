@@ -9,7 +9,8 @@
 #   1. files: mkfs.ext4 -O orphan_file at 64 MiB and 4 GiB, the orphan file's
 #      blocks zeroed from block 0 and from block 217 as on server8; e2fsck sees
 #      it; `stormblock ext4-repair`; e2fsck -fn clean;
-#   2. a node disk with a clone of the damaged 64 MiB filesystem, the shipped
+#   2. a node disk with a clone of a 64 MiB filesystem missing the 1 MiB extent
+#      its orphan file is in (what server8's numbers point at), the shipped
 #      initramfs on the build VM's kernel in QEMU: the kernel's `bad magic`, the
 #      FINDING, `mounted: ... (after a repair)`, a clean r/w mount;
 #   3. a filesystem the repair cannot save (its metadata overwritten): FATAL
@@ -89,6 +90,23 @@ for spec in "64M 0" "4G 217"; do
         fail "$1: a second run"; cat "$W/rep2"
     fi
 done
+
+# What server8's numbers point at: block 217 of a 4 GiB orphan file is exactly on
+# a 1 MiB boundary, so what read wrong there is a whole extent of the volume, not
+# some blocks of a file. The same, with everything else that extent holds.
+say "1b: a whole 1 MiB extent of zeros (extent 8 at 64 MiB, 35 at 4 GiB)"
+for spec in "64M 8" "4G 35"; do
+    set -- $spec
+    f="$W/x$1.img"
+    cp --sparse=always "$W/f$1.img.good" "$f"
+    dd if=/dev/zero of="$f" bs=1M seek="$2" count=1 conv=notrunc status=none
+    e2fsck -fn "$f" > "$W/before" 2>&1
+    echo "  $1: e2fsck before: $(grep -c . "$W/before") line(s), rc $?"
+    if "$BIN" ext4-repair "$f" > "$W/rep" 2>&1; then ok "$1: repaired"; else fail "$1: repair exit $?"; fi
+    grep -v ' INFO ' "$W/rep" | sed 's/^/    /' | head -12
+    if e2fsck -fn "$f" > "$W/after" 2>&1; then ok "$1: e2fsck -fn clean"; else fail "$1: e2fsck after"; head -30 "$W/after"; fi
+done
+
 "$BIN" ext4-repair "$W/no-such-file" > /dev/null 2>&1
 if [ $? = 2 ] && [ ! -e "$W/no-such-file" ]; then ok "no such file: exit 2, nothing made"; else fail "a missing file"; fi
 head -c 1M /dev/urandom > "$W/noise"
@@ -101,7 +119,7 @@ printf 'NAME=stormcos\nVERSION_ID=11.79\n' > "$W/root/etc/os-release"
 mkfs.ext4 -q -b 4096 -d "$W/root" "$W/rootfs.img" 32M || { echo "FAIL: mkfs.ext4 -d"; exit 1; }
 cp --sparse=always "$W/f64M.img.good" "$W/good.img"
 cp --sparse=always "$W/f64M.img.good" "$W/hurt.img"
-damage "$W/hurt.img" 0
+dd if=/dev/zero of="$W/hurt.img" bs=1M seek=8 count=1 conv=notrunc status=none
 cp --sparse=always "$W/f64M.img.good" "$W/wreck.img"
 # Past the superblock: the group descriptors and the inode table overwritten.
 # The superblock stays, so it is still ext4 and the repair has to say no.
