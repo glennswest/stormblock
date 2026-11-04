@@ -227,6 +227,21 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### A configured TLS file missing at start (2026-11-03, #483, P1, stormcos#497, #374) — IN PROGRESS
+
+On a node the stormcert pair, node CA, forge CA and CRL all appear after the
+engine starts; `validate` refused the config, so no engine, no storage.
+Missing = not yet; a file there that does not parse stays an error.
+- [ ] `validate`: both-or-neither stays, no existence checks
+- [ ] `tls.rs`: pair missing = plain, TLS when both appear (plain connections
+      closed then, never back to plain once a pair is held); client CA / forge
+      CA missing = no such credential; CRL configured and missing = forge's CA
+      proves nothing (admin and forge node), fail closed
+- [ ] idle pickup (a tick, not only at a connection), no lock across file I/O
+- [ ] health `tls {serving, missing}`; the scheme goldens/finder hand out is
+      what is served, not what is configured
+- [ ] tests, auth.md, README, CHANGELOG; check.sh
+
 ### Shelf test: two RAID-6 sets on the DS224C, 4K+PI (2026-10-10, #390, P2) — ENGINE HALF DONE; the run WAITS ON HARDWARE (stormdrive#82)
 
 The run itself is on the Dell's shelf and waits on: shelf drives inducted
