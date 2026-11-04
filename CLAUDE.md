@@ -227,6 +227,20 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Plain and TLS on one :9090 while callers move (2026-11-03, #525, P2, stormcos#374) — IN PROGRESS
+
+`[management] tls_mode = "required"` (default) | `"optional"`. Inert unless set.
+Optional: the connection's first byte (0x16 = TLS) picks; a count of every
+plain request is the exit test.
+- [ ] config, validate (unknown refused); `tls_mode` needs nothing else
+- [ ] listener: peek, bounded so a silent connection cannot hold an fd forever
+- [ ] `mgmt/plain.rs`: `stormblock_mgmt_plain_requests_total{caller,route}`,
+      an audit.log line per new caller + route (off the runtime), bounded table
+- [ ] handed-out URLs (finder, golden tickets) stay http while optional: they
+      must work for a caller who has not moved
+- [ ] test (both schemes, the count, required refuses); auth.md, README, CHANGELOG
+- [ ] check.sh; tag; stage; tell stormcos#374
+
 ### A configured TLS file missing at start (2026-11-03, #483, P1, stormcos#497, #374) — DONE (v23.14.0), closed; on a node after stormcos#374/#497
 
 On a node the stormcert pair, node CA, forge CA and CRL all appear after the
