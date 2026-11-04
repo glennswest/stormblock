@@ -954,7 +954,7 @@ async fn the_boot_port_answers_the_boot_verbs_beside_a_tls_api() {
     let r = c.get(format!("{host}/intent")).send().await.unwrap();
     assert_eq!(r.status(), 200, "intent");
     let r = c.post(format!("{host}/claim")).json(&serde_json::json!({})).send().await.unwrap();
-    assert_eq!(r.status(), 200, "claim");
+    assert_eq!(r.status(), 201, "claim");
     let claim: serde_json::Value = r.json().await.unwrap();
     let clone = claim["volume"]["id"].as_str().expect("a clone").to_string();
     assert_ne!(clone, id, "a clone, not the image");
