@@ -5013,6 +5013,16 @@ if [ -n "$MOUNT_MAP" ]; then
     _cm_dt="${STORM_DEV_TEST:--b}"
     _cm_dir="${STORM_RUN:-/run}/stormblock-mounts"
     mkdir -p "$_cm_dir"
+    # What did not mount, and what was repaired, for health (#532): one line
+    # each, `<failed|repaired> <device> <mount point> <why>`. /run survives the
+    # switch_root; a console line does not reach whoever asks the node later.
+    _cm_report="${STORM_RUN:-/run}/stormblock/boot-mounts"
+    mkdir -p "${_cm_report%/*}"
+    : > "$_cm_report"
+    _cm_repair="${STORM_MOUNT_REPAIR:-stormblock ext4-repair}"
+    case " $(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null) " in
+        *" rd.stormblock.mount-repair=off "*) _cm_repair="" ;;
+    esac
     printf '%s\n' "$MOUNT_MAP" | awk 'NF >= 2 { print $1, $2 }' > "$_cm_dir/list"
     _cm_t0=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
 
@@ -5036,6 +5046,7 @@ if [ -n "$MOUNT_MAP" ]; then
             echo "$mdev $mmnt" >> "$_cm_dir/present"
         else
             echo "  WARNING: $mdev never appeared; $mmnt will be empty"
+            echo "failed $mdev $mmnt the device never appeared" >> "$_cm_report"
         fi
     done < "$_cm_dir/list"
     awk '{ d = gsub("/", "/", $2); print d, $1, $2 }' "$_cm_dir/present" \
@@ -5047,11 +5058,29 @@ if [ -n "$MOUNT_MAP" ]; then
         mkdir -p "$_cm_root$2" 2>/dev/null
         if [ ! -d "$_cm_root$2" ]; then
             echo "  WARNING: $1 would not mount at $2: no such mount point, and the root cannot make one"
+            echo "failed $1 $2 no such mount point, and the root cannot make one" >> "$_cm_report"
         elif $_cm_mount -t ext4 "$1" "$_cm_root$2" 2>/dev/null \
             || $_cm_mount "$1" "$_cm_root$2" 2>/dev/null; then
             echo "  mounted: $1 -> $2"
         else
             echo "  WARNING: $1 would not mount at $2"
+            # Only what the kernel refused is repaired (#532): one left as it
+            # is fails every mount of every boot, and a repair writes, so a
+            # filesystem that mounts is never touched here.
+            if [ -z "$_cm_repair" ]; then
+                echo "failed $1 $2 the kernel refused it; repair is off (rd.stormblock.mount-repair=off)" >> "$_cm_report"
+            elif $_cm_repair "$1" > "$_cm_dir/repair.${1##*/}" 2>&1; then
+                sed 's/^/  /' "$_cm_dir/repair.${1##*/}"
+                if $_cm_mount -t ext4 "$1" "$_cm_root$2" 2>/dev/null; then
+                    echo "  mounted: $1 -> $2 (after a repair)"
+                    echo "repaired $1 $2 see the boot's console" >> "$_cm_report"
+                else
+                    echo "failed $1 $2 the kernel refused it again after a repair" >> "$_cm_report"
+                fi
+            else
+                sed 's/^/  /' "$_cm_dir/repair.${1##*/}"
+                echo "failed $1 $2 the kernel refused it and it could not be repaired: $(tail -1 "$_cm_dir/repair.${1##*/}")" >> "$_cm_report"
+            fi
         fi
     }
     # Named pids: this shell is PID 1, and a bare `wait` would wait for the
@@ -5071,6 +5100,12 @@ if [ -n "$MOUNT_MAP" ]; then
     _cm_t1=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
     if [ -n "$_cm_t0" ] && [ -n "$_cm_t1" ]; then
         echo "  $_cm_total volume(s) mounted in $(awk -v a="$_cm_t0" -v b="$_cm_t1" 'BEGIN { printf "%.1f", b - a }') s ($_cm_par at a time)"
+    fi
+    # Said last, and as what it is (#532): a service on these mount points
+    # writes to the read-only image's empty directory, and fails far from here.
+    if grep -q '^failed ' "$_cm_report"; then
+        echo "FATAL: $(grep -c '^failed ' "$_cm_report") volume(s) of the mount list are not mounted; this node's services will not work, and health says failed (#532):"
+        grep '^failed ' "$_cm_report" | sed 's/^failed /  /'
     fi
     rm -rf "$_cm_dir"
 fi

@@ -176,6 +176,38 @@ async fn health_reports_what_the_flow_over_has_left() {
     server.abort();
 }
 
+/// #532: what the boot could not mount is on the open health, and the node
+/// says failed; a volume that only took a repair is named and is no failure.
+/// Set by file, in a process of its own under nextest.
+#[tokio::test]
+async fn health_names_what_the_boot_could_not_mount() {
+    let dir = TempDir::new().unwrap();
+    let report = dir.path().join("boot-mounts");
+    std::env::set_var("STORMBLOCK_BOOT_MOUNTS_REPORT", &report);
+    let state = state_with(&dir, config_with_token("sekrit")).await;
+    let (base, server) = serve(state).await;
+    let c = reqwest::Client::new();
+    let get = || async {
+        c.get(format!("{base}/api/v1/health")).send().await.unwrap().json::<serde_json::Value>().await.unwrap()
+    };
+    assert!(get().await.get("boot_mounts").is_none(), "no report: left out");
+
+    std::fs::write(&report, "").unwrap();
+    assert!(get().await.get("boot_mounts").is_none(), "everything mounted: left out");
+
+    std::fs::write(&report, "repaired /dev/ublkb16 /d/registry see the boot's console\n").unwrap();
+    let h = get().await;
+    assert_eq!(h["boot_mounts"]["repaired"][0]["mount"], "/d/registry");
+    assert_eq!(h["status"], "ok", "repaired and mounted is not a failure");
+
+    std::fs::write(&report, "failed /dev/ublkb10 /var/lib/kubelet the kernel refused it\n").unwrap();
+    let h = get().await;
+    assert_eq!(h["boot_mounts"]["failed"][0]["device"], "/dev/ublkb10");
+    assert_eq!(h["boot_mounts"]["failed"][0]["why"], "the kernel refused it");
+    assert_eq!(h["status"], "failed");
+    server.abort();
+}
+
 /// #413: an engine with no discovery (a node's `adopt-ublk`) answers 404,
 /// which a poller reads as "none here", not a 500 logged as a WARN on the
 /// node's console every 15 s; and /metrics answers once the recorder is in.

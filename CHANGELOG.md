@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-04
+- **fix:** #532: a volume of the mount list the kernel refuses is no longer left refused, with its mount point on the read-only image. `/init` repairs what a mount refused (`stormblock ext4-repair`, as `e2fsck -fy`, off with `rd.stormblock.mount-repair=off`) and mounts it again; a volume that mounts is never touched. The repair includes the orphan file's blocks (`orphan file block N: bad magic`, server8's 10 `-data` volumes), which mkfs-ext4's check does not read (mkfs.ext4.rs#32). What still fails, or never appeared, is a `FATAL` naming each after the mount wave, and health says `failed` with `boot_mounts` (`failed`, `repaired`).
+
 ## [v23.16.0] — 2026-11-03
 
 ### Added

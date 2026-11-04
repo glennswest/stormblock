@@ -425,6 +425,16 @@ enum SubCommand {
         #[arg(long)]
         console_copy: Option<String>,
     },
+    /// Repair an ext4 filesystem a mount refused (#532), as `e2fsck -fy` would:
+    /// the journal, the passes, and the orphan file blocks the kernel reads at
+    /// mount and mkfs-ext4's check does not. `/init` runs it on a device the
+    /// kernel just refused. Refused while the device is in use (mounted).
+    /// Exit 0: a mount should take it; 1: still damaged; 2: not ext4, or the
+    /// device cannot be opened (nothing written).
+    Ext4Repair {
+        /// The device (a /dev/ublkbN, or an image file).
+        device: String,
+    },
     /// Ask the network for an appliance (#104): a query on the multicast
     /// group, answered by every engine that serves boot claims. Prints each
     /// answer's URL, one a line. Exit 0: something answered; 1: nothing.
@@ -1241,6 +1251,9 @@ pub async fn run() -> anyhow::Result<()> {
                 }
                 tokio::task::spawn_blocking(move || crate::logcast::main(opts)).await?;
                 return Ok(());
+            }
+            SubCommand::Ext4Repair { device } => {
+                std::process::exit(ext4_repair(&device).await);
             }
             SubCommand::Discover { wait_ms } => {
                 let got = crate::mgmt::finder::discover(std::time::Duration::from_millis(*wait_ms), None)?;
@@ -3332,6 +3345,76 @@ pub async fn run() -> anyhow::Result<()> {
             return Ok(crate::drive::open_path(path, false).await?);
         }
         Ok(Arc::new(crate::drive::filedev::FileDevice::open(path).await?))
+    }
+
+    /// `stormblock ext4-repair` (#532): what it says goes on the console, a line
+    /// each; the exit status is the command's.
+    async fn ext4_repair(device: &str) -> i32 {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Held for the whole run: on a block device O_EXCL fails while a mount
+        // (or anything else exclusive) holds it, and a repair under a mounted
+        // filesystem would destroy it. An image file does not take O_EXCL so.
+        let _hold = if crate::drive::is_block_device(device) {
+            match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_EXCL).open(device) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    println!("{device}: in use or cannot be opened ({e}); not repaired");
+                    return 2;
+                }
+            }
+        } else {
+            None
+        };
+        let dev = match open_existing_storage(device).await {
+            Ok(d) => d,
+            Err(e) => {
+                println!("{device}: cannot open ({e}); not repaired");
+                return 2;
+            }
+        };
+        if let Err(e) = crate::fs::ext4::read_layout(&dev).await {
+            println!("{device}: not an ext4 filesystem ({e}); not repaired");
+            return 2;
+        }
+        let done = match crate::fs::ext4::repair_refused(&dev).await {
+            Ok(d) => d,
+            Err(e) => {
+                println!("{device}: could not be repaired: {e}");
+                return 1;
+            }
+        };
+        if !done.orphan.rewritten.is_empty() {
+            let (first, n) = (done.orphan.rewritten[0], done.orphan.rewritten.len());
+            println!(
+                "FINDING: {device}: {n} of the {} orphan file block(s) were not what a mount reads \
+                 (the first: block {first}); rewritten empty (#532)",
+                done.orphan.blocks
+            );
+        }
+        for f in done.fixed.iter().take(20) {
+            println!("{device}: fixed: {f}");
+        }
+        if done.fixed.len() > 20 {
+            println!("{device}: and {} more fixed", done.fixed.len() - 20);
+        }
+        if done.left.is_empty() {
+            println!("{device}: repaired");
+            return 0;
+        }
+        for l in done.left.iter().take(20) {
+            println!("{device}: still wrong: {l}");
+        }
+        println!("{device}: {} problem(s) left; not repaired", done.left.len());
+        1
+    }
+
+    /// Existing storage by path, to write to, never created: a block device or
+    /// fabric URI as [`open_storage`], a file only when it is there.
+    async fn open_existing_storage(path: &str) -> anyhow::Result<Arc<dyn BlockDevice>> {
+        if !is_fabric_uri(path) && !std::path::Path::new(path).exists() {
+            anyhow::bail!("no such file or device");
+        }
+        open_storage(path).await
     }
 
     /// Storage by path, for looking at (#140): read-only, never created.

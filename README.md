@@ -2315,6 +2315,19 @@ before its parent. Each volume is tried as ext4 first, then with a probing
 mount. The kernel passes an unknown `KEY=value` on its command line to
 `/init` as an environment variable.
 
+**A volume the kernel refuses** (#532) is repaired and mounted again:
+`stormblock ext4-repair <device>`, as `e2fsck -fy` (the journal, the passes, and
+the orphan file blocks a mount reads, which mkfs-ext4's own check does not:
+mkfs.ext4.rs#32); `rd.stormblock.mount-repair=off` leaves it refused. Only a
+refused mount is repaired: a volume that mounts is never written to here. What
+it did is a `FINDING` on the console. A volume still not mounted, or a device
+that never appeared, is a `FATAL` naming each after the mount wave; the boot
+goes on, so the node can still be reached and asked, and open health says
+`status: failed` with `boot_mounts` (`failed` and `repaired`: `device`, `mount`,
+`why`), from `/run/stormblock/boot-mounts`. An install does not check the
+volumes it keeps beforehand: a full check of every kept volume on every install
+would cost more than the mount that finds the same thing.
+
 **With no appliance** (#294) the boot says so and why. A local disk missing
 a volume the release mounts stops the boot with a FATAL naming the volume and
 the release on the disk (its root volume's os-release). A disk that can boot

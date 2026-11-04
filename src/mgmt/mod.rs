@@ -14,6 +14,7 @@ pub mod ublk_export;
 #[cfg(target_os = "linux")]
 pub mod vhost_export;
 pub mod debug;
+pub mod boot_mounts;
 pub mod slab_report;
 pub mod tls;
 pub mod plain;

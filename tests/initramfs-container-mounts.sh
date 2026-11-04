@@ -39,7 +39,7 @@ if [ "$1" = "-t" ]; then t="$2"; shift 2; fi
 dev="$1"; dir="$2"
 name=${dev##*/}
 echo "call ${t:-probe} $name $dir" >> "$STUB_LOG"
-case " ${STUB_BAD:-} " in *" $name "*) exit 32 ;; esac
+case " ${STUB_BAD:-} " in *" $name "*) [ -e "$STUB_MENDED/$name" ] || exit 32 ;; esac
 case " ${STUB_XFS:-} " in *" $name "*) [ "$t" = ext4 ] && exit 32 ;; esac
 mkdir -p "$STUB_RUNNING"
 touch "$STUB_RUNNING/$$"
@@ -55,14 +55,39 @@ chmod +x "$STUB"
 
 now() { cut -d' ' -f1 /proc/uptime; }
 
+# stormblock ext4-repair, stubbed (#532): devices in STUB_MENDS are mended
+# (the mount stub then takes them); fake:NAME says repaired and mends nothing;
+# any other answers as the engine does for one it cannot repair.
+REPAIR="$WORK/repair"
+cat > "$REPAIR" <<'STUBEOF'
+#!/bin/sh
+name=${1##*/}
+echo "repair $name" >> "$STUB_LOG"
+case " ${STUB_MENDS:-} " in
+    *" $name "*)
+        echo "FINDING: $1: 32 of the 32 orphan file block(s) rewritten"
+        touch "$STUB_MENDED/$name"
+        exit 0 ;;
+    *" fake:$name "*)
+        echo "$1: repaired"
+        exit 0 ;;
+esac
+echo "$1: 3 problem(s) left; not repaired"
+exit 1
+STUBEOF
+chmod +x "$REPAIR"
+: > "$WORK/cmdline"
+
 # run MAP [env...] -> output in $WORK/out, elapsed seconds in $ELAPSED
 run() {
     map=$1; shift
     : > "$WORK/log"; : > "$WORK/conc"; rm -rf "$WORK/running" "$WORK/run"
     [ -n "${KEEP_SYSROOT:-}" ] || rm -rf "$WORK/sysroot"
-    mkdir -p "$WORK/run"
+    mkdir -p "$WORK/run" "$WORK/mended"
+    rm -f "${WORK:?}"/mended/*
     t0=$(now)
-    env STUB_LOG="$WORK/log" STUB_CONC="$WORK/conc" STUB_RUNNING="$WORK/running" \
+    env STUB_LOG="$WORK/log" STUB_CONC="$WORK/conc" STUB_RUNNING="$WORK/running" STUB_MENDED="$WORK/mended" \
+        STORM_CMDLINE="$WORK/cmdline" STORM_MOUNT_REPAIR="$REPAIR" \
         STUB_SLEEP="${SLEEP:-0.3}" STORM_MOUNT="$STUB" STORM_DEV_TEST=-e \
         STORM_SYSROOT="$WORK/sysroot" STORM_RUN="$WORK/run" "$@" \
         MOUNT_MAP="$map" ${SHELL_UNDER_TEST:-sh} -c '. "$1"' sh "$WORK/block.sh" > "$WORK/out" 2>&1
@@ -126,6 +151,52 @@ $DEV/ublkb1 /c/b1
 " STUB_BAD=ublkb1
     check "a bad volume warned" 1 "$(grep -c 'WARNING: .*ublkb1 would not mount at /c/b1' "$WORK/out")"
     check "the others mounted" 1 "$(grep -c '  mounted: ' "$WORK/out")"
+
+    # #532: nothing refused, nothing repaired, nothing reported.
+    run "$DEV/ublkb0 /c/ok0
+"
+    check "a good mount: no repair run" 0 "$(grep -c '^repair ' "$WORK/log")"
+    check "a good mount: nothing reported" "" "$(cat "$WORK/run/stormblock/boot-mounts")"
+    check "a good mount: no FATAL" 0 "$(grep -c FATAL "$WORK/out")"
+
+    # #532: refused, repaired, mounted, and said so; the others untouched.
+    run "$DEV/ublkb0 /c/g0
+$DEV/ublkb1 /c/b1
+" STUB_BAD=ublkb1 STUB_MENDS=ublkb1
+    check "refused: the repair ran on it alone" "repair ublkb1" "$(grep '^repair ' "$WORK/log")"
+    check "refused: the finding on the console" 1 "$(grep -c '  FINDING: .*ublkb1' "$WORK/out")"
+    check "refused: mounted after the repair" 1 "$(grep -c 'mounted: .*ublkb1 -> /c/b1 (after a repair)' "$WORK/out")"
+    check "refused: reported as repaired" 1 "$(grep -c '^repaired .*ublkb1 /c/b1 ' "$WORK/run/stormblock/boot-mounts")"
+    check "refused: not a failure" 0 "$(grep -c FATAL "$WORK/out")"
+
+    # #532: a repair that cannot: loud, and in the report with what it said.
+    run "$DEV/ublkb0 /c/g0
+$DEV/ublkb1 /c/b1
+" STUB_BAD=ublkb1
+    check "unrepairable: FATAL, counted" 1 "$(grep -c '^FATAL: 1 volume(s) of the mount list are not mounted' "$WORK/out")"
+    check "unrepairable: named under it" 1 "$(grep -c "^  $DEV/ublkb1 /c/b1 " "$WORK/out")"
+    check "unrepairable: the repair's words kept" 1 \
+        "$(grep -c '^failed .*ublkb1 /c/b1 the kernel refused it and it could not be repaired: .*3 problem(s) left' "$WORK/run/stormblock/boot-mounts")"
+    check "unrepairable: the other still mounted" 1 "$(grep -c '  mounted: .*ublkb0' "$WORK/out")"
+
+    # #532: the repair says done, the kernel still refuses.
+    run "$DEV/ublkb1 /c/b1
+" STUB_BAD=ublkb1 STUB_MENDS=fake:ublkb1
+    check "refused again: failed" 1 "$(grep -c '^failed .* the kernel refused it again after a repair' "$WORK/run/stormblock/boot-mounts")"
+
+    # #532: off by the command line: never run, and said.
+    echo "ro rd.stormblock.mount-repair=off quiet" > "$WORK/cmdline"
+    run "$DEV/ublkb1 /c/b1
+" STUB_BAD=ublkb1 STUB_MENDS=ublkb1
+    : > "$WORK/cmdline"
+    check "off: no repair" 0 "$(grep -c '^repair ' "$WORK/log")"
+    check "off: failed, saying why" 1 "$(grep -c '^failed .*repair is off' "$WORK/run/stormblock/boot-mounts")"
+
+    # #532: a device that never appeared is in the report too (#522).
+    SLEEP=0.1 run "$DEV/nope1 /c/m1
+" STORM_MOUNT_WAIT=0
+    check "never appeared: reported" 1 "$(grep -c '^failed .*nope1 /c/m1 the device never appeared' "$WORK/run/stormblock/boot-mounts")"
+    check "never appeared: FATAL" 1 "$(grep -c '^FATAL: 1 volume' "$WORK/out")"
 
     # A read-only root (stormcos#470): a mount point the image has is used;
     # a missing one cannot be made, and is named.

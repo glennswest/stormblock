@@ -655,6 +655,124 @@ pub async fn repair(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<fsck::FsckRepo
         .map_err(|e| anyhow::anyhow!("repairing the filesystem: {e}"))
 }
 
+/// What [`mend_orphan_file`] found in a filesystem's orphan file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrphanMend {
+    /// Blocks the orphan file has.
+    pub blocks: u64,
+    /// Logical blocks rewritten, in order.
+    pub rewritten: Vec<u64>,
+    /// Logical blocks of its size with nothing mapped (only a new orphan file
+    /// would answer those, which is not built here).
+    pub unmapped: u64,
+}
+
+/// Rewrite every orphan file block a mount would refuse (#532): the kernel
+/// reads each at mount (`ext4_init_orphan_info`), and a wrong magic or checksum
+/// in any of them fails the mount. A block rewritten comes back empty, as
+/// `e2fsck` leaves it: what it held cannot be trusted, and the most an entry
+/// could have been is an inode to release, which a later check finds anyway.
+///
+/// mkfs-ext4's fsck does not read these blocks unless there are orphans to
+/// release, so it calls such a filesystem clean (mkfs.ext4.rs, filed from #532).
+/// This goes when a release of that crate does it.
+pub async fn mend_orphan_file(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<OrphanMend> {
+    use mkfs_ext4::bytes::{get_u32, put_u32};
+    use mkfs_ext4::csum::crc32c;
+    use mkfs_ext4::format::{ORPHAN_BLOCK_MAGIC, ORPHAN_TAIL_LEN};
+    use mkfs_ext4::BlockDevice as _;
+
+    let fs = Filesystem::open(VolumeDevice::opaque(dev.clone()))
+        .await
+        .map_err(|e| anyhow::anyhow!("opening the filesystem: {e}"))?;
+    let sb = fs.superblock();
+    let mut out = OrphanMend::default();
+    if !sb.feature_compat.contains(CompatFeatures::ORPHAN_FILE) || sb.orphan_file_inum == 0 {
+        return Ok(out);
+    }
+    let inum = sb.orphan_file_inum;
+    let inode = fs.read_inode(inum).await.map_err(|e| anyhow::anyhow!("reading orphan file inode {inum}: {e}"))?;
+    let mut blocks = std::collections::BTreeMap::new();
+    fs.walk_blocks(&inode, |b| {
+        if let Some(logical) = b.logical {
+            blocks.insert(logical, b.physical);
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("walking the orphan file: {e}"))?;
+
+    let block_size = u64::from(fs.block_size());
+    let tail = block_size as usize - ORPHAN_TAIL_LEN;
+    let slots = tail / 4 * 4;
+    let csum = |physical: u64, buf: &[u8]| {
+        let mut crc = crc32c(fs.csum_seed(), &inum.to_le_bytes());
+        crc = crc32c(crc, &inode.generation.to_le_bytes());
+        crc = crc32c(crc, &physical.to_le_bytes());
+        crc32c(crc, &buf[..slots])
+    };
+    out.blocks = blocks.len() as u64;
+    out.unmapped = (inode.size / block_size).saturating_sub(out.blocks);
+    for (logical, physical) in blocks {
+        let buf = fs.read_block(physical).await.map_err(|e| anyhow::anyhow!("reading orphan file block {logical}: {e}"))?;
+        let good = get_u32(&buf, tail) == ORPHAN_BLOCK_MAGIC
+            && (!fs.has_metadata_csum() || get_u32(&buf, tail + 4) == csum(physical, &buf));
+        if good {
+            continue;
+        }
+        let mut fresh = vec![0u8; block_size as usize];
+        put_u32(&mut fresh, tail, ORPHAN_BLOCK_MAGIC);
+        if fs.has_metadata_csum() {
+            let crc = csum(physical, &fresh);
+            put_u32(&mut fresh, tail + 4, crc);
+        }
+        fs.write_block(physical, &fresh).await.map_err(|e| anyhow::anyhow!("rewriting orphan file block {logical}: {e}"))?;
+        out.rewritten.push(logical);
+    }
+    if !out.rewritten.is_empty() {
+        fs.device().flush().await.map_err(|e| anyhow::anyhow!("flushing the orphan file: {e}"))?;
+    }
+    Ok(out)
+}
+
+/// What [`repair_refused`] did.
+#[derive(Debug, Default)]
+pub struct RefusedRepair {
+    pub orphan: OrphanMend,
+    /// What the repair passes corrected, as they said it.
+    pub fixed: Vec<String>,
+    /// What is still wrong: empty means a mount should take it now.
+    pub left: Vec<String>,
+}
+
+/// Repair a filesystem a mount refused (#532), as `e2fsck -fy` would. Only for
+/// that: a repair writes, and a filesystem the kernel mounts is left to it.
+/// The journal is replayed first (the repair's first step), since it may hold
+/// newer copies of the orphan file's blocks.
+pub async fn repair_refused(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<RefusedRepair> {
+    let mut out = RefusedRepair::default();
+    let mut take_fixes = |r: &fsck::FsckReport| {
+        out.fixed.extend(r.problems.iter().filter(|p| p.fixed).map(|p| format!("{}: {}", p.code, p.message)));
+    };
+    take_fixes(&repair(dev).await?);
+    let orphan = mend_orphan_file(dev).await?;
+    if !orphan.rewritten.is_empty() {
+        // Anything the first pass could not do past a bad orphan block.
+        take_fixes(&repair(dev).await?);
+    }
+    out.orphan = orphan;
+    let last = check(dev).await?;
+    out.left = last
+        .problems
+        .iter()
+        .filter(|p| p.severity > Severity::Info)
+        .map(|p| format!("{}: {}", p.code, p.message))
+        .collect();
+    if out.orphan.unmapped > 0 {
+        out.left.push(format!("orphan-file-hole: {} block(s) of the orphan file are not mapped", out.orphan.unmapped));
+    }
+    Ok(out)
+}
+
 /// One problem a check found, with the paths of the inodes it names.
 #[derive(Debug, Clone)]
 pub struct Finding {
@@ -1287,6 +1405,87 @@ mod tests {
             used < 128 * 1024 * 1024,
             "a 1 GiB filesystem materialised {used} bytes"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// The orphan file's physical blocks, as a test reaches them.
+    async fn orphan_blocks(dev: &Arc<dyn BlockDevice>) -> Vec<u64> {
+        let fs = Filesystem::open(VolumeDevice::opaque(dev.clone())).await.unwrap();
+        let inode = fs.read_inode(fs.superblock().orphan_file_inum).await.unwrap();
+        let mut blocks = std::collections::BTreeMap::new();
+        fs.walk_blocks(&inode, |b| {
+            if let Some(l) = b.logical {
+                blocks.insert(l, b.physical);
+            }
+        })
+        .await
+        .unwrap();
+        blocks.into_values().collect()
+    }
+
+    /// #532: an orphan file block of zeros, which the kernel refuses to mount
+    /// and mkfs-ext4's check calls clean, is rewritten; a block that is right
+    /// is not touched, and a second run finds nothing.
+    #[tokio::test]
+    async fn an_orphan_file_a_mount_refuses_is_mended_and_nothing_else_is_written() {
+        let (dev, path) = scratch("orphan", 64 * 1024 * 1024).await;
+        format(&dev, &Ext4Params::default()).await.unwrap();
+        let blocks = orphan_blocks(&dev).await;
+        assert_eq!(blocks.len(), 32, "a 64 MiB ext4 has 32 orphan file blocks");
+
+        let untouched = mend_orphan_file(&dev).await.unwrap();
+        assert_eq!(untouched.blocks, 32);
+        assert!(untouched.rewritten.is_empty(), "a good orphan file is left alone: {untouched:?}");
+
+        let bs = 4096usize;
+        let image_before = std::fs::read(&path).unwrap();
+        // Blocks 0 and 5 zeroed; block 9's slots flipped under its checksum.
+        for (l, off, byte) in [(0usize, 0usize, 0u8), (5, 0, 0)] {
+            let at = blocks[l] as usize * bs;
+            use std::os::unix::fs::FileExt;
+            let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.write_all_at(&vec![byte; bs], (at + off) as u64).unwrap();
+            f.sync_all().unwrap();
+        }
+        {
+            use std::os::unix::fs::FileExt;
+            let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.write_all_at(&[0xAB], blocks[9] * bs as u64).unwrap();
+            f.sync_all().unwrap();
+        }
+        let fresh: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(&path).await.unwrap());
+        assert!(
+            check(&fresh).await.unwrap().problems.iter().all(|p| p.severity <= Severity::Info),
+            "mkfs-ext4's check does not see this: remove the stopgap when it does"
+        );
+
+        let mended = mend_orphan_file(&fresh).await.unwrap();
+        assert_eq!(mended.rewritten, vec![0, 5, 9]);
+        assert!(mend_orphan_file(&fresh).await.unwrap().rewritten.is_empty(), "a second run finds nothing");
+        // Byte for byte what the format wrote: every block's checksum right.
+        assert_eq!(std::fs::read(&path).unwrap(), image_before);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #532: the whole repair, on a filesystem carrying the kernel's own error
+    /// mark from the failed mount: nothing left, the error flag gone.
+    #[tokio::test]
+    async fn a_refused_filesystem_is_repaired_and_says_what_is_left() {
+        let (dev, path) = scratch("refused", 64 * 1024 * 1024).await;
+        format(&dev, &Ext4Params::default()).await.unwrap();
+        let blocks = orphan_blocks(&dev).await;
+        {
+            let mut fs = Filesystem::open(VolumeDevice::opaque(dev.clone())).await.unwrap();
+            fs.superblock_mut().state |= state::ERROR_FS;
+            fs.flush_superblock().await.unwrap();
+            fs.write_block(blocks[0], &[0u8; 4096]).await.unwrap();
+        }
+        let done = repair_refused(&dev).await.unwrap();
+        assert_eq!(done.orphan.rewritten, vec![0]);
+        assert!(done.left.is_empty(), "{:?}", done.left);
+        let layout = read_layout(&dev).await.unwrap();
+        assert_eq!(layout.state & state::ERROR_FS, 0, "the kernel's mark of the failed mount is cleared");
+        assert!(seal_blockers(&dev).await.unwrap().is_empty());
         let _ = std::fs::remove_file(path);
     }
 

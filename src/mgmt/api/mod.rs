@@ -105,6 +105,10 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// manager is busy (read without waiting).
         #[serde(skip_serializing_if = "Option::is_none")]
         lost_mappings: Option<serde_json::Value>,
+        /// The mount list's volumes that did not mount at this boot, or took a
+        /// repair (#532).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        boot_mounts: Option<crate::mgmt::boot_mounts::BootMounts>,
         /// The worst of this node's RAID sets — `clean`, `rebuilding`,
         /// `degraded`, `failed` — when it has any (#252). Read without
         /// waiting: when the array table is busy, the last reading (#364).
@@ -247,11 +251,18 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     };
     #[cfg(not(target_os = "linux"))]
     let lost_status: Option<&'static str> = None;
+    let boot_mounts = crate::mgmt::boot_mounts::read();
+    let mounts_failed = boot_mounts.as_ref().is_some_and(|m| !m.failed.is_empty());
     Json(Health {
-        status: lost_status.unwrap_or(if durability.is_some() { "degraded" } else { "ok" }),
+        status: if mounts_failed {
+            "failed"
+        } else {
+            lost_status.unwrap_or(if durability.is_some() { "degraded" } else { "ok" })
+        },
         durability,
         digests,
         lost_mappings,
+        boot_mounts,
         service: "stormblock",
         version: crate::version::VERSION,
         commit: crate::version::COMMIT,
