@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### A configured TLS file missing at start (2026-11-03, #483, P1, stormcos#497, #374) — IN PROGRESS
+### A configured TLS file missing at start (2026-11-03, #483, P1, stormcos#497, #374) — DONE (v23.14.0), closed; on a node after stormcos#374/#497
 
 On a node the stormcert pair, node CA, forge CA and CRL all appear after the
 engine starts; `validate` refused the config, so no engine, no storage.
@@ -245,7 +245,11 @@ Missing = not yet; a file there that does not parse stays an error.
 - [x] health `tls {serving, missing}`; the scheme goldens/finder hand out is
       what is served; `[fabric]` takes a certificate not there yet as none
 - [x] tests (`integration_mgmt_tls`, 2 new, 5/5 runs), auth.md, README, CHANGELOG
-- [ ] check.sh + the built binary with every file missing; v23.14.0; stage; close
+- [x] check.sh at 012af890 ALL PASS (1321/1321 on sc-build's rerun; the first run
+      lost `integration_locks::listings_keep_their_time…`, 565 ms against its
+      400 ms bound, no TLS in that test: filed); the built musl binary with
+      every file missing starts, health `serving: http` and all five `missing`;
+      v23.14.0; stage; closed. Not on a node: stormcos#374/#497 set the keys
 
 ### Shelf test: two RAID-6 sets on the DS224C, 4K+PI (2026-10-10, #390, P2) — ENGINE HALF DONE; the run WAITS ON HARDWARE (stormdrive#82)
 
