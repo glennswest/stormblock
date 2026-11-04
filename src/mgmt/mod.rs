@@ -773,7 +773,8 @@ async fn serve_connection<IO>(
     tokio::pin!(conn);
     tokio::select! {
         _ = conn.as_mut() => {}
-        _ = plain_until.wait_for(|tls| *tls) => {
+        // Its guard is not `Send`: dropped before anything else is awaited.
+        _ = async { let _ = plain_until.wait_for(|tls| *tls).await; } => {
             conn.as_mut().graceful_shutdown();
             let _ = conn.await;
         }
