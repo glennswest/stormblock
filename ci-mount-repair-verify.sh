@@ -100,8 +100,11 @@ for spec in "64M 8" "4G 35"; do
     f="$W/x$1.img"
     cp --sparse=always "$W/f$1.img.good" "$f"
     dd if=/dev/zero of="$f" bs=1M seek="$2" count=1 conv=notrunc status=none
-    e2fsck -fn "$f" > "$W/before" 2>&1
-    echo "  $1: e2fsck before: $(grep -c . "$W/before") line(s), rc $?"
+    if e2fsck -fn "$f" > "$W/before" 2>&1; then
+        fail "$1: e2fsck did not see the lost extent"
+    else
+        ok "$1: e2fsck sees it: $(grep -im1 orphan "$W/before")"
+    fi
     if "$BIN" ext4-repair "$f" > "$W/rep" 2>&1; then ok "$1: repaired"; else fail "$1: repair exit $?"; fi
     grep -v ' INFO ' "$W/rep" | sed 's/^/    /' | head -12
     if e2fsck -fn "$f" > "$W/after" 2>&1; then ok "$1: e2fsck -fn clean"; else fail "$1: e2fsck after"; head -30 "$W/after"; fi
