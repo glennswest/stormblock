@@ -241,10 +241,10 @@ boundary fits: block 217 of 256 at 1 MiB extents); it needs the disk.
 Found: mkfs-ext4's fsck never reads the orphan file's blocks, so a check calls
 such a volume clean and its repair would not mend it (filed on mkfs.ext4.rs).
 Plan: only a mount the kernel refused is touched, on any boot:
-- [ ] `fs::ext4::mend_orphan_file` + `repair_refused`; CLI `stormblock ext4-repair <dev>`
-- [ ] /init: a refused mount is repaired and tried again, said as a FINDING; what
+- [x] `fs::ext4::mend_orphan_file` + `repair_refused`; CLI `stormblock ext4-repair <dev>`
+- [x] /init: a refused mount is repaired and tried again, said as a FINDING; what
       still fails is a FATAL line and `/run/stormblock/boot-mounts`
-- [ ] health `boot_mounts`, status `failed`
+- [x] health `boot_mounts`, status `failed`
 - [ ] tests; `ci-mount-repair-verify.sh` (the real kernel's refusal, the shipped
       initramfs); docs, CHANGELOG; check.sh
 

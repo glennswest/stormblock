@@ -5069,7 +5069,7 @@ if [ -n "$MOUNT_MAP" ]; then
             # filesystem that mounts is never touched here.
             if [ -z "$_cm_repair" ]; then
                 echo "failed $1 $2 the kernel refused it; repair is off (rd.stormblock.mount-repair=off)" >> "$_cm_report"
-            elif $_cm_repair "$1" > "$_cm_dir/repair.${1##*/}" 2>&1; then
+            elif RUST_LOG=warn $_cm_repair "$1" > "$_cm_dir/repair.${1##*/}" 2>&1; then
                 sed 's/^/  /' "$_cm_dir/repair.${1##*/}"
                 if $_cm_mount -t ext4 "$1" "$_cm_root$2" 2>/dev/null; then
                     echo "  mounted: $1 -> $2 (after a repair)"

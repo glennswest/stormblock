@@ -542,6 +542,19 @@ instead, so the worst a misbehaving hook can do is be ignored.
 `tests/initramfs-boot-hook.sh` installs a hook that prints a command among its
 assignments and checks it did not run.
 
+
+## A volume of the mount list the kernel refuses (#532)
+
+`/init` runs `stormblock ext4-repair <device>` on a device the kernel just
+refused, then mounts it again; a volume that mounts is never written to.
+`FINDING:` on the console says what was rewritten, and whether those blocks read
+as zeros, since the repair overwrites them. `rd.stormblock.mount-repair=off`
+leaves it refused. What is still not mounted, or never appeared, is a `FATAL`
+naming each, and `/run/stormblock/boot-mounts` (`<failed|repaired> <device>
+<mount point> <why>`), which open health reports as `boot_mounts` with `status:
+failed`. The boot goes on: a node at a shell in the initramfs can be asked
+nothing, and the machine would only be cut hard (#486).
+
 ## Why a hook, and not a better probe
 
 Three things a hook can answer that `slab list <the device the cmdline names>`

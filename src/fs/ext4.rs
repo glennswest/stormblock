@@ -662,6 +662,11 @@ pub struct OrphanMend {
     pub blocks: u64,
     /// Logical blocks rewritten, in order.
     pub rewritten: Vec<u64>,
+    /// How many of those read as all zeros (as an extent that lost its mapping
+    /// reads, #451): the repair overwrites the evidence, so it is said here.
+    pub zeroed: u64,
+    /// The first one's block on the device, to place it against the extents.
+    pub first_physical: Option<u64>,
     /// Logical blocks of its size with nothing mapped (only a new orphan file
     /// would answer those, which is not built here).
     pub unmapped: u64,
@@ -727,6 +732,8 @@ pub async fn mend_orphan_file(dev: &Arc<dyn BlockDevice>) -> anyhow::Result<Orph
         }
         fs.write_block(physical, &fresh).await.map_err(|e| anyhow::anyhow!("rewriting orphan file block {logical}: {e}"))?;
         out.rewritten.push(logical);
+        out.zeroed += u64::from(buf.iter().all(|b| *b == 0));
+        out.first_physical.get_or_insert(physical);
     }
     if !out.rewritten.is_empty() {
         fs.device().flush().await.map_err(|e| anyhow::anyhow!("flushing the orphan file: {e}"))?;
@@ -1461,6 +1468,8 @@ mod tests {
 
         let mended = mend_orphan_file(&fresh).await.unwrap();
         assert_eq!(mended.rewritten, vec![0, 5, 9]);
+        assert_eq!(mended.zeroed, 2, "blocks 0 and 5 read as zeros, block 9 did not");
+        assert_eq!(mended.first_physical, Some(blocks[0]));
         assert!(mend_orphan_file(&fresh).await.unwrap().rewritten.is_empty(), "a second run finds nothing");
         // Byte for byte what the format wrote: every block's checksum right.
         assert_eq!(std::fs::read(&path).unwrap(), image_before);

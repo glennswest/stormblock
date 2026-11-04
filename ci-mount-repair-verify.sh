@@ -52,17 +52,18 @@ orphan_inum() {
 }
 # damage IMAGE FROM: zero the orphan file's blocks from logical FROM on.
 damage() {
-    local img=$1 from=$2 inum n=0 lb=$2 phys
+    local img=$1 from=$2 inum n=0 lb=$2 phys first=""
     inum=$(orphan_inum "$img")
     [ -n "$inum" ] || { fail "$img: no orphan file inode"; return 1; }
     while :; do
         phys=$(debugfs -R "bmap <$inum> $lb" "$img" 2>/dev/null | tail -1 | tr -d ' ')
         case "$phys" in ''|0|*[!0-9]*) break ;; esac
+        first=${first:-$phys}
         dd if=/dev/zero of="$img" bs=4096 seek="$phys" count=1 conv=notrunc status=none
         n=$((n + 1)); lb=$((lb + 1))
     done
     [ "$n" -gt 0 ] || { fail "$img: no orphan file block to zero from $from"; return 1; }
-    echo "  $(basename "$img"): inode $inum, $n orphan file block(s) zeroed from block $from"
+    echo "  $(basename "$img"): inode $inum, $n orphan file block(s) zeroed from block $from, at $first ($((first % 256)) into a 1 MiB extent)"
 }
 
 say "1: files, e2fsck on both sides"
@@ -169,6 +170,8 @@ expect A "FINDING: /dev/ublkb[0-9]+: 32 of the 32 orphan file block" "the findin
 expect A "mounted: /dev/ublkb[0-9]+ -> /d/hurt \(after a repair\)" "mounted after the repair"
 expect A "mounted: /dev/ublkb[0-9]+ -> /d/good$" "the good volume mounted, unrepaired"
 refuse A "^FATAL: .*not mounted" "no FATAL"
+refuse A "StormBlock starting" "the repair's INFO lines stay off the console"
+expect A "32 all zeros" "says what the blocks were"
 
 if [ -s "$W/wrecked.img" ]; then
     say "3: past repair: loud"

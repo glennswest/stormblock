@@ -3387,8 +3387,10 @@ pub async fn run() -> anyhow::Result<()> {
             let (first, n) = (done.orphan.rewritten[0], done.orphan.rewritten.len());
             println!(
                 "FINDING: {device}: {n} of the {} orphan file block(s) were not what a mount reads \
-                 (the first: block {first}); rewritten empty (#532)",
-                done.orphan.blocks
+                 (the first: block {first}, at {}; {} all zeros); rewritten empty (#532)",
+                done.orphan.blocks,
+                done.orphan.first_physical.unwrap_or(0),
+                done.orphan.zeroed
             );
         }
         for f in done.fixed.iter().take(20) {
