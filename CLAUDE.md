@@ -227,6 +227,25 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### A plain boot-only listener beside :9090 (2026-11-03, #524, P2, stormcos#374, stormbootx#183) — IN PROGRESS
+
+Firmware cannot do TLS. Decided on reading the callers:
+- `[management] boot_listen` (9089 by convention, unset = none): health (GET)
+  and exactly `is_boot_claim`'s verbs; anything else 404, before auth
+- the host secret keeps the management URL: the claim reply says
+  `management_url` (`api_scheme()://advertised or Host's host:listen port`),
+  boot-claim keeps it as `HostSecret.appliance`, the base when an older engine
+  sends none. The install ticket stays on the boot port
+- /init: `StormBootEngine` (stormbootx v0.36.0) is asked first, as a boothost
+  named to it; discovery asks 9089 then 9090 per host unless
+  `rd.stormblock.bootport=` names one. The finder answers the boot port
+- [ ] config, listener, health, finder
+- [ ] management_url, boot-claim
+- [ ] /init, shell tests
+- [ ] tests (verbs, 404s with TLS on :9090, a full claim with the real client);
+      auth.md (what crosses in the clear), boot-hooks.md, README, CHANGELOG
+- [ ] check.sh; tag; stage; tell stormcos#374, stormbootx#183
+
 ### Plain and TLS on one :9090 while callers move (2026-11-03, #525, P2, stormcos#374) — DONE (v23.15.0), closed; on a node after stormcos#374
 
 `[management] tls_mode = "required"` (default) | `"optional"`. Inert unless set.
