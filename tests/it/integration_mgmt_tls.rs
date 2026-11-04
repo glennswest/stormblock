@@ -965,9 +965,10 @@ async fn the_boot_port_answers_the_boot_verbs_beside_a_tls_api() {
     let r = c.post(format!("{plain}/api/v1/synonyms/boothost/default/claim"))
         .json(&serde_json::json!({})).send().await.unwrap();
     assert_eq!(r.status(), 400, "the default claim is reached, and wants a MAC");
-    let r = c.get(format!("{host}/command")).send().await.unwrap();
-    assert!(r.status().is_success(), "command: {}", r.status());
     let not_filtered = |b: &str| !b.contains("not on the boot port");
+    // None pending is the handler's own answer: reached.
+    let r = c.get(format!("{host}/command")).send().await.unwrap();
+    assert!(not_filtered(&r.text().await.unwrap()), "command is on the list");
     let r = c.post(format!("{host}/command/done")).json(&serde_json::json!({"id": 1, "result": "ok"})).send().await.unwrap();
     assert!(not_filtered(&r.text().await.unwrap()), "command/done is on the list");
     let r = c.post(format!("{host}/installed")).json(&serde_json::json!({"volume": clone})).send().await.unwrap();
