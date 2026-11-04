@@ -502,6 +502,11 @@ where
     panic!("never: {what}");
 }
 
+/// A GET's status; a kept connection the server just ended counts as 0.
+async fn status(c: &reqwest::Client, url: &str) -> u16 {
+    c.get(url).send().await.map_or(0, |r| r.status().as_u16())
+}
+
 fn plain_client() -> reqwest::Client {
     reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(10)).build().unwrap()
 }
@@ -584,18 +589,20 @@ async fn every_tls_file_is_taken_up_as_it_appears_and_a_missing_crl_fails_closed
         .await
         .expect("the plain connection ends when the pair appears")
         .unwrap();
-    assert!(plain.get(format!("{http}/api/v1/health")).send().await.is_err(), "no plain once TLS is up");
+    assert!(plain_client().get(format!("{http}/api/v1/health")).send().await.is_err(), "no plain once TLS is up");
     let (serving, missing) = missing_of(anon.get(format!("{https}/api/v1/health")).send().await.unwrap()).await;
     assert_eq!(serving, "https");
     assert_eq!(missing, ["tls_client_ca", "tls_admin_ca", "tls_admin_crl"]);
     assert!(url_scheme().starts_with("https://"), "{}", url_scheme());
 
-    // The node CA: its client certificate becomes a credential.
+    // The node CA: its client certificate becomes a credential, for this very
+    // client too, whose kept connection was asked for no certificate.
     let kubelet = pki.client(Some("kubelet"));
-    assert_eq!(kubelet.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 401);
+    let volumes = format!("{https}/api/v1/volumes");
+    assert_eq!(kubelet.get(&volumes).send().await.unwrap().status(), 401);
     appear(&pki, &live, "node-ca.crt");
     eventually("a node-CA certificate is a credential", || async {
-        kubelet.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status() == 200
+        status(&kubelet, &volumes).await == 200
     })
     .await;
 
@@ -613,19 +620,26 @@ async fn every_tls_file_is_taken_up_as_it_appears_and_a_missing_crl_fails_closed
     let manifest = format!("{https}/api/v1/releases/nosuch/manifest");
     let sc = pki.client(Some("stormcentral"));
     let node = pki.client(Some("server7"));
-    assert_eq!(sc.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 401, "no CRL: not admin");
+    assert_eq!(sc.get(&volumes).send().await.unwrap().status(), 401, "no CRL: not admin");
     assert_eq!(sc.put(format!("{https}/api/v1/forge/trust")).json(&trust).send().await.unwrap().status(), 401);
     assert_eq!(node.get(&manifest).send().await.unwrap().status(), 401, "no CRL: not a forge node");
 
     // The CRL: admin by certificate, a forge node's read, the revoked one not.
     appear(&pki, &live, "forge.crl");
     eventually("forge's certificate is admin", || async {
-        sc.put(format!("{https}/api/v1/forge/trust")).json(&trust).send().await.unwrap().status() == 200
+        sc.put(format!("{https}/api/v1/forge/trust"))
+            .json(&trust)
+            .send()
+            .await
+            .is_ok_and(|r| r.status() == 200)
     })
     .await;
-    assert_eq!(node.get(&manifest).send().await.unwrap().status(), 404, "a forge node reads; there is no such release");
+    eventually("a forge node reads; there is no such release", || async {
+        status(&node, &manifest).await == 404
+    })
+    .await;
     let old = pki.client(Some("old-stormcentral"));
-    assert_eq!(old.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 401);
+    assert_eq!(old.get(&volumes).send().await.unwrap().status(), 401);
     assert!(missing_of(anon.get(format!("{https}/api/v1/health")).send().await.unwrap()).await.1.is_empty());
 
     // The CRL gone again: closed again. The pair gone: never plain again.
@@ -637,9 +651,15 @@ async fn every_tls_file_is_taken_up_as_it_appears_and_a_missing_crl_fails_closed
         s == "https" && m == ["tls_cert", "tls_key", "tls_admin_crl"]
     })
     .await;
-    assert_eq!(sc.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 401);
-    assert_eq!(kubelet.get(format!("{https}/api/v1/volumes")).send().await.unwrap().status(), 200);
-    assert!(plain.get(format!("{http}/api/v1/health")).send().await.is_err(), "the pair held is still served");
+    eventually("the CRL gone: closed again, on the kept connection too", || async {
+        status(&sc, &volumes).await == 401
+    })
+    .await;
+    eventually("the node CA's certificate still works", || async {
+        status(&kubelet, &volumes).await == 200
+    })
+    .await;
+    assert!(plain_client().get(format!("{http}/api/v1/health")).send().await.is_err(), "the pair held is still served");
 }
 
 /// #483: "not there" is the only leniency. A file that is there and does not

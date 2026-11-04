@@ -713,14 +713,15 @@ pub async fn serve_tls(
                 continue;
             }
         };
+        // In this order: a change right after the acceptor still ends it.
+        let until = reloader.watch_judged();
         let accepted = reloader.acceptor();
         let app = router.clone();
-        let plain_until = reloader.watch_tls();
         tokio::spawn(async move {
             let Some((acceptor, classifier)) = accepted else {
                 // No pair yet (#483): plain, until there is one.
                 let io = hyper_util::rt::TokioIo::new(tcp_stream);
-                serve_connection(io, app, peer, None, Some(plain_until)).await;
+                serve_connection(io, app, peer, None, until).await;
                 return;
             };
             let tls_stream = match acceptor.accept(tcp_stream).await {
@@ -732,19 +733,20 @@ pub async fn serve_tls(
             };
             let cert = tls::client_cert(&tls_stream, &classifier);
             let io = hyper_util::rt::TokioIo::new(tls_stream);
-            serve_connection(io, app, peer, cert, None).await;
+            serve_connection(io, app, peer, cert, until).await;
         });
     }
 }
 
-/// One connection of the management listener. `plain_until`: end it after its
-/// request in flight when that turns true (a pair appeared, #483).
+/// One connection of the management listener. `until`: when it changes, end
+/// the connection after its request in flight (#483): what it was judged by no
+/// longer holds, and the caller's next connection is judged afresh.
 async fn serve_connection<IO>(
     io: IO,
     app: axum::Router,
     peer: std::net::SocketAddr,
     cert: Option<tls::ClientCert>,
-    plain_until: Option<tokio::sync::watch::Receiver<bool>>,
+    mut until: tokio::sync::watch::Receiver<u64>,
 ) where
     IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
@@ -766,15 +768,10 @@ async fn serve_connection<IO>(
     });
     let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
     let conn = builder.serve_connection(io, service);
-    let Some(mut plain_until) = plain_until else {
-        let _ = conn.await;
-        return;
-    };
     tokio::pin!(conn);
     tokio::select! {
         _ = conn.as_mut() => {}
-        // Its guard is not `Send`: dropped before anything else is awaited.
-        _ = async { let _ = plain_until.wait_for(|tls| *tls).await; } => {
+        _ = until.changed() => {
             conn.as_mut().graceful_shutdown();
             let _ = conn.await;
         }

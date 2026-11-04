@@ -424,8 +424,11 @@ pub struct Reloader {
     files: TlsFiles,
     current: Mutex<Current>,
     check_every: Duration,
-    /// Set once a pair is served: plain connections still open then end.
-    tls_up: tokio::sync::watch::Sender<bool>,
+    /// Moves when what an open connection was judged by no longer holds: the
+    /// first pair (it was plain), or a CA or CRL changed (its certificate was
+    /// judged at its handshake, and a CA that was not there asked for none).
+    /// Open connections end after their request in flight and come back.
+    judged: tokio::sync::watch::Sender<u64>,
 }
 
 impl Reloader {
@@ -444,12 +447,12 @@ impl Reloader {
         for key in &missing {
             tracing::warn!("management TLS: {key} is configured and not there yet: {}", meanwhile(key));
         }
-        let (tls_up, _) = tokio::sync::watch::channel(acceptor.is_some());
+        let (judged, _) = tokio::sync::watch::channel(0);
         Ok(Reloader {
             files,
             current: Mutex::new(Current { acceptor, classifier, stamps, missing, checked: Instant::now() }),
             check_every,
-            tls_up,
+            judged,
         })
     }
 
@@ -464,17 +467,18 @@ impl Reloader {
 
     /// Whether new connections are served TLS.
     pub fn serving_tls(&self) -> bool {
-        *self.tls_up.borrow()
+        self.lock().acceptor.is_some()
     }
 
-    /// Changes to true when a pair is first served; plain connections watch it.
-    pub fn watch_tls(&self) -> tokio::sync::watch::Receiver<bool> {
-        self.tls_up.subscribe()
+    /// For one connection, taken before its `acceptor()`: changes when the
+    /// connection should end.
+    pub fn watch_judged(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.judged.subscribe()
     }
 
     pub fn status(&self) -> TlsStatus {
-        let missing = self.lock().missing.clone();
-        TlsStatus { serving: if self.serving_tls() { "https" } else { "http" }, missing }
+        let cur = self.lock();
+        TlsStatus { serving: if cur.acceptor.is_some() { "https" } else { "http" }, missing: cur.missing.clone() }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
@@ -512,6 +516,9 @@ impl Reloader {
             }
         };
         cur.classifier = Arc::new(cls);
+        // A renewed pair alone judges nobody differently; the first two stamps
+        // are the pair's (`named`).
+        let mut end_open = before[2..] != stamps[2..];
         cur.stamps = stamps;
         for key in was.iter().filter(|k| !missing.contains(k)) {
             tracing::info!("management TLS: {key} is there now and taken up");
@@ -528,7 +535,7 @@ impl Reloader {
                         "management TLS: {} is there: new connections are HTTPS, plain ones end after their request",
                         self.files.cert.display()
                     );
-                    self.tls_up.send_replace(true);
+                    end_open = true;
                 } else {
                     tracing::info!(
                         "management TLS: {} re-read (renewed); new connections use it",
@@ -541,6 +548,9 @@ impl Reloader {
                 "management TLS: the pair's files are gone; still serving the pair held in memory"
             ),
             None => {}
+        }
+        if end_open {
+            self.judged.send_modify(|n| *n += 1);
         }
     }
 

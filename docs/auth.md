@@ -602,6 +602,12 @@ looked at every 5 s, connection or not):
 | `tls_admin_ca` | no certificate is admin, nor a forge node |
 | `tls_admin_crl` (with the key set) | **fails closed**: whether a certificate from forge's CA is revoked cannot be told, so none is admin or a forge node. Unlike the key unset, where revocation is not checked and the start says so |
 
+A certificate is judged at its handshake, so when a CA or CRL changes (appears,
+is replaced or goes) open connections end after their request in flight and the
+caller's next one is judged afresh: a caller connected before the CA appeared
+was asked for no certificate, and one forge has just revoked keeps nothing. A
+renewed pair alone ends nothing.
+
 The start logs each one. `GET /api/v1/health` has `tls: {serving: "https"|"http",
 missing: ["tls_admin_crl", …]}` (key names only; left out with no TLS
 configured). The scheme a golden's ticket URL and the appliance finder hand out
