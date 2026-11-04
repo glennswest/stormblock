@@ -232,15 +232,20 @@ the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#35
 On a node the stormcert pair, node CA, forge CA and CRL all appear after the
 engine starts; `validate` refused the config, so no engine, no storage.
 Missing = not yet; a file there that does not parse stays an error.
-- [ ] `validate`: both-or-neither stays, no existence checks
-- [ ] `tls.rs`: pair missing = plain, TLS when both appear (plain connections
-      closed then, never back to plain once a pair is held); client CA / forge
-      CA missing = no such credential; CRL configured and missing = forge's CA
-      proves nothing (admin and forge node), fail closed
-- [ ] idle pickup (a tick, not only at a connection), no lock across file I/O
-- [ ] health `tls {serving, missing}`; the scheme goldens/finder hand out is
-      what is served, not what is configured
-- [ ] tests, auth.md, README, CHANGELOG; check.sh
+- [x] `validate`: both-or-neither stays, no existence checks
+- [x] `tls.rs`: pair missing = plain, TLS when both appear, never back to plain
+      once a pair is held; client CA / forge CA missing = no such credential;
+      CRL configured and missing = forge's CA proves nothing (admin and forge
+      node), fail closed
+- [x] found by the test: a caller's kept connection was judged at its handshake
+      (asked for no certificate before the CA appeared), so it stayed 401: a CA
+      or CRL changed, or the first pair, ends open connections after their
+      request; a renewed pair alone ends nothing
+- [x] idle pickup (a tick, not only at a connection), no lock across file I/O
+- [x] health `tls {serving, missing}`; the scheme goldens/finder hand out is
+      what is served; `[fabric]` takes a certificate not there yet as none
+- [x] tests (`integration_mgmt_tls`, 2 new, 5/5 runs), auth.md, README, CHANGELOG
+- [ ] check.sh + the built binary with every file missing; v23.14.0; stage; close
 
 ### Shelf test: two RAID-6 sets on the DS224C, 4K+PI (2026-10-10, #390, P2) — ENGINE HALF DONE; the run WAITS ON HARDWARE (stormdrive#82)
 
