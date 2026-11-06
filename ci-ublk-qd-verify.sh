@@ -39,6 +39,7 @@
 # (ublk_drv, dm-delay), a static busybox, dmsetup and curl (copied in with
 # their libraries). Run on dev through sc-build:
 #   sc-build 'sh ci-ublk-qd-verify.sh'
+# NUMBERS=1 sc-build ... : only the timings, each mode three times, interleaved.
 set -uo pipefail
 
 KVER=${KVER:-$(uname -r)}
@@ -210,6 +211,11 @@ EOT
     dd if=$dev of=/tmp/back bs=64k skip=2048 count=256 iflag=direct 2>/dev/null
     cmp -s /tmp/pat /tmp/back && r $mode-round-trip PASS || r $mode-round-trip FAIL
 
+    if [ -e /etc/numbers ]; then
+        fast_reads; fast_large
+        kill -TERM $pid; wait $pid
+        return
+    fi
     [ "$mode" != serial ] && fast_reads
     [ "$mode" != serial ] && fast_large
     [ "$mode" != serial ] && features
@@ -549,10 +555,11 @@ in_place_clone() {
     c=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/snapshots -d "{\"name\":\"zclone\",\"source_volume_id\":\"$s\"}" | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
     cd=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$c/attach -d '{"transport":"ublk"}' | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
     [ -b "$sd" ] && [ -b "$cd" ] || { r $mode-clone "FAIL (no devices: '$sd' '$cd')"; return; }
-    dd if=/dev/urandom of=/tmp/cl bs=4096 count=16 2>/dev/null
-    dd if=/tmp/cl of=$cd bs=4096 seek=2 count=16 oflag=direct conv=fsync 2>/dev/null
-    dd if=/tmp/cl of=$cd bs=4096 seek=2 count=16 oflag=direct conv=fsync 2>/dev/null
-    dd if=$cd of=/tmp/cl.b bs=4096 skip=2 count=16 iflag=direct 2>/dev/null
+    # Inside the first 64 KiB: what follows it stays the source's.
+    dd if=/dev/urandom of=/tmp/cl bs=4096 count=8 2>/dev/null
+    dd if=/tmp/cl of=$cd bs=4096 seek=2 count=8 oflag=direct conv=fsync 2>/dev/null
+    dd if=/tmp/cl of=$cd bs=4096 seek=2 count=8 oflag=direct conv=fsync 2>/dev/null
+    dd if=$cd of=/tmp/cl.b bs=4096 skip=2 count=8 iflag=direct 2>/dev/null
     cmp -s /tmp/cl /tmp/cl.b && a=ok || a=clone-data
     dd if=$sd of=/tmp/s.b bs=64k count=128 iflag=direct 2>/dev/null
     dd if=/tmp/pat of=/tmp/s.w bs=64k count=128 2>/dev/null
@@ -757,6 +764,18 @@ unanswered() {
     case "$h" in *ublk_stuck*) r unanswered-cleared "FAIL ($h)" ;; *) r unanswered-cleared PASS ;; esac
 }
 
+# NUMBERS=1: only the timings, each mode three times, interleaved, so a build
+# VM's drift lands on none of them.
+if [ -e /etc/numbers ]; then
+    port=9100
+    for d in vda vdb vdc vdd vde vdf vdg vdh vdi vdj vdk vdl; do
+        case $port in 9100|9104|9108) m=direct ;; 9101|9105|9109) m=concurrent ;; 9102|9106|9110) m=copy ;; *) m=plain ;; esac
+        run $m $d $port
+        port=$((port + 1))
+    done
+    echo "GUEST done"
+    poweroff -f
+fi
 run serial vda 9091
 run concurrent vdb 9092
 run plain vdc 9093
@@ -767,8 +786,10 @@ echo "GUEST done"
 poweroff -f
 EOF
 chmod +x "$I/init"
+[ -n "${NUMBERS:-}" ] && touch "$I/etc/numbers"
 (cd "$I" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$W/initrd.gz"
-truncate -s 1G "$W/a.img" "$W/b.img" "$W/c.img" "$W/d.img" "$W/e.img" "$W/f.img"
+truncate -s 1G "$W/a.img" "$W/b.img" "$W/c.img" "$W/d.img" "$W/e.img" "$W/f.img" \
+    "$W/g.img" "$W/h.img" "$W/i.img" "$W/j.img" "$W/k.img" "$W/l.img"
 
 say "boot $KERNEL in QEMU"
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
@@ -780,9 +801,15 @@ timeout 1500 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 
     -drive file="$W/c.img",if=virtio,format=raw \
     -drive file="$W/d.img",if=virtio,format=raw \
     -drive file="$W/e.img",if=virtio,format=raw \
-    -drive file="$W/f.img",if=virtio,format=raw > "$W/guest.log" 2>&1
+    -drive file="$W/f.img",if=virtio,format=raw \
+    -drive file="$W/g.img",if=virtio,format=raw -drive file="$W/h.img",if=virtio,format=raw \
+    -drive file="$W/i.img",if=virtio,format=raw -drive file="$W/j.img",if=virtio,format=raw \
+    -drive file="$W/k.img",if=virtio,format=raw -drive file="$W/l.img",if=virtio,format=raw > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG|STEP|STACK|PS|WATCHDOG)|ERROR|panick'
 
+if [ -n "${NUMBERS:-}" ]; then
+    echo "== numbers: done"; exit 0
+fi
 t() { tr -d '\r' < "$W/guest.log" | awk -v m="$1" -v w="$2" '$1=="TIME" && $2==m && $3==w {print $4}'; }
 SP=$(t serial parallel-reads); CP=$(t concurrent parallel-reads)
 SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
