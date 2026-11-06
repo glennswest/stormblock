@@ -85,6 +85,7 @@ say "the initramfs, and a boot hook for the modprobe checks"
 cat > "$W/10-a64" <<'HOOK'
 #!/bin/sh
 # Not a decision: exit 1 is "no opinion". What this image's own tools can do.
+exec >&2   # a hook's stdout is its answer; its stderr is the console
 echo "@@ARCH $(uname -m)"
 [ -d /sys/firmware/acpi/tables ] && echo "@@ACPI tables"
 for m in r8169 nvme_tcp ublk_drv; do
