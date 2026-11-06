@@ -40,17 +40,44 @@ fn grew(by: i64) {
     let now = HEAP.fetch_add(by, Relaxed) + by;
     PEAK.fetch_max(now, Relaxed);
 }
+/// Live bytes by the exact size of the allocation, up to 8 KiB, and above it
+/// by power of two: says what kind of thing the heap is holding.
+const SMALL: usize = 8192;
+static BY_SIZE: [AtomicI64; SMALL + 64] = [const { AtomicI64::new(0) }; SMALL + 64];
+fn bucket(size: usize) -> usize {
+    if size < SMALL { size } else { SMALL + (usize::BITS - size.leading_zeros()) as usize }
+}
+fn tally(size: usize, sign: i64) {
+    BY_SIZE[bucket(size)].fetch_add(sign * size as i64, Relaxed);
+}
+fn sizes(what: &str) {
+    let mut v: Vec<(usize, i64)> = BY_SIZE.iter().enumerate().map(|(i, b)| (i, b.load(Relaxed))).filter(|(_, b)| *b > 1 << 20).collect();
+    v.sort_by_key(|(_, b)| -*b);
+    let top: Vec<String> = v
+        .iter()
+        .take(8)
+        .map(|(i, b)| {
+            let name = if *i < SMALL { format!("{i} B") } else { format!("<2^{}", i - SMALL) };
+            format!("{name}: {:.1} MiB", mib(*b))
+        })
+        .collect();
+    println!("  live by allocation size, {what}: {}", top.join(", "));
+}
 unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
         grew(l.size() as i64);
+        tally(l.size(), 1);
         unsafe { std::alloc::System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
         HEAP.fetch_sub(l.size() as i64, Relaxed);
+        tally(l.size(), -1);
         unsafe { std::alloc::System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
         grew(n as i64 - l.size() as i64);
+        tally(l.size(), -1);
+        tally(n, 1);
         unsafe { std::alloc::System.realloc(p, l, n) }
     }
 }
@@ -186,6 +213,7 @@ async fn main() -> anyhow::Result<()> {
     let fill_s = t.elapsed().as_secs_f64();
     println!("{extents} extents written in {fill_s:.0} s ({:.0} /s)", extents as f64 / fill_s);
     line("hot, every map resident", base, extents, fill_s);
+    sizes("hot");
 
     // Cold: the handles here are what a served volume's export would be, and
     // keep a map in; idle volumes have none.
@@ -195,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
     let out = vm.evict_idle(0).await;
     println!("{out} of {volumes} maps out of memory");
     line("cold, every map out", base, extents, t.elapsed().as_secs_f64());
+    sizes("cold");
 
     drop(vm);
     let after_drop = heap() - base;
@@ -229,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
     let out = vm.evict_idle(0).await;
     println!("{out} of {volumes} maps out");
     line("run on: every map out", base, extents, t.elapsed().as_secs_f64());
+    sizes("run on, out");
     peak_reset();
     let t = Instant::now();
     let before = heap();
@@ -236,6 +266,13 @@ async fn main() -> anyhow::Result<()> {
     let loaded = heap() - before;
     line("run on: every map in", base, extents, t.elapsed().as_secs_f64());
     println!("  a map in memory: {:.2} B/extent", loaded as f64 / extents as f64);
+    sizes("run on, in");
+    {
+        let gem = vm.gem().read().await;
+        let mapped: u64 = gem.resident_ids().iter().filter_map(|id| gem.get_volume_map(id)).map(|m| m.len() as u64).sum();
+        println!("  maps in memory name {mapped} extents of {extents}");
+        anyhow::ensure!(mapped >= extents, "a map came back short");
+    }
     peak_reset();
     let t = Instant::now();
     let out = vm.evict_idle(0).await;
