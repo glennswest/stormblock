@@ -93,11 +93,18 @@ async fn main() -> anyhow::Result<()> {
     let slot_mib: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
     let volumes: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1024);
     let fill: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(100);
-    let size = parse_size(&size_s).ok_or_else(|| anyhow::anyhow!("size {size_s}"))?;
+    parse_size(&size_s).ok_or_else(|| anyhow::anyhow!("size {size_s}"))?;
     let slot = slot_mib << 20;
     std::fs::create_dir_all(&dir)?;
     let uri = format!("emulated://full-drive?size={size_s}&backing={dir}");
     let base = heap();
+    // A step that takes long says so, whatever it is doing.
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        let mem = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+        let avail = mem.lines().find(|l| l.starts_with("MemAvailable")).unwrap_or("").to_string();
+        eprintln!("  [every 2 min] heap {:.1} MiB, peak {:.1} MiB, rss {:.1} MiB, {avail}", mib(heap() - base), mib(peak() - base), rss() as f64 / (1u64 << 20) as f64);
+    });
 
     peak_reset();
     let t = Instant::now();
@@ -137,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
     let mut at = 0u64;
     while at < per_volume {
         let end = (at + BATCH).min(per_volume);
+        let batch = Instant::now();
         let mut tasks = Vec::with_capacity(handles.len());
         for h in &handles {
             let (h, zero) = (h.clone(), zero.clone());
@@ -152,10 +160,17 @@ async fn main() -> anyhow::Result<()> {
         }
         done += (end - at) * volumes;
         at = end;
+        let wrote = batch.elapsed().as_secs_f64();
         vm.persist().await;
+        let persisted = batch.elapsed().as_secs_f64() - wrote;
         anyhow::ensure!(vm.durability_fault().is_none(), "records: {:?} at {done} extents", vm.durability_fault());
-        if last.elapsed().as_secs() >= 60 {
-            println!("  {done} of {extents} extents, {:.0} /s, heap {:.1} MiB", done as f64 / t.elapsed().as_secs_f64(), mib(heap() - base));
+        if last.elapsed().as_secs() >= 60 || persisted > 30.0 {
+            println!(
+                "  {done} of {extents} extents, {:.0} /s, heap {:.1} MiB, peak so far {:.1} MiB; this batch: write+flush {wrote:.1} s, persist {persisted:.1} s",
+                done as f64 / t.elapsed().as_secs_f64(),
+                mib(heap() - base),
+                mib(peak() - base),
+            );
             last = Instant::now();
         }
     }
