@@ -32,12 +32,16 @@ pub const UBLK_U_IO_PREP_IO_CMDS: u32 = 0xC010_7525;
 pub const UBLK_U_IO_COMMIT_IO_CMDS: u32 = 0xC010_7526;
 pub const UBLK_U_IO_FETCH_IO_CMDS: u32 = 0xC010_7527;
 pub const UBLK_BATCH_F_HAS_BUF_ADDR: u16 = 1 << 1;
+/// A failed auto registration delivers the request anyway (#505, step 2).
+pub const UBLK_BATCH_F_AUTO_BUF_REG_FALLBACK: u16 = 1 << 2;
 /// `IORING_URING_CMD_MULTISHOT`.
 pub const URING_CMD_MULTISHOT: u32 = 1 << 1;
 /// `IOU_PBUF_RING_INC`.
 pub const PBUF_RING_INC: u16 = 2;
 /// One element of PREP and COMMIT, with the buffer's address.
 pub const ELEM_BYTES: usize = 16;
+/// With auto buffer registration: the buffer index in place of an address.
+pub const ELEM_BYTES_AUTO: usize = 8;
 
 /// `struct ublk_batch_io`: 16 bytes at the start of the command area.
 pub fn batch_cmd(q_id: u16, flags: u16, nr_elem: u16, elem_bytes: u8) -> [u8; 80] {
@@ -56,6 +60,25 @@ pub fn put_elem(out: &mut Vec<u8>, tag: u16, result: i32, buf_addr: u64) {
     out.extend_from_slice(&0u16.to_ne_bytes());
     out.extend_from_slice(&result.to_ne_bytes());
     out.extend_from_slice(&buf_addr.to_ne_bytes());
+}
+
+/// One element under auto buffer registration: the index the kernel registers
+/// the tag's next request at, here the tag itself, and no address.
+pub fn put_elem_auto(out: &mut Vec<u8>, tag: u16, result: i32) {
+    out.extend_from_slice(&tag.to_ne_bytes());
+    out.extend_from_slice(&tag.to_ne_bytes());
+    out.extend_from_slice(&result.to_ne_bytes());
+}
+
+/// PREP_IO_CMDS or COMMIT_IO_CMDS under auto buffer registration.
+pub fn elems_auto_sqe(char_fd: RawFd, op: u32, q_id: u16, elems: &[u8], user_data: u64) -> squeue::Entry128 {
+    let n = (elems.len() / ELEM_BYTES_AUTO) as u16;
+    let sqe = opcode::UringCmd80::new(types::Fd(char_fd), op)
+        .cmd(batch_cmd(q_id, UBLK_BATCH_F_AUTO_BUF_REG_FALLBACK, n, ELEM_BYTES_AUTO as u8))
+        .addr(Some(elems.as_ptr() as u64))
+        .build()
+        .user_data(user_data);
+    patch(sqe, elems.len() as u32, 0, None)
 }
 
 /// Set an SQE's `len` (offset 24), command flags (28) and buffer group (40):
@@ -180,6 +203,18 @@ mod tests {
         put_elem(&mut e, 7, -5, 0x1122_3344_5566_7788);
         assert_eq!(e.len(), ELEM_BYTES);
         assert_eq!(&e[..8], &[7, 0, 0, 0, 0xfb, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn an_auto_registering_element_names_its_buffer_and_no_address() {
+        let mut e = Vec::new();
+        put_elem_auto(&mut e, 7, -5);
+        assert_eq!(e, [7, 0, 7, 0, 0xfb, 0xff, 0xff, 0xff]);
+        let s = elems_auto_sqe(9, UBLK_U_IO_COMMIT_IO_CMDS, 1, &e, 3);
+        let raw: [u8; 128] = unsafe { std::mem::transmute(s) };
+        assert_eq!(u32::from_ne_bytes(raw[24..28].try_into().unwrap()), 8, "len");
+        // Fallback, no HAS_BUF_ADDR, one element of 8 bytes.
+        assert_eq!(&raw[48..56], &[1, 0, 4, 0, 1, 0, 8, 0]);
     }
 
     #[test]

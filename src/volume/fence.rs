@@ -161,6 +161,24 @@ pub async fn hold(legs: impl IntoIterator<Item = Leg>) -> Held {
     Held { _guards: guards }
 }
 
+/// Hold every leg shared if nothing keeps it now, without waiting (#505).
+pub fn try_hold(legs: impl IntoIterator<Item = Leg>) -> Option<Held> {
+    if off() {
+        return Some(Held { _guards: Vec::new() });
+    }
+    let mut legs: Vec<Leg> = legs.into_iter().collect();
+    legs.sort_unstable_by_key(order);
+    legs.dedup();
+    let mut guards = Vec::with_capacity(legs.len());
+    for leg in legs {
+        let lock = lock_of(leg);
+        let mut g = Guard { leg, guard: None, lock: Some(lock.clone()) };
+        g.guard = Some(lock.try_read_owned().ok()?);
+        guards.push(g);
+    }
+    Some(Held { _guards: guards })
+}
+
 impl Exclusive {
     /// Whether this guard covers `leg` — the one the move is about to copy.
     pub fn covers(&self, leg: Leg) -> bool {

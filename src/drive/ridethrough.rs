@@ -208,6 +208,14 @@ impl BlockDevice for RideThrough {
     fn id(&self) -> &DeviceId {
         self.inner.id()
     }
+    /// Not while the drive is being ridden through (#505): a request must
+    /// come here, to wait and be retried.
+    fn direct_fd(&self) -> Option<(std::os::fd::RawFd, u64)> {
+        if self.stalled.load(Ordering::Acquire) {
+            return None;
+        }
+        self.inner.direct_fd()
+    }
     fn drive_id(&self) -> DeviceId {
         self.inner.drive_id()
     }

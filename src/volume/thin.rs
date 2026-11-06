@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 
-use crate::drive::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType, SmartData};
+use crate::drive::{BlockDevice, DeviceId, DriveError, DriveResult, DriveType, InPlace, SmartData};
 use crate::drive::slab::{SlabId, SlabRole};
 use crate::drive::slab_registry::SlabRegistry;
 use crate::placement::domain::FailureDomain;
@@ -556,7 +556,7 @@ pub struct ThinVolumeHandle {
     /// Writes, discards and write-zeroes finished on this volume (#338),
     /// counted when they return — success, error or dropped. Starts at 1,
     /// so a handle's first flush is always a full one.
-    completed: AtomicU64,
+    completed: Arc<AtomicU64>,
     /// The `completed` a successful flush started from: everything finished
     /// before it is durable. A flush that finds `completed` no further has
     /// nothing to make durable and touches no device.
@@ -573,7 +573,7 @@ pub struct ThinVolumeHandle {
     /// mirror is still landing once the copy starts, nor one with it once
     /// it is dropped.
     mirror: std::sync::RwLock<Option<Arc<super::mirror::LiveMirror>>>,
-    mirror_gate: tokio::sync::RwLock<()>,
+    mirror_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 /// Counts one write, discard or write-zeroes as finished when it returns,
@@ -583,6 +583,25 @@ struct Finished<'a>(&'a AtomicU64);
 impl Drop for Finished<'_> {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// What an in-place request holds until it has landed (#505): dropped before
+/// the request is answered, so a write is `completed` before its FLUSH can be
+/// sent (#338), and a move, a snapshot or a mirror's start waits for it.
+struct InPlaceHold {
+    _mirror: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    _snap: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    _fence: fence::Held,
+    _took: crate::fglat::Timer,
+    finished: Option<Arc<AtomicU64>>,
+}
+
+impl Drop for InPlaceHold {
+    fn drop(&mut self) {
+        if let Some(c) = &self.finished {
+            c.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -657,11 +676,11 @@ impl ThinVolumeHandle {
             lba: std::sync::atomic::AtomicU32::new(Lba::DEFAULT),
             last_use: AtomicU64::new(next_use()),
             last_health: std::sync::Mutex::new(None),
-            completed: AtomicU64::new(1),
+            completed: Arc::new(AtomicU64::new(1)),
             synced: AtomicU64::new(0),
             snap_gate: Arc::new(tokio::sync::RwLock::new(())),
             mirror: std::sync::RwLock::new(None),
-            mirror_gate: tokio::sync::RwLock::new(()),
+            mirror_gate: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
@@ -848,6 +867,109 @@ impl ThinVolumeHandle {
             return Err(DriveError::ReadOnly(VolumeError::ReadOnly(self.id).to_string()));
         }
         Ok(())
+    }
+
+    /// Plan a request in place (#505), whether or not the device under it has
+    /// a file descriptor: [`BlockDevice::plan_in_place`] asks for one, a test
+    /// on a device that models a power cut does not.
+    ///
+    /// Decided on the ublk queue's own thread, so it never waits: whatever is
+    /// held by someone else sends the request the ordinary way, as does
+    /// everything that ordinary path does more than one device I/O or a look at
+    /// the data for: a parity stripe, a mirror's legs, a range across extents,
+    /// a hole, a failed leg. A write also needs a slot this volume alone owns
+    /// (else copy-on-write), whose entry is on the device (else the next flush
+    /// publishes it, #171), on a slab not being emptied (else relocate, #239)
+    /// and no live mirror (#295). A FUA write is not planned: `write_fua`
+    /// decides per drive, and a commit record is small enough to copy.
+    pub fn plan_in_place_on(&self, write: bool, offset: u64, len: usize, need_fd: bool) -> Option<InPlace> {
+        if self.refused.get().is_some() || len == 0 {
+            return None;
+        }
+        if write && !self.writable() {
+            return None;
+        }
+        let bs = u64::from(self.block_size());
+        if offset % bs != 0 || len as u64 % bs != 0 || !self.redundancy().is_none() {
+            return None;
+        }
+        let vext = offset / self.slot_size;
+        let off_in_slot = offset % self.slot_size;
+        if off_in_slot + len as u64 > self.slot_size {
+            return None;
+        }
+        // In `write`'s order: the mirror's gate, then the snapshot's (#367),
+        // and only then a look at the volume again (#487).
+        let (mirror, snap) = if write {
+            let m = self.mirror_gate.clone().try_read_owned().ok()?;
+            if self.live_mirror().is_some_and(|l| l.is_live()) {
+                return None;
+            }
+            let s = self.snap_gate.clone().try_read_owned().ok()?;
+            if self.refused.get().is_some() || !self.writable() {
+                return None;
+            }
+            (Some(m), Some(s))
+        } else {
+            (None, None)
+        };
+        let usable = |loc: &ExtentLocation| {
+            loc.leg_count() == 1 && (!write || loc.ref_count == 1) && !self.is_failed(loc.primary().slab_id)
+        };
+        // As `fenced_lookup`: the map read again with the fence held, since a
+        // move in between frees the slot first found (#239).
+        let found = {
+            let gem = self.gem.try_read().ok()?;
+            if gem.is_cold(&self.id) {
+                return None;
+            }
+            gem.lookup(self.id, vext)?
+        };
+        if !usable(&found) {
+            return None;
+        }
+        let leg = found.primary();
+        let held = fence::try_hold([leg])?;
+        {
+            let gem = self.gem.try_read().ok()?;
+            let again = gem.lookup(self.id, vext)?;
+            if !usable(&again) || again.primary() != leg {
+                return None;
+            }
+        }
+        let (device, at) = {
+            let reg = self.registry.try_read().ok()?;
+            if write && (reg.is_quarantined(&leg.slab_id) && !fence::relocate_off()) {
+                return None;
+            }
+            let slab = reg.get(&leg.slab_id)?;
+            if write && slab.is_unpublished(leg.slot_idx) {
+                return None;
+            }
+            slab.slot_device_and_offset(leg.slot_idx, off_in_slot).ok()?
+        };
+        if need_fd && device.direct_fd().is_none() {
+            return None;
+        }
+        // The drive's own block may be larger than the volume's (a 512 volume
+        // on a 4Kn drive): that needs the read-modify-write below.
+        let dbs = u64::from(device.block_size());
+        if at % dbs != 0 || len as u64 % dbs != 0 {
+            return None;
+        }
+        self.last_use.store(next_use(), Ordering::Relaxed);
+        FOREGROUND_IO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !write {
+            crate::flowhot::note(&found);
+        }
+        let hold = InPlaceHold {
+            _mirror: mirror,
+            _snap: snap,
+            _fence: held,
+            _took: crate::fglat::Timer::new(crate::fglat::Class::Io),
+            finished: write.then(|| self.completed.clone()),
+        };
+        Some(InPlace { device, offset: at, hold: Box::new(hold) })
     }
 
     /// Keep this volume's dirty-stripe log under `dir`. Returns what a
@@ -3305,6 +3427,14 @@ impl BlockDevice for ThinVolumeHandle {
 
     fn device_type(&self) -> DriveType {
         DriveType::File
+    }
+
+    fn plans_in_place(&self) -> bool {
+        true
+    }
+
+    fn plan_in_place(&self, write: bool, offset: u64, len: usize) -> Option<InPlace> {
+        self.plan_in_place_on(write, offset, len, true)
     }
 
     /// Any slab of the half this volume is placed in is on a rotating disk

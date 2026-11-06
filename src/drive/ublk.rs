@@ -127,6 +127,50 @@ const UBLK_F_BATCH_IO: u64 = 1 << 15;
 /// served by several threads. 7.2 grants it on every device unasked; batch
 /// I/O drops it.
 const UBLK_F_PER_IO_DAEMON: u64 = 1 << 13;
+/// The kernel registers each request's pages in the queue ring's buffer table
+/// before delivering it (#505, step 2). The server can then never reach the
+/// data through a mapped buffer: READ_FIXED/WRITE_FIXED on that ring, or...
+const UBLK_F_AUTO_BUF_REG: u64 = 1 << 11;
+/// ...`pread`/`pwrite` of `/dev/ublkcN` at the request's position. Both on one
+/// device, chosen per request: the driver gates each on its own flag.
+const UBLK_F_USER_COPY: u64 = 1 << 7;
+/// A registration failed and the request was delivered anyway (we pass
+/// `UBLK_AUTO_BUF_REG_FALLBACK`): no buffer, so it takes the copy path.
+const UBLK_IO_F_NEED_REG_BUF: u32 = 1 << 17;
+/// `UBLK_AUTO_BUF_REG_FALLBACK`, as `struct ublk_auto_buf_reg.flags`.
+const UBLK_AUTO_BUF_REG_FALLBACK: u64 = 1;
+
+/// What FETCH_REQ and COMMIT_AND_FETCH_REQ carry in the **SQE's** `addr` under
+/// auto buffer registration (`ublk_auto_buf_reg_to_sqe_addr`): the index to
+/// register the tag's next request at, here the tag, and the flags.
+/// `ublksrv_io_cmd.addr` itself stays 0, or the kernel refuses the command.
+const fn auto_reg_addr(tag: u16) -> u64 {
+    tag as u64 | (UBLK_AUTO_BUF_REG_FALLBACK << 16)
+}
+
+/// Where a request's data is in `/dev/ublkcN` (`ublk_user_copy`): the fixed
+/// base (`UBLKSRV_IO_BUF_OFFSET`), the queue above bit 41, the tag above bit 25.
+const fn user_copy_pos(queue: u16, tag: u16) -> u64 {
+    0x8000_0000 + ((queue as u64) << 41) + ((tag as u64) << 25)
+}
+
+/// Whether a device created now asks for zero copy (#505, step 2). As batch
+/// I/O: the mode is fixed at creation and a successor must serve it, so a
+/// device handed to another process (recoverable, #189) asks only with
+/// `STORMBLOCK_UBLK_ZERO_COPY=always`; `=0` never asks.
+fn wants_zero_copy(recoverable: bool) -> bool {
+    match std::env::var("STORMBLOCK_UBLK_ZERO_COPY").as_deref() {
+        Ok("0") | Ok("off") => false,
+        Ok("always") => true,
+        _ => !recoverable,
+    }
+}
+
+/// Requests served in place, on the copy path of a zero-copy device, and
+/// planned in place but gone round again on the copy path (#505).
+static IN_PLACE: AtomicU64 = AtomicU64::new(0);
+static COPIED: AtomicU64 = AtomicU64::new(0);
+static IN_PLACE_RETRIED: AtomicU64 = AtomicU64::new(0);
 
 /// Threads serving one queue when the device allows a daemon per tag and
 /// does not use batch I/O (#505): `STORMBLOCK_UBLK_QUEUE_THREADS`, 1–8,
@@ -795,6 +839,15 @@ impl UblkServer {
             if kernel_features & UBLK_F_BATCH_IO != 0 && wants_batch(self.recoverable) {
                 flags |= UBLK_F_BATCH_IO;
             }
+            // Only for a device that can plan a request in place: for anything
+            // else it would be a pread/pwrite per request and nothing gained.
+            if kernel_features & UBLK_F_AUTO_BUF_REG != 0
+                && kernel_features & UBLK_F_USER_COPY != 0
+                && self.device.plans_in_place()
+                && wants_zero_copy(self.recoverable)
+            {
+                flags |= UBLK_F_AUTO_BUF_REG | UBLK_F_USER_COPY;
+            }
             if self.recoverable {
                 if kernel_features & UBLK_F_USER_RECOVERY != 0 {
                     flags |= UBLK_F_USER_RECOVERY;
@@ -853,6 +906,9 @@ impl UblkServer {
         };
         // Served in batch mode exactly when the device was made so (#505).
         let batch = dev_flags & UBLK_F_BATCH_IO != 0;
+        // And zero copy (#505): both flags, or it is not a device this serves
+        // that way. No other process makes one with only one of them here.
+        let zero_copy = dev_flags & UBLK_F_AUTO_BUF_REG != 0 && dev_flags & UBLK_F_USER_COPY != 0;
 
         // --- SET_PARAMS ---
         //
@@ -986,6 +1042,16 @@ impl UblkServer {
             }
         };
         let char_fd = char_file.as_raw_fd();
+        // The char device for the tasks of the copy path (#505): a task may
+        // outlive the bounded wait at a stop, and must never read or write an
+        // fd number since reused.
+        let user_copy = if zero_copy {
+            Some(Arc::new(char_file.try_clone().map_err(|e| {
+                DriveError::Other(anyhow::anyhow!("{char_path}: a second handle for user copy: {e}"))
+            })?))
+        } else {
+            None
+        };
 
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as libc::off_t;
         let desc_buf_size = queue_depth as usize * std::mem::size_of::<UblkIoDesc>();
@@ -1045,6 +1111,7 @@ impl UblkServer {
             let rt_handle = tokio::runtime::Handle::current();
             let barrier = startup_barrier.clone();
             let track = track.clone();
+            let user_copy = user_copy.clone();
 
             let handle = std::thread::Builder::new()
                 .name(if per_queue > 1 { format!("ublk-q{q}.{part}") } else { format!("ublk-q{}", q) })
@@ -1052,7 +1119,7 @@ impl UblkServer {
                     let desc_base = desc_base;
                     queue_worker(
                         q, raw_char_fd, desc_base.0, depth, max_io,
-                        device, running, rt_handle, barrier, track, batch, tags, taken,
+                        device, running, rt_handle, barrier, track, batch, tags, taken, user_copy,
                     );
                 })
                 .map_err(|e| DriveError::Other(anyhow::anyhow!(
@@ -1062,6 +1129,10 @@ impl UblkServer {
             workers.push(handle);
           }
         }
+
+        // Only the workers and their tasks hold it from here: DEL_DEV waits
+        // for every handle on the char device.
+        drop(user_copy);
 
         // Wait for all workers to submit their initial FETCH_REQs
         startup_barrier.wait();
@@ -1236,6 +1307,12 @@ pub struct FeatureReport {
     /// io_uring rings built with SINGLE_ISSUER + DEFER_TASKRUN, and plain.
     pub rings_tuned: u64,
     pub rings_plain: u64,
+    /// On zero-copy devices: requests that went straight to the drive, took
+    /// the copy path, and were planned in place but had to go round again on
+    /// the copy path (an error, a short count: #505).
+    pub in_place: u64,
+    pub copied: u64,
+    pub in_place_retried: u64,
 }
 
 /// `UBLK_F_*` bits by name (7.2's uapi).
@@ -1308,7 +1385,15 @@ pub fn feature_report() -> FeatureReport {
         .map(|m| m.values().fold(0u64, |a, f| a | f))
         .unwrap_or(0);
     let (rings_tuned, rings_plain) = crate::drive::ringsetup::counts();
-    FeatureReport { offered, used: feature_names(used_mask), rings_tuned, rings_plain }
+    FeatureReport {
+        offered,
+        used: feature_names(used_mask),
+        rings_tuned,
+        rings_plain,
+        in_place: IN_PLACE.load(Ordering::Relaxed),
+        copied: COPIED.load(Ordering::Relaxed),
+        in_place_retried: IN_PLACE_RETRIED.load(Ordering::Relaxed),
+    }
 }
 
 /// Ask the kernel for its `UBLK_F_*` feature mask.
@@ -1732,6 +1817,8 @@ const WAKE: u64 = u64::MAX;
 const BATCH_PREP: u64 = u64::MAX - 1;
 const BATCH_FETCH: u64 = u64::MAX - 2;
 const BATCH_COMMIT: u64 = 1 << 62;
+/// A request's own I/O in place (#505): this bit and the tag.
+const IN_PLACE_IO: u64 = 1 << 61;
 
 /// Requests a device has been given and not yet answered, by tag (#337).
 ///
@@ -1958,7 +2045,72 @@ pub fn stuck(older_than: std::time::Duration) -> Vec<Stuck> {
 struct Done {
     tag: u16,
     result: i32,
-    buf: Vec<u8>,
+    /// `None` for a request served in place: its buffer never left.
+    buf: Option<Vec<u8>>,
+}
+
+/// A request on its way to the drive in place (#505): the I/O is in the
+/// queue's ring, and what keeps it safe is held until its completion.
+struct InPlaceIo {
+    _plan: crate::drive::InPlace,
+    op: u8,
+    offset: u64,
+    length: usize,
+}
+
+/// The copy path of a zero-copy device: `/dev/ublkcN` holds the request's data.
+#[derive(Clone)]
+struct UserCopy {
+    char_dev: Arc<std::fs::File>,
+    queue: u16,
+}
+
+/// [`serve`], with the data brought in from the kernel for a write and handed
+/// to it after a read when the device is in user-copy mode (#505).
+#[allow(clippy::too_many_arguments)]
+async fn serve_request(
+    device: &dyn BlockDevice,
+    user_copy: Option<&UserCopy>,
+    tag: u16,
+    op: u8,
+    fua: bool,
+    offset: u64,
+    length: usize,
+    mut buf: Vec<u8>,
+) -> (i32, Vec<u8>) {
+    use std::os::unix::fs::FileExt;
+    let Some(uc) = user_copy else {
+        return serve(device, op, fua, offset, length, buf).await;
+    };
+    let pos = user_copy_pos(uc.queue, tag);
+    if matches!(op, UBLK_IO_OP_READ | UBLK_IO_OP_WRITE) {
+        COPIED.fetch_add(1, Ordering::Relaxed);
+    }
+    if op == UBLK_IO_OP_WRITE {
+        if let Err(e) = uc.char_dev.read_exact_at(&mut buf[..length], pos) {
+            tracing::error!("ublk write @{offset}+{length}: the data from the kernel: {e}");
+            return (-(libc::EIO), buf);
+        }
+    }
+    let (result, buf) = serve(device, op, fua, offset, length, buf).await;
+    if op == UBLK_IO_OP_READ && result >= 0 {
+        if let Err(e) = uc.char_dev.write_all_at(&buf[..length], pos) {
+            tracing::error!("ublk read @{offset}+{length}: the data to the kernel: {e}");
+            return (-(libc::EIO), buf);
+        }
+    }
+    (result, buf)
+}
+
+/// The request's I/O in the queue's ring, on the buffer the kernel registered
+/// at its tag (`addr` is an offset into that buffer: 0, the whole request).
+fn in_place_sqe(fd: RawFd, write: bool, length: usize, tag: u16, at: u64) -> squeue::Entry128 {
+    let sqe = if write {
+        opcode::WriteFixed::new(types::Fd(fd), std::ptr::null(), length as u32, tag).offset(at).build()
+    } else {
+        opcode::ReadFixed::new(types::Fd(fd), std::ptr::null_mut(), length as u32, tag).offset(at).build()
+    };
+    sqe.user_data(IN_PLACE_IO | tag as u64).into()
 }
 
 /// Where requests served on the runtime hand their results back to the queue
@@ -2060,13 +2212,16 @@ fn push_commit(
     tag: u16,
     result: i32,
     buf: &[u8],
+    zero_copy: bool,
 ) {
-    let io_cmd = UblkIoCmd { q_id: queue_id, tag, result, addr: buf.as_ptr() as u64 };
+    let addr = if zero_copy { 0 } else { buf.as_ptr() as u64 };
+    let io_cmd = UblkIoCmd { q_id: queue_id, tag, result, addr };
     let mut cmd_bytes = [0u8; 80];
     let src = io_cmd.as_bytes();
     cmd_bytes[..src.len()].copy_from_slice(src);
     let sqe = opcode::UringCmd80::new(types::Fd(char_fd), UBLK_U_IO_COMMIT_AND_FETCH_REQ)
         .cmd(cmd_bytes)
+        .addr(zero_copy.then(|| auto_reg_addr(tag)))
         .build()
         .user_data(tag as u64);
     unsafe {
@@ -2113,8 +2268,11 @@ fn queue_worker(
     batch: bool,
     tags: std::ops::Range<u16>,
     taken: Arc<AtomicBool>,
+    char_dev: Option<Arc<std::fs::File>>,
 ) {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let zero_copy = char_dev.is_some();
+    let user_copy = char_dev.map(|char_dev| UserCopy { char_dev, queue: queue_id });
 
     let serial = std::env::var("STORMBLOCK_UBLK_SERIAL").is_ok_and(|v| v == "1");
 
@@ -2130,6 +2288,15 @@ fn queue_worker(
             return;
         }
     };
+
+    // The table the kernel registers requests in, an index a tag (#505). With
+    // no table every registration fails, which delivers each request with
+    // NEED_REG_BUF: the copy path, and slower, not wrong.
+    if zero_copy {
+        if let Err(e) = ring.submitter().register_buffers_sparse(queue_depth as u32) {
+            tracing::warn!("ublk queue {queue_id}: no buffer table, every request copied (#505): {e}");
+        }
+    }
 
     let efd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) };
     if efd < 0 {
@@ -2170,9 +2337,17 @@ fn queue_worker(
         use crate::drive::ublk_batch as b;
         let mut prep = Vec::with_capacity(queue_depth as usize * b::ELEM_BYTES);
         for tag in 0..queue_depth {
-            b::put_elem(&mut prep, tag, 0, bufs[tag as usize].as_ptr() as u64);
+            if zero_copy {
+                b::put_elem_auto(&mut prep, tag, 0);
+            } else {
+                b::put_elem(&mut prep, tag, 0, bufs[tag as usize].as_ptr() as u64);
+            }
         }
-        let sqe = b::elems_sqe(char_fd, b::UBLK_U_IO_PREP_IO_CMDS, queue_id, &prep, BATCH_PREP);
+        let sqe = if zero_copy {
+            b::elems_auto_sqe(char_fd, b::UBLK_U_IO_PREP_IO_CMDS, queue_id, &prep, BATCH_PREP)
+        } else {
+            b::elems_sqe(char_fd, b::UBLK_U_IO_PREP_IO_CMDS, queue_id, &prep, BATCH_PREP)
+        };
         let prepared = unsafe { ring.submission().push(&sqe).is_ok() }
             && ring.submit_and_wait(1).is_ok()
             && ring.completion().any(|c| c.user_data() == BATCH_PREP && c.result() == 0);
@@ -2201,7 +2376,7 @@ fn queue_worker(
     } else {
         // Submit initial FETCH_REQ for this thread's tags — registers them with the kernel
         for tag in tags.clone() {
-            if submit_io_fetch(&mut ring, char_fd, queue_id, tag, &bufs[tag as usize]).is_err() {
+            if submit_io_fetch(&mut ring, char_fd, queue_id, tag, &bufs[tag as usize], zero_copy).is_err() {
                 tracing::error!("ublk queue {}: initial FETCH_REQ failed for tag {}", queue_id, tag);
                 startup_barrier.wait();
                 return;
@@ -2244,6 +2419,8 @@ fn queue_worker(
     let wait_args = types::SubmitArgs::new().timespec(&idle_wait);
     // The device taken away by another process (#299): nothing more comes.
     let mut lost_here = false;
+    // Requests on their way to the drive in place (#505), by tag.
+    let mut in_place: Vec<Option<InPlaceIo>> = (0..queue_depth).map(|_| None).collect();
     while running.load(Ordering::Relaxed) {
         if lost_here {
             break;
@@ -2275,6 +2452,10 @@ fn queue_worker(
         // Requests to serve this round: a tag's own CQE (FETCH/COMMIT_AND_
         // FETCH), or every tag a batch fetch wrote (#505).
         let mut arrived: Vec<u16> = Vec::new();
+        // In place, and failed or cut short: the same request by the copy
+        // path, which rides through a drive's reset, fails a leg or answers
+        // the error, and finds the extent wherever it is by now (#505).
+        let mut again: Vec<u16> = Vec::new();
         let mut done_now: Vec<Done> = Vec::new();
         for (user_data, res, more) in cqes {
             if user_data == WAKE {
@@ -2325,13 +2506,40 @@ fn queue_worker(
                         let rest = e[res as usize..].to_vec();
                         commit_seq += 1;
                         let ud = BATCH_COMMIT | commit_seq;
-                        let sqe = crate::drive::ublk_batch::elems_sqe(
-                            char_fd, crate::drive::ublk_batch::UBLK_U_IO_COMMIT_IO_CMDS, queue_id, &rest, ud);
+                        let sqe = if zero_copy {
+                            crate::drive::ublk_batch::elems_auto_sqe(
+                                char_fd, crate::drive::ublk_batch::UBLK_U_IO_COMMIT_IO_CMDS, queue_id, &rest, ud)
+                        } else {
+                            crate::drive::ublk_batch::elems_sqe(
+                                char_fd, crate::drive::ublk_batch::UBLK_U_IO_COMMIT_IO_CMDS, queue_id, &rest, ud)
+                        };
                         commits.insert(ud, rest);
                         if unsafe { ring.submission().push(&sqe).is_err() } {
                             tracing::error!("ublk queue {}: SQ full re-sending a commit", queue_id);
                         }
                     }
+                }
+                continue;
+            }
+            if user_data & IN_PLACE_IO != 0 {
+                let tag = user_data as u16;
+                // Everything it held goes before the request is answered: the
+                // write counts as completed before its FLUSH can be sent (#338).
+                let Some(io) = in_place[tag as usize].take() else { continue };
+                if res >= 0 && res as usize == io.length {
+                    let length = io.length as i32;
+                    drop(io);
+                    IN_PLACE.fetch_add(1, Ordering::Relaxed);
+                    track.end(tag);
+                    done_now.push(Done { tag, result: length, buf: None });
+                } else {
+                    tracing::debug!(
+                        "ublk queue {queue_id} tag {tag}: op {} @{}+{} in place gave {res}: by the copy path",
+                        io.op, io.offset, io.length
+                    );
+                    drop(io);
+                    IN_PLACE_RETRIED.fetch_add(1, Ordering::Relaxed);
+                    again.push(tag);
                 }
                 continue;
             }
@@ -2355,30 +2563,53 @@ fn queue_worker(
             arrived.push(tag);
         }
 
-        for tag in arrived {
+        let first_again = arrived.len();
+        arrived.append(&mut again);
+        for (nth, tag) in arrived.into_iter().enumerate() {
             // Read the I/O descriptor for this tag
             let desc = unsafe { &*desc_base.add(tag as usize) };
             let op = (desc.op_flags & 0xFF) as u8;
             let fua = desc.op_flags & UBLK_IO_F_FUA != 0;
             let offset = desc.start_sector * 512;
             let length = desc.nr_sectors as usize * 512;
-            let buf = std::mem::take(&mut bufs[tag as usize]);
             track.begin(tag, op);
 
+            // In place when it can be, decided here and now (#505). A FUA
+            // write is left to `write_fua`, which decides per drive.
+            if zero_copy
+                && !serial
+                && nth < first_again
+                && desc.op_flags & UBLK_IO_F_NEED_REG_BUF == 0
+                && (op == UBLK_IO_OP_READ || (op == UBLK_IO_OP_WRITE && !fua))
+            {
+                let write = op == UBLK_IO_OP_WRITE;
+                if let Some(plan) = device.plan_in_place(write, offset, length) {
+                    if let Some((fd, base)) = plan.device.direct_fd() {
+                        let sqe = in_place_sqe(fd, write, length, tag, base + plan.offset);
+                        if unsafe { ring.submission().push(&sqe).is_ok() } {
+                            in_place[tag as usize] = Some(InPlaceIo { _plan: plan, op, offset, length });
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            let buf = std::mem::take(&mut bufs[tag as usize]);
             if serial {
-                let (result, buf) = rt_handle.block_on(serve(&*device, op, fua, offset, length, buf));
+                let (result, buf) = rt_handle.block_on(serve_request(&*device, user_copy.as_ref(), tag, op, fua, offset, length, buf));
                 track.end(tag);
-                done_now.push(Done { tag, result, buf });
+                done_now.push(Done { tag, result, buf: Some(buf) });
                 continue;
             }
             completions.in_flight.fetch_add(1, Ordering::SeqCst);
             let device = device.clone();
             let completions = completions.clone();
             let track = track.clone();
+            let user_copy = user_copy.clone();
             rt_handle.spawn(async move {
-                let (result, buf) = serve(&*device, op, fua, offset, length, buf).await;
+                let (result, buf) = serve_request(&*device, user_copy.as_ref(), tag, op, fua, offset, length, buf).await;
                 track.end(tag);
-                completions.post(Done { tag, result, buf });
+                completions.post(Done { tag, result, buf: Some(buf) });
             });
         }
 
@@ -2388,21 +2619,34 @@ fn queue_worker(
             if batch {
                 let mut elems = Vec::with_capacity(done_now.len() * crate::drive::ublk_batch::ELEM_BYTES);
                 for d in done_now {
-                    bufs[d.tag as usize] = d.buf;
-                    crate::drive::ublk_batch::put_elem(&mut elems, d.tag, d.result, bufs[d.tag as usize].as_ptr() as u64);
+                    if let Some(b) = d.buf {
+                        bufs[d.tag as usize] = b;
+                    }
+                    if zero_copy {
+                        crate::drive::ublk_batch::put_elem_auto(&mut elems, d.tag, d.result);
+                    } else {
+                        crate::drive::ublk_batch::put_elem(&mut elems, d.tag, d.result, bufs[d.tag as usize].as_ptr() as u64);
+                    }
                 }
                 commit_seq += 1;
                 let ud = BATCH_COMMIT | commit_seq;
-                let sqe = crate::drive::ublk_batch::elems_sqe(
-                    char_fd, crate::drive::ublk_batch::UBLK_U_IO_COMMIT_IO_CMDS, queue_id, &elems, ud);
+                let sqe = if zero_copy {
+                    crate::drive::ublk_batch::elems_auto_sqe(
+                        char_fd, crate::drive::ublk_batch::UBLK_U_IO_COMMIT_IO_CMDS, queue_id, &elems, ud)
+                } else {
+                    crate::drive::ublk_batch::elems_sqe(
+                        char_fd, crate::drive::ublk_batch::UBLK_U_IO_COMMIT_IO_CMDS, queue_id, &elems, ud)
+                };
                 commits.insert(ud, elems);
                 if unsafe { ring.submission().push(&sqe).is_err() } {
                     tracing::error!("ublk queue {}: SQ full on the batch commit", queue_id);
                 }
             } else {
                 for d in done_now {
-                    bufs[d.tag as usize] = d.buf;
-                    push_commit(&mut ring, char_fd, queue_id, d.tag, d.result, &bufs[d.tag as usize]);
+                    if let Some(b) = d.buf {
+                        bufs[d.tag as usize] = b;
+                    }
+                    push_commit(&mut ring, char_fd, queue_id, d.tag, d.result, &bufs[d.tag as usize], zero_copy);
                 }
             }
         }
@@ -2413,6 +2657,27 @@ fn queue_worker(
     // write still landing then would be one it never saw. Bounded, inside the
     // stop budget (#105).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    // The same for I/O in place (#505), whose completions only this ring has.
+    // Nothing is answered: as with a task's, the kernel fails or reissues them.
+    while in_place.iter().any(Option::is_some) && std::time::Instant::now() < deadline {
+        let brief = types::Timespec::new().sec(0).nsec(10_000_000);
+        let args = types::SubmitArgs::new().timespec(&brief);
+        if let Err(e) = ring.submitter().submit_with_args(1, &args) {
+            if !matches!(e.raw_os_error(), Some(libc::ETIME) | Some(libc::EINTR)) {
+                tracing::warn!("ublk queue {queue_id}: waiting for I/O in place: {e}");
+                break;
+            }
+        }
+        for cqe in ring.completion() {
+            // The batch commands' user_data has the bit above it set too.
+            if cqe.user_data() & IN_PLACE_IO != 0 && cqe.user_data() & BATCH_COMMIT == 0 {
+                in_place[cqe.user_data() as u16 as usize] = None;
+            }
+        }
+    }
+    if in_place.iter().any(Option::is_some) {
+        tracing::warn!("ublk queue {queue_id}: I/O in place still running at exit");
+    }
     while completions.in_flight.load(Ordering::SeqCst) > 0 {
         if std::time::Instant::now() >= deadline {
             tracing::warn!(
@@ -2434,12 +2699,13 @@ fn submit_io_fetch(
     queue_id: u16,
     tag: u16,
     buf: &[u8],
+    zero_copy: bool,
 ) -> DriveResult<()> {
     let io_cmd = UblkIoCmd {
         q_id: queue_id,
         tag,
         result: 0,
-        addr: buf.as_ptr() as u64,
+        addr: if zero_copy { 0 } else { buf.as_ptr() as u64 },
     };
 
     let mut cmd_bytes = [0u8; 80];
@@ -2448,6 +2714,7 @@ fn submit_io_fetch(
 
     let sqe = opcode::UringCmd80::new(types::Fd(char_fd), UBLK_U_IO_FETCH_REQ)
         .cmd(cmd_bytes)
+        .addr(zero_copy.then(|| auto_reg_addr(tag)))
         .build()
         .user_data(tag as u64);
 
@@ -2466,6 +2733,40 @@ fn submit_io_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_copy_addresses_match_the_uapi() {
+        // `ublk_auto_buf_reg_to_sqe_addr`: index, flags at bit 16, all else 0.
+        assert_eq!(auto_reg_addr(0), 1 << 16);
+        assert_eq!(auto_reg_addr(127), 127 | 1 << 16);
+        // `ublk_pos_to_hwq`/`_tag`: UBLK_IO_BUF_BITS 25, UBLK_TAG_BITS 16.
+        assert_eq!(user_copy_pos(0, 0), 0x8000_0000);
+        assert_eq!(user_copy_pos(3, 5) - 0x8000_0000, (3u64 << 41) | (5u64 << 25));
+        // A request's bytes stay below the next tag: max_io_buf_bytes fits.
+        assert!((DEFAULT_MAX_IO_BYTES as u64) < 1 << 25);
+    }
+
+    #[test]
+    fn a_recoverable_device_asks_for_zero_copy_only_when_told_to() {
+        assert!(wants_zero_copy(false));
+        assert!(!wants_zero_copy(true));
+    }
+
+    #[test]
+    fn a_fixed_io_names_its_tags_buffer_and_the_drive() {
+        let sqe = in_place_sqe(9, true, 8192, 7, 4096);
+        let raw: [u8; 128] = unsafe { std::mem::transmute(sqe) };
+        assert_eq!(raw[0], 5, "IORING_OP_WRITE_FIXED");
+        assert_eq!(i32::from_ne_bytes(raw[4..8].try_into().unwrap()), 9, "fd");
+        assert_eq!(u64::from_ne_bytes(raw[8..16].try_into().unwrap()), 4096, "offset");
+        assert_eq!(u64::from_ne_bytes(raw[16..24].try_into().unwrap()), 0, "addr: the buffer's start");
+        assert_eq!(u32::from_ne_bytes(raw[24..28].try_into().unwrap()), 8192, "len");
+        assert_eq!(u16::from_ne_bytes(raw[40..42].try_into().unwrap()), 7, "buf_index");
+        assert_eq!(u64::from_ne_bytes(raw[32..40].try_into().unwrap()), IN_PLACE_IO | 7);
+        let sqe = in_place_sqe(9, false, 512, 0, 0);
+        let raw: [u8; 128] = unsafe { std::mem::transmute(sqe) };
+        assert_eq!(raw[0], 4, "IORING_OP_READ_FIXED");
+    }
 
     /// #337: a request a device has not answered is listed with its op and
     /// age, oldest first; an answered one, or a dropped device, is not.

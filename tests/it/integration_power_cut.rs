@@ -89,7 +89,25 @@ enum Allowed {
     Any,
 }
 
-async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize, mid: bool, fua: bool) -> Result<(usize, bool), String> {
+/// A plain write as the ublk queue makes it on a zero-copy device (#505): the
+/// plan, the bytes straight to the slab's device, the plan dropped; or, when it
+/// plans nothing, the ordinary path. Whether it went in place.
+async fn write_as_ublk(v: &stormblock::volume::thin::ThinVolumeHandle, offset: u64, data: &[u8]) -> Result<bool, String> {
+    match v.plan_in_place_on(true, offset, data.len(), false) {
+        Some(plan) => {
+            plan.device.write(plan.offset, data).await.map_err(|e| e.to_string())?;
+            drop(plan);
+            Ok(true)
+        }
+        None => {
+            v.write(offset, data).await.map_err(|e| e.to_string())?;
+            Ok(false)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize, mid: bool, fua: bool, in_place: bool, went: &mut usize) -> Result<(usize, bool), String> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     let dev = Arc::new(CrashDevice::new(32 * 1024 * 1024).with_atomic_unit(atomic));
     let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
@@ -113,7 +131,7 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize, mid: bool, fu
     vm.persist().await;
     // The claim: a copy-on-write clone of the blank.
     let clone = vm.create_snapshot(blank, "clone").await.map_err(|e| e.to_string())?;
-    let cv = vm.get_volume(&clone).unwrap();
+    let cv = vm.get_volume_handle(&clone).unwrap();
     cv.flush().await.map_err(|e| e.to_string())?;
     // A second volume, to free and reuse slots under the clone.
     let other = vm.create_volume_any("other", VOL).await.map_err(|e| e.to_string())?;
@@ -163,7 +181,11 @@ async fn trial(seed: u64, version: u32, tear: Tear, atomic: usize, mid: bool, fu
         } else if r < 0.70 {
             let i = rng.gen_range(0..BLOCKS);
             seq += 1;
-            cv.write(i * BLOCK, &block(i, seq)).await.map_err(|e| e.to_string())?;
+            if in_place {
+                *went += write_as_ublk(&cv, i * BLOCK, &block(i, seq)).await? as usize;
+            } else {
+                cv.write(i * BLOCK, &block(i, seq)).await.map_err(|e| e.to_string())?;
+            }
             current.insert(i, Some(seq));
             if let Allowed::Values(s) = allowed.get_mut(&i).unwrap() {
                 s.insert(seq);
@@ -331,10 +353,37 @@ async fn fua_writes_survive_a_power_cut_that_tears_writes() {
 }
 
 async fn power_cuts_fua(version: u32, tear: Tear, atomic: usize, mid: bool, fua: bool) {
+    power_cuts_all(version, tear, atomic, mid, fua, false).await
+}
+
+/// #505: the same 300 cuts with plain writes going in place as a zero-copy
+/// ublk device sends them, and with FUA writes and copy-on-writes the ordinary
+/// way beside them, on one volume.
+#[tokio::test]
+async fn writes_in_place_survive_a_power_cut() {
+    power_cuts_all(2, Tear::None, 4096, true, false, true).await;
+}
+
+#[tokio::test]
+async fn writes_in_place_survive_a_power_cut_that_tears_writes() {
+    power_cuts_all(2, Tear::Prefix(0.5), 4096, true, false, true).await;
+}
+
+#[tokio::test]
+async fn writes_in_place_survive_a_power_cut_that_tears_sectors() {
+    power_cuts_all(2, Tear::Scatter(0.5), 512, true, false, true).await;
+}
+
+#[tokio::test]
+async fn writes_in_place_and_fua_writes_survive_a_power_cut() {
+    power_cuts_all(2, Tear::None, 4096, true, true, true).await;
+}
+
+async fn power_cuts_all(version: u32, tear: Tear, atomic: usize, mid: bool, fua: bool, in_place: bool) {
     let mut failures = Vec::new();
-    let (mut torn, mut mid_op) = (0usize, 0usize);
+    let (mut torn, mut mid_op, mut went) = (0usize, 0usize, 0usize);
     for seed in 0..300u64 {
-        match trial(seed, version, tear, atomic, mid, fua).await {
+        match trial(seed, version, tear, atomic, mid, fua, in_place, &mut went).await {
             Ok((t, m)) => {
                 torn += t;
                 mid_op += m as usize;
@@ -342,7 +391,10 @@ async fn power_cuts_fua(version: u32, tear: Tear, atomic: usize, mid: bool, fua:
             Err(e) => failures.push(e),
         }
     }
-    println!("{tear:?} at {atomic} bytes: {mid_op} of 300 cuts inside an operation, {torn} write(s) torn");
+    println!("{tear:?} at {atomic} bytes: {mid_op} of 300 cuts inside an operation, {torn} write(s) torn, {went} in place");
+    if in_place {
+        assert!(went >= 300, "too few writes went in place to test anything: {went}");
+    }
     assert!(
         failures.is_empty(),
         "{} of 300 power cuts lost acknowledged data; first: {}",

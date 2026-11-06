@@ -112,6 +112,10 @@ impl BlockDevice for PartitionDevice {
         self.inner.drive_offset() + self.start
     }
 
+    fn direct_fd(&self) -> Option<(std::os::fd::RawFd, u64)> {
+        self.inner.direct_fd().map(|(fd, at)| (fd, at + self.start))
+    }
+
     fn fabric_path(&self) -> Option<super::nvmeof_dev::FabricPath> {
         self.inner.fabric_path()
     }

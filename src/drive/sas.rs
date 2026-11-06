@@ -176,6 +176,10 @@ impl BlockDevice for SasDevice {
         &self.id
     }
 
+    fn direct_fd(&self) -> Option<(RawFd, u64)> {
+        Some((self.fd, 0))
+    }
+
     fn capacity_bytes(&self) -> u64 {
         self.capacity.load(std::sync::atomic::Ordering::SeqCst)
     }

@@ -282,6 +282,18 @@ pub(crate) async fn zero_range_fast<D: BlockDevice + ?Sized>(
     Ok(())
 }
 
+/// A request that can go straight to the drive without the engine seeing its
+/// data (#505): see [`BlockDevice::plan_in_place`].
+pub struct InPlace {
+    /// The device the slot is on. Kept so its file descriptor stays open.
+    pub device: std::sync::Arc<dyn BlockDevice>,
+    /// Where on [`device`](Self::device) the request lands.
+    pub offset: u64,
+    /// What must stay held until the I/O has landed, whichever way it ends.
+    /// Dropped before the request is answered.
+    pub hold: Box<dyn std::any::Any + Send>,
+}
+
 #[async_trait]
 pub trait BlockDevice: Send + Sync {
     /// Device identity.
@@ -379,6 +391,28 @@ pub trait BlockDevice: Send + Sync {
     /// answers for the slabs it is placed on.
     fn rotational(&self) -> bool {
         self.device_type() == DriveType::SasHdd
+    }
+
+    /// The file descriptor a request may go straight to, and where this
+    /// device's byte 0 is on it (#505): an `O_DIRECT` drive, through its
+    /// partition and its ride-through. `None` for anything that must see the
+    /// data or the error itself, and while a drive is being ridden through.
+    fn direct_fd(&self) -> Option<(std::os::fd::RawFd, u64)> {
+        None
+    }
+
+    /// Whether this device can plan requests [`in place`](InPlace) (#505),
+    /// which makes it worth a ublk device with auto buffer registration.
+    fn plans_in_place(&self) -> bool {
+        false
+    }
+
+    /// A request that can go straight to one place on one device (#505), with
+    /// everything that keeps it safe held until the plan is dropped. Never
+    /// waits: `None` for anything else or anything busy, and the request takes
+    /// the ordinary path.
+    fn plan_in_place(&self, _write: bool, _offset: u64, _len: usize) -> Option<InPlace> {
+        None
     }
 
     /// Query SMART health data. Returns None if not supported.
