@@ -72,14 +72,14 @@ async fn main() -> anyhow::Result<()> {
             let cap = dev.capacity_bytes();
             vm.add_slab(Slab::format_with(dev, SlabFormat::new(MIB, StorageTier::Hot).with_auto_metadata(cap)).await?).await;
         }
-        let vm = stormblock::lockwatch::TrackedMutex::new(vm);
-        let store = tokio::sync::Mutex::new(stormblock::fs::template::TemplateStore::default());
+        let vm = Arc::new(stormblock::lockwatch::TrackedMutex::new(vm));
+        let store = Arc::new(tokio::sync::Mutex::new(stormblock::fs::template::TemplateStore::default()));
         let t = Instant::now();
         let tmpl = stormblock::fs::template::create(&vm, &store, &stormblock::fs::template::TemplateSpec::new("tmpl", size)).await?;
         println!("template {size_s} in {:.1} s", t.elapsed().as_secs_f64());
         let t = Instant::now();
         let spec = stormblock::fs::template::CloneSpec::new("clone");
-        let c = stormblock::fs::template::clone_template(&vm, &store, &tmpl.id, &spec).await?;
+        let c = stormblock::fs::template::clone_template(&vm, &store, &tmpl.id.to_string(), &spec).await?;
         println!("cloned in {:.1} s", t.elapsed().as_secs_f64());
         let dev: Arc<dyn BlockDevice> = vm.lock().await.get_volume(&c.volume_id).unwrap();
         check("the clone", &dev).await?;
