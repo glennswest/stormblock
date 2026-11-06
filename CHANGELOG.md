@@ -4,12 +4,15 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-06
-- **fix:** #552: an install left the release's kernel pallet with no tries, so a warm reset booted the older pallet (forge1 12.58.5: no modules for that kernel, Cilium crash loop, stormcos#828). A pallet the image carries gets a full count of tries, copied now or already on the disk; a raised pallet too (activate, rollback). What the install does not name keeps the loader's count (#205), and a proven pallet is left alone. `Local boot: … boots on its own` is said only when something on the ladder can boot; each ladder line gives its tries.
-- **fix:** #552: a node could not mark the pallet it booted from its own disk: `POST /api/v1/pallets/{id}/successful` saw drives only, and a local disk is a boot disk (#314), so it answered 404, every boot spent a try, and no node's pallet was ever marked. It reaches a local boot disk now, not a network boot's clone.
-
 ### 2026-11-06
 - **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.
 
+
+## [v23.19.2] — 2026-11-06
+
+### Fixed
+- #552: an install left the release's kernel pallet with no tries, so a warm reset booted the older pallet (forge1 12.58.5: no modules for that kernel, Cilium crash loop, stormcos#828). A pallet the image carries gets a full count of tries, copied now or already on the disk; a raised pallet too (activate, rollback). What the install does not name keeps the loader's count (#205), and a proven pallet is left alone. `Local boot: … boots on its own` is said only when something on the ladder can boot; each ladder line gives its tries.
+- #552: a node could not mark the pallet it booted from its own disk: `POST /api/v1/pallets/{id}/successful` saw drives only, and a local disk is a boot disk (#314), so it answered 404, every boot spent a try, and no node's pallet was ever marked. It reaches a local boot disk now, not a network boot's clone.
 
 ## [v23.19.1] — 2026-11-06
 
