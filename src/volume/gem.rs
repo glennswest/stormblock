@@ -401,6 +401,9 @@ impl GlobalExtentMap {
         let mut slabs: Vec<SlabId> = map.all_legs().map(|l| l.slab_id).collect();
         slabs.sort_by_key(|s| s.0);
         slabs.dedup();
+        // One slab id was collected per leg: without this a cold map kept 16 B
+        // an extent of the 28 B it was evicted to give back (#513).
+        slabs.shrink_to_fit();
         self.cold.insert(
             id,
             ColdMap {
@@ -1252,6 +1255,21 @@ impl Default for GlobalExtentMap {
 
 #[cfg(test)]
 mod tests {
+    /// #513: a cold map keeps its counts and a slab or two, not a slab id per
+    /// extent.
+    #[test]
+    fn a_cold_map_keeps_no_room_for_a_slab_id_per_extent() {
+        let (vol, slab) = (VolumeId::new(), SlabId::new());
+        let mut gem = GlobalExtentMap::new();
+        for e in 0..10_000 {
+            gem.insert(vol, e, ExtentLocation::new(slab, e));
+        }
+        assert!(gem.evict(vol));
+        let cold = gem.cold(&vol).unwrap();
+        assert_eq!((cold.extents, cold.slabs.len()), (10_000, 1));
+        assert!(cold.slabs.capacity() <= 4, "room for {} slab ids", cold.slabs.capacity());
+    }
+
     use super::*;
     use uuid::Uuid;
 
