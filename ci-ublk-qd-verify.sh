@@ -146,6 +146,11 @@ EOT
     # #505: the engine as before it: plain io_uring rings (no SINGLE_ISSUER +
     # DEFER_TASKRUN) and a command per request (no batch I/O), served at once.
     if [ "$mode" = plain ]; then export STORMBLOCK_URING_PLAIN=1 STORMBLOCK_UBLK_BATCH=0; else unset STORMBLOCK_URING_PLAIN STORMBLOCK_UBLK_BATCH; fi
+    # #505 step 2: zero copy off in the engine as before it (`plain`) and in
+    # `copy` (step 1: tuned rings and batch I/O, the data copied); `direct` is
+    # zero copy with a command per request, `concurrent` with batch I/O.
+    case "$mode" in plain|copy) export STORMBLOCK_UBLK_ZERO_COPY=0 ;; *) unset STORMBLOCK_UBLK_ZERO_COPY ;; esac
+    [ "$mode" = direct ] && export STORMBLOCK_UBLK_BATCH=0
     # #505: no batch I/O, each queue's tags served by four threads (PER_IO_DAEMON).
     if [ "$mode" = split ]; then export STORMBLOCK_UBLK_BATCH=0 STORMBLOCK_UBLK_QUEUE_THREADS=4; else unset STORMBLOCK_UBLK_QUEUE_THREADS; fi
     RUST_LOG=stormblock=info stormblock --config /run/sb$disk.toml --data-dir /run/sb$disk \
@@ -206,7 +211,10 @@ EOT
     cmp -s /tmp/pat /tmp/back && r $mode-round-trip PASS || r $mode-round-trip FAIL
 
     [ "$mode" != serial ] && fast_reads
+    [ "$mode" != serial ] && fast_large
     [ "$mode" != serial ] && features
+    case "$mode" in concurrent|direct|split) in_place_check ;; esac
+    [ "$mode" = serial ] || [ "$mode" = plain ] || in_place_clone
     [ "$mode" = concurrent ] && fd_cycles
     [ "$mode" = concurrent ] && taken
     [ "$mode" = concurrent ] && in_use
@@ -215,6 +223,7 @@ EOT
     [ "$mode" = concurrent ] && mount_detach
     [ "$mode" = concurrent ] && fsck_snapshot
     [ "$mode" = concurrent ] && unanswered
+    [ "$mode" = concurrent ] && in_place_kill
 
     step stop
     kill -TERM $pid; wait $pid
@@ -223,7 +232,7 @@ EOT
 
 # A hang must say where it is: the engine's log and every one of its threads'
 # kernel stacks, then the guest powers off.
-( sleep ${WATCHDOG:-300}
+( sleep ${WATCHDOG:-1200}
   echo "WATCHDOG fired"
   for l in /run/engine-*.log; do sed "s|^|LOG ${l##*/}: |" $l | tail -15; done
   for p in $(pidof stormblock); do
@@ -453,6 +462,134 @@ fast_reads() {
     dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$t8" && dmsetup resume slow$disk
 }
 
+# #505 step 2: what zero copy is for, large requests on a fast disk: 8 writers
+# of 256 KiB × 64 and 8 readers the same, over slots already written and
+# flushed (in place), wall time and the engine's CPU, three rounds.
+fast_large() {
+    step fast-large
+    t8=$(dmsetup table slow$disk)
+    dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$(echo "$t8" | awk '{$6=0; $9=0; print}')" \
+        && dmsetup resume slow$disk || echo "LOG fast-large: the delay stays on"
+    jobs=
+    for j in 0 1 2 3 4 5 6 7; do
+        dd if=/dev/zero of=$dev bs=256k count=64 seek=$((j * 64)) oflag=direct conv=fsync 2>/dev/null &
+        jobs="$jobs $!"
+    done
+    wait $jobs
+    for what in write read; do
+        walls=; cpus=
+        for round in 1 2 3; do
+            cpu0=$(awk '{print $14 + $15}' /proc/$pid/stat)
+            t0=$(now)
+            jobs=
+            for j in 0 1 2 3 4 5 6 7; do
+                if [ $what = write ]; then
+                    dd if=/dev/zero of=$dev bs=256k count=64 seek=$((j * 64)) oflag=direct 2>/dev/null &
+                else
+                    dd if=$dev of=/dev/null bs=256k count=64 skip=$((j * 64)) iflag=direct 2>/dev/null &
+                fi
+                jobs="$jobs $!"
+            done
+            wait $jobs
+            t1=$(now)
+            cpu1=$(awk '{print $14 + $15}' /proc/$pid/stat)
+            walls="$walls $(ms $t0 $t1)"; cpus="$cpus $(( (cpu1 - cpu0) * 10 ))"
+        done
+        med() { echo $* | awk '{ for (i = 1; i <= NF; i++) a[i] = $i
+            for (i = 2; i <= NF; i++) { v = a[i]; j = i - 1; while (j > 0 && a[j] > v) { a[j + 1] = a[j]; j-- } a[j + 1] = v }
+            print a[int((NF + 1) / 2)] }'; }
+        echo "TIME $mode large-$what $(med $walls)"
+        echo "TIME $mode large-$what-cpu $(med $cpus)"
+        echo "LOG $mode large-$what rounds (ms):$walls; engine CPU (ms):$cpus"
+    done
+    dmsetup suspend slow$disk && dmsetup reload slow$disk --table "$t8" && dmsetup resume slow$disk
+}
+
+counter() { curl -s -m 5 http://127.0.0.1:$port/api/v1/health | grep -o "\"$1\":[0-9]*" | head -1 | cut -d: -f2; }
+
+# #505 step 2: a rewrite of slots written and flushed goes in place and reads
+# back; a write across an extent and a first write beside it take the copy
+# path on the same device.
+in_place_check() {
+    step in-place
+    dd if=/tmp/pat of=$dev bs=64k seek=3008 count=256 oflag=direct conv=fsync 2>/dev/null
+    p0=$(counter in_place); c0=$(counter copied)
+    # Reversed in chunks, so the bytes differ from what is there.
+    awk 'BEGIN { for (i = 0; i < 256; i++) print 255 - i }' > /tmp/order
+    : > /tmp/pat2
+    while read -r k; do dd if=/tmp/pat bs=64k skip=$k count=1 2>/dev/null >> /tmp/pat2; done < /tmp/order
+    dd if=/tmp/pat2 of=$dev bs=64k seek=3008 count=256 oflag=direct conv=fsync 2>/dev/null
+    p1=$(counter in_place); c1=$(counter copied)
+    dd if=$dev of=/tmp/back2 bs=64k skip=3008 count=256 iflag=direct 2>/dev/null
+    p2=$(counter in_place)
+    cmp -s /tmp/pat2 /tmp/back2 && r $mode-in-place-data PASS || r $mode-in-place-data FAIL
+    echo "LOG $mode in place: rewrite $((p1 - p0)) in place, $((c1 - c0)) copied; read back $((p2 - p1)) in place; retried $(counter in_place_retried)"
+    [ $((p1 - p0)) -ge 128 ] && r $mode-in-place-writes PASS || r $mode-in-place-writes "FAIL ($((p1 - p0)) in place, $((c1 - c0)) copied)"
+    [ $((p2 - p1)) -ge 128 ] && r $mode-in-place-reads PASS || r $mode-in-place-reads "FAIL ($((p2 - p1)))"
+    # A write across two extents (1 MiB slots): the copy path, same device.
+    c2=$(counter copied)
+    # 1002 × 192 KiB ends 64 KiB past a 1 MiB boundary: one request, two extents.
+    dd if=/tmp/pat of=$dev bs=192k seek=1002 count=1 oflag=direct conv=fsync 2>/dev/null
+    dd if=$dev of=/tmp/back3 bs=192k skip=1002 count=1 iflag=direct 2>/dev/null
+    dd if=/tmp/pat of=/tmp/want3 bs=192k count=1 2>/dev/null
+    cmp -s /tmp/want3 /tmp/back3 && r $mode-across-extents PASS || r $mode-across-extents FAIL
+    echo "LOG $mode across extents: $(( $(counter copied) - c2 )) copied"
+    grep -iE 'ublk.*(data from|data to) the kernel' /run/engine-$mode.log | head -3 | sed 's/^/LOG /'
+}
+
+# #505 step 2: a clone shares its source's slots: its first write copies, the
+# source keeps its bytes, and the clone's own slot then goes in place.
+in_place_clone() {
+    step in-place-clone
+    s=$(api -X POST http://127.0.0.1:$port/api/v1/volumes -d '{"name":"zsrc","size":"16M"}' | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    sd=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$s/attach -d '{"transport":"ublk"}' | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+    dd if=/tmp/pat of=$sd bs=64k count=128 oflag=direct conv=fsync 2>/dev/null
+    c=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$s/clone -d '{"name":"zclone"}' | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    cd=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$c/attach -d '{"transport":"ublk"}' | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+    [ -b "$sd" ] && [ -b "$cd" ] || { r $mode-clone "FAIL (no devices: '$sd' '$cd')"; return; }
+    dd if=/dev/urandom of=/tmp/cl bs=4096 count=16 2>/dev/null
+    dd if=/tmp/cl of=$cd bs=4096 seek=2 count=16 oflag=direct conv=fsync 2>/dev/null
+    dd if=/tmp/cl of=$cd bs=4096 seek=2 count=16 oflag=direct conv=fsync 2>/dev/null
+    dd if=$cd of=/tmp/cl.b bs=4096 skip=2 count=16 iflag=direct 2>/dev/null
+    cmp -s /tmp/cl /tmp/cl.b && a=ok || a=clone-data
+    dd if=$sd of=/tmp/s.b bs=64k count=128 iflag=direct 2>/dev/null
+    dd if=/tmp/pat of=/tmp/s.w bs=64k count=128 2>/dev/null
+    cmp -s /tmp/s.w /tmp/s.b && b=ok || b=source-data
+    dd if=$cd of=/tmp/c.b bs=64k skip=1 count=127 iflag=direct 2>/dev/null
+    dd if=/tmp/pat of=/tmp/c.w bs=64k skip=1 count=127 2>/dev/null
+    cmp -s /tmp/c.w /tmp/c.b && c2=ok || c2=clone-shared-data
+    [ "$a$b$c2" = okokok ] && r $mode-clone PASS || r $mode-clone "FAIL ($a $b $c2)"
+    for v in $c $s; do curl -s -m 30 -o /dev/null -H 'Authorization: Bearer t' -X DELETE http://127.0.0.1:$port/api/v1/volumes/$v/attach; done
+}
+
+# #505 step 2: what was written in place and fsync'd is there for an engine that
+# never saw it end: killed, not stopped, and started again on the slab.
+in_place_kill() {
+    step in-place-kill
+    dd if=/tmp/pat of=$dev bs=64k seek=3400 count=64 oflag=direct conv=fsync 2>/dev/null
+    dd if=/tmp/pat of=/tmp/k.w bs=64k skip=64 count=64 2>/dev/null
+    p0=$(counter in_place)
+    dd if=/tmp/k.w of=$dev bs=64k seek=3400 count=64 oflag=direct conv=fsync 2>/dev/null
+    p1=$(counter in_place)
+    [ $((p1 - p0)) -ge 32 ] || r in-place-kill "FAIL (only $((p1 - p0)) in place)"
+    kill -KILL $pid; wait $pid 2>/dev/null
+    RUST_LOG=stormblock=info stormblock --config /run/sb$disk.toml --data-dir /run/sb$disk \
+        --no-iscsi > /run/engine-$mode-2.log 2>&1 &
+    pid=$!
+    for i in $(seq 1 100); do api http://127.0.0.1:$port/api/v1/health >/dev/null 2>&1 && break; sleep 0.2; done
+    # The slab was made through the API: opened again the same way, adopted.
+    curl -s -m 60 -o /dev/null -H 'Authorization: Bearer t' -H 'Content-Type: application/json' \
+        -X POST http://127.0.0.1:$port/api/v1/drives -d "{\"path\":\"$slow\"}"
+    d2=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$id/attach -d '{"transport":"ublk"}' | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
+    if [ -b "$d2" ]; then
+        dd if=$d2 of=/tmp/k.b bs=64k skip=3400 count=64 iflag=direct 2>/dev/null
+        cmp -s /tmp/k.w /tmp/k.b && r in-place-kill PASS || r in-place-kill "FAIL (data)"
+    else
+        r in-place-kill "FAIL (no device after the restart: '$d2')"
+        sed 's/^/LOG /' /run/engine-$mode-2.log | tail -8
+    fi
+}
+
 # #510: attach and detach one volume 40 times over ublk; the engine's open
 # fds after are what they were before (pvetest1 ran out after ~805), and
 # health reports them against the limit.
@@ -518,7 +655,12 @@ features() {
     h=$(curl -s -m 5 http://127.0.0.1:$port/api/v1/health)
     echo "LOG $mode ublk_features: $(echo "$h" | grep -o '"ublk_features":{[^}]*}')"
     case "$mode:$h" in
-    concurrent:*'"offered":['*'"used":['*'BATCH_IO'*'"rings_tuned":'[1-9]*) r features-tuned PASS ;;
+    concurrent:*'"used":['*'AUTO_BUF_REG'*'BATCH_IO'*'"rings_tuned":'[1-9]*'"in_place":'[1-9]*) r features-tuned PASS ;;
+    direct:*'"used":['*'BATCH_IO'*) r features-direct "FAIL (batch I/O used)" ;;
+    direct:*'"used":['*'AUTO_BUF_REG'*'"in_place":'[1-9]*) r features-direct PASS ;;
+    copy:*'"used":['*'AUTO_BUF_REG'*) r features-copy "FAIL (zero copy used)" ;;
+    copy:*'"used":['*'BATCH_IO'*'"in_place":0'*) r features-copy PASS ;;
+    plain:*'"used":['*'AUTO_BUF_REG'*) r features-plain "FAIL (zero copy used)" ;;
     plain:*'"used":['*'BATCH_IO'*) r features-plain "FAIL (batch I/O used)" ;;
     plain:*'"offered":['*'"rings_tuned":0,"rings_plain":'[1-9]*) r features-plain PASS ;;
     split:*'"used":['*'BATCH_IO'*) r features-split "FAIL (batch I/O used)" ;;
@@ -617,22 +759,26 @@ run serial vda 9091
 run concurrent vdb 9092
 run plain vdc 9093
 run split vdd 9094
+run copy vde 9095
+run direct vdf 9096
 echo "GUEST done"
 poweroff -f
 EOF
 chmod +x "$I/init"
 (cd "$I" && find . | cpio -o -H newc 2>/dev/null | gzip -1) > "$W/initrd.gz"
-truncate -s 1G "$W/a.img" "$W/b.img" "$W/c.img" "$W/d.img"
+truncate -s 1G "$W/a.img" "$W/b.img" "$W/c.img" "$W/d.img" "$W/e.img" "$W/f.img"
 
 say "boot $KERNEL in QEMU"
 ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
-timeout 900 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4 \
+timeout 1500 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4 \
     -nographic -no-reboot -kernel "$KERNEL" -initrd "$W/initrd.gz" \
     -append "console=ttyS0 panic=-1 loglevel=4" \
     -drive file="$W/a.img",if=virtio,format=raw \
     -drive file="$W/b.img",if=virtio,format=raw \
     -drive file="$W/c.img",if=virtio,format=raw \
-    -drive file="$W/d.img",if=virtio,format=raw > "$W/guest.log" 2>&1
+    -drive file="$W/d.img",if=virtio,format=raw \
+    -drive file="$W/e.img",if=virtio,format=raw \
+    -drive file="$W/f.img",if=virtio,format=raw > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|TIME|LOG|STEP|STACK|PS|WATCHDOG)|ERROR|panick'
 
 t() { tr -d '\r' < "$W/guest.log" | awk -v m="$1" -v w="$2" '$1=="TIME" && $2==m && $3==w {print $4}'; }
@@ -641,7 +787,14 @@ SF=$(t serial reads-under-fsync); CF=$(t concurrent reads-under-fsync)
 echo "parallel reads:    serial ${SP:-?} ms, concurrent ${CP:-?} ms"
 echo "reads under fsync: serial ${SF:-?} ms, concurrent ${CF:-?} ms"
 echo "fast reads (#505, median of 5): tuned rings + batch I/O $(t concurrent fast-reads) ms, engine CPU $(t concurrent fast-reads-cpu) ms; as before (plain, no batch) $(t plain fast-reads) ms, CPU $(t plain fast-reads-cpu) ms; no batch, 4 threads a queue $(t split fast-reads) ms, CPU $(t split fast-reads-cpu) ms"
-for m in serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
+for w in fast-reads large-write large-read; do
+    echo "$w (#505 step 2, ms, engine CPU ms): as before $(t plain $w) / $(t plain $w-cpu); step 1, copied $(t copy $w) / $(t copy $w-cpu); zero copy + batch $(t concurrent $w) / $(t concurrent $w-cpu); zero copy $(t direct $w) / $(t direct $w-cpu); zero copy, 4 threads a queue $(t split $w) / $(t split $w-cpu)"
+done
+for m in concurrent-in-place-data concurrent-in-place-writes concurrent-in-place-reads concurrent-across-extents \
+         direct-in-place-data direct-in-place-writes direct-in-place-reads direct-across-extents \
+         split-in-place-data split-in-place-writes split-in-place-reads split-across-extents \
+         concurrent-clone direct-clone split-clone copy-clone copy-round-trip direct-round-trip features-copy features-direct in-place-kill \
+         serial-round-trip concurrent-round-trip in-use-kept in-use-delete-refused in-use-deleted-after-detach \
          fsck-snapshot fsck-snapshot-deleted fsck-unmounted-clean \
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
          parallel-attach attach-delete-race plain-round-trip split-round-trip features-tuned features-plain features-split fd-cycles fd-health taken-reported taken-logged taken-reattached taken-cleared \
