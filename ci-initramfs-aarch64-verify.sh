@@ -96,7 +96,7 @@ echo "@@RTLFW $(ls /lib/firmware/rtl_nic 2>/dev/null | grep -c '^rtl812[56]')"
 exit 1
 HOOK
 if ! MODROOT="$M" BOOT_HOOKS="$W/10-a64" bash scripts/build-stormblock-initramfs.sh "$BIN" "$KVER" "$W/initrd.img" > "$W/initrd.log" 2>&1; then
-    tail -30 "$W/initrd.log"; echo "FAIL: the initramfs did not build"; exit 1
+    grep -E '^ERROR|^  ERROR' "$W/initrd.log"; tail -30 "$W/initrd.log" | grep -v '^rm: '; echo "FAIL: the initramfs did not build"; exit 1
 fi
 grep -E '^  (arch|applets|modprobe|udev|firmware|modules|boot hook)' "$W/initrd.log" | sed 's/^/  /'
 ok "initramfs $(du -h "$W/initrd.img" | cut -f1)"

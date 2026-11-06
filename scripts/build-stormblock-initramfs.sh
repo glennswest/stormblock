@@ -122,7 +122,8 @@ if [ "$TARGET_ARCH" != "$HOST_ARCH" ]; then
             exit 1
         fi
         USERLAND_WORK=$(mktemp -d)
-        trap 'rm -rf "$USERLAND_WORK"' EXIT
+        # Packages make read-only directories (usr/lib64 is 0555).
+        trap 'chmod -R u+rwX "$USERLAND_WORK" 2>/dev/null; rm -rf "$USERLAND_WORK"' EXIT
         USERLAND=$USERLAND_WORK/root
         mkdir -p "$USERLAND" "$USERLAND_WORK/rpm" "$USERLAND_WORK/keys" \
                  "$USERLAND_WORK/dnf/cache" "$USERLAND_WORK/dnf/persist" "$USERLAND_WORK/dnf/log"
@@ -145,6 +146,8 @@ if [ "$TARGET_ARCH" != "$HOST_ARCH" ]; then
         for _rpm in "$USERLAND_WORK"/rpm/*.rpm; do
             ( cd "$USERLAND" && rpm2cpio "$_rpm" | cpio -idm --quiet --no-absolute-filenames 2>/dev/null ) || {
                 echo "ERROR: cannot unpack $_rpm"; exit 1; }
+            # The next package writes into what this one made read-only.
+            find "$USERLAND" -type d ! -perm -u+w -exec chmod u+w {} +
         done
         # What it came from goes in the image, for whoever asks what is in it.
         for _rpm in "$USERLAND_WORK"/rpm/*.rpm; do
@@ -175,7 +178,7 @@ echo "  output:     $OUTPUT"
 
 # Create temporary initramfs root
 INITRD_DIR=$(mktemp -d)
-trap 'rm -rf "$INITRD_DIR" ${USERLAND_WORK:+"$USERLAND_WORK"}' EXIT
+trap 'if [ -n "${USERLAND_WORK:-}" ]; then chmod -R u+rwX "$USERLAND_WORK" 2>/dev/null; rm -rf "$USERLAND_WORK"; fi; rm -rf "$INITRD_DIR"' EXIT
 
 mkdir -p "$INITRD_DIR"/{bin,sbin,usr/sbin,lib/modules,dev,proc,sys,sysroot,etc,run,tmp,var}
 # Where a boot hook goes (#109). Created empty and always present, so an image
