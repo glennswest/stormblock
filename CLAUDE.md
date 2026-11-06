@@ -522,7 +522,7 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
       build VM can measure; the earlier single-run gains were noise. pve and
       the Dell (stormcentral's perf stage) once a release carries it
 - [x] check.sh at 47c55218 ALL PASS (1287/1287, no warnings)
-- [ ] 2: zero copy fast path, on **wip/505-zero-copy** until check.sh passes.
+- [x] 2: zero copy fast path, on **wip/505-zero-copy** until check.sh passes.
       Read in 7.2's driver: AUTO_BUF_REG and USER_COPY combine (`ublk_user_copy`
       gates on USER_COPY only; only the selftest calls it "too many modes"), so
       no SUPPORT_ZERO_COPY: nothing registers by hand. The index rides in the
@@ -543,6 +543,11 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
         health `ublk_features`
       - tests: the plan's refusals, fence/gate/flush; the 300 power cuts with
         writes through a plan; ci-ublk-qd-verify.sh modes
+      - verified: controls without the fence and the completed count fail
+        (tmp/505-control); ci-ublk-qd-verify.sh ALL PASS (100 checks, kernel
+        7.2.11). `NUMBERS=1`: batch + zero copy no worse than zero copy alone
+        (an earlier gap was drift, modes run at different moments), so batch stays
+        on; large requests 3–5× less engine CPU, CHANGELOG has them
 - [ ] 3: SHMEM_ZC: stormvm#105 filed (the guest memfd handed over at
       attach); the engine half once its shape is agreed there
 

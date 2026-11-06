@@ -828,7 +828,9 @@ for m in concurrent-in-place-data concurrent-in-place-writes concurrent-in-place
          unanswered-named unanswered-logged unanswered-fsync-returned unanswered-cleared \
          parallel-attach attach-delete-race plain-round-trip split-round-trip features-tuned features-plain features-split fd-cycles fd-health taken-reported taken-logged taken-reattached taken-cleared \
          mount-detach-refused mount-detach-mounted mount-detach-no-deleted-read mount-detach-after; do
-    tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
+    # Not `grep -q`: it stops at the match, tr dies of SIGPIPE, and pipefail
+    # calls that a failure (taken-logged, once the log outgrew the pipe).
+    tr -d '\r' < "$W/guest.log" | grep "^RESULT $m PASS" > /dev/null || fail "$m"
 done
 if [ -n "$SP" ] && [ -n "$CP" ] && [ "$CP" -gt 0 ]; then
     [ $((SP)) -ge $((CP * 3)) ] || fail "served at once is not 3x faster on parallel reads ($SP vs $CP ms)"
