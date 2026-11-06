@@ -522,9 +522,27 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
       build VM can measure; the earlier single-run gains were noise. pve and
       the Dell (stormcentral's perf stage) once a release carries it
 - [x] check.sh at 47c55218 ALL PASS (1287/1287, no warnings)
-- [ ] 2: zero copy fast path (SUPPORT_ZERO_COPY + AUTO_BUF_REG; the copy
-      path per request: USER_COPY with ZERO_COPY, pread/pwrite of
-      /dev/ublkcN, to check against the driver), crash/power-cut tests
+- [ ] 2: zero copy fast path, on **wip/505-zero-copy** until check.sh passes.
+      Read in 7.2's driver: AUTO_BUF_REG and USER_COPY combine (`ublk_user_copy`
+      gates on USER_COPY only; only the selftest calls it "too many modes"), so
+      no SUPPORT_ZERO_COPY: nothing registers by hand. The index rides in the
+      SQE's own `addr`; `ublksrv_io_cmd.addr` must be 0; FALLBACK delivers a
+      failed registration as NEED_REG_BUF, which takes the copy path.
+      - `BlockDevice::direct_fd` (SasDevice, through partition + ride-through;
+        none while a drive is being ridden through) and `plan_in_place`
+      - `ThinVolumeHandle` plans with try-locks on the queue thread, never
+        waits: one unreplicated leg, one extent, whole blocks; a write only on
+        an owned, published slot off a slab being emptied, no live mirror, not
+        FUA. Holds the mirror gate, the snapshot gate and the fence until the
+        CQE; `completed` bumped before the commit (#338). Anything else, or a
+        lock taken: today's path, by pread/pwrite of /dev/ublkcN
+      - READ_FIXED/WRITE_FIXED on the queue's ring; any error or short count
+        goes round again on the copy path (ride-through, leg failure)
+      - attached devices only (a recoverable one could be taken by another
+        build, as batch); `STORMBLOCK_UBLK_ZERO_COPY=0|always`; counts in
+        health `ublk_features`
+      - tests: the plan's refusals, fence/gate/flush; the 300 power cuts with
+        writes through a plan; ci-ublk-qd-verify.sh modes
 - [ ] 3: SHMEM_ZC: stormvm#105 filed (the guest memfd handed over at
       attach); the engine half once its shape is agreed there
 
