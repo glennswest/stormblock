@@ -144,8 +144,11 @@ if [ "$TARGET_ARCH" != "$HOST_ARCH" ]; then
             exit 1
         fi
         for _rpm in "$USERLAND_WORK"/rpm/*.rpm; do
-            ( cd "$USERLAND" && rpm2cpio "$_rpm" | cpio -idm --quiet --no-absolute-filenames 2>/dev/null ) || {
-                echo "ERROR: cannot unpack $_rpm"; exit 1; }
+            # `filesystem` is the tree's top-level symlinks (lib64 -> usr/lib64),
+            # which no unpacked set needs and which collide with real directories.
+            case "${_rpm##*/}" in filesystem-[0-9]*) continue ;; esac
+            ( cd "$USERLAND" && rpm2cpio "$_rpm" | cpio -idm --quiet --no-absolute-filenames ) 2> "$USERLAND_WORK/cpio.err" || {
+                tail -3 "$USERLAND_WORK/cpio.err"; echo "ERROR: cannot unpack $_rpm"; exit 1; }
             # The next package writes into what this one made read-only.
             find "$USERLAND" -type d ! -perm -u+w -exec chmod u+w {} +
         done
