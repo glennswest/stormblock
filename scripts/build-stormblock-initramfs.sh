@@ -249,6 +249,8 @@ carry_libs_cross() { # elf
     fi
     for _n in $(readelf -d "$1" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p'); do
         [ -e "$INITRD_DIR/lib64/$_n" ] && continue
+        # libc names the loader by soname; it is the interpreter, carried above.
+        case "$_n" in ld-linux*) continue ;; esac
         _lib=""
         for _d in "$USERLAND/usr/lib64" "$USERLAND/lib64" "$USERLAND/usr/lib64/systemd"; do
             [ -e "$_d/$_n" ] && { _lib=$_d/$_n; break; }
