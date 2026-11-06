@@ -27,6 +27,14 @@
 # Output: /tmp/stormblock-initramfs.img (zstd-compressed cpio)
 #
 # Requirements: busybox (static), cpio, zstd; xz/gzip for module decompression
+#
+# Another architecture (#514): the image is for the architecture of the
+# stormblock binary it is given, whatever this host is. An aarch64 binary makes
+# an aarch64 image on the x86_64 build VM: busybox, kmod and udev come from
+# Fedora's signed aarch64 packages (INITRAMFS_SYSROOT names an unpacked set,
+# else they are fetched with dnf for the kernel's Fedora release), firmware from
+# the modules golden, nothing from this host's userland. Needs readelf, dnf,
+# rpm2cpio, cpio and qemu-aarch64 (to ask that busybox what it has).
 
 set -euo pipefail
 
@@ -43,9 +51,111 @@ if [ ! -f "$STORMBLOCK_BIN" ]; then
     exit 1
 fi
 
+# --- BEGIN target architecture (covered by tests/initramfs-arch.sh)
+# What an image is for is what its stormblock is for (#514): read from the ELF
+# header, so nothing has to be told and a binary cannot go in the wrong image.
+# Not `uname -m`, which says what is building it.
+elf_machine() { # file -> e_machine, empty when the file is not an ELF
+    [ "$(head -c 4 "$1" 2>/dev/null | od -An -c | tr -d ' ')" = '177ELF' ] || return 0
+    od -An -tu2 -j18 -N2 "$1" | tr -d ' '
+}
+machine_arch() { # e_machine -> architecture, empty when it is neither
+    case "$1" in
+        62) echo x86_64 ;;
+        183) echo aarch64 ;;
+    esac
+}
+# A kernel's own name says its architecture too; one that says another is a
+# modules golden of the wrong kind.
+kver_refused() { # kernel-version architecture -> the reason, empty when it fits
+    case "$1" in
+        *.x86_64|*.aarch64)
+            [ "${1##*.}" = "$2" ] || echo "kernel $1 is not for $2"
+            ;;
+    esac
+}
+# --- END target architecture
+
+TARGET_MACHINE=$(elf_machine "$STORMBLOCK_BIN")
+TARGET_ARCH=$(machine_arch "$TARGET_MACHINE")
+HOST_ARCH=$(uname -m)
+if [ -z "$TARGET_ARCH" ]; then
+    echo "ERROR: $STORMBLOCK_BIN is not an x86_64 or aarch64 ELF (e_machine '${TARGET_MACHINE}')"
+    exit 1
+fi
+_why=$(kver_refused "$KVER" "$TARGET_ARCH")
+if [ -n "$_why" ]; then
+    echo "ERROR: $_why, and $STORMBLOCK_BIN is a $TARGET_ARCH binary"
+    exit 1
+fi
+
+# USERLAND is where this image's programs come from: / when it is for this host,
+# else an unpacked set of the architecture's packages. Every program below is
+# taken from under it; nothing of another architecture can run on the machine
+# and the check before the archive says so if one slips in.
+USERLAND=""
+QEMU_USER=""
+if [ "$TARGET_ARCH" != "$HOST_ARCH" ]; then
+    QEMU_USER=$(command -v "qemu-$TARGET_ARCH" || command -v "qemu-$TARGET_ARCH-static" || true)
+    if [ -z "$QEMU_USER" ]; then
+        echo "ERROR: no qemu-$TARGET_ARCH: this host cannot ask a $TARGET_ARCH busybox what it has"
+        exit 1
+    fi
+    for _tool in readelf rpm2cpio cpio; do
+        command -v "$_tool" >/dev/null || { echo "ERROR: $_tool is needed for a $TARGET_ARCH image on $HOST_ARCH"; exit 1; }
+    done
+    USERLAND_WORK=""
+    if [ -n "${INITRAMFS_SYSROOT:-}" ]; then
+        USERLAND=$INITRAMFS_SYSROOT
+    else
+        # Fedora's own packages, for the kernel's Fedora release, signatures
+        # checked in a keyring of their own, as stormcos's kernel fetch does
+        # (stormcos#666). dnf's state stays on this job's drive.
+        _fc=$(printf '%s' "$KVER" | sed -n 's/.*\.fc\([0-9][0-9]*\).*/\1/p')
+        if [ -z "$_fc" ]; then
+            echo "ERROR: kernel $KVER names no Fedora release, and no INITRAMFS_SYSROOT was given"
+            exit 1
+        fi
+        _key=/etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$_fc-$TARGET_ARCH
+        if [ ! -r "$_key" ]; then
+            echo "ERROR: no Fedora key at $_key: update fedora-gpg-keys on this host"
+            exit 1
+        fi
+        USERLAND_WORK=$(mktemp -d)
+        trap 'rm -rf "$USERLAND_WORK"' EXIT
+        USERLAND=$USERLAND_WORK/root
+        mkdir -p "$USERLAND" "$USERLAND_WORK/rpm" "$USERLAND_WORK/keys" \
+                 "$USERLAND_WORK/dnf/cache" "$USERLAND_WORK/dnf/persist" "$USERLAND_WORK/dnf/log"
+        echo "Fetching Fedora $_fc's $TARGET_ARCH userland..."
+        if ! ( cd "$USERLAND_WORK/rpm" && dnf -q --releasever="$_fc" --forcearch="$TARGET_ARCH" \
+                --setopt=cachedir="$USERLAND_WORK/dnf/cache" \
+                --setopt=persistdir="$USERLAND_WORK/dnf/persist" \
+                --setopt=logdir="$USERLAND_WORK/dnf/log" --setopt=countme=0 \
+                download --resolve --alldeps busybox kmod systemd-udev ) > "$USERLAND_WORK/dnf.out" 2>&1; then
+            tail -5 "$USERLAND_WORK/dnf.out"
+            echo "ERROR: dnf could not fetch the $TARGET_ARCH userland"
+            exit 1
+        fi
+        rpmkeys --dbpath "$USERLAND_WORK/keys" --import "$_key" || {
+            echo "ERROR: cannot import $_key"; exit 1; }
+        if rpmkeys --dbpath "$USERLAND_WORK/keys" -K "$USERLAND_WORK"/rpm/*.rpm | grep -v 'digests signatures OK' | grep .; then
+            echo "ERROR: a $TARGET_ARCH package above is not signed by Fedora $_fc's key"
+            exit 1
+        fi
+        for _rpm in "$USERLAND_WORK"/rpm/*.rpm; do
+            ( cd "$USERLAND" && rpm2cpio "$_rpm" | cpio -idm --quiet --no-absolute-filenames 2>/dev/null ) || {
+                echo "ERROR: cannot unpack $_rpm"; exit 1; }
+        done
+        # What it came from goes in the image, for whoever asks what is in it.
+        for _rpm in "$USERLAND_WORK"/rpm/*.rpm; do
+            printf '%s\t%s\n' "$(basename "$_rpm")" "$(sha256sum "$_rpm" | cut -d' ' -f1)"
+        done > "$USERLAND_WORK/packages.tsv"
+    fi
+fi
+
 # Find busybox (static)
 BUSYBOX=""
-for candidate in /usr/bin/busybox /bin/busybox /usr/sbin/busybox; do
+for candidate in "$USERLAND/usr/bin/busybox" "$USERLAND/bin/busybox" "$USERLAND/usr/sbin/busybox"; do
     if [ -x "$candidate" ]; then
         BUSYBOX="$candidate"
         break
@@ -60,11 +170,12 @@ echo "Building stormblock-initramfs..."
 echo "  stormblock: $STORMBLOCK_BIN ($(du -h "$STORMBLOCK_BIN" | cut -f1))"
 echo "  busybox:    $BUSYBOX"
 echo "  kernel:     $KVER"
+echo "  arch:       $TARGET_ARCH${USERLAND:+ (userland from $USERLAND)}"
 echo "  output:     $OUTPUT"
 
 # Create temporary initramfs root
 INITRD_DIR=$(mktemp -d)
-trap 'rm -rf "$INITRD_DIR"' EXIT
+trap 'rm -rf "$INITRD_DIR" ${USERLAND_WORK:+"$USERLAND_WORK"}' EXIT
 
 mkdir -p "$INITRD_DIR"/{bin,sbin,usr/sbin,lib/modules,dev,proc,sys,sysroot,etc,run,tmp,var}
 # Where a boot hook goes (#109). Created empty and always present, so an image
@@ -77,6 +188,7 @@ mkdir -p "$INITRD_DIR/etc/stormblock/boot.d"
 # reproducible build says when with SOURCE_DATE_EPOCH.
 BUILD_EPOCH="${SOURCE_DATE_EPOCH:-$(date -u +%s)}"
 echo "$BUILD_EPOCH" > "$INITRD_DIR/etc/stormblock/build-date"
+[ -n "${USERLAND_WORK:-}" ] && cp "$USERLAND_WORK/packages.tsv" "$INITRD_DIR/etc/stormblock/userland-packages.tsv"
 
 # Busybox (static) + a symlink for **every applet it has**.
 #
@@ -92,7 +204,7 @@ echo "$BUILD_EPOCH" > "$INITRD_DIR/etc/stormblock/build-date"
 cp "$BUSYBOX" "$INITRD_DIR/bin/busybox"
 chmod 755 "$INITRD_DIR/bin/busybox"
 APPLETS=0
-for cmd in $("$BUSYBOX" --list); do
+for cmd in $(${QEMU_USER:+"$QEMU_USER"} "$BUSYBOX" --list); do
     # `busybox` itself is the real binary, not a link to itself.
     [ "$cmd" = "busybox" ] && continue
     ln -sf busybox "$INITRD_DIR/bin/$cmd"
@@ -112,18 +224,62 @@ echo "  applets:    $APPLETS (everything this busybox provides)"
 #
 # It is dynamically linked, so its libraries and the loader come too — about
 # 5 MB, against 27 MB of drivers those libraries exist to load.
-KMOD="$(command -v modprobe || echo /usr/sbin/modprobe)"
+#
+# carry_libs takes a program's libraries and loader into the image. ldd runs
+# the program's own loader, which only works for this host's programs; for
+# another architecture's the ELF's own NEEDED and interpreter are read and
+# followed under USERLAND, and a library that is not there stops the build.
+carry_libs_cross() { # elf
+    local _interp _n _lib _d
+    _interp=$(readelf -l "$1" 2>/dev/null | sed -n 's/.*interpreter: \(.*\)\]/\1/p')
+    if [ -n "$_interp" ] && [ ! -e "$INITRD_DIR$_interp" ]; then
+        _lib=""
+        for _d in "$USERLAND$_interp" "$USERLAND/usr$_interp" "$USERLAND/usr/lib64/${_interp##*/}"; do
+            [ -e "$_d" ] && { _lib=$_d; break; }
+        done
+        [ -n "$_lib" ] || { echo "ERROR: $1's loader $_interp is not in $USERLAND"; exit 1; }
+        mkdir -p "$INITRD_DIR$(dirname "$_interp")"
+        cp -L "$_lib" "$INITRD_DIR$_interp"
+    fi
+    for _n in $(readelf -d "$1" 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p'); do
+        [ -e "$INITRD_DIR/lib64/$_n" ] && continue
+        _lib=""
+        for _d in "$USERLAND/usr/lib64" "$USERLAND/lib64" "$USERLAND/usr/lib64/systemd"; do
+            [ -e "$_d/$_n" ] && { _lib=$_d/$_n; break; }
+        done
+        [ -n "$_lib" ] || { echo "ERROR: $1 needs $_n, which is not in $USERLAND"; exit 1; }
+        cp -L "$_lib" "$INITRD_DIR/lib64/$_n"
+        carry_libs_cross "$INITRD_DIR/lib64/$_n"
+    done
+}
+carry_libs() { # elf
+    if [ -n "$USERLAND" ]; then
+        carry_libs_cross "$1"
+        return
+    fi
+    for lib in $(ldd "$1" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*'); do
+        cp -L "$lib" "$INITRD_DIR/lib64/" 2>/dev/null || true
+    done
+}
+if [ -n "$USERLAND" ]; then
+    KMOD=""
+    for _c in "$USERLAND/usr/bin/modprobe" "$USERLAND/usr/sbin/modprobe" "$USERLAND/sbin/modprobe"; do
+        [ -e "$_c" ] && { KMOD=$_c; break; }
+    done
+else
+    KMOD="$(command -v modprobe || echo /usr/sbin/modprobe)"
+fi
 if [ -x "$KMOD" ]; then
     mkdir -p "$INITRD_DIR/usr/sbin" "$INITRD_DIR/lib64"
     cp -L "$KMOD" "$INITRD_DIR/usr/sbin/modprobe"
     # depmod is the same binary; carry it under its own name so a rebuild of
     # the tables is possible from inside a running node.
     cp -L "$KMOD" "$INITRD_DIR/usr/sbin/depmod"
-    for lib in $(ldd "$KMOD" | grep -oE '/[^ ]+\.so[^ ]*'); do
-        cp -L "$lib" "$INITRD_DIR/lib64/" 2>/dev/null || true
-    done
-    cp -L /lib64/ld-linux-x86-64.so.2 "$INITRD_DIR/lib64/" 2>/dev/null || true
-    echo "  modprobe:   kmod $("$KMOD" --version 2>/dev/null | head -1 | awk '{print $NF}')"
+    carry_libs "$INITRD_DIR/usr/sbin/modprobe"
+    if [ -z "$USERLAND" ]; then
+        cp -L /lib64/ld-linux-x86-64.so.2 "$INITRD_DIR/lib64/" 2>/dev/null || true
+    fi
+    echo "  modprobe:   kmod $(${QEMU_USER:+"$QEMU_USER" -L "$INITRD_DIR"} "$KMOD" --version 2>/dev/null | head -1 | awk '{print $NF}')"
 else
     # Not a warning. The module tree ships compressed, and busybox's insmod
     # cannot read a compressed module — it would fail on every driver, one at
@@ -150,31 +306,33 @@ fi
 # that fails the assignment and `set -e` ends the build — silently, because
 # the failing command printed nothing. Hence the `|| true`.
 UDEVD=""
-for cand in /usr/lib/systemd/systemd-udevd /lib/systemd/systemd-udevd /sbin/udevd; do
+for cand in "$USERLAND/usr/lib/systemd/systemd-udevd" "$USERLAND/lib/systemd/systemd-udevd" "$USERLAND/sbin/udevd"; do
     [ -x "$cand" ] && { UDEVD="$cand"; break; }
 done
-UDEVADM="$(command -v udevadm || true)"
+if [ -n "$USERLAND" ]; then
+    UDEVADM="$USERLAND/usr/bin/udevadm"
+else
+    UDEVADM="$(command -v udevadm || true)"
+fi
 if [ -x "$UDEVD" ] && [ -x "$UDEVADM" ]; then
     mkdir -p "$INITRD_DIR/usr/lib/systemd" "$INITRD_DIR/usr/bin" \
              "$INITRD_DIR/usr/lib/udev/rules.d" "$INITRD_DIR/run/udev"
     cp -L "$UDEVADM" "$INITRD_DIR/usr/bin/udevadm"
     cp -L "$UDEVD"   "$INITRD_DIR/usr/lib/systemd/systemd-udevd"
-    for b in "$UDEVADM" "$UDEVD"; do
-        for lib in $(ldd "$b" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*'); do
-            cp -L "$lib" "$INITRD_DIR/lib64/" 2>/dev/null || true
-        done
-    done
+    carry_libs "$INITRD_DIR/usr/bin/udevadm"
+    carry_libs "$INITRD_DIR/usr/lib/systemd/systemd-udevd"
     # The rules, and the helpers they invoke. Rules that call a helper which is
     # not there fail silently, which is the worst way for this to go wrong.
-    cp -a /usr/lib/udev/rules.d/. "$INITRD_DIR/usr/lib/udev/rules.d/" 2>/dev/null || true
-    for h in /usr/lib/udev/*_id /usr/lib/udev/*-id /usr/lib/udev/mtd_probe; do
+    cp -a "$USERLAND/usr/lib/udev/rules.d/." "$INITRD_DIR/usr/lib/udev/rules.d/" 2>/dev/null || true
+    for h in "$USERLAND"/usr/lib/udev/*_id "$USERLAND"/usr/lib/udev/*-id "$USERLAND/usr/lib/udev/mtd_probe"; do
         [ -x "$h" ] || continue
         cp -L "$h" "$INITRD_DIR/usr/lib/udev/" 2>/dev/null || true
-        for lib in $(ldd "$h" 2>/dev/null | grep -oE '/[^ ]+\.so[^ ]*'); do
-            cp -L "$lib" "$INITRD_DIR/lib64/" 2>/dev/null || true
-        done
+        carry_libs "$INITRD_DIR/usr/lib/udev/$(basename "$h")"
     done
-    echo "  udev:       $("$UDEVADM" --version 2>/dev/null | head -1), $(ls "$INITRD_DIR/usr/lib/udev/rules.d" | wc -l) rules"
+    echo "  udev:       $(${QEMU_USER:+"$QEMU_USER" -L "$INITRD_DIR"} "$UDEVADM" --version 2>/dev/null | head -1), $(ls "$INITRD_DIR/usr/lib/udev/rules.d" | wc -l) rules"
+elif [ -n "$USERLAND" ]; then
+    echo "ERROR: no udevd in $USERLAND"
+    exit 1
 else
     echo "  WARNING: no udevd found; /init will fall back to walking modalias"
 fi
@@ -191,7 +349,14 @@ fi
 # `/init` brings the network up again after the golden is bound, for the
 # machines where that matters. A disk that cannot be reached has no such second
 # chance, which is why these stay.
-FWDIR="$(ls -d /usr/lib/firmware /lib/firmware 2>/dev/null | head -1 || true)"
+#
+# For another architecture this host's firmware is not the release's: it comes
+# from the modules golden, where the rest of it is (#514).
+if [ -n "$USERLAND" ]; then
+    FWDIR="$(ls -d "${MODROOT:-}/lib/firmware" "${MODROOT:-}/usr/lib/firmware" 2>/dev/null | head -1 || true)"
+else
+    FWDIR="$(ls -d /usr/lib/firmware /lib/firmware 2>/dev/null | head -1 || true)"
+fi
 # Named by adapter family. Storage adapters are a small and slow-moving set —
 # unlike NIC model numbers, which is why the split is drawn here.
 FW_STORAGE="ql2*_fw.bin* qla*.bin* lpfc* aic94xx* mpt* qed* bnx2 bnx2x cxgb4
@@ -203,7 +368,28 @@ if [ -n "$FWDIR" ] && [ -d "$FWDIR" ]; then
             [ -e "$e" ] && cp -a "$e" "$INITRD_DIR/lib/firmware/" 2>/dev/null || true
         done
     done
+    # --- BEGIN boot NIC firmware (covered by ci-initramfs-aarch64-verify.sh)
+    # The Orion O6N's only way to its slab is its RTL8125/8126 (#514): r8169
+    # asks for rtl_nic/ at probe, before the modules golden can be mounted,
+    # because the modules golden is on the far side of that NIC. All of rtl_nic
+    # (kilobytes each), since the chip is not confirmed on the board and r8169
+    # picks by chip. On aarch64 only: x86_64's image is as it was.
+    if [ "$TARGET_ARCH" = aarch64 ]; then
+        if [ ! -d "$FWDIR/rtl_nic" ]; then
+            echo "ERROR: no rtl_nic firmware in $FWDIR: r8169 would come up without its patch"
+            exit 1
+        fi
+        cp -aL "$FWDIR/rtl_nic" "$INITRD_DIR/lib/firmware/"
+        for _fw in rtl8125 rtl8126; do
+            ls "$INITRD_DIR/lib/firmware/rtl_nic/$_fw"* >/dev/null 2>&1 || {
+                echo "ERROR: no rtl_nic/$_fw* firmware in $FWDIR"; exit 1; }
+        done
+    fi
+    # --- END boot NIC firmware
     echo "  firmware:   $(du -sh "$INITRD_DIR/lib/firmware" | cut -f1) — storage adapters only (of $(du -sh "$FWDIR" | cut -f1); the rest is in the modules golden)"
+elif [ "$TARGET_ARCH" = aarch64 ]; then
+    echo "ERROR: no firmware under MODROOT (${MODROOT:-unset}): the O6N's r8169 needs rtl_nic"
+    exit 1
 else
     echo "  WARNING: no linux-firmware on this build host — an HBA that loads"
     echo "           firmware at probe will look like a missing driver"
@@ -262,6 +448,21 @@ do
     mkdir -p "$DEST/$(dirname "$tree")"
     cp -a "$MODDIR/$tree" "$DEST/$(dirname "$tree")/"
 done
+
+# On a SoC, what is between the kernel and those drivers is itself modules
+# (#514). The CIX P1's PCIe host is built in, but its mailbox (`cix-mailbox`,
+# SCMI's transport), its USB (Cadence, xHCI on a platform device) and their PHYs
+# are not; the walk over each device's modalias, ACPI's included, can only load
+# what is here. x86_64's PCI firmware needs none of it.
+if [ "$TARGET_ARCH" = aarch64 ]; then
+    for tree in kernel/drivers/mailbox kernel/drivers/phy kernel/drivers/firmware/arm_scmi \
+        kernel/drivers/usb/host kernel/drivers/usb/cdns3
+    do
+        [ -d "$MODDIR/$tree" ] || continue
+        mkdir -p "$DEST/$(dirname "$tree")"
+        cp -a "$MODDIR/$tree" "$DEST/$(dirname "$tree")/"
+    done
+fi
 
 # What a whole subtree brings that this initramfs cannot use.
 #
@@ -379,6 +580,47 @@ EOF
 if [ "$missing" -gt 0 ]; then
     echo "ERROR: $missing module(s) required by what this image carries are absent."
     exit 1
+fi
+
+# The modules are this image's architecture (#514): a modules golden of another
+# fails here, not as a boot with no drivers.
+_mod_checked=0
+while IFS= read -r _ko; do
+    [ -n "$_ko" ] || continue
+    case "$_ko" in
+        *.xz)  _m=$(xz -dc "$_ko" 2>/dev/null | head -c 20 | od -An -tu2 -j18 -N2 | tr -d ' ' || true) ;;
+        *.zst) _m=$(zstd -dc "$_ko" 2>/dev/null | head -c 20 | od -An -tu2 -j18 -N2 | tr -d ' ' || true) ;;
+        *.gz)  _m=$(gzip -dc "$_ko" 2>/dev/null | head -c 20 | od -An -tu2 -j18 -N2 | tr -d ' ' || true) ;;
+        *)     _m=$(od -An -tu2 -j18 -N2 "$_ko" | tr -d ' ') ;;
+    esac
+    if [ "$_m" != "$TARGET_MACHINE" ]; then
+        echo "ERROR: $_ko is not a $TARGET_ARCH module (e_machine '$_m', want $TARGET_MACHINE)"
+        exit 1
+    fi
+    _mod_checked=$((_mod_checked + 1))
+done <<EOF
+$(find "$DEST" -name '*.ko*' -type f)
+EOF
+echo "  modules:    $_mod_checked checked, all $TARGET_ARCH"
+
+# --- BEGIN boot path (covered by tests/initramfs-arch.sh)
+# What the Orion O6N boots through (#514), by name: a tree can lose a driver
+# and still look whole. In the image, or built into this kernel. r8169 is its
+# NIC, nvme its M.2 drives, nvme-tcp the claim, ublk_drv the root.
+boot_path_missing() { # module-dir -> the modules of the O6N's path that are absent
+    for _bp in net/ethernet/realtek/r8169 nvme/host/nvme nvme/host/nvme-tcp block/ublk_drv; do
+        ls "$1/kernel/drivers/$_bp".ko* >/dev/null 2>&1 && continue
+        grep -q "kernel/drivers/$_bp.ko" "$1/modules.builtin" 2>/dev/null && continue
+        echo "$_bp"
+    done
+}
+# --- END boot path
+if [ "$TARGET_ARCH" = aarch64 ]; then
+    _absent=$(boot_path_missing "$DEST")
+    if [ -n "$_absent" ]; then
+        echo "ERROR: the O6N's boot path needs these, absent from $MODDIR:" $_absent
+        exit 1
+    fi
 fi
 
 printf '  modules:    %d files, %s (of %s; the rest is in the modules golden)\n' \
@@ -5455,14 +5697,36 @@ UCODE_DIR="$INITRD_DIR.ucode"
 rm -rf "$UCODE_DIR"
 mkdir -p "$UCODE_DIR/kernel/x86/microcode"
 UCODE_FOUND=""
-if ls /lib/firmware/intel-ucode/* >/dev/null 2>&1; then
+# --- BEGIN no foreign binaries (covered by tests/initramfs-arch.sh)
+# Nothing in the image is another architecture's, whatever a path above did
+# (#514): a symlink out of the package set copies this host's file, and a
+# program of the wrong architecture fails on the machine as "not found".
+# Firmware is not the kernel's to run and the modules are checked above.
+foreign_elfs() { # image-root e_machine -> the paths of ELFs for another machine
+    find "$1" -type f ! -path '*/lib/firmware/*' ! -name '*.ko*' | while IFS= read -r _f; do
+        _m=$(elf_machine "$_f")
+        [ -z "$_m" ] || [ "$_m" = "$2" ] || echo "$_f"
+    done
+}
+# --- END no foreign binaries
+_foreign=$(foreign_elfs "$INITRD_DIR" "$TARGET_MACHINE")
+if [ -n "$_foreign" ]; then
+    echo "ERROR: not $TARGET_ARCH, in a $TARGET_ARCH image:"
+    echo "$_foreign" | sed "s|^$INITRD_DIR|  |"
+    exit 1
+fi
+if [ "$TARGET_ARCH" != x86_64 ]; then
+    # x86's microcode loader is what reads that early cpio. An arm64 kernel has
+    # none, and a host's Intel blobs have no business on the machine.
+    :
+elif ls /lib/firmware/intel-ucode/* >/dev/null 2>&1; then
     # Every file concatenated: the kernel walks the blob and picks the one
     # matching this CPU's family/model/stepping, so one image serves any of
     # them. It is ~5 MB, and it is not compressed on purpose.
     cat /lib/firmware/intel-ucode/* > "$UCODE_DIR/kernel/x86/microcode/GenuineIntel.bin"
     UCODE_FOUND="$UCODE_FOUND Intel($(ls /lib/firmware/intel-ucode | wc -l) revisions)"
 fi
-if ls /lib/firmware/amd-ucode/*.bin >/dev/null 2>&1; then
+if [ "$TARGET_ARCH" = x86_64 ] && ls /lib/firmware/amd-ucode/*.bin >/dev/null 2>&1; then
     cat /lib/firmware/amd-ucode/*.bin > "$UCODE_DIR/kernel/x86/microcode/AuthenticAMD.bin"
     UCODE_FOUND="$UCODE_FOUND AMD"
 fi
@@ -5472,9 +5736,11 @@ echo "Building cpio archive..."
 if [ -n "$UCODE_FOUND" ]; then
     echo "  early microcode:$UCODE_FOUND"
     ( cd "$UCODE_DIR" && find . | cpio -o -H newc --quiet 2>/dev/null ) > "$OUTPUT"
-else
+elif [ "$TARGET_ARCH" = x86_64 ]; then
     echo "  WARNING: no CPU microcode on this build host — nodes will run whatever"
     echo "           their BIOS shipped. Install microcode_ctl and amd-ucode-firmware."
+    : > "$OUTPUT"
+else
     : > "$OUTPUT"
 fi
 cd "$INITRD_DIR"
