@@ -227,6 +227,16 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### A full 256 TB / 1 PB drive's resident metadata at v23 (2026-11-06, #513, stormcos#93) — IN PROGRESS
+
+`metadata_footprint` measures a v1-shaped slab and extrapolates; what is asked
+is a really full drive through the real path. `examples/full_drive`: format 2
+on a directory-backed emulated drive at the real slot size, volumes filled
+through `write` (zero blocks: nothing stored but metadata), heap counted by the
+allocator with its peak: format, every map resident, every map cold, a restart.
+- [ ] the example; rate on a build VM decides which sizes can really be filled
+- [ ] numbers; docs/metadata-scale.md; CHANGELOG; posted on #513 for SCALE.md
+
 ### Forge trust: the apiserver's CA apart from the forge CA (2026-11-06, #540, P0, stormcert#136) — DONE (v23.18.0), closed
 
 Forge's apiserver serves a node-CA certificate; `ca.crt` (the forge CA) cannot
