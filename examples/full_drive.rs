@@ -145,12 +145,14 @@ async fn main() -> anyhow::Result<()> {
     peak_reset();
     let t = Instant::now();
     let zero = Arc::new(vec![0u8; 4096]);
-    const BATCH: u64 = 4096;
+    // About 256 Ki extents between flushes: a write costs ~2.3 KiB until its
+    // flush has published it, so 4 M at once took 10 GiB.
+    let batch_extents = (262_144 / volumes).max(1);
     let mut done = 0u64;
     let mut last = Instant::now();
     let mut at = 0u64;
     while at < per_volume {
-        let end = (at + BATCH).min(per_volume);
+        let end = (at + batch_extents).min(per_volume);
         let batch = Instant::now();
         let mut tasks = Vec::with_capacity(handles.len());
         for h in &handles {
