@@ -145,8 +145,18 @@ the recoverable boot devices, which a successor of another build would have
 to serve the same way, #189); without batch I/O,
 `STORMBLOCK_UBLK_QUEUE_THREADS` (1–8, default 1) serves each queue's tags
 from that many threads (PER_IO_DAEMON, which 7.2 grants on every device and
-batch I/O excludes); #505. Health `ublk_features` says what the
-kernel offers, what the devices use and how the rings were built. A shared NVMe-oF/TCP subsystem
+batch I/O excludes). Those devices also use **zero copy** when the kernel
+offers `AUTO_BUF_REG` and `USER_COPY`, decided per request: a read or plain
+write on one unreplicated extent (for a write, on a slot it alone owns and
+already on the drive) of an `O_DIRECT` drive goes straight between the
+kernel's pages and the drive on the queue's ring; anything else (copy-on-write,
+a first write, FUA, parity, mirrors, NVMe/TCP, a slab being emptied, a drive
+being ridden through, any error) is copied by `pread`/`pwrite` of `/dev/ublkcN`
+and served the ordinary way, with the same rules (`docs/durability.md` rule 21).
+`STORMBLOCK_UBLK_ZERO_COPY=0` off, `=always` also on the recoverable boot devices;
+#505. Health `ublk_features` says what the
+kernel offers, what the devices use, how the rings were built and how many
+requests went in place. A shared NVMe-oF/TCP subsystem
 with namespace hot-add, and per-volume subsystems; a shared iSCSI target
 (CHAP, MC/S, ALUA, thousands of LUNs). `/serve/v1`'s NVMe exports are each
 a subsystem of their own (`<nqn_prefix>:vol-<uuid>`, the volume as namespace
@@ -705,7 +715,9 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   And `"ublk_features"` (#505): `offered` (the kernel's ublk features),
   `used` (what the devices served were made with), `rings_tuned` and
   `rings_plain` (io_uring rings with and without SINGLE_ISSUER +
-  DEFER_TASKRUN).
+  DEFER_TASKRUN), and on zero-copy devices `in_place`, `copied` and
+  `in_place_retried` (requests that went straight to the drive, took the copy
+  path, and went in place but had to go round again by the copy path).
   And `"drives_unreachable"` (#391): every local drive whose I/O is failing
   with transport errors (a controller reset, a link down), with `path`,
   `since` (unix s), `last_error`, `retries` and `gave_up`. While `gave_up`

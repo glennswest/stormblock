@@ -463,7 +463,7 @@ fast_reads() {
 }
 
 # #505 step 2: what zero copy is for, large requests on a fast disk: 8 writers
-# of 256 KiB × 64 and 8 readers the same, over slots already written and
+# of 256 KiB × 64, twenty passes each, and 8 readers the same, over slots already written and
 # flushed (in place), wall time and the engine's CPU, three rounds.
 fast_large() {
     step fast-large
@@ -483,11 +483,13 @@ fast_large() {
             t0=$(now)
             jobs=
             for j in 0 1 2 3 4 5 6 7; do
-                if [ $what = write ]; then
-                    dd if=/dev/zero of=$dev bs=256k count=64 seek=$((j * 64)) oflag=direct 2>/dev/null &
-                else
-                    dd if=$dev of=/dev/null bs=256k count=64 skip=$((j * 64)) iflag=direct 2>/dev/null &
-                fi
+                ( for pass in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                    if [ $what = write ]; then
+                        dd if=/dev/zero of=$dev bs=256k count=64 seek=$((j * 64)) oflag=direct 2>/dev/null
+                    else
+                        dd if=$dev of=/dev/null bs=256k count=64 skip=$((j * 64)) iflag=direct 2>/dev/null
+                    fi
+                done ) &
                 jobs="$jobs $!"
             done
             wait $jobs

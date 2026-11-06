@@ -364,6 +364,32 @@ tests run on.
    open exclusively, as a mount is from its first moment, though it is in
    no mount table until it is made.
 
+21. **A request in place holds what the ordinary path holds** (#505, step 2).
+    On a zero-copy ublk device (`AUTO_BUF_REG` + `USER_COPY`) a request may go
+    straight from the kernel's pages to the drive, `READ_FIXED`/`WRITE_FIXED`
+    on the queue's own ring, with the engine never seeing the data.
+    `ThinVolumeHandle::plan_in_place_on` decides, per request, on the queue's
+    thread, and never waits: a lock someone else has means the ordinary path.
+    Planned: one unreplicated leg, one extent, whole blocks of the volume and
+    the drive, on an `O_DIRECT` drive not being ridden through (rule 14). A
+    write also needs a slot this volume alone owns (else copy-on-write), whose
+    entry is on the device (else a flush publishes it, rule 2's order), off a
+    slab being emptied (rule 11), no live mirror, and no FUA (rule 15: decided
+    per drive, and a commit record is small). The plan holds the mirror's gate,
+    the snapshot's gate (#367) and the slot's fence (rule 10; the map read again
+    under it) until the I/O's completion, and drops them before the request is
+    answered, which is when a write counts as completed (rule 13). Any error
+    or short count sends the same request down the ordinary path, which rides
+    through, fails the leg or answers the error, and finds the extent wherever
+    it is by now. Everything else copies by `pread`/`pwrite` of `/dev/ublkcN`,
+    never through a memfd. Not on a recoverable boot device unless
+    `STORMBLOCK_UBLK_ZERO_COPY=always`: the mode is fixed at creation and a
+    successor of another build (#189) would have to serve it.
+    `STORMBLOCK_UBLK_ZERO_COPY=0` turns it off for devices made after. Checked:
+    the 300 cuts with writes through a plan, in `integration_power_cut`; moves
+    under writes and the refusals in `integration_in_place`; the real path,
+    with a kill -9 and a restart, in `ci-ublk-qd-verify.sh`.
+
 ## T10 protection information (#389)
 
 A drive formatted with PI type 1 (stormdrive formats shelf drives 4096 + PI1
