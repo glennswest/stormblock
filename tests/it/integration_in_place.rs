@@ -179,8 +179,8 @@ async fn a_flush_after_a_write_in_place_reaches_the_drive() {
 
 /// Writes in place while every extent is moved over and over (#239's shape):
 /// each slot is fenced for its I/O, the map checked again under the fence, so
-/// nothing lands on a slot already copied from. Each writer's last value is
-/// what its block reads afterwards.
+/// nothing lands on a slot already copied from. Each writer reads its own write
+/// back at once, and its last value is what the block reads afterwards.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn writes_in_place_are_not_lost_to_a_move_running_under_them() {
     let (mut vm, _dev) = node().await;
@@ -207,6 +207,9 @@ async fn writes_in_place_are_not_lost_to_a_move_running_under_them() {
                 match h.plan_in_place_on(true, at, BLOCK, false) {
                     Some(plan) => {
                         planned += 1;
+                        // As long as a real drive's write takes: a move gets
+                        // its chance between the plan and the bytes landing.
+                        tokio::time::sleep(Duration::from_micros(500)).await;
                         plan.device.write(plan.offset, &data).await.unwrap();
                         drop(plan);
                     }
@@ -214,7 +217,9 @@ async fn writes_in_place_are_not_lost_to_a_move_running_under_them() {
                         h.write(at, &data).await.unwrap();
                     }
                 }
-                tokio::task::yield_now().await;
+                let mut back = vec![0u8; BLOCK];
+                h.read(at, &mut back).await.unwrap();
+                assert!(back == data, "extent {e}: write {n} is gone, a move ran under it");
             }
             (e, n, planned)
         }));

@@ -373,7 +373,7 @@ tests run on.
     Planned: one unreplicated leg, one extent, whole blocks of the volume and
     the drive, on an `O_DIRECT` drive not being ridden through (rule 14). A
     write also needs a slot this volume alone owns (else copy-on-write), whose
-    entry is on the device (else a flush publishes it, rule 2's order), off a
+    entry is on the device (else a flush publishes it, rule 1), off a
     slab being emptied (rule 11), no live mirror, and no FUA (rule 15: decided
     per drive, and a commit record is small). The plan holds the mirror's gate,
     the snapshot's gate (#367) and the slot's fence (rule 10; the map read again
