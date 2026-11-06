@@ -371,9 +371,7 @@ GPT (in the drive's own sector size)
   an **exhausted** one (no tries, never proven, which stormuefi skips), then by
   priority and version. So a release that failed every try never outranks the
   one the node proved good. It is dropped first, both from the ladder and to
-  make room, and the last proven pallet is never evicted. Only a pallet copied
-  by this run gets a fresh count of tries; one already on the disk keeps the
-  loader's count. It is the same GPT-attribute ladder
+  make room, and the last proven pallet is never evicted. It is the same GPT-attribute ladder
   (`priority`/`tries`/`successful`) that `pallet activate|successful|rollback`
   drives. Marking a boot successful once the node is healthy is stormcos's
   (`deploy/node/boot-ok.sh`: `POST /api/v1/pallets/{id}/successful`); staging
