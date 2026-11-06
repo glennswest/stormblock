@@ -15477,7 +15477,10 @@ mod forge_mode_tests {
         let node = VolumeManager::new(MIB);
         let (reg, gem) = (node.registry().clone(), node.gem().clone());
         let state = Arc::new(AppState::new(StormBlockConfig::default(), node, reg, gem));
-        let api = serve(state.clone()).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = listener.local_addr().unwrap();
+        let router = mgmt::api::router(state.clone());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let c = reqwest::Client::new();
         let pallet = format!("http://{api}/api/v1/pallets/{pallet_id}");
 

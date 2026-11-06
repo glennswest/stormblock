@@ -378,6 +378,18 @@ GPT (in the drive's own sector size)
   drives. Marking a boot successful once the node is healthy is stormcos's
   (`deploy/node/boot-ok.sh`: `POST /api/v1/pallets/{id}/successful`); staging
   B on a *running* node is #122's ([docs/staging.md](staging.md)).
+- **What an install asks to boot, it can boot** (#552). A pallet of the image
+  gets a full count of tries, whether this run copied it or found it on the disk
+  with its tries spent: on top with none, stormuefi skips it and starts the older
+  kernel, under a release whose modules are not for it. So does a pallet raised
+  by an activate or a rollback. Every other pallet keeps the loader's count, and
+  a proven one is left alone. `Local boot: … boots on its own` is said only when
+  something on the ladder can boot, and each ladder line gives its tries.
+- **A node marks what it booted** (#552). `POST /api/v1/pallets/{id}/successful`
+  reaches the disk this node's engine booted from (a drive or a local boot disk;
+  not a network boot's clone, whose tries start again at each claim), so a
+  healthy boot stops spending tries.
+
 - **The attached image outranks the disk.** stormuefi scans every device, so a
   node that netboots a new release also sees its disk's copy of the old one.
   The disk's ladder therefore starts at 14, one below the 15 an image publishes
