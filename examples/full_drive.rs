@@ -15,6 +15,7 @@
 //! * **cold**: every map out (`evict_idle`), what the node keeps for idle volumes;
 //! * **restart**: slabs opened and volumes restored from the drive alone, its
 //!   time and peak, and what stays;
+//! * **run on**: the first persist after it, then every map out, in, and out;
 //! * **one volume back**: the first read of a cold volume, its map loaded whole.
 //!
 //! ```text
@@ -213,6 +214,31 @@ async fn main() -> anyhow::Result<()> {
     let out = vm.evict_idle(0).await;
     println!("{out} maps out after the restart");
     line("restart: every map out", base, extents, t.elapsed().as_secs_f64());
+
+    // A node that has run on: its first persist after the restart (which turns
+    // the pager on), every map out, every map back, every map out again.
+    peak_reset();
+    let t = Instant::now();
+    vm.persist().await;
+    anyhow::ensure!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    line("first persist", base, extents, t.elapsed().as_secs_f64());
+    peak_reset();
+    let t = Instant::now();
+    let out = vm.evict_idle(0).await;
+    println!("{out} of {volumes} maps out");
+    line("run on: every map out", base, extents, t.elapsed().as_secs_f64());
+    peak_reset();
+    let t = Instant::now();
+    let before = heap();
+    stormblock::volume::gem::ensure_all_resident(vm.gem()).await?;
+    let loaded = heap() - before;
+    line("run on: every map in", base, extents, t.elapsed().as_secs_f64());
+    println!("  a map in memory: {:.2} B/extent", loaded as f64 / extents as f64);
+    peak_reset();
+    let t = Instant::now();
+    let out = vm.evict_idle(0).await;
+    println!("{out} of {volumes} maps out");
+    line("run on: out again", base, extents, t.elapsed().as_secs_f64());
 
     // One volume comes back: its first read loads its map whole.
     peak_reset();
