@@ -3,6 +3,10 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-06
+- **fix:** #513: a cold extent map kept 16 B an extent. `ColdMap.slabs` collected a slab id per leg and was deduplicated in place, so eviction gave back 13 of a map's 29 B. A full 256 TiB at 8 MiB with every map out: 636 MiB → 123 MiB, and 30 MiB after a restart.
+- **docs:** #513: `docs/metadata-scale.md` §5: resident metadata for a drive really filled, measured with the new `examples/full_drive` (a full 256 TiB at 8 MiB: 1.03 GiB with every map in memory, 30 MiB with every map out, 17.3 GiB at a restart's peak). Filed what it found: #546 (the first persist after a restart fails past about half allocated; a fill stops at ~94 %), #547 (restore holds the whole store).
+
 
 ## [v23.19.0] — 2026-11-06
 

@@ -1,7 +1,8 @@
 # Allocation metadata at 40 PB a node
 
 **Status:** design (#145, 2026-09-25), with measurements and the first fix;
-§3.2 built (#155, 2026-10-05): see §4.
+§3.2 built (#155, 2026-10-05): see §4. **What a full drive costs today: §5**
+(#513); §1's figures are from before #155.
 Scale target (the owner): 160 × 256 TB drives per 4U node (Supermicro
 ASG-4116S-NU160R class), ~41 PB a node, ~400 PB a rack, and 1 PB drives
 coming (stormcos#93). Companion: [multi-drive.md](multi-drive.md).
@@ -220,7 +221,62 @@ used, not with the drive. The measurements above predate it. 160 drives of 1 PiB
 1 GiB/PiB budget of §2. Bulk extents of 64 MiB (#156) bring it to 2 MiB/PiB,
 and a free-extent tree (§3.3) brings it below that.
 
-## 5. Work
+## 5. A drive really full, measured at v23 (#513)
+
+Everything above §4 multiplied a small slab up. `examples/full_drive` fills
+one: a format 2 slab on an emulated drive of the real size and slot size,
+volumes written through `ThinVolumeHandle::write` with their flushes and
+persists, heap counted by the allocator, on a 16 GB build VM. A flush every
+256 Ki extents. The drive stores only the slot table and the records.
+
+Bytes an extent, the same at every size measured, so extent size and drive size
+matter only through how many extents there are:
+
+| | B/extent | what it is |
+|---|---|---|
+| a map in memory | **29** | `extable`: 28 B and a chunk's share. Resident while its volume is in use, or idle with no budget set |
+| a map out of memory | **~0** | a `ColdMap`: counts and its slabs. Read back from the store on first use (33 k extents in ~60 ms) |
+| what stays with every map out | ~30 KiB a volume, plus bounded | headers, the free map (1 bit a committed slot), and caps: 16 MiB of slot-table pages a slab, 256 Ki entries of overlay (~25 MiB) between checkpoints, internal tree pages |
+| a restart's restore, peak | **~555** | the whole store in a `Vec`, then the whole document (#547) |
+| the first persist after a restart, peak | **~201** | the store written whole (#546) |
+| a write until its flush | ~2,300 | pending entries, per write outstanding, not per extent held |
+
+Really filled: **256 TiB at 8 MiB** (33.5 M extents, all of it), 16 TiB at 1 MiB
+(16.8 M, all of it). Partly filled, for the per-extent figures on the real
+geometry: 256 TiB at 1 MiB (8 M), 1 PiB at 8 MiB (8 M), 1 PiB at 1 MiB (10.7 M):
+each 29 B a map, 476–572 B a restore's peak, 201 B a first persist's. The
+rows below other than the first are those figures times the extent count.
+
+| one full drive (binary units) | extents | every map in memory | every map out | restore's peak | first persist's peak |
+|---|---|---|---|---|---|
+| **256 TiB, 8 MiB** (measured) | 33.5 M | **1.03 GiB** | **30 MiB** | **17.3 GiB**, 181 s | **6.3 GiB**, 54 s |
+| 1 PiB, 8 MiB | 134 M | ~3.6 GiB | under 100 MiB | ~69 GiB | ~25 GiB |
+| 256 TiB, 1 MiB | 268 M | ~7.2 GiB | under 100 MiB | ~139 GiB | ~50 GiB |
+| 1 PiB, 1 MiB | 1.07 G | ~29 GiB | under 200 MiB | ~555 GiB | ~201 GiB |
+
+A shelf of 160 × 256 TiB in steady state: ~145 GiB at 8 MiB and ~1.1 TiB at
+1 MiB with every map in memory, under 16 GiB with every map out. §1's ~12.8 TB
+is gone. What is left is the restart, which is the node's RAM ceiling until
+#547: 17 GiB a drive at 8 MiB, one drive at a time at best.
+
+Against §2's budget of 1 GiB/PiB: idle data meets it at any extent size;
+data in use does not (3.6 GiB/PiB at 8 MiB, 29 GiB/PiB at 1 MiB, as a volume's
+map loads whole).
+
+Three things to know, all found by filling a drive rather than multiplying one:
+
+* **Maps leave memory only with `[metadata] cache_mb` set**, and none does by
+  default. Unset, a node stays in the "in memory" column. And a restart ends
+  there whatever the setting, until its first persist turns the pager on.
+* **The default metadata region does not hold a full drive** (#546): a fill
+  stops at ~94 %, and past about half allocated the first persist after a
+  restart fails. So these runs use four times it (`METADATA_X`).
+* **A cold map kept 16 B an extent** until this measurement (`ColdMap.slabs`,
+  the capacity of a list deduplicated in place), over half of what eviction was
+  for: 636 MiB stayed with every map out on the full 256 TiB. Fixed; the numbers
+  above are after it.
+
+## 6. Work
 
 | | issue |
 |---|---|
@@ -230,5 +286,5 @@ and a free-extent tree (§3.3) brings it below that.
 | paged on-disk extent index with a bounded cache; 64-bit indexes; format version and migration *(decision B)* | stormblock #158 |
 | emulated 256 TB / 1 PB drives to test the budget at every level | stormcos #92 |
 
-Each is measured by `examples/metadata_footprint.rs`. The budget is a test:
+Each is measured by `examples/metadata_footprint.rs` (a slab's structures) and `examples/full_drive.rs` (a drive filled and restarted). The budget is a test:
 resident bytes per written PiB, and zero per free slot.

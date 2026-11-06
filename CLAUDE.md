@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,15 +227,19 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### A full 256 TB / 1 PB drive's resident metadata at v23 (2026-11-06, #513, stormcos#93) — IN PROGRESS
+### A full 256 TB / 1 PB drive's resident metadata at v23 (2026-11-06, #513, stormcos#93) — DONE (v23.19.1), closed
 
-`metadata_footprint` measures a v1-shaped slab and extrapolates; what is asked
-is a really full drive through the real path. `examples/full_drive`: format 2
-on a directory-backed emulated drive at the real slot size, volumes filled
-through `write` (zero blocks: nothing stored but metadata), heap counted by the
-allocator with its peak: format, every map resident, every map cold, a restart.
-- [ ] the example; rate on a build VM decides which sizes can really be filled
-- [ ] numbers; docs/metadata-scale.md; CHANGELOG; posted on #513 for SCALE.md
+`metadata_footprint` multiplies a small slab up; `examples/full_drive` fills a
+format 2 slab on a directory-backed emulated drive through `write`, heap counted
+by the allocator: fill, hot, cold, a restart, a first persist, out, in.
+- [x] measured: full 256 TiB at 8 MiB and 16 TiB at 1 MiB; 8–11 M extents on
+      256 TiB at 1 MiB and 1 PiB at both. 29 B/extent a map, ~0 cold, restore's
+      peak ~555 B, first persist's ~201 B (docs/metadata-scale.md §5)
+- [x] found + fixed: `ColdMap.slabs` kept a slab id's capacity per extent (16 B)
+- [x] found + filed: #546 (P1: default region: first persist after a restart
+      fails past ~50 % allocated, a fill stops at ~94 %), #547 (restore's peak).
+      Maps leave memory only with `[metadata] cache_mb`, unset by default
+- [x] check.sh; v23.19.1; stage; numbers on #513 for stormcos's SCALE.md
 
 ### Forge trust: the apiserver's CA apart from the forge CA (2026-11-06, #540, P0, stormcert#136) — DONE (v23.18.0), closed
 
