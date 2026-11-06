@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,13 +227,15 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Forge trust: the apiserver's CA apart from the forge CA (2026-11-06, #540, P0, stormcert#136)
+### Forge trust: the apiserver's CA apart from the forge CA (2026-11-06, #540, P0, stormcert#136) — DONE (v23.18.0), closed
 
 Forge's apiserver serves a node-CA certificate; `ca.crt` (the forge CA) cannot
 verify it and also seeds a client trust root, so it is not widened.
-- [ ] `ForgeTrust.apiserver_ca` (PEM, optional); GET, claim answer; `apiserver-ca.crt`
+- [x] `ForgeTrust.apiserver_ca` (PEM, optional); GET, claim answer; `apiserver-ca.crt`
       0644 from a claim and `write_self`, before `from`; a trust with none removes it
-- [ ] tests, README, CHANGELOG; check.sh; v23.17.1; stage; stormcert#136 told
+- [x] tests, README, CHANGELOG; check.sh at a7027dbf ALL PASS; v23.18.0; stage;
+      stormcert#136 told; closed. On a node: stormcert b3bac81 PUTs it, then
+      `forge-enroll` verifies with `apiserver-ca.crt`
 
 ### Kept -data volumes that will not mount: orphan file "bad magic" (2026-11-04, #532, P1) — DONE (v23.17.0), closed; server8 pending
 

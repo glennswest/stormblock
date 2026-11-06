@@ -3,8 +3,11 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-11-06
-- **feat:** #540 (stormcert#136): forge trust carries the apiserver's CA apart from the forge CA. `PUT /api/v1/forge/trust` takes `apiserver_ca` (PEM, optional, refused when malformed), kept in `forge-trust.json`, shown by `GET` (absent when there is none) and answered in a claim's `forge_trust`. `boot-claim` and a first node's own write `/run/stormblock/forge/apiserver-ca.crt` (0644) before `from`; a trust with none removes a stale one. `ca.crt` is unchanged: it also seeds `forge-ca.crt`, a client trust root on every node, and forge's node CA there would let every pair it signed authenticate to other nodes.
+
+## [v23.18.0] — 2026-11-06
+
+### Added
+- #540 (stormcert#136): forge trust carries the apiserver's CA apart from the forge CA. `PUT /api/v1/forge/trust` takes `apiserver_ca` (PEM, optional, refused when malformed), kept in `forge-trust.json`, shown by `GET` (absent when there is none) and answered in a claim's `forge_trust`. `boot-claim` and a first node's own write `/run/stormblock/forge/apiserver-ca.crt` (0644) before `from`; a trust with none removes a stale one. `ca.crt` is unchanged: it also seeds `forge-ca.crt`, a client trust root on every node, and forge's node CA there would let every pair it signed authenticate to other nodes.
 
 
 ## [v23.17.0] — 2026-11-04
