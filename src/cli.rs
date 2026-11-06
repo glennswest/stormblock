@@ -3479,8 +3479,13 @@ pub async fn run() -> anyhow::Result<()> {
         for f in &r.failed {
             println!("Local boot: {disk}: not copied — {f}");
         }
-        for (name, version, pri) in &r.ladder {
-            println!("Local boot: {disk}: ladder {name} v{version} priority {pri}");
+        for (i, (name, version, pri)) in r.ladder.iter().enumerate() {
+            let state = match r.states.get(i) {
+                Some((_, true)) => "proven".to_string(),
+                Some((tries, false)) => format!("tries {tries}"),
+                None => String::new(),
+            };
+            println!("Local boot: {disk}: ladder {name} v{version} priority {pri} {state}");
         }
         if r.bootable() {
             println!("Local boot: {disk} boots on its own");
@@ -15442,6 +15447,52 @@ mod forge_mode_tests {
         let v: serde_json::Value =
             c.post(format!("{pallet}/verify")).send().await.unwrap().json().await.unwrap();
         assert_eq!(v["ok"], true, "still whole: {v}");
+    }
+
+    /// #552: a node booted from its local disk holds it only as a boot disk,
+    /// and every boot spends a try. Its engine marks the pallet it booted, on
+    /// the disk, so the tries stop running out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_node_marks_the_pallet_it_booted_from_its_own_disk() {
+        use crate::pallet::manager::PublishSpec;
+        use crate::pallet::{BytesContent, MemberKind, MemberSpec, PalletKind, PalletManager, PalletStore};
+        const DISK: u64 = 256 * MIB;
+        let dir = tempfile::tempdir().unwrap();
+        let disk_path = dir.path().join("node.disk").to_string_lossy().to_string();
+        let disk: Arc<dyn BlockDevice> = Arc::new(FileDevice::open_with_capacity(&disk_path, DISK).await.unwrap());
+        let mut layout = crate::image::local::LocalLayout::for_drive(DISK);
+        layout.system_bytes = 96 * MIB;
+        layout.slot_size = MIB;
+        layout.boot_bytes = 32 * MIB;
+        layout.bulk = false;
+        crate::image::local::lay_node_slabs(disk.clone(), &layout).await.unwrap();
+        let pallet_id = {
+            let mut store = PalletStore::new(Vec::new());
+            store.add_drive(disk_path.clone(), disk.clone());
+            let mut spec = PublishSpec::new("kernel1", PalletKind::Boot)
+                .member(MemberSpec::new("cmdline", "cmdline", MemberKind::BootConfig, Arc::new(BytesContent(b"x".to_vec()))));
+            spec.priority = Some(14);
+            PalletManager::new(store).publish(spec).await.unwrap().id
+        };
+        let node = VolumeManager::new(MIB);
+        let (reg, gem) = (node.registry().clone(), node.gem().clone());
+        let state = Arc::new(AppState::new(StormBlockConfig::default(), node, reg, gem));
+        let api = serve(state.clone()).await;
+        let c = reqwest::Client::new();
+        let pallet = format!("http://{api}/api/v1/pallets/{pallet_id}");
+
+        assert_eq!(c.post(format!("{pallet}/successful")).send().await.unwrap().status(), 404, "a disk it does not hold");
+        super::set_boot_disks(&state, vec![(disk_path.clone(), disk.clone())]).await;
+        let r = c.post(format!("{pallet}/successful")).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+
+        // On the disk, as the loader reads it.
+        let mut store = PalletStore::new(Vec::new());
+        store.add_drive(disk_path, disk);
+        let found = store.find(pallet_id).await.unwrap();
+        assert!(found.attributes.successful, "{:?}", found.attributes);
+        // A write verb beyond this one still does not reach a boot disk.
+        assert_eq!(c.delete(&pallet).send().await.unwrap().status(), 404);
     }
 }
 

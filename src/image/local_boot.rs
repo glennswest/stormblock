@@ -95,12 +95,16 @@ pub struct LocalBootReport {
     pub ladder: Vec<(String, u64, u8)>,
     /// Source boot pallets that could not be copied, and why.
     pub failed: Vec<String>,
+    /// For each of `ladder`: tries left, and whether it is proven (#552).
+    pub states: Vec<(u8, bool)>,
 }
 
 impl LocalBootReport {
     /// Whether the disk can start a kernel on its own now.
     pub fn bootable(&self) -> bool {
-        !matches!(self.esp, EspOutcome::NoSource) && !self.ladder.is_empty()
+        // A pallet with no tries and never proven is one the loader skips
+        // (#552): the disk is only bootable if something on it is not that.
+        !matches!(self.esp, EspOutcome::NoSource) && self.states.iter().any(|(tries, proven)| *proven || *tries > 0)
     }
 }
 
@@ -165,6 +169,7 @@ pub async fn lay_local_boot_ranked(
         removed: Vec::new(),
         ladder: Vec::new(),
         failed: Vec::new(),
+        states: Vec::new(),
     };
     let mut store = PalletStore::new(Vec::new());
     store.add_drive(disk_path, disk.clone());
@@ -193,10 +198,6 @@ pub async fn lay_local_boot_ranked(
     for p in &wanted {
         wanted_digests.push(digest(&mgr, p).await?);
     }
-    // The pallets copied by this run: the only ones given a fresh count of
-    // tries (#205).
-    let mut fresh: Vec<[u8; 32]> = Vec::new();
-
     for (src, want) in wanted.iter().zip(wanted_digests.iter()) {
         let mut have = HashSet::new();
         for p in boot_pallets(&mgr, |d| d == 0).await {
@@ -210,7 +211,6 @@ pub async fn lay_local_boot_ranked(
             match mgr.copy_pallet(src.id, 0).await {
                 Ok(_) => {
                     report.copied.push(describe(src));
-                    fresh.push(*want);
                     break;
                 }
                 Err(crate::pallet::PalletError::NoSpace { .. }) => {
@@ -247,9 +247,15 @@ pub async fn lay_local_boot_ranked(
     let mut order: Vec<[u8; 32]> = Vec::new();
     order.extend(active);
     order.extend(wanted_digests.iter().copied().filter(|d| Some(*d) != active));
-    let (ladder, removed) = rerank(&disk, &mgr, &order, &fresh).await?;
-    report.ladder = ladder;
-    report.removed.extend(removed);
+    // What this run asks to boot gets a full count, copied now or found on the
+    // disk with its tries spent (#552): a pallet with none is skipped by the
+    // loader whatever its priority, and an older kernel boots instead. Not the
+    // pallet a stage goes below: it is running, on the loader's count.
+    let arm: Vec<[u8; 32]> = wanted_digests.iter().copied().filter(|d| Some(*d) != active).collect();
+    let ranked = rerank(&disk, &mgr, &order, &arm).await?;
+    report.ladder = ranked.ladder;
+    report.states = ranked.states;
+    report.removed.extend(ranked.removed);
 
     // 4. The ESP last, so the disk becomes bootable only once there is
     //    something on it to boot.
@@ -262,27 +268,28 @@ pub async fn lay_local_boot_ranked(
 /// Order the disk's boot pallets: those in `first` (by manifest digest) on
 /// top in that order, then the rest — proven, then candidates, then
 /// exhausted, each by `(priority, version)` (#205) — removing past
-/// [`LOCAL_KEEP`] any that `first` does not name. Only a pallet in `fresh`
-/// (copied by this run) has its tries reset; one already on the disk keeps
-/// the loader's count. Returns the ladder and what was removed.
+/// [`LOCAL_KEEP`] any that `first` does not name. A pallet in `arm`, the ones
+/// this run asks to boot, gets [`DEFAULT_TRIES`] unless it is proven (#552);
+/// every other keeps the loader's count, the one record that it failed (#205).
 async fn rerank(
     disk: &Arc<dyn BlockDevice>,
     mgr: &PalletManager,
     first: &[[u8; 32]],
-    fresh: &[[u8; 32]],
-) -> Result<(Vec<(String, u64, u8)>, Vec<String>)> {
+    arm: &[[u8; 32]],
+) -> Result<Ranked> {
     let mut local = boot_pallets(mgr, |d| d == 0).await;
     let mut ranked: Vec<(usize, PalletLocation, bool)> = Vec::new();
     for p in local.drain(..) {
         let d = digest(mgr, &p).await?;
         let rank = first.iter().position(|w| *w == d).unwrap_or(usize::MAX);
-        ranked.push((rank, p, fresh.contains(&d)));
+        ranked.push((rank, p, arm.contains(&d)));
     }
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then(keep_key(&b.1).cmp(&keep_key(&a.1))));
     let mut gpt = Gpt::read(disk).await?;
     let mut keep = Vec::new();
     let mut removed = Vec::new();
-    for (i, (rank, p, fresh)) in ranked.iter().enumerate() {
+    let mut states = Vec::new();
+    for (i, (rank, p, armed)) in ranked.iter().enumerate() {
         if i >= LOCAL_KEEP && *rank == usize::MAX {
             gpt.remove(p.entry_index)?;
             removed.push(describe(p));
@@ -290,14 +297,22 @@ async fn rerank(
         }
         let mut a = p.attributes;
         a.priority = LOCAL_TOP.saturating_sub(keep.len() as u8).max(1);
-        if *fresh && !a.successful && a.tries_left == 0 {
+        if *armed && !a.successful {
             a.tries_left = DEFAULT_TRIES;
         }
         gpt.entries[p.entry_index].attributes = a.to_u64();
         keep.push((p.name.clone(), p.version, a.priority));
+        states.push((a.tries_left, a.successful));
     }
     gpt.write(disk).await?;
-    Ok((keep, removed))
+    Ok(Ranked { ladder: keep, removed, states })
+}
+
+/// What [`rerank`] left.
+struct Ranked {
+    ladder: Vec<(String, u64, u8)>,
+    removed: Vec<String>,
+    states: Vec<(u8, bool)>,
 }
 
 /// The disk's boot pallets, top first: `(manifest digest, name, version,
@@ -338,7 +353,9 @@ pub async fn raise_local_boot(
     if !found {
         return Err(ImageError::Spec(format!("{disk_path} has no boot pallet with that manifest digest")));
     }
-    Ok(rerank(&disk, &mgr, &[top], &[]).await?.0)
+    // Asked for by name, so it gets the tries to boot (#552): a rollback to a
+    // kept pallet whose count ran out would otherwise be skipped.
+    Ok(rerank(&disk, &mgr, &[top], &[top]).await?.ladder)
 }
 
 /// The first ESP among the sources: `(device, start, len)` in bytes.
@@ -818,6 +835,71 @@ mod tests {
         let st = states(&ddev, &dpath).await;
         assert_eq!(st.iter().map(|s| s.0.as_str()).collect::<Vec<_>>(), vec!["B", "A"], "{st:?}");
         assert_eq!((st[1].2, st[1].3), (0, false), "A still exhausted: {st:?}");
+    }
+
+    /// #552 (forge1 12.58.5): the release's pallet is already on the disk with
+    /// its tries spent. An install of it gives it a full count: on top with no
+    /// tries, the loader skips it and boots the older kernel. What the
+    /// install does not name keeps its count, and a proven pallet is left alone.
+    #[tokio::test]
+    async fn an_install_arms_the_pallet_it_wants_though_it_was_already_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dpath, ddev) = node_disk(&dir).await;
+        let (apath, adev) = image(&dir, "A.img", "A").await;
+        let (bpath, bdev) = image(&dir, "B.img", "B").await;
+        lay_local_boot(&dpath, ddev.clone(), vec![(bpath.clone(), bdev.clone())]).await.unwrap();
+        lay_local_boot(&dpath, ddev.clone(), vec![(apath.clone(), adev.clone())]).await.unwrap();
+        // forge1: A spent, B still counting.
+        set_state(&ddev, &dpath, "A", 0, false).await;
+        set_state(&ddev, &dpath, "B", 2, false).await;
+
+        let r = lay_local_boot(&dpath, ddev.clone(), vec![(apath.clone(), adev.clone())]).await.unwrap();
+        assert_eq!(r.already, 1);
+        assert!(r.bootable());
+        let st = states(&ddev, &dpath).await;
+        assert_eq!(st[0].0, "A", "{st:?}");
+        assert_eq!((st[0].2, st[0].3), (DEFAULT_TRIES, false), "the one asked for: {st:?}");
+        assert_eq!((st[1].2, st[1].3), (2, false), "the other keeps the loader's count: {st:?}");
+
+        // Proven stays proven, with no count of tries given to it.
+        set_state(&ddev, &dpath, "A", 0, true).await;
+        lay_local_boot(&dpath, ddev.clone(), vec![(apath, adev)]).await.unwrap();
+        let st = states(&ddev, &dpath).await;
+        assert_eq!((st[0].2, st[0].3), (0, true), "{st:?}");
+    }
+
+    /// #552: the report says what the loader would do. With no source and
+    /// nothing on the disk that can boot, it is not "boots on its own".
+    #[tokio::test]
+    async fn a_disk_of_spent_pallets_does_not_boot_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dpath, ddev) = node_disk(&dir).await;
+        let (apath, adev) = image(&dir, "A.img", "A").await;
+        let r = lay_local_boot(&dpath, ddev.clone(), vec![(apath.clone(), adev.clone())]).await.unwrap();
+        assert!(r.bootable());
+        set_state(&ddev, &dpath, "A", 0, false).await;
+        // No pallet copied or named: only what the disk already has.
+        let mut none = lay_local_boot(&dpath, ddev.clone(), Vec::new()).await.unwrap();
+        none.esp = EspOutcome::Unchanged;
+        assert_eq!(none.states, vec![(0, false)]);
+        assert!(!none.bootable());
+    }
+
+    /// #552: activating or rolling back to a pallet asks for it by name; one
+    /// whose count ran out would be skipped.
+    #[tokio::test]
+    async fn a_raised_pallet_can_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dpath, ddev) = node_disk(&dir).await;
+        let (apath, adev) = image(&dir, "A.img", "A").await;
+        let (bpath, bdev) = image(&dir, "B.img", "B").await;
+        lay_local_boot(&dpath, ddev.clone(), vec![(apath.clone(), adev.clone())]).await.unwrap();
+        lay_local_boot(&dpath, ddev.clone(), vec![(bpath, bdev)]).await.unwrap();
+        set_state(&ddev, &dpath, "A", 0, false).await;
+        let top = local_boot_ladder(&apath, adev).await.unwrap()[0].0;
+        raise_local_boot(&dpath, ddev.clone(), top).await.unwrap();
+        let st = states(&ddev, &dpath).await;
+        assert_eq!((st[0].0.as_str(), st[0].2), ("A", DEFAULT_TRIES), "{st:?}");
     }
 
     /// stormuefi scans every device. When a node netboots, the image it

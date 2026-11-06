@@ -227,6 +227,19 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### An install's kernel pallet with no tries; no node marks a local pallet good (2026-11-06, #552, P0, stormcos#828)
+
+forge1 12.58.5: the wanted pallet was already on the disk with tries=0 (a warm
+reset spends one a boot, since nothing marks it), the ladder put it on top, the
+loader skipped it and booted the older kernel: no modules, Cilium crash loop.
+- [ ] rerank: a pallet this run wants on top (install, stage, activate, rollback),
+      unproven, gets a full count, copied or not; never the active one a stage
+      goes below, never one it does not name (#205); "boots on its own" only
+      when a pallet on the ladder can boot; the ladder line says tries
+- [ ] `POST /pallets/{id}/successful` reaches a local boot disk (#314's list),
+      not a network boot's clone
+- [ ] tests; docs; CHANGELOG; check.sh; patch; stage; stormcos#828 told
+
 ### Writes into an ext4 past ~192 TiB corrupt it (2026-11-06, #512, stormcos#93) — WAITING on mkfs.ext4.rs#33, fio.ext4.rs#18
 
 Not the engine: mkfs-ext4's `write_group_descs` ignores meta_bg, which the layout

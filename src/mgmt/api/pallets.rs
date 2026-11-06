@@ -64,6 +64,23 @@ async fn read_manager(state: &AppState) -> PalletManager {
     PalletManager::with_mirrors(read_store(state).await, mirrors)
 }
 
+/// A manager that can mark a pallet good (#552): the drives and the boot disks
+/// on this machine. A node booted from its local disk holds that disk only as a
+/// boot disk (#314), so without it the mark answered 404, every boot spent a
+/// try, and the pallet ran out. Not a network boot's clone: its tries start
+/// again at the next claim, and there is nothing there to prove.
+async fn mark_manager(state: &AppState) -> PalletManager {
+    let mirrors = state.pallet_mirrors.read().await.clone();
+    let mut s = store(state).await;
+    for d in state.boot_disks.read().await.iter() {
+        let remote = matches!(d.device.device_type(), crate::drive::DriveType::NvmeTcp | crate::drive::DriveType::Iscsi);
+        if !remote && s.drives().iter().all(|r| r.path != d.path) {
+            s.add_drive_labelled(d.path.clone(), d.device.clone(), d.labels.clone());
+        }
+    }
+    PalletManager::with_mirrors(s, mirrors)
+}
+
 const MIRRORS_FILE: &str = "pallet_mirrors.json";
 
 /// The node's pallet mirror policy, from `<data_dir>/pallet_mirrors.json`.
@@ -591,7 +608,7 @@ async fn activate(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
 
 async fn mark_successful(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let id = with_id!(id);
-    match manager(&state).await.mark_successful(id).await {
+    match mark_manager(&state).await.mark_successful(id).await {
         Ok(loc) => Json(PalletResponse::from(&loc)).into_response(),
         Err(e) => err(e),
     }
