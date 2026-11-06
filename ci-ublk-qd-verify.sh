@@ -544,7 +544,7 @@ in_place_clone() {
     s=$(api -X POST http://127.0.0.1:$port/api/v1/volumes -d '{"name":"zsrc","size":"16M"}' | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
     sd=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$s/attach -d '{"transport":"ublk"}' | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
     dd if=/tmp/pat of=$sd bs=64k count=128 oflag=direct conv=fsync 2>/dev/null
-    c=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$s/clone -d '{"name":"zclone"}' | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
+    c=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/snapshots -d "{\"name\":\"zclone\",\"source_volume_id\":\"$s\"}" | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
     cd=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$c/attach -d '{"transport":"ublk"}' | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
     [ -b "$sd" ] && [ -b "$cd" ] || { r $mode-clone "FAIL (no devices: '$sd' '$cd')"; return; }
     dd if=/dev/urandom of=/tmp/cl bs=4096 count=16 2>/dev/null
