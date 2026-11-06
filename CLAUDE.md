@@ -227,6 +227,16 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Writes into an ext4 past ~192 TiB corrupt it (2026-11-06, #512, stormcos#93) — WAITING on mkfs.ext4.rs#33, fio.ext4.rs#18
+
+Not the engine: mkfs-ext4's `write_group_descs` ignores meta_bg, which the layout
+takes past 3/4 of a group of descriptors (~192 TiB). Reproduced with
+`examples/ext4_large`: meta_bg at 16 and 64 GiB corrupt after 8 files, classic
+clean. No guard added here: no filesystem that size exists outside stormcos's run.
+- [x] cause, reproduction; filed on both crates; #512 proposed after them
+- [ ] when released: both pins by rev (Cargo.lock by hand), `ext4_large volume 256T`
+      clean through the engine, stormcos's tools/pb-scale; check.sh; patch; stage; close
+
 ### A full 256 TB / 1 PB drive's resident metadata at v23 (2026-11-06, #513, stormcos#93) — DONE (v23.19.1), closed
 
 `metadata_footprint` multiplies a small slab up; `examples/full_drive` fills a
