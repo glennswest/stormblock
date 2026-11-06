@@ -110,15 +110,15 @@ async fn main() -> anyhow::Result<()> {
     peak_reset();
     let t = Instant::now();
     let dev: Arc<dyn BlockDevice> = stormblock::drive::open_path(&uri, false).await?;
-    // The default region fills first at about 94 % of the drive (#513's
-    // finding): twice it, unless METADATA_DEFAULT=1, so a fill reaches the end.
+    // The default region is too small to measure this: a fill stops at about
+    // 94 % of the drive, and a restart's first persist, which writes the store
+    // whole beside the old one, past about half (#513's findings). Four times
+    // it, or METADATA_X times (1: the default), so a fill reaches the end.
     let mut fmt = SlabFormat::new(slot, StorageTier::Hot)
         .with_role(SlabRole::Data)
         .with_version(SLAB_VERSION_2)
         .with_auto_metadata(dev.capacity_bytes());
-    if std::env::var("METADATA_DEFAULT").is_err() {
-        fmt.metadata_bytes *= 2;
-    }
+    fmt.metadata_bytes *= std::env::var("METADATA_X").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(4);
     println!("metadata region {:.1} MiB", fmt.metadata_bytes as f64 / (1u64 << 20) as f64);
     let slab = Slab::format_with(dev.clone(), fmt).await?;
     let sid = slab.slab_id();
