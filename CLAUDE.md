@@ -227,6 +227,20 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### aarch64 initramfs for the Orion O6N (2026-11-06, #514, P1, stormcos#666) — IN PROGRESS, on wip/514-aarch64
+
+The image is for its binary's architecture (read from the ELF, never `uname`).
+x86_64's image stays as it was; another architecture takes busybox, kmod and udev
+from Fedora's signed packages for the kernel's release, firmware from the modules
+golden. `component initramfs --arch aarch64` and the sealed kernel set are
+stormcentral#1153's. Board: stormbootx#172.
+- [x] engine: `cargo zigbuild --target aarch64-unknown-linux-musl` builds and runs
+      under qemu-user; zig's linker needs `ulimit -n` raised (1024 fails)
+- [ ] script: arch from ELF, userland, libs by NEEDED, rtl_nic, boot path by name,
+      no foreign ELF, no microcode; tests/initramfs-arch.sh
+- [ ] ci-initramfs-aarch64-verify.sh: UEFI + ACPI in QEMU, NVMe slab and claim
+- [ ] x86_64's image unchanged; unit tests under qemu-user; check.sh; docs, CHANGELOG
+
 ### An install's kernel pallet with no tries; no node marks a local pallet good (2026-11-06, #552, P0, stormcos#828) — DONE (v23.19.2), closed; metal pending
 
 forge1 12.58.5: the wanted pallet was already on the disk with tries=0 (a warm
