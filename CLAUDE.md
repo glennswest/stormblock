@@ -548,8 +548,13 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
         7.2.11). `NUMBERS=1`: batch + zero copy no worse than zero copy alone
         (an earlier gap was drift, modes run at different moments), so batch stays
         on; large requests 3–5× less engine CPU, CHANGELOG has them
-- [ ] 3: SHMEM_ZC: stormvm#105 filed (the guest memfd handed over at
-      attach); the engine half once its shape is agreed there
+      - PAUSED 2026-11-06 for P0 #540, on wip/505-zero-copy (ba30b57b + this).
+        To finish: read check.sh at the branch head (tmp/b505c2.log, or run it
+        again); ff main; CHANGELOG's "third drifted across every mode" is
+        loose (plain's third pass was its fastest: say the first two passes of
+        each mode are quoted); v23.18.0; stage; close #505
+- [ ] 3: SHMEM_ZC: #541 (the engine half), after stormvm#105 (the guest memfd
+      handed over at attach)
 
 ### A deleted volume behind a live ublk device after server1's reboot (2026-10-28, #502, P0) — DONE (v23.0.3), closed; metal pending
 
