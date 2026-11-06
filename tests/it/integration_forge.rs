@@ -356,22 +356,56 @@ async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writ
     assert_eq!(std::fs::read_to_string(booted.join("bootstrap.token")).unwrap(), "abcdef.0123456789abcdef\n");
     assert_eq!((mode(booted.join("ca.crt")), mode(booted.join("url")), mode(booted.join("bootstrap.token"))), (0o644, 0o644, 0o600));
 
+    // #540 (stormcert#136): forge names what its apiserver's certificate
+    // chains to. Readable on GET, handed out, its own file; `ca.crt` as it was.
+    assert!(st.get("apiserver_ca").is_none(), "absent while there is none: {st}");
+    assert!(booted.exists() && !booted.join("apiserver-ca.crt").exists());
+    const NODE_CA: &str = "-----BEGIN CERTIFICATE-----\nMIIBnodeca\n-----END CERTIFICATE-----\n";
+    let r = c.put(format!("{base}/api/v1/forge/trust"))
+        .json(&serde_json::json!({"ca": CA, "bootstrap_token": "abcdef.0123456789abcdef", "apiserver_ca": "nope"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 400, "a malformed apiserver_ca is refused");
+    let r = c.put(format!("{base}/api/v1/forge/trust"))
+        .json(&serde_json::json!({"ca": CA, "bootstrap_token": "abcdef.0123456789abcdef", "apiserver_ca": NODE_CA}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let got: serde_json::Value = c.get(format!("{base}/api/v1/forge/trust")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(got["apiserver_ca"], NODE_CA, "{got}");
+    let v = claim().await;
+    assert_eq!(v["forge_trust"]["apiserver_ca"], NODE_CA);
+    assert_eq!(forge_trust::from_claim(&booted, &base, &v), Ok("written"));
+    assert_eq!(std::fs::read_to_string(booted.join("apiserver-ca.crt")).unwrap(), NODE_CA);
+    assert_eq!(mode(booted.join("apiserver-ca.crt")), 0o644);
+    assert_eq!(std::fs::read_to_string(booted.join("ca.crt")).unwrap(), CA);
+    // Set again with none: the next claim takes the file away.
+    let r = c.put(format!("{base}/api/v1/forge/trust"))
+        .json(&serde_json::json!({"ca": CA, "bootstrap_token": "abcdef.0123456789abcdef"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = claim().await;
+    assert!(v["forge_trust"].get("apiserver_ca").is_none(), "{v}");
+    assert_eq!(forge_trust::from_claim(&booted, &base, &v), Ok("written"));
+    assert!(!booted.join("apiserver-ca.crt").exists(), "no stale one");
+
     // The first node: forge mode on, its trust set — its own, on loopback.
     let port = free_port();
     let r = c.put(format!("{base}/api/v1/forge")).json(&serde_json::json!({"listen_addr": format!("127.0.0.1:{port}")})).send().await.unwrap();
     assert!(r.status().is_success());
     let r = c.put(format!("{base}/api/v1/forge/trust"))
-        .json(&serde_json::json!({"ca": CA, "url": "https://forge.g8.lo:6443", "bootstrap_token": "abcdef.0123456789abcdef"}))
+        .json(&serde_json::json!({"ca": CA, "url": "https://forge.g8.lo:6443", "bootstrap_token": "abcdef.0123456789abcdef", "apiserver_ca": NODE_CA}))
         .send().await.unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(forge_trust::read_from(&node_dir).as_deref(), Some("self"));
+    // Its own apiserver serves the same node-CA certificate.
+    assert_eq!(std::fs::read_to_string(node_dir.join("apiserver-ca.crt")).unwrap(), NODE_CA);
+    assert_eq!(std::fs::read_to_string(node_dir.join("ca.crt")).unwrap(), CA);
     assert_eq!(std::fs::read_to_string(node_dir.join("url")).unwrap(), "https://127.0.0.1:6443\n", "its own apiserver, on loopback");
     assert_eq!(mode(node_dir.join("bootstrap.token")), 0o600);
     // Others are told the URL stormcert gave.
     assert_eq!(claim().await["forge_trust"]["url"], "https://forge.g8.lo:6443");
 
     // What a claim wrote this boot is never overwritten by the node's own.
-    forge_trust::write_dir(&node_dir, CA, "https://other-forge:6443", "x.y", "claim http://other-forge:9090").unwrap();
+    forge_trust::write_dir(&node_dir, CA, "https://other-forge:6443", "x.y", None, "claim http://other-forge:9090").unwrap();
     assert!(!forge_trust::write_self(&state).await);
     assert_eq!(std::fs::read_to_string(node_dir.join("url")).unwrap(), "https://other-forge:6443\n");
 

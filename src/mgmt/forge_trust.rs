@@ -9,6 +9,11 @@
 //! - `url`: forge's apiserver, `https://<forge>:6443`, 0644;
 //! - `bootstrap.token`: a narrow credential that may only create
 //!   `storm.io/forge-node` CSRs, 0600;
+//! - `apiserver-ca.crt`: the CA forge's apiserver's serving certificate chains
+//!   to, when forge's stormcert named one (#540, stormcert#136), 0644. Its own
+//!   file, never added to `ca.crt`: that also seeds `forge-ca.crt`, a *client*
+//!   trust root on every node, and forge's node CA there would let every pair
+//!   it signed authenticate to other nodes;
 //! - `from`: `claim <forge>` or `self`, so a reader knows which.
 //!
 //! Where it comes from: forge's own stormcert makes the CA and mints the
@@ -54,14 +59,25 @@ pub struct ForgeTrust {
     pub url: Option<String>,
     /// May only create `storm.io/forge-node` CSRs.
     pub bootstrap_token: String,
+    /// What forge's apiserver's serving certificate chains to, PEM, when that
+    /// is not `ca` (#540): only ever used to verify that apiserver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apiserver_ca: Option<String>,
     #[serde(default)]
     pub updated_at: u64,
 }
 
+fn is_pem_certs(s: &str) -> bool {
+    s.contains("-----BEGIN CERTIFICATE-----") && s.contains("-----END CERTIFICATE-----")
+}
+
 impl ForgeTrust {
     pub fn validate(&self) -> Result<(), String> {
-        if !self.ca.contains("-----BEGIN CERTIFICATE-----") || !self.ca.contains("-----END CERTIFICATE-----") {
+        if !is_pem_certs(&self.ca) {
             return Err("ca must be PEM certificate(s)".into());
+        }
+        if self.apiserver_ca.as_deref().is_some_and(|c| !is_pem_certs(c)) {
+            return Err("apiserver_ca must be PEM certificate(s)".into());
         }
         let t = self.bootstrap_token.trim();
         if t.is_empty() || t.len() > 512 || t.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -114,7 +130,13 @@ pub fn remote_url(state: &AppState, t: &ForgeTrust) -> String {
 /// no trust to hand out.
 pub fn claim_answer(state: &AppState) -> Value {
     match load(state) {
-        Some(t) => json!({ "ca": t.ca, "url": remote_url(state, &t), "bootstrap_token": t.bootstrap_token }),
+        Some(t) => {
+            let mut v = json!({ "ca": t.ca, "url": remote_url(state, &t), "bootstrap_token": t.bootstrap_token });
+            if let Some(c) = t.apiserver_ca {
+                v["apiserver_ca"] = json!(c);
+            }
+            v
+        }
         None => Value::Null,
     }
 }
@@ -122,14 +144,21 @@ pub fn claim_answer(state: &AppState) -> Value {
 /// What `GET /api/v1/forge/trust` says: never the token.
 pub fn status(state: &AppState) -> Value {
     match load(state) {
-        Some(t) => json!({
-            "set": true,
-            "ca": t.ca,
-            "url": remote_url(state, &t),
-            "bootstrap_token_set": !t.bootstrap_token.is_empty(),
-            "updated_at": t.updated_at,
-            "node_dir_from": read_from(&node_dir()),
-        }),
+        Some(t) => {
+            let mut v = json!({
+                "set": true,
+                "ca": t.ca,
+                "url": remote_url(state, &t),
+                "bootstrap_token_set": !t.bootstrap_token.is_empty(),
+                "updated_at": t.updated_at,
+                "node_dir_from": read_from(&node_dir()),
+            });
+            // Absent when there is none: stormcert compares it only when present.
+            if let Some(c) = &t.apiserver_ca {
+                v["apiserver_ca"] = json!(c);
+            }
+            v
+        }
         None => json!({ "set": false, "node_dir_from": read_from(&node_dir()) }),
     }
 }
@@ -151,11 +180,20 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8], mode: u32) -> std::io::Resul
 }
 
 /// Write the node's directory: `ca.crt`, `url`, `bootstrap.token` (0600),
-/// and `from` last, so a reader that finds `from` finds the rest.
-pub fn write_dir(dir: &Path, ca: &str, url: &str, token: &str, from: &str) -> std::io::Result<()> {
+/// `apiserver-ca.crt` when the trust has one (a stale one from an earlier
+/// claim removed when it has none), and `from` last, so a reader that finds
+/// `from` finds the rest.
+pub fn write_dir(dir: &Path, ca: &str, url: &str, token: &str, apiserver_ca: Option<&str>, from: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let ca = if ca.ends_with('\n') { ca.to_string() } else { format!("{ca}\n") };
-    write_file(&dir.join("ca.crt"), ca.as_bytes(), 0o644)?;
+    let newline = |c: &str| if c.ends_with('\n') { c.to_string() } else { format!("{c}\n") };
+    write_file(&dir.join("ca.crt"), newline(ca).as_bytes(), 0o644)?;
+    match apiserver_ca {
+        Some(c) => write_file(&dir.join("apiserver-ca.crt"), newline(c).as_bytes(), 0o644)?,
+        None => match std::fs::remove_file(dir.join("apiserver-ca.crt")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        },
+    }
     write_file(&dir.join("url"), format!("{url}\n").as_bytes(), 0o644)?;
     write_file(&dir.join("bootstrap.token"), format!("{}\n", token.trim()).as_bytes(), 0o600)?;
     write_file(&dir.join("from"), format!("{from}\n").as_bytes(), 0o644)
@@ -168,7 +206,7 @@ pub fn read_from(dir: &Path) -> Option<String> {
 
 /// Remove the node's directory (a claim that carried no trust).
 pub fn remove_dir(dir: &Path) {
-    for f in ["from", "ca.crt", "url", "bootstrap.token"] {
+    for f in ["from", "ca.crt", "apiserver-ca.crt", "url", "bootstrap.token"] {
         let _ = std::fs::remove_file(dir.join(f));
     }
     let _ = std::fs::remove_dir(dir);
@@ -190,11 +228,12 @@ pub fn from_claim(dir: &Path, forge: &str, reply: &Value) -> Result<&'static str
         ca: get("ca").unwrap_or_default(),
         url: get("url"),
         bootstrap_token: get("bootstrap_token").unwrap_or_default(),
+        apiserver_ca: get("apiserver_ca"),
         updated_at: 0,
     };
     trust.validate()?;
     let url = trust.url.clone().ok_or("forge_trust without a url")?;
-    write_dir(dir, &trust.ca, &url, &trust.bootstrap_token, &format!("claim {forge}")).map_err(|e| e.to_string())?;
+    write_dir(dir, &trust.ca, &url, &trust.bootstrap_token, trust.apiserver_ca.as_deref(), &format!("claim {forge}")).map_err(|e| e.to_string())?;
     Ok("written")
 }
 
@@ -211,7 +250,7 @@ pub async fn write_self(state: &AppState) -> bool {
         return false;
     }
     let url = format!("https://127.0.0.1:{APISERVER_PORT}");
-    match write_dir(&dir, &t.ca, &url, &t.bootstrap_token, "self") {
+    match write_dir(&dir, &t.ca, &url, &t.bootstrap_token, t.apiserver_ca.as_deref(), "self") {
         Ok(()) => {
             tracing::info!("forge trust: this node's own written to {}", dir.display());
             true
@@ -258,10 +297,49 @@ mod tests {
         assert!(!dir.exists());
     }
 
+    /// #540: the apiserver's CA in a file of its own, `ca.crt` untouched, and
+    /// a later claim whose trust has none leaves no stale one behind.
+    #[test]
+    fn the_apiserver_ca_is_its_own_file_and_goes_when_the_trust_has_none() {
+        const NODE_CA: &str = "-----BEGIN CERTIFICATE-----\nMIIBnode\n-----END CERTIFICATE-----\n";
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("forge");
+        let with = json!({"forge_trust": {"ca": CA, "url": "https://f:6443", "bootstrap_token": "a.b", "apiserver_ca": NODE_CA}});
+        assert_eq!(from_claim(&dir, "f", &with), Ok("written"));
+        assert_eq!(std::fs::read_to_string(dir.join("apiserver-ca.crt")).unwrap(), NODE_CA);
+        assert_eq!(mode(&dir.join("apiserver-ca.crt")), 0o644);
+        assert_eq!(std::fs::read_to_string(dir.join("ca.crt")).unwrap(), CA, "the client trust root is not widened");
+
+        // What an engine from before this sends, or forge with none named.
+        let without = json!({"forge_trust": {"ca": CA, "url": "https://f:6443", "bootstrap_token": "a.b"}});
+        assert_eq!(from_claim(&dir, "f", &without), Ok("written"));
+        assert!(!dir.join("apiserver-ca.crt").exists(), "a stale one is removed");
+
+        // A malformed one: nothing written over what is there.
+        assert_eq!(from_claim(&dir, "f", &with), Ok("written"));
+        let bad = json!({"forge_trust": {"ca": CA, "url": "https://f:6443", "bootstrap_token": "a.b", "apiserver_ca": "not pem"}});
+        assert!(from_claim(&dir, "f", &bad).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("apiserver-ca.crt")).unwrap(), NODE_CA);
+
+        // Removed with the directory, which then goes.
+        assert_eq!(from_claim(&dir, "f", &json!({})), Ok("none"));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn a_trust_kept_before_the_field_reads_and_keeps_none() {
+        let t: ForgeTrust = serde_json::from_str(&format!(r#"{{"ca":{:?},"bootstrap_token":"a.b"}}"#, CA)).unwrap();
+        assert_eq!(t.apiserver_ca, None);
+        assert!(!serde_json::to_string(&t).unwrap().contains("apiserver_ca"));
+    }
+
     #[test]
     fn trust_is_validated() {
-        let ok = ForgeTrust { ca: CA.into(), url: None, bootstrap_token: "abc.def".into(), updated_at: 0 };
+        let ok = ForgeTrust { ca: CA.into(), url: None, bootstrap_token: "abc.def".into(), apiserver_ca: None, updated_at: 0 };
         assert!(ok.validate().is_ok());
+        assert!(ForgeTrust { apiserver_ca: Some(CA.into()), ..ok.clone() }.validate().is_ok());
+        assert!(ForgeTrust { apiserver_ca: Some("x".into()), ..ok.clone() }.validate().is_err());
+        assert!(ForgeTrust { apiserver_ca: Some("".into()), ..ok.clone() }.validate().is_err());
         assert!(ForgeTrust { bootstrap_token: "a b".into(), ..ok.clone() }.validate().is_err());
         assert!(ForgeTrust { bootstrap_token: "".into(), ..ok.clone() }.validate().is_err());
         assert!(ForgeTrust { url: Some("http://x:6443".into()), ..ok.clone() }.validate().is_err());

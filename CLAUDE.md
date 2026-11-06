@@ -227,6 +227,14 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Forge trust: the apiserver's CA apart from the forge CA (2026-11-06, #540, P0, stormcert#136)
+
+Forge's apiserver serves a node-CA certificate; `ca.crt` (the forge CA) cannot
+verify it and also seeds a client trust root, so it is not widened.
+- [ ] `ForgeTrust.apiserver_ca` (PEM, optional); GET, claim answer; `apiserver-ca.crt`
+      0644 from a claim and `write_self`, before `from`; a trust with none removes it
+- [ ] tests, README, CHANGELOG; check.sh; v23.17.1; stage; stormcert#136 told
+
 ### Kept -data volumes that will not mount: orphan file "bad magic" (2026-11-04, #532, P1) — DONE (v23.17.0), closed; server8 pending
 
 server8 12.61: 10 kept `-data` volumes refused by the kernel, the mount point
