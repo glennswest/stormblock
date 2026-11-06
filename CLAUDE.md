@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -481,7 +481,7 @@ modules' dependency closure taken over the kernel's full modules.dep, which
 stops the build on anything missing): registry/initramfs:blob-aafea1b1d512d74b
 (vmlinuz blob-515dcb6e407dff32). #350 paused on wip/350-system-pair for it.
 
-### ublk zero copy, batch I/O, io_uring ring flags (2026-10-28, #505, P1) — IN PROGRESS
+### ublk zero copy, batch I/O, io_uring ring flags (2026-10-28, #505, P1) — DONE (steps 1, 2; v23.19.0), closed; step 3 is #541; metal pending
 
 Master's decision (for the owner, "why not do all?"): all of it, in order:
 1. SINGLE_ISSUER + DEFER_TASKRUN, BATCH_IO, PER_IO_DAEMON, each behind
@@ -522,7 +522,7 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
       build VM can measure; the earlier single-run gains were noise. pve and
       the Dell (stormcentral's perf stage) once a release carries it
 - [x] check.sh at 47c55218 ALL PASS (1287/1287, no warnings)
-- [x] 2: zero copy fast path, on **wip/505-zero-copy** until check.sh passes.
+- [x] 2: zero copy fast path (v23.19.0).
       Read in 7.2's driver: AUTO_BUF_REG and USER_COPY combine (`ublk_user_copy`
       gates on USER_COPY only; only the selftest calls it "too many modes"), so
       no SUPPORT_ZERO_COPY: nothing registers by hand. The index rides in the
@@ -544,12 +544,14 @@ entry, IOU_PBUF_RING_INC), u16 tags, cqe res = bytes.
       - tests: the plan's refusals, fence/gate/flush; the 300 power cuts with
         writes through a plan; ci-ublk-qd-verify.sh modes
       - verified: controls without the fence and the completed count fail
-        (tmp/505-control); ci-ublk-qd-verify.sh ALL PASS (100 checks, kernel
+        (tmp/505-control); ci-ublk-qd-verify.sh ALL PASS (50 checks, kernel
         7.2.11). `NUMBERS=1`: batch + zero copy no worse than zero copy alone
         (an earlier gap was drift, modes run at different moments), so batch stays
         on; large requests 3–5× less engine CPU, CHANGELOG has them
       - resumed after #540, rebased onto v23.18.0: check.sh and
-        ci-ublk-qd-verify.sh at the branch head, main fast-forwarded, v23.19.0
+        ci-ublk-qd-verify.sh ALL PASS at 260edae2, main fast-forwarded, v23.19.0,
+        stage. Not on metal: pve and the Dell (stormcentral's perf stage; health
+        `ublk_features` `in_place`). `STORMBLOCK_UBLK_ZERO_COPY=0` is the way back
 - [ ] 3: SHMEM_ZC: #541 (the engine half), after stormvm#105 (the guest memfd
       handed over at attach)
 
