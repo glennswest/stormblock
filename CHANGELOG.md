@@ -4,14 +4,15 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
-- **fix:** #555: `PUT /api/v1/forge/trust` is reviewed as `settrust` on `forge`, not `destroy`, so forge's stormcert can give the engine its trust without being able to turn forge off. Not `update`: every `storage-user` holds that. `DELETE` stays `destroy`. stormcos's `stormcos:forge-trust` role needs the verb.
-- **fix:** #538: a handover's stand-down takes under a second again. Since #522 (v23.13.1) a node's exports run on one thread each, and stopping one joined its queue workers with a blocking call, so a request in flight could not finish and the worker waited out its 5 s: on every boot, before any unit's I/O could resume.
 - **docs:** #557: why a cluster worker cannot review a bearer, and the question it needs answered.
-
-### 2026-11-06
 - **docs:** #390: `ci-shelf-raid6-verify.sh` re-run at 19bde5e0, ALL PASS. The run on the DS224C waits on the shelf being cabled to the Dell again.
-- **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.
 
+
+## [v23.22.3] — 2026-11-07
+
+### Fixed
+- #555: `PUT /api/v1/forge/trust` is reviewed as `settrust` on `forge`, not `destroy`, so forge's stormcert can give the engine its trust without being able to turn forge off. Not `update`: every `storage-user` holds that. `DELETE` stays `destroy`. stormcos's `stormcos:forge-trust` role needs the verb.
+- #538: a handover's stand-down takes under a second again. Since #522 (v23.13.1) a node's exports run on one thread each, and stopping one joined its queue workers with a blocking call, so a request in flight could not finish and the worker waited out its 5 s: on every boot, before any unit's I/O could resume.
 
 ## [v23.22.2] — 2026-11-06
 
