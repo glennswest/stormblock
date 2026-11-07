@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.22.1** (2026-11-06, #521: clones at once share their log flush, step times in `api:`); **v23.22.0** (2026-11-06, #484: a boot's page-in: read ahead in /init, 1 MiB of read-ahead on a ublk device); **v23.21.1** (2026-11-06, #544: the validation reads in disk order); **v23.21.0** (2026-11-06, #506: `/run/stormblock/appliance`); **v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.22.2** (2026-11-06, #545: path NICs beside the boot, DNS and DHCP retried by the second); **v23.22.1** (2026-11-06, #521: clones at once share their log flush, step times in `api:`); **v23.22.0** (2026-11-06, #484: a boot's page-in: read ahead in /init, 1 MiB of read-ahead on a ublk device); **v23.21.1** (2026-11-06, #544: the validation reads in disk order); **v23.21.0** (2026-11-06, #506: `/run/stormblock/appliance`); **v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — IN PROGRESS
+### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — v23.22.2 SHIPPED; open, back after a release carrying it
 
 Read from server7's and forge1's reboots by line (`.times`): the X9's 8.3 s "clock" is not the clock (firmware
 synced, 0 s): path NIC DHCP 3.2 s + a lost DNS answer 5.1 s, both before the stamp. Not done, on purpose:
@@ -235,8 +235,9 @@ concurrent module loading: probe order names sda and ethN, and `rd.stormblock.sl
 NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
 - [x] path NICs beside the boot, joined before an engine connects to the appliance and before switch_root
 - [x] DNS: 1 s a try, three fresh queries; DHCP: 1 s between discovers; stamp "node named"
-- [ ] tests; ci-path-nics-verify, ci-node-name-verify, ci-boot-nic-verify; check.sh; stage
-- [ ] the probe's repeated slab opens (a table scan each: SAS's 4.7 s): own issue
+- [x] tests; ci-path-nics-verify, ci-node-name-verify, ci-boot-nic-verify, ci-no-appliance-verify ALL PASS;
+      check.sh ALL PASS (1361/1361); v23.22.2; stage
+- [x] the probe's repeated slab opens (a table scan each: SAS's 4.7 s): #556
 - [ ] metal: stamps on an X9 and the R6415 (targets: root ready 40 and 25 s)
 
 ### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; open, back after a release carrying 3e42735c
