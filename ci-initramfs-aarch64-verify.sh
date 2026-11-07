@@ -88,6 +88,7 @@ cat > "$W/10-a64" <<'HOOK'
 exec >&2   # a hook's stdout is its answer; its stderr is the console
 echo "@@ARCH $(uname -m)"
 [ -d /sys/firmware/acpi/tables ] && echo "@@ACPI tables"
+dmesg | grep -q 'ACPI: Interpreter enabled' && echo "@@ACPI interpreter"
 for m in r8169 nvme_tcp ublk_drv; do
     if modprobe "$m" 2>&1 && [ -d "/sys/module/$m" ]; then echo "@@LOADED $m"
     else echo "@@NOTLOADED $m"; fi
@@ -183,6 +184,7 @@ expect() { # boot needle what
 checks() { # boot
     expect "$1" "@@ARCH aarch64" "the image runs on aarch64"
     expect "$1" "@@ACPI tables" "/sys/firmware/acpi/tables"
+    expect "$1" "@@ACPI interpreter" "the kernel runs in ACPI mode"
     expect "$1" "@@LOADED r8169" "r8169 loads through the image's modprobe"
     expect "$1" "@@LOADED nvme_tcp" "nvme_tcp loads"
     expect "$1" "@@LOADED ublk_drv" "ublk_drv loads"

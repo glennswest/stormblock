@@ -930,6 +930,39 @@ baseline setup; `scripts/build-stormblock-initramfs.sh` builds the initramfs
 and `scripts/build-stormbase-iso.sh` an ISO. The test container is
 glennswest/stormblock-test ("The test container" above).
 
+**An aarch64 initramfs (#514, the Radxa Orion O6N).** The script builds for the
+architecture of the binary it is given, read from its ELF header; the host's
+never decides. On the x86_64 build VM:
+
+```bash
+ulimit -n "$(ulimit -Hn)"   # zig's linker holds every object open; 1024 fails
+cargo zigbuild --release --locked --target aarch64-unknown-linux-musl --bin stormblock
+MODROOT=<the aarch64 modules golden> scripts/build-stormblock-initramfs.sh \
+    "$CARGO_TARGET_DIR/aarch64-unknown-linux-musl/release/stormblock" \
+    7.2.15-200.fc44.aarch64 initramfs.img
+```
+
+- **Userland:** busybox, kmod and udev come from Fedora's aarch64 packages for
+  the kernel's release (`.fcNN`), fetched with `dnf --forcearch`, signatures
+  checked against that release's key. Each package and its sha256 is recorded
+  in the image's `/etc/stormblock/userland-packages.tsv`. `INITRAMFS_SYSROOT`
+  names an unpacked set instead. Libraries follow each ELF's `NEEDED`, not
+  `ldd`. It needs `dnf`, `rpm2cpio`, `cpio`, `readelf` and `qemu-aarch64`.
+- **The O6N's boot path:** firmware comes from the modules golden. All of
+  `rtl_nic/` goes in, because r8169 asks for it at probe, before the golden can
+  be mounted. Also added on aarch64: `drivers/mailbox`, `phy`,
+  `firmware/arm_scmi`, `usb/host` and `usb/cdns3`, for the modalias walk.
+- **Refused, by name:** a kernel whose name says another architecture, a module
+  or program of another architecture, and an image missing `r8169`, `nvme`,
+  `nvme-tcp`, `ublk_drv` or `rtl_nic/rtl8125*`/`rtl8126*`.
+- **No early microcode cpio** on aarch64. `/init` reads no device tree.
+- **x86_64's image is unchanged.**
+
+`ci-initramfs-aarch64-verify.sh` boots it in `qemu-system-aarch64` under UEFI
+with `acpi=force`, from an NVMe drive and over the NVMe/TCP claim. QEMU has no
+RTL8125 and no CIX P1, so r8169 taking its firmware at probe and the SoC's own
+drivers wait for the board (stormbootx#172).
+
 ## Using it
 
 The examples below leave the token out for brevity. Every request except the

@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-06
+- **feat:** #514: `scripts/build-stormblock-initramfs.sh` builds for the architecture of the stormblock binary it is given, read from the ELF; an aarch64 engine makes an aarch64 image on the x86_64 build VM, for the Orion O6N. busybox, kmod and udev come from Fedora's signed aarch64 packages for the kernel's release (listed with their sha256 in `/etc/stormblock/userland-packages.tsv`, or `INITRAMFS_SYSROOT`), `rtl_nic/` firmware from the modules golden, and the CIX mailbox, PHY, SCMI and USB trees go in for the modalias walk. A kernel, module or program of another architecture, or an image missing r8169, nvme, nvme-tcp, ublk_drv or the RTL8125/8126 firmware, stops the build. x86_64's image is unchanged. `tests/initramfs-arch.sh`; `ci-initramfs-aarch64-verify.sh` boots it under UEFI with ACPI in QEMU, from an NVMe drive and over the NVMe/TCP claim. Not on the board yet (stormbootx#172), and `component initramfs --arch aarch64` is stormcentral#1153.
 - **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.
 
 
