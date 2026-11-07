@@ -877,6 +877,45 @@ impl SlabSyncHandle {
     }
 }
 
+/// Discards freed slots on a slab's device, with no lock on the slab (#521).
+pub struct SlotDiscarder {
+    device: Arc<dyn BlockDevice>,
+    slab: uuid::Uuid,
+    data_offset: u64,
+    slot_size: u64,
+}
+
+impl SlotDiscarder {
+    /// See [`Slab::discard_slots`]. Only for slots that cannot be taken by
+    /// anything before this returns: already out of the bitmap, or still owned.
+    pub async fn discard(&self, slot_indices: &[u64]) {
+        let mut sorted: Vec<u64> = slot_indices.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut slots = sorted.into_iter();
+        let Some(first) = slots.next() else { return };
+        let (mut run_start, mut run_end) = (first, first); // inclusive
+        for idx in slots {
+            if idx == run_end + 1 {
+                run_end = idx;
+            } else {
+                self.discard_run(run_start, run_end).await;
+                run_start = idx;
+                run_end = idx;
+            }
+        }
+        self.discard_run(run_start, run_end).await;
+    }
+
+    async fn discard_run(&self, first: u64, last: u64) {
+        let offset = self.data_offset + first * self.slot_size;
+        let len = (last - first + 1) * self.slot_size;
+        if let Err(e) = self.device.discard(offset, len).await {
+            tracing::debug!("slab {}: discard of slots {first}..={last} failed: {e}", self.slab);
+        }
+    }
+}
+
 /// [`Slab::sync`] for a slab in a registry, never holding the registry
 /// across a device flush (#269).
 ///
@@ -1635,37 +1674,57 @@ impl Slab {
     /// Best-effort: a device that cannot discard is not a failure, the slot is
     /// still free.
     async fn discard_slots(&self, slot_indices: &[u64]) {
-        if slot_indices.is_empty() {
-            return;
-        }
-        let slot_size = self.header.slot_size;
-        let mut sorted: Vec<u64> = slot_indices.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-
-        let mut run_start = sorted[0];
-        let mut run_end = sorted[0]; // inclusive
-        for &idx in &sorted[1..] {
-            if idx == run_end + 1 {
-                run_end = idx;
-            } else {
-                self.discard_slot_run(run_start, run_end, slot_size).await;
-                run_start = idx;
-                run_end = idx;
-            }
-        }
-        self.discard_slot_run(run_start, run_end, slot_size).await;
+        self.discarder().discard(slot_indices).await
     }
 
-    async fn discard_slot_run(&self, first: u64, last: u64, slot_size: u64) {
-        let offset = self.header.data_offset + (first as u64) * slot_size;
-        let len = ((last - first) as u64 + 1) * slot_size;
-        if let Err(e) = self.device.discard(offset, len).await {
-            tracing::debug!(
-                "slab {}: discard of slots {first}..={last} failed: {e}",
-                self.id.0
-            );
+    fn discarder(&self) -> SlotDiscarder {
+        SlotDiscarder {
+            device: self.device.clone(),
+            slab: self.id.0,
+            data_offset: self.header.data_offset,
+            slot_size: self.header.slot_size,
         }
+    }
+
+    /// What a batch letting go of slots needs before it takes the registry
+    /// (#521): those of `slots` this slab owns now, by `pre`, and how to
+    /// discard them with no lock held. No discarder when freed slots are
+    /// queued for the eraser instead, which discards after its passes.
+    pub async fn plan_free(
+        &self,
+        slots: &[u64],
+        pre: &super::slottable::Preread,
+    ) -> DriveResult<(Vec<u64>, Option<SlotDiscarder>)> {
+        let mut owned = Vec::with_capacity(slots.len());
+        for &slot in slots {
+            self.in_range(slot)?;
+            if self.slot_with(slot, Some(pre)).await?.state.is_owned() {
+                owned.push(slot);
+            }
+        }
+        let erases = self.erase_now.unwrap_or(self.erase).max(self.erase) != super::erase::EraseLevel::None;
+        Ok((owned, (!erases).then(|| self.discarder())))
+    }
+
+    /// [`free`](Self::free) of many slots with one table write and no discard
+    /// (#521: the caller discarded them first, by [`plan_free`](Self::plan_free)):
+    /// the registry is held for a batch's table write, not a round trip per
+    /// slot. Returns how many were let go; a slot not owned is left alone.
+    pub async fn free_planned(&mut self, slots: &[u64], pre: &super::slottable::Preread) -> DriveResult<usize> {
+        let mut write = Vec::with_capacity(slots.len());
+        let mut freed = 0;
+        for &slot in slots {
+            self.in_range(slot)?;
+            if !self.slot_with(slot, Some(pre)).await?.state.is_owned() {
+                continue;
+            }
+            if self.retire(slot as usize).await? {
+                write.push(slot);
+            }
+            freed += 1;
+        }
+        self.persist_slots(&write).await?;
+        Ok(freed)
     }
 
     /// Read data from a slot at the given offset within the slot.

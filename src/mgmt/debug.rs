@@ -51,6 +51,9 @@ use crate::mgmt::AppState;
 
 /// A request waiting longer than this is a stall.
 pub const STALL_AFTER: Duration = Duration::from_secs(10);
+/// An answer this slow says where its time went where it can be read (#521):
+/// the kubelet logs its own calls from the same second.
+const SLOW_ANSWER: Duration = Duration::from_secs(1);
 /// A stall still going is logged again this often.
 const REPORT_AGAIN: Duration = Duration::from_secs(30);
 /// How many watchdog reports are kept for `/debug/stalls`.
@@ -179,6 +182,19 @@ impl CallerSlot {
 
 /// A probe asked over and over by supervisors: its line is DEBUG, so a
 /// health check every second does not bury what happens.
+/// How loud a request's `api:` line is. From [`SLOW_ANSWER`] it is a WARN:
+/// only WARN reaches a node's console and syslog (#243), and a slow answer's
+/// steps are what say why it was slow (#521). The record has the rest.
+fn answer_level(path: &str, status: u16, took: Duration) -> tracing::Level {
+    if is_probe(path) && status < 400 {
+        tracing::Level::DEBUG
+    } else if status >= 500 || took >= SLOW_ANSWER {
+        tracing::Level::WARN
+    } else {
+        tracing::Level::INFO
+    }
+}
+
 fn is_probe(path: &str) -> bool {
     matches!(
         path,
@@ -249,12 +265,14 @@ pub async fn track(State(state): State<Arc<AppState>>, mut req: Request, next: N
     let ms = since.elapsed().as_secs_f64() * 1000.0;
     let wait = activity.lock_wait().as_secs_f64() * 1000.0;
     let steps = activity.steps_line();
-    if is_probe(&path) && status < 400 {
-        tracing::debug!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get());
-    } else if status >= 500 || ms >= STALL_AFTER.as_secs_f64() * 1000.0 {
-        tracing::warn!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get());
-    } else {
-        tracing::info!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get());
+    match answer_level(&path, status, since.elapsed()) {
+        tracing::Level::DEBUG => {
+            tracing::debug!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get())
+        }
+        tracing::Level::WARN => {
+            tracing::warn!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get())
+        }
+        _ => tracing::info!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get()),
     }
     resp
 }
@@ -708,6 +726,17 @@ mod view_tests {
         assert_eq!(route_family("/serve/v1/exports/e1"), "/serve/v1/exports/…");
         assert_eq!(route_family("/debug/stalls"), "/debug/stalls");
         assert_eq!(route_family("/"), "/");
+    }
+
+    /// #521: a slow answer's line reaches the console; a slow probe's stays out.
+    #[test]
+    fn a_slow_answer_is_said_where_it_can_be_read() {
+        let level = |path, status, ms| answer_level(path, status, Duration::from_millis(ms));
+        assert_eq!(level("/api/v1/volumes", 200, 999), tracing::Level::INFO);
+        assert_eq!(level("/api/v1/volumes", 200, 1000), tracing::Level::WARN);
+        assert_eq!(level("/api/v1/volumes", 500, 1), tracing::Level::WARN);
+        assert_eq!(level("/api/v1/health", 200, 5000), tracing::Level::DEBUG);
+        assert_eq!(level("/api/v1/health", 503, 1), tracing::Level::INFO);
     }
 
     /// A remote slab's flushes are given by transport in the open view.

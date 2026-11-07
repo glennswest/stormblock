@@ -7813,26 +7813,64 @@ pub async fn run() -> anyhow::Result<()> {
         Ok(checked)
     }
 
+    /// Slots let go at a time: about a page of the slot table (#521).
+    const FREE_HELD_BATCH: usize = 64;
+
     /// Free the source slots a flow-over held (#412), once its validation
     /// passed and the map naming their copies is durable.
+    ///
+    /// By batches, the round trips with no lock (#521): ~3,300 slots a table
+    /// write and a discard each to forge, with the registry held, stopped
+    /// every volume's I/O and every API call for 18.7 s on pvetest1. A slot is
+    /// discarded while still owned, so nothing can have taken it; nothing
+    /// reads it, since the map naming its copy is durable.
     pub(crate) async fn free_held(
         registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
         held: &FlowHeld,
     ) -> usize {
-        let mut legs: Vec<crate::volume::gem::Leg> =
-            held.moved.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(s, _)| *s).collect();
-        legs.extend(held.zeroed.lock().unwrap_or_else(|e| e.into_inner()).iter().copied());
-        let mut r = registry.write().await;
+        let mut by_slab: std::collections::HashMap<crate::drive::slab::SlabId, Vec<u64>> = Default::default();
+        for (leg, _) in held.moved.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
+        }
+        for leg in held.zeroed.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            by_slab.entry(leg.slab_id).or_default().push(leg.slot_idx);
+        }
         let mut freed = 0;
-        for leg in legs {
-            if let Some(slab) = r.get_mut(&leg.slab_id) {
-                match slab.free(leg.slot_idx).await {
-                    Ok(_) => freed += 1,
-                    Err(e) => tracing::warn!("flow-over: freeing slot {} of {}: {e}", leg.slot_idx, leg.slab_id),
+        for (id, mut slots) in by_slab {
+            slots.sort_unstable();
+            slots.dedup();
+            let Some(table) = registry.read().await.get(&id).map(|s| s.table()) else { continue };
+            for batch in slots.chunks(FREE_HELD_BATCH) {
+                match free_held_batch(registry, id, &table, batch).await {
+                    Ok(n) => freed += n,
+                    Err(e) => tracing::warn!("flow-over: freeing {} slot(s) of {id} from {}: {e}", batch.len(), batch[0]),
                 }
             }
         }
         freed
+    }
+
+    async fn free_held_batch(
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        id: crate::drive::slab::SlabId,
+        table: &crate::drive::slottable::SlotTable,
+        batch: &[u64],
+    ) -> crate::drive::DriveResult<usize> {
+        let pre = table.read_many(batch).await?;
+        let (owned, discarder) = match registry.read().await.get(&id) {
+            Some(slab) => slab.plan_free(batch, &pre).await?,
+            None => return Ok(0),
+        };
+        if owned.len() != batch.len() {
+            tracing::warn!("flow-over: {} of {} slot(s) of {id} were already free", batch.len() - owned.len(), batch.len());
+        }
+        if let Some(d) = discarder {
+            d.discard(&owned).await;
+        }
+        match registry.write().await.get_mut(&id) {
+            Some(slab) => slab.free_planned(&owned, &pre).await,
+            None => Ok(0),
+        }
     }
 
     /// The longest pause the pacing takes between two windows.

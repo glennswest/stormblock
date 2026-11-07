@@ -328,6 +328,9 @@ tests run on.
    such a copy; nothing it wrote from it is let go of on the appliance's
    side, and the validation's repair rewrites the extent itself. A move with
    no hold (a drain, a rebalance) still reads every copy back.
+   Once it passes, the sources are let go by batches with no lock across the
+   round trips to the appliance (#521): each slot discarded while still owned,
+   so nothing can have taken it, then freed with one table write per batch.
 18. **A delete lets go of a volume's slots once its writes have landed**
    (#487). A copy-on-write reads an extent's location, copies it, remaps it
    under the extent map's lock and then lets go of the old slot. A delete

@@ -284,8 +284,8 @@ now and no X9 has run an engine with step times (server7, server8 12.63), so X9'
 under-10 s `api:` line is INFO, which reaches neither console nor syslog, so it would stay unread on a release too. Plan,
 on wip/521-free-held:
 - [ ] test `letting_go_of_a_flow_overs_sources_keeps_no_reader_waiting`; negative control at the commit before the fix
-- [ ] `free_held` by batches: table read and discards with no lock, the registry held for one batch's table write
-- [ ] an `api:` line WARN from 1 s (the kubelet's own line), so its steps reach console and syslog; docs, CHANGELOG
+- [x] `free_held` by batches: table read and discards with no lock, the registry held for one batch's table write
+- [x] an `api:` line WARN from 1 s (the kubelet's own line), so its steps reach console and syslog; docs, CHANGELOG
 - [ ] check.sh; merge; patch release; stage; `--after-release` for the X9 number; the remainder below stands
 
 X9 clones 2-3.5 s (10-17 s on server1), cold 183 ms but warm-after-reboot up to 3.7 s; lists 1.9-3.3 s;

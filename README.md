@@ -765,8 +765,9 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   names every zoned or drive-managed SMR disk the engine opened (#282).
 - Every API request ends with one line (#365): `api: <method> <path>
   <status> <ms>ms lock-wait <ms>ms caller <admin|node|client-cert|bearer|
-  anonymous|open> peer <addr> req <id>`, INFO (WARN at 5xx or over 10 s;
-  health probes, `/metrics` and `/debug` at DEBUG). A request whose caller
+  anonymous|open> peer <addr> req <id>`, INFO (WARN at 5xx or from 1 s, so
+  a slow answer's steps reach the console and syslog; health probes,
+  `/metrics` and `/debug` at DEBUG). A request whose caller
   went away first is said too (`abandoned by its caller after Ns`).
   A clone, a delete and the volume and slab listings also say where the time went
   (#521): `steps check=0ms preread=0ms snapshot=0ms stamp=26ms readback=8ms persist=169ms`.
