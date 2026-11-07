@@ -3,12 +3,15 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-11-07
-- **fix:** #521: letting go of a flow-over's source slots no longer stops the node. Read on pvetest1 12.66, right after `Flow-over: validated`: the slab registry held 18.7 s for ~3,300 table writes and discards to forge, 47 callers waiting, `GET /api/v1/volumes` 18.5 s (12-14 s on pvetest1 and forge1 too). `free_held` now goes by batches of 64: entries read and slots discarded with no lock, the registry held for one batch's table write. A slot is discarded while still owned, so nothing can have taken it.
-- **fix:** #521: an `api:` line is a WARN from 1 s (it was 10 s): under that it was INFO, which reaches neither a node's console nor syslog, so a slow clone's `steps` could not be read on a node.
-- **docs:** refreshed from the code since 2026-10-30 (v23.13.0 to v23.23.0): README says `settrust` (#555) and the cluster record (#557); "Not built, or not wired" lists the open findings (#546, #547, #553, #556, #512, #541); CLAUDE.md's refresh date. Every other key, port and env var the commits added was already documented.
-- **docs:** #390: `ci-shelf-raid6-verify.sh` re-run at 19bde5e0, ALL PASS. The run on the DS224C waits on the shelf being cabled to the Dell again.
+## [v23.23.1] — 2026-11-07
 
+### Fixed
+- #521: letting go of a flow-over's source slots no longer stops the node. Read on pvetest1 12.66, right after `Flow-over: validated`: the slab registry held 18.7 s for ~3,300 table writes and discards to forge, 47 callers waiting, `GET /api/v1/volumes` 18.5 s (12-14 s on pvetest1 and forge1 too). `free_held` now goes by batches of 64: entries read and slots discarded with no lock, the registry held for one batch's table write. A slot is discarded while still owned, so nothing can have taken it.
+- #521: an `api:` line is a WARN from 1 s (it was 10 s): under that it was INFO, which reaches neither a node's console nor syslog, so a slow clone's `steps` could not be read on a node.
+
+### Documentation
+- refreshed from the code since 2026-10-30 (v23.13.0 to v23.23.0): README says `settrust` (#555) and the cluster record (#557); "Not built, or not wired" lists the open findings (#546, #547, #553, #556, #512, #541); CLAUDE.md's refresh date. Every other key, port and env var the commits added was already documented.
+- #390: `ci-shelf-raid6-verify.sh` re-run at 19bde5e0, ALL PASS. The run on the DS224C waits on the shelf being cabled to the Dell again.
 
 ## [v23.23.0] — 2026-11-07
 
