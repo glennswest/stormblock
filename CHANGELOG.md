@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-06
+- **perf:** #545: the initramfs takes its path NICs' leases beside the boot (joined before an engine connects to the appliance and before switch_root); asks DNS for a second at a time, three fresh queries, where a lost answer waited 5 s; sends a DHCP discover a second, the same total wait. A stamp `node named` says what the X9's "clock" stage was: firmware-synced clocks cost nothing. Modules still load one at a time: their probe order names `sda` and `ethN`.
 - **docs:** #390: `ci-shelf-raid6-verify.sh` re-run at 19bde5e0, ALL PASS. The run on the DS224C waits on the shelf being cabled to the Dell again.
 - **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.
 

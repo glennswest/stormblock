@@ -227,6 +227,18 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — IN PROGRESS
+
+Read from server7's and forge1's reboots by line (`.times`): the X9's 8.3 s "clock" is not the clock (firmware
+synced, 0 s): path NIC DHCP 3.2 s + a lost DNS answer 5.1 s, both before the stamp. Not done, on purpose:
+concurrent module loading: probe order names sda and ethN, and `rd.stormblock.slab=/dev/sda` and a declared
+NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
+- [x] path NICs beside the boot, joined before an engine connects to the appliance and before switch_root
+- [x] DNS: 1 s a try, three fresh queries; DHCP: 1 s between discovers; stamp "node named"
+- [ ] tests; ci-path-nics-verify, ci-node-name-verify, ci-boot-nic-verify; check.sh; stage
+- [ ] the probe's repeated slab opens (a table scan each: SAS's 4.7 s): own issue
+- [ ] metal: stamps on an X9 and the R6415 (targets: root ready 40 and 25 s)
+
 ### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; open, back after a release carrying 3e42735c
 
 X9 clones 2-3.5 s (10-17 s on server1), cold 183 ms but warm-after-reboot up to 3.7 s; lists 1.9-3.3 s;

@@ -67,7 +67,14 @@ name() (
     STORM_PROC_SYS="$R/sys"; STORM_SYSNET="$R/net"
     IFACE=eth0; UPLINK=eth0
     ip() { echo "2: eth0    inet 192.168.30.2/20 brd 192.168.31.255 scope global eth0"; }
+    # The stub is a shell function, which `timeout` cannot run.
+    STORM_DNS_TIMEOUT=""
     nslookup() {
+        # A lost answer (#545): what `timeout` says for a query it gave up on.
+        if [ -n "${LOST:-}" ] && [ "$(cat "$R/lost" 2>/dev/null || echo 0)" -lt "$LOST" ]; then
+            echo $(( $(cat "$R/lost" 2>/dev/null || echo 0) + 1 )) > "$R/lost"
+            return 143
+        fi
         case "$1" in
         192.168.30.2) [ -n "${PTR:-}" ] && printf 'Server: 192.168.31.252\n\n2.30.168.192.in-addr.arpa\tname = %s.\n' "$PTR" ;;
         *) for a in ${BACK:-}; do printf 'Address: %s\n' "$a"; done ;;
@@ -77,6 +84,9 @@ name() (
     . "$WORK/name.sh" > "$WORK/name.out" 2>&1
     echo "$NODE_NAME|$(cat "$R/sys/kernel/hostname" 2>/dev/null)|$(cat "$R/sys/kernel/domainname" 2>/dev/null)"
 )
+
+r=$(LOST=2 PTR=stormblock1.g16.lo BACK=192.168.30.2 DNS=192.168.31.252 name)
+check "answers lost twice: asked again, and named (#545)" "stormblock1|stormblock1|g16.lo" "$r"
 
 r=$(OPT12=stormblock1 DOMAIN=g16.lo DNS=192.168.31.252 name)
 check "option 12 names the node, with the lease's domain" "stormblock1|stormblock1|g16.lo" "$r"

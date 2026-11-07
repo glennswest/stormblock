@@ -53,20 +53,26 @@ run() { # extra environment -> console in $WORK/out, leased ports in $WORK/asked
         net_carrier() { cat "$NET_SYSFS/$1/carrier" 2>/dev/null || echo 0; }
         udhcpc() {
             while [ $# -gt 0 ]; do case "$1" in -i) _i=$2; shift ;; -x) echo "HOSTNAME SENT" ;; esac; shift; done
+            sleep "${STUB_DHCP_SLEEP:-0}"
             echo "$_i" >> "$WORK/asked"
             [ "$_i" != eth5 ]
         }
         ip() { [ "$1 $2 $3" = "-4 -o addr" ] && echo "2: $6 inet 10.20.0.12/24 brd 10.20.0.255 scope global $6"; return 0; }
         . "$WORK/block.sh"
-        echo "PATH_NICS=$PATH_NICS"
+        echo "before the join"
+        path_nics_join
+        echo "after the join"
     ) > "$WORK/out" 2>&1
 }
 said() { grep -q "$1" "$WORK/out" && echo yes || echo no; }
 
 echo "the block:"
-run
+STUB_DHCP_SLEEP=1 run
+check "the boot goes on while a port waits for its lease" "before the join" "$(grep -n -m1 -E 'before the join|path NIC eth1: ' "$WORK/out" | cut -d: -f2)"
+check "  and the join waits for it" "after the join" "$(tail -1 "$WORK/out")"
 check "only the cabled, unbonded, unskipped ports are asked" "eth1 eth5" "$(tr '\n' ' ' < "$WORK/asked" | sed 's/ $//')"
-check "the one that got a lease is a path NIC" " eth1" "$(sed -n 's/^PATH_NICS=//p' "$WORK/out")"
+check "the one that got a lease is a path NIC" yes "$(said 'path NIC eth1: ')"
+check "  the other is not" yes "$(said 'path NIC eth5: no lease')"
 check "  and says its address" yes "$(said 'path NIC eth1: 10.20.0.12/24')"
 check "a port with no answer is said, not used" yes "$(said 'path NIC eth5: no lease - not used')"
 check "the skipped one is said" yes "$(said 'path NIC eth3: skipped')"

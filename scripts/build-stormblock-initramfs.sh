@@ -2568,8 +2568,11 @@ else
     #
     # Fewer retries per candidate when there is more than one, so trying four
     # ports does not take four times as long as trying the only one there is.
-    DHCP_TRIES=5
-    [ "$(echo $CANDIDATES | wc -w)" -le 1 ] && DHCP_TRIES=10
+    # One second between discovers, as many of them as the three seconds' worth
+    # there were (#545): a port just up often loses the first, and that wait
+    # was 2.6 s of an X9's boot.
+    DHCP_TRIES=15
+    [ "$(echo $CANDIDATES | wc -w)" -le 1 ] && DHCP_TRIES=30
 
     # --- BEGIN dhcp name hint (covered by tests/initramfs-node-name.sh)
     # The name this node asks for its lease under (option 12, #238), so the
@@ -2635,7 +2638,7 @@ else
         fi
         if [ -n "$BONDED" ]; then
             net_bring_up "$BONDED"
-            if udhcpc -i "$IFACE" -O mtu -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
+            if udhcpc -i "$IFACE" -O mtu -s /usr/share/udhcpc/default.script -q -n -T 1 -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
                 LEASED="$BONDED"
             else
                 echo "  no lease on $BONDED - falling back to single ports"
@@ -2648,7 +2651,7 @@ else
     [ -n "$LEASED" ] || for UPLINK in $CANDIDATES; do
         netsay "  trying $UPLINK (speed $(net_speed "$UPLINK"), carrier $(net_carrier "$UPLINK"))"
         net_bring_up "$UPLINK"
-        if udhcpc -i "$IFACE" -O mtu -s /usr/share/udhcpc/default.script -q -n -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
+        if udhcpc -i "$IFACE" -O mtu -s /usr/share/udhcpc/default.script -q -n -T 1 -t "$DHCP_TRIES" $DHCP_HOST_ARGS; then
             LEASED="$UPLINK"
             break
         fi
@@ -2681,7 +2684,18 @@ if [ -n "$NETADDR" ]; then
     # turns it off. Two NICs on one subnet answer ARP each for its own
     # address only (arp_ignore=1, arp_announce=2, #90's rule). No hostname is
     # sent: the node's name is its uplink's.
-    PATH_NICS=""
+    #
+    # Beside the rest of the boot, not in front of it (#545: 3.2 s of an X9's
+    # reboot, for a port only the appliance's NVMe/TCP uses). Joined before an
+    # engine connects to the appliance for its data, and before switch_root,
+    # since the lease files go to stormpump.
+    _pn_job=""
+    path_nics_join() {
+        if [ -n "$_pn_job" ]; then
+            wait "$_pn_job" 2>/dev/null
+            _pn_job=""
+        fi
+    }
     _pn_sysctl="${STORM_SYSCTL_NET:-/proc/sys/net/ipv4/conf}"
     _pn_script="${STORM_PATH_SCRIPT:-/usr/share/udhcpc/path.script}"
     if [ "${PATH_NICS_MODE:-on}" = off ]; then
@@ -2705,15 +2719,19 @@ if [ -n "$NETADDR" ]; then
                 echo 2 > "$_pn_sysctl/$_f/arp_announce" 2>/dev/null
             done
         fi
-        for _p in $_pn_cand; do
-            if udhcpc -i "$_p" -O mtu -s "$_pn_script" -q -n -t 3 >/dev/null 2>&1; then
-                _pa=$(ip -4 -o addr show dev "$_p" 2>/dev/null | awk '{print $4}' | head -1)
-                netsay "  path NIC $_p: ${_pa:-leased} (an NVMe/TCP path to the appliance when it is on its subnet)"
-                PATH_NICS="$PATH_NICS $_p"
-            else
-                netsay "  path NIC $_p: no lease - not used"
-            fi
-        done
+        if [ -n "$_pn_cand" ]; then
+            (
+                for _p in $_pn_cand; do
+                    if udhcpc -i "$_p" -O mtu -s "$_pn_script" -q -n -t 3 >/dev/null 2>&1; then
+                        _pa=$(ip -4 -o addr show dev "$_p" 2>/dev/null | awk '{print $4}' | head -1)
+                        netsay "  path NIC $_p: ${_pa:-leased} (an NVMe/TCP path to the appliance when it is on its subnet)"
+                    else
+                        netsay "  path NIC $_p: no lease - not used"
+                    fi
+                done
+            ) &
+            _pn_job=$!
+        fi
     fi
     # --- END path nics
 
@@ -2764,7 +2782,17 @@ if [ -n "$NETADDR" ]; then
             # The lease carried no option 6 (microdns#14 on the g16 pool).
             echo "  no DNS server in the lease: cannot ask DNS what $MYIP is called"
         else
-            PTRNAME=$(nslookup "$MYIP" 2>/dev/null \
+            # A second each, three times, with a fresh query (#545): a lost
+            # answer was a 5 s wait in nslookup itself, on an X9's every boot.
+            # What DNS did answer, even "no such name", is not asked again.
+            ns_ask() {
+                for _na in 1 2 3; do
+                    _no=$(${STORM_DNS_TIMEOUT-timeout 1} nslookup "$1" 2>/dev/null); _nr=$?
+                    [ "$_nr" -lt 124 ] && break
+                done
+                printf '%s\n' "$_no"
+            }
+            PTRNAME=$(ns_ask "$MYIP" \
                       | sed -n 's/.*name = \(.*\)\.$/\1/p' | head -1)
             # Forward-confirmed, or not at all.
             #
@@ -2789,7 +2817,7 @@ if [ -n "$NETADDR" ]; then
                 # 192.168.30.2. Membership is the question forward-confirmed
                 # reverse DNS actually asks: does the name the PTR gave resolve
                 # back to the address that asked.
-                BACK=$(nslookup "$PTRNAME" 2>/dev/null \
+                BACK=$(ns_ask "$PTRNAME" \
                        | awk '/^Address: /{ print $2 }')
                 if printf '%s\n' "$BACK" | grep -qxF "$MYIP"; then
                     NODE_NAME=${PTRNAME%%.*}
@@ -2969,6 +2997,8 @@ clock_step() { # $1 = the node's address, empty when there is no network
     return 0
 }
 # --- END clock step
+# What came after "network up": this boot's name, and any wait for its DNS.
+stamp "node named"
 clock_step "${NETADDR:-}"
 stamp "clock"
 
@@ -3745,6 +3775,8 @@ if [ "$BOOT_MODE" = "local" ]; then
     # image (#244, `root_fallback` below): the survey decides the disk
     # afresh, and the mounts are numbered for the image that boots.
     launch_local() {
+        # Its data over NVMe/TCP: by every path it has (#450, #545).
+        case "${SLAB:-}" in *://*) command -v path_nics_join >/dev/null 2>&1 && path_nics_join ;; esac
     # Diskless: this machine's slab is a namespace on the appliance, and which
     # one is a per-machine fact the baked-in cmdline cannot carry. Ask, keyed
     # on the service tag. The firmware made the same claim a stage earlier to
@@ -5715,6 +5747,9 @@ fi
 mount --move /proc /sysroot/proc
 mount --move /sys /sysroot/sys
 mount --move /dev /sysroot/dev
+# Every lease is in its file before stormpump looks for them (#450, #545).
+command -v path_nics_join >/dev/null 2>&1 && path_nics_join
+
 # Carry /run (holds the overlay lower/upper mounts) into the new root
 mkdir -p /sysroot/run
 mount --move /run /sysroot/run 2>/dev/null || true
