@@ -3120,6 +3120,19 @@ if [ "$BOOT_MODE" = "local" ]; then
             echo "No appliance: $BOOTHOST_WHY"
         fi
     fi
+    # Left for the running node, whichever way it was found (#506). PID 1 asks
+    # it for the boot intent before a kexec reboot (stormpump#186), and its own
+    # rule cannot find an appliance that option 17 or the DHCP server named.
+    # /run survives switch_root. The URL alone, one line; only http://, which is
+    # all the reader takes: an nvme-tcp:// boothost has no API to ask. With no
+    # appliance, no file. A failure here costs a slower reboot, never this boot.
+    case "$BOOTHOST" in
+    http://*)
+        { mkdir -p "${STORM_RUN:-/run/stormblock}" \
+            && echo "$BOOTHOST" > "${STORM_RUN:-/run/stormblock}/appliance"; } 2>/dev/null \
+            || echo "  WARNING: could not leave $BOOTHOST in ${STORM_RUN:-/run/stormblock}/appliance"
+        ;;
+    esac
     # --- END appliance discovery
 
     # An explicit, one-shot wipe.

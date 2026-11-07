@@ -133,6 +133,7 @@ for a in sh echo mount uname cat poweroff sleep tr grep; do ln -s busybox "$R/bi
 printf 'NAME=stormcos\nPRETTY_NAME="stormcos a64-test"\nVERSION_ID=0\n' > "$R/etc/os-release"
 cat > "$R/sbin/init" <<'INIT'
 #!/bin/sh
+echo "@@APPLIANCE $(cat /run/stormblock/appliance 2>/dev/null || echo none)"
 echo "@@ROOT-INIT $(uname -m) $(tr ' ' '\n' < /proc/cmdline | grep -c '^acpi=force$')"
 poweroff -f
 INIT
@@ -196,6 +197,7 @@ cp --sparse=always "$W/disk.img" "$W/A.disk"
 boot A "rd.stormblock.slab=/dev/nvme0n1" -nic none \
     -drive "id=d0,file=$W/A.disk,format=raw,if=none" -device nvme,serial=o6n-m2,drive=d0
 checks A
+expect A "@@APPLIANCE none" "no appliance: nothing left in /run/stormblock/appliance (#506)"
 expect A "Root device ready: /dev/ublkb0" "the engine serves the root"
 
 say "B: UEFI + ACPI, no disk: DHCP, the claim, the slab over NVMe/TCP"
@@ -208,6 +210,7 @@ curl -sf "http://127.0.0.1:$HTTP/api/v1/health" >/dev/null || { echo "FAIL: stor
 boot B "ip=dhcp rd.stormblock.boothost=http://10.0.2.2:$HTTP rd.stormblock.tag=o6n rd.stormblock.diskless=1" \
     -nic "user,model=virtio-net-pci"
 checks B
+expect B "@@APPLIANCE http://10.0.2.2:$HTTP" "the appliance's URL is there after switch_root (#506)"
 expect B "Root device ready: /dev/ublkb0" "the engine serves the root"
 grep -q 'nvme-tcp://' "$W/B.txt" && ok "B: the slab named over NVMe/TCP" || fail "B: no nvme-tcp:// on the console"
 

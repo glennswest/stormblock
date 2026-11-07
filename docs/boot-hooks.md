@@ -235,6 +235,12 @@ waited for, bounded by `STORM_STORAGE_WAIT` (30 s): SAS and expander
 discovery runs on after the driver loads. The inventory goes into
 `local-disk.json` as `controllers` and `drives`, kept by the verdict below.
 
+**The appliance `/init` settled on (#506)** is left in
+`/run/stormblock/appliance`, which survives `switch_root`: its URL alone on one
+line, however it was found. stormpump reads it for a kexec reboot's intent
+(stormpump#186). Only an `http://` URL is left, and with no appliance there is
+no file.
+
 **What the boot did with the machine's own disk (#344)** is written to
 `/run/stormblock/local-disk.json` (which survives `switch_root`) and reported
 in the engine's health as `slabs.local_disk`, with the drive's `shelf` (`id`,

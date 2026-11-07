@@ -867,7 +867,10 @@ for `adopt-ublk`), `/var/lib/stormblock/raft` (`[cluster] data_dir`).
 
 In the initramfs: `/etc/stormblock/boot.d/` (boot hooks,
 `docs/boot-hooks.md`), `/etc/stormblock/build-date` (the image's build time,
-the clock's floor, #251), `/run/stormblock/install.json` (written by
+the clock's floor, #251), `/run/stormblock/appliance` (the URL of the appliance
+`/init` settled on, one line, `http://` only and absent with none; it survives
+`switch_root` for stormpump's kexec reboot, #506),
+`/run/stormblock/install.json` (written by
 `boot-claim` when the appliance says `install`, #148) and
 `/run/stormblock/no-intent` (the appliance stated no intent, #236), and the
 EFI variables `StormBootTag` and `StormBootHostNqn` (vendor GUID

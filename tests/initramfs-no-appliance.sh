@@ -60,7 +60,9 @@ echo "appliance discovery:"
 discover() { # named-host -> "BOOTHOST|BOOTHOST_WHY|asks"
     (
         set +e
-        BOOTHOST=""
+        BOOTHOST="${PRESET:-}"
+        STORM_RUN="${RUN_AT:-$WORK/run}"
+        rm -f "$WORK/run/appliance"
         printf '%s' "$1" > "$WORK/named"
         STORM_BOOTHOST_FILE="$WORK/named"
         STORM_BOOTHOST_RETRY=0
@@ -84,6 +86,8 @@ discover() { # named-host -> "BOOTHOST|BOOTHOST_WHY|asks"
 
 r=$(ANSWERS=http://forge:9090 ANSWER_AFTER=0 STORM_BOOTHOST_WAIT=5 discover http://forge:9090)
 check "a named boothost that answers is the appliance" "http://forge:9090" "${r%%|*}"
+check "  and it is left for the running node (#506), the URL alone" "http://forge:9090" "$(cat "$WORK/run/appliance")"
+check "  on one line" "1" "$(wc -l < "$WORK/run/appliance" | tr -d ' ')"
 
 # server8: the link has just come up, the first asks go nowhere.
 r=$(ANSWERS=http://forge:9090 ANSWER_AFTER=12 STORM_BOOTHOST_WAIT=30 discover http://forge:9090)
@@ -100,6 +104,8 @@ asks=${r##*|}
 
 r=$(STORM_BOOTHOST_WAIT=30 discover "")
 check "with no named boothost nothing is waited for" "" "${r%%|*}"
+[ ! -e "$WORK/run/appliance" ] && echo "  ok    with no appliance no file is left (#506)" \
+    || { echo "  FAIL  a file was left with no appliance: $(cat "$WORK/run/appliance")"; fail=1; }
 contains "and why is kept" "no appliance answered" "$(printf '%s' "$r" | cut -d'|' -f2)"
 # #104: multicast discovery, last and only when asked.
 r=$(ANSWERS=http://10.9.9.9:9090 STUB_FOUND=http://10.9.9.9:9090 discover "")
@@ -125,6 +131,21 @@ r=$(FW_ENGINE=10.0.0.5:9089 ANSWERS=http://boothost:9089 discover "")
 check "  and when it is gone the network is asked" "http://boothost:9089" "${r%%|*}"
 r=$(ANSWERS=http://boothost:9089 discover "")
 check "the boot port of a host is found" "http://boothost:9089" "${r%%|*}"
+check "  and the port that answered is the one left (#506)" "http://boothost:9089" "$(cat "$WORK/run/appliance")"
+# #506: however it was found.
+r=$(PRESET=http://10.0.0.9:9090 discover "")
+check "rd.stormblock.boothost= is left too, with nothing discovered" "http://10.0.0.9:9090" "$(cat "$WORK/run/appliance")"
+check "  and nothing was asked" "0" "${r##*|}"
+r=$(ANSWERS=http://10.0.0.5:9089 FW_ENGINE=10.0.0.5:9089 discover "")
+check "the firmware's engine is left" "http://10.0.0.5:9089" "$(cat "$WORK/run/appliance")"
+r=$(PRESET=nvme-tcp://forge:4420/nqn.x discover "")
+check "an nvme-tcp:// boothost is still the appliance" "nvme-tcp://forge:4420/nqn.x" "${r%%|*}"
+[ ! -e "$WORK/run/appliance" ] && echo "  ok    but it has no API to ask: no file" \
+    || { echo "  FAIL  left a URL with no API: $(cat "$WORK/run/appliance")"; fail=1; }
+: > "$WORK/not-a-dir"
+r=$(RUN_AT="$WORK/not-a-dir/run" PRESET=http://forge:9090 discover "")
+check "a file that cannot be written does not cost the boot" "http://forge:9090" "${r%%|*}"
+contains "  and says so" "could not leave http://forge:9090" "$(cat "$WORK/discovery.out")"
 r=$(ANSWERS=http://boothost:9090 discover "")
 check "an engine with no boot port still answers on 9090" "http://boothost:9090" "${r%%|*}"
 contains "  and the boot port was asked before it" "no engine at http://boothost:9089" "$(cat "$WORK/discovery.out")"
