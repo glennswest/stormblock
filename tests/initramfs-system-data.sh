@@ -36,6 +36,7 @@ run() ( # -> console in sd.out
     STORM_SYSTEM_DATA_DEV="$R/system-data.dev"; STORM_SYSTEM_DATA_DIR="$WORK/sd"
     STORM_SYSTEM_DATA_ROOT="$WORK/root"; STORM_SYSTEM_DATA_RUN="$R"; STORM_CMDLINE="$WORK/cmdline"
     STORM_SYSTEM_DATA_WAIT=0; STORM_SYSTEM_DATA_KEEP="${KEEP:-500}"
+    printf '%s\n' "${HOST:-stormblock1}" > "$WORK/hostname"; STORM_SYSTEM_DATA_HOSTNAME="$WORK/hostname"
     MOUNTS="cilium:/p/cilium,kubelet-data:/var/lib/kubelet"; MOUNTS_FROM="/etc/stormblock/mounts in stormpump"
     BOOTTAG=C2NR0Q2
     LOCAL_DISK="${LD:-}"; LOCAL_DISK_ID="${LDID:-}"; CHOSEN_BY="${CB:-}"; SYSTEM_DISK=""; SYSTEM_DISK_ID=""
@@ -65,10 +66,10 @@ if command -v python3 >/dev/null 2>&1; then
     r=$(python3 -c '
 import json, sys, glob
 b = json.load(open(glob.glob(sys.argv[1] + "/history/boots/*.json")[0]))
-print(b["release"], b["tag"], "stormblock.volume=stormpump" in b["cmdline"], b["local_disk"]["state"], b["handover"]["installed"]["version"], b["install_config"])
+print(b["release"], b["tag"], b["hostname"], "stormblock.volume=stormpump" in b["cmdline"], b["local_disk"]["state"], b["handover"]["installed"]["version"], b["install_config"])
 ' "$WORK/sd" 2>&1)
     # No install-config block in this run: its source reads none (#459).
-    check "the boot record is JSON with what the boot knew" "11.97 C2NR0Q2 True taken 11.97 none" "$r"
+    check "the boot record is JSON with what the boot knew" "11.97 C2NR0Q2 stormblock1 True taken 11.97 none" "$r"
 fi
 
 # #478: the drive an install chose, recorded as stormdrive's designation,
@@ -103,6 +104,18 @@ for t in 20200101T000000Z 20200102T000000Z 20200103T000000Z; do echo '{}' > "$WO
 KEEP=3 run
 check "the newest 3 boot records are kept" 3 "$(ls "$WORK/sd/history/boots" | wc -l)"
 check "the oldest went first" "" "$(ls "$WORK/sd/history/boots" | grep 2020010[12] || true)"
+
+# #560: a node whose name changed says what it was on the last boot.
+sleep 1
+run
+case "$(cat "$WORK/sd.out")" in *"node name:"*) echo "  FAIL  the same name said as a rename"; fail=1 ;; *) echo "  ok    the same name as the last boot: nothing said" ;; esac
+sleep 1
+HOST=storm-06f96d run
+contains "a renamed node says what it was (#560)" "node name: storm-06f96d (was stormblock1 on the last boot): it registers as a new node" "$(cat "$WORK/sd.out")"
+rm -f "$WORK"/sd/history/boots/*; echo '{"at": "20260101T000000Z", "release": "11.97", "tag": "x", "cmdline": ""}' > "$WORK/sd/history/boots/20260101T000000Z.json"
+sleep 1
+run
+case "$(cat "$WORK/sd.out")" in *"node name:"*) echo "  FAIL  a rename said against a record with no name"; fail=1 ;; *) echo "  ok    a last record from before #560 (no name): nothing said" ;; esac
 
 # A mount that fails: said, and the boot goes on.
 MOUNT_FAILS=1 run

@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
+- **feat:** #560 (#559's other half): every boot record in system-data (`history/boots/`) carries the node's name (`hostname`), and a boot whose name differs from the last record's says so on the console: `node name: X (was Y on the last boot): it registers as a new node`. **What v23.25.1 changes for a running fleet:** a node whose site has a forward-confirmed PTR and no option 12 takes the PTR's short name on its first boot of an initramfs from v23.25.1 or later, where it was `storm-<mac>`. The kubelet's Node name and tier-0's subject CN follow the kernel hostname (unless `stormcos.toml` declares one), so a kept-data reinstall registers a new Node beside the old `storm-<mac>` one (what stormcos#191 asks for). That first rename is not said on the console: earlier records carry no name.
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
 ## [v23.25.1] — 2026-11-07

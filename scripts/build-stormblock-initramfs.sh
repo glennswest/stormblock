@@ -5481,8 +5481,9 @@ esac
 # replays its journal at this mount, which is why the records are written
 # through it and not into the volume offline.
 #   config/           the release's mount list (mounts.release, its source)
-#   history/boots/    one record per boot: release, tag, cmdline, the disk
-#                     verdict and inventory (local-disk.json), the handover
+#   history/boots/    one record per boot: release, tag, the node's name
+#                     (#560), cmdline, the disk verdict and inventory
+#                     (local-disk.json), the handover
 #   history/installs/ one record per boot that installed (the handover's
 #                     `installed`)
 SD_DEV_FILE="${STORM_SYSTEM_DATA_DEV:-/run/stormblock/system-data.dev}"
@@ -5491,6 +5492,7 @@ SD_KEEP="${STORM_SYSTEM_DATA_KEEP:-500}"
 SD_ROOT="${STORM_SYSTEM_DATA_ROOT:-/sysroot}"
 SD_RUN="${STORM_SYSTEM_DATA_RUN:-/run/stormblock}"
 SD_CMDLINE="${STORM_CMDLINE:-/proc/cmdline}"
+SD_HOSTNAME="${STORM_SYSTEM_DATA_HOSTNAME:-/proc/sys/kernel/hostname}"
 sd_json() { # file -> its contents, or null
     if [ -s "$1" ]; then cat "$1"; else printf null; fi
 }
@@ -5515,9 +5517,20 @@ if [ -s "$SD_DEV_FILE" ]; then
             printf '%s\n' "${MOUNTS_FROM:-}" > "$SD_DIR/config/mounts.release.from"
         fi
         sd_boot="$SD_DIR/history/boots/$sd_at.json"
+        # The node's name, and whether it changed (#560): a node renamed (by
+        # its PTR, its reservation, its declaration) registers as a new Node
+        # beside the old one, so the console says what it was. Records from
+        # before #560 carry no name: nothing is said against those.
+        sd_name=$(head -1 "$SD_HOSTNAME" 2>/dev/null)
+        sd_last=$(ls "$SD_DIR/history/boots" 2>/dev/null | sort | tail -1)
+        sd_was=""
+        [ -n "$sd_last" ] && sd_was=$(sed -n 's/.*"hostname": "\([^"]*\)".*/\1/p' "$SD_DIR/history/boots/$sd_last" 2>/dev/null | head -1)
+        if [ -n "$sd_name" ] && [ -n "$sd_was" ] && [ "$sd_name" != "$sd_was" ]; then
+            echo "  node name: $sd_name (was $sd_was on the last boot): it registers as a new node"
+        fi
         {
-            printf '{"at": "%s", "release": %s, "tag": %s, "cmdline": %s,\n' \
-                "$sd_at" "$(sd_str "$sd_release")" "$(sd_str "${BOOTTAG:-}")" "$(sd_str "$(cat "$SD_CMDLINE" 2>/dev/null)")"
+            printf '{"at": "%s", "release": %s, "tag": %s, "hostname": %s, "cmdline": %s,\n' \
+                "$sd_at" "$(sd_str "$sd_release")" "$(sd_str "${BOOTTAG:-}")" "$(sd_str "$sd_name")" "$(sd_str "$(cat "$SD_CMDLINE" 2>/dev/null)")"
             printf ' "local_disk": %s,\n' "$(sd_json "$SD_RUN/local-disk.json")"
             # Which install-config this boot takes (#459), never its bytes.
             printf ' "install_config": %s,\n' "$(sd_str "$(install_config_source 2>/dev/null || echo none)")"
