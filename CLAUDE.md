@@ -227,6 +227,19 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Move a volume onto a named drive, slab or array, online, with progress (2026-11-07, #426, P1, stormvm#29, stormcos#806) — IN PROGRESS on wip/426-volume-move
+
+The retier aimed only at a tier and could not be watched. Built: a per-volume placement target
+(`volume/target.rs`: `to` slabs, `except` slabs, process-wide by id, `<data_dir>/placement_targets.json`),
+asked by every allocation (`allocate_apart`, the affine slab); `mgmt/volume_move.rs`: resolve slab/drive/array,
+refuse what cannot hold the volume (pinned, dedicated, role, size, domains < copies), set the target, then a job
+moves each outside leg as a drain does (fence-only copy, live I/O first), progress, cancel; `target` on create.
+Rebalance skips targeted volumes; retier refused while one stands. Decided here: the target is a hard boundary
+(a pin's rule), and it stays after the move.
+- [x] code; test `integration_volume_move` passes; control (allocation ignoring the target) fails at "new extents
+      stay on the drive"; docs (multi-drive.md, README), CHANGELOG
+- [ ] check.sh on the branch; merge; minor release; stage; stormvm#29 and stormstorage#106 told; close
+
 ### A claim on a cluster worker takes ~321 s (2026-11-07, #558, P1, stormcentral#360) — NOT stormblock's: waits on stormcluster#103
 
 Read from stormcentral's paired test b8a2d7f96a (12.70): the claim bound 0 s after its first event, the kubelet's
