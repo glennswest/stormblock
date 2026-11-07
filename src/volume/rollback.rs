@@ -131,7 +131,7 @@ pub fn recognise(volumes: &[Seen], exclude: &HashSet<VolumeId>) -> Vec<Copy> {
             });
         }
     }
-    out.sort_by(|a, b| order(a, b));
+    out.sort_by(order);
     out
 }
 
@@ -154,7 +154,7 @@ pub fn plan(copies: &[Copy], keep: usize) -> (Vec<Copy>, Vec<Copy>) {
     }
     let (mut kept, mut gone) = (Vec::new(), Vec::new());
     for (_, mut g) in groups {
-        g.sort_by(|a, b| order(a, b));
+        g.sort_by(order);
         let cut = g.len().saturating_sub(keep);
         gone.extend(g[..cut].iter().map(|c| (*c).clone()));
         kept.extend(g[cut..].iter().map(|c| (*c).clone()));
