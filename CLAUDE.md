@@ -257,6 +257,8 @@ until A lands. Stormblock's half: follow a record of the cluster, written by sto
 - [x] test: a worker with no local apiserver takes a reviewed release; docs, CHANGELOG; check.sh ALL PASS at 1fcff47f
       (1364/1364); v23.23.0; stage
 - [x] filed: https://github.com/glennswest/stormcluster/issues/99 (issue and renew tokens, write and remove the record, take C out), https://github.com/glennswest/stormcos/issues/838
+- [x] 2026-11-07: record path checked: stormcluster e9d8d80 writes `/data/stormcert/engine-cluster.json`, stormcos mounts
+      `sbcert` (/data/stormcert) at /etc/stormcert beside `stormblock.token`: the default path. Proposed after stormcluster#99
 - [ ] after those: the master reruns `testhost cluster-test`; a real TLS endpoint; close
 
 ### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — PAUSED for P0 #557: v23.22.2 on main, not tagged or staged

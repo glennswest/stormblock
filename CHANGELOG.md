@@ -102,6 +102,7 @@
 - #483: a configured TLS file that is not there is "not yet", not a refusal to start; each is taken up when it appears, and a missing CRL fails closed. The detail is below.
 
 ### 2026-11-03
+- **docs:** #557: the cluster record's path checked against stormcluster#99 and stormcos's mount (work plan only)
 - **fix:** #483: a configured TLS file that is not there is "not yet", not a refusal to start (stormcos#497, #374: on a node the stormcert pair, node CA, forge CA and CRL appear after the engine). `tls_cert`/`tls_key` missing: plain HTTP until both are there, then HTTPS with no restart, open plain connections ended, never back to plain once a pair is held. `tls_client_ca` / `tls_admin_ca` missing: no such credential until it appears. `tls_admin_crl` set and missing: fails closed, no certificate from forge's CA is admin or a forge node. A file there that does not parse is still an error at start. Files are looked at with no connection arriving, and no lock is held across reading them. Health `tls {serving, missing}`; goldens' ticket URLs and the finder say the scheme served, not the one configured; `[fabric]` takes a certificate not there yet as none.
 - **chore:** #523: kernel set 7.2.14-200.fc44 → 7.2.15-200.fc44. No code change: `stormcentral component initramfs --commit e415f1f4` built the initramfs for 7.2.15-200.fc44.x86_64: registry/initramfs:blob-ff4d570e3f0efef8 (vmlinuz blob-cf54563ed16a752e).
 
