@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,19 +227,26 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### aarch64 initramfs for the Orion O6N (2026-11-06, #514, P1, stormcos#666) — IN PROGRESS, on wip/514-aarch64
+### aarch64 initramfs for the Orion O6N (2026-11-06, #514, P1, stormcos#666) — DONE (v23.20.0), closed; the board pending
 
 The image is for its binary's architecture (read from the ELF, never `uname`).
-x86_64's image stays as it was; another architecture takes busybox, kmod and udev
-from Fedora's signed packages for the kernel's release, firmware from the modules
-golden. `component initramfs --arch aarch64` and the sealed kernel set are
-stormcentral#1153's. Board: stormbootx#172.
-- [x] engine: `cargo zigbuild --target aarch64-unknown-linux-musl` builds and runs
-      under qemu-user; zig's linker needs `ulimit -n` raised (1024 fails)
-- [ ] script: arch from ELF, userland, libs by NEEDED, rtl_nic, boot path by name,
-      no foreign ELF, no microcode; tests/initramfs-arch.sh
-- [ ] ci-initramfs-aarch64-verify.sh: UEFI + ACPI in QEMU, NVMe slab and claim
-- [ ] x86_64's image unchanged; unit tests under qemu-user; check.sh; docs, CHANGELOG
+Another architecture takes busybox, kmod and udev from Fedora's signed packages
+for the kernel's release, firmware from the modules golden. `component initramfs
+--arch aarch64` and the sealed kernel set are stormcentral#1153's. Board:
+stormbootx#172. No golden: the x86_64 engine and image do not change.
+- [x] engine: `cargo zigbuild --target aarch64-unknown-linux-musl`, no rustc
+      warning; zig's linker needs `ulimit -n` raised (1024 fails: told #1153).
+      Unit tests under qemu-user: 971 of 972 (one at a time where they share
+      globals); the other wants io_uring, which qemu-user lacks and the boots run
+- [x] script: arch from ELF, userland, libs by NEEDED, rtl_nic, boot path by name,
+      no foreign ELF, no microcode; tests/initramfs-arch.sh (sh, busybox sh)
+- [x] ci-initramfs-aarch64-verify.sh ALL PASS at 0ea6bd9f (Fedora's signed
+      7.2.15-200.fc44.aarch64, UEFI, acpi=force: NVMe slab; DHCP + claim + NVMe/TCP)
+- [x] x86_64's image byte-identical to 0d792b5c's (676 files);
+      ci-no-appliance-verify.sh ALL PASS; check.sh at 0ea6bd9f ALL PASS (1354/1354)
+- [ ] metal, not this repo's: r8169 taking rtl_nic at probe and the CIX drivers on
+      the O6N (stormbootx#172); the real aarch64 modules golden (stormcentral#1153)
+- Found: x86_64 images built on a build VM have no firmware or microcode: #553
 
 ### An install's kernel pallet with no tries; no node marks a local pallet good (2026-11-06, #552, P0, stormcos#828) — DONE (v23.19.2), closed; metal pending
 
