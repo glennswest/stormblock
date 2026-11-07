@@ -232,11 +232,14 @@ the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#35
 Kubelet on a SAS HDD: `logging=1240ms(10 faults)`; the engine pages itself in for 16 s
 while 33 units read the same disk. Target: < 10 ms a fault on a boot path. Plan: measure
 first, then fix where the numbers point:
-- [ ] `examples/pagein_probe.rs` + `ci-boot-pagein-verify.sh`: real exec's major faults on
+- [x] `examples/pagein_probe.rs` + `ci-boot-pagein-verify.sh`: real exec's major faults on
       ext4 over ublk on a throttled disk, quiet and under boot load, per read_ahead_kb;
       O_DIRECT reads of the ublk device against the disk under it (what the engine adds)
-- [ ] fix per the numbers (read-around on boot devices, boot read-ahead in /init, reads
-      not behind writes and flushes)
+- [x] first run: quiet, a read through ublk costs what the disk costs (p90 16.2 vs 17.2 ms);
+      a binary read ahead takes 0 faults and 2 ms against 52 faults and 0.9 s, under load too
+      (that run's throttle counted per 64 KiB, so its read-ahead sizes mean nothing: fixed)
+- [ ] `# --- BEGIN boot read-ahead` in /init, tests/initramfs-boot-readahead.sh
+- [ ] re-measure; read_ahead_kb only if the numbers say so
 
 ### Validation on spinning disks reads in disk order (2026-11-06, #544, P1, stormcos#804) — DONE (v23.21.1), closed; metal pending
 

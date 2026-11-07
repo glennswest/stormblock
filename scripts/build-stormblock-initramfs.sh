@@ -5374,6 +5374,64 @@ if [ -n "$MOUNT_MAP" ]; then
 fi
 # --- END container mounts
 
+# --- BEGIN boot read-ahead (covered by tests/initramfs-boot-readahead.sh)
+# What the node needs to reach Ready is read into the page cache here, by one
+# reader, before any unit starts (#484). A boot's major fault costs 70-124 ms
+# (3.5 ms quiet): nearly all of it queueing on a disk that 34 units are paging
+# in from at once, and nothing in the engine (ci-boot-pagein-verify.sh: a read
+# through ublk takes what the disk takes). The engine paged itself in for 16 s
+# on a SAS HDD; here the page is there and the fault is a minor one, also while
+# a handover holds the devices' I/O. The cache belongs to the kernel, so it
+# survives the switch_root and the handover.
+# The list: <root>/etc/stormblock/boot-readahead (a path per line, from the
+# root, a directory for every regular file under it, `#` a comment; empty means
+# nothing), else the defaults below. What is not there is skipped. Bounded by
+# STORM_READAHEAD_SECS and by STORM_READAHEAD_MIB, and a quarter of the memory
+# available: it stops where it is, and what it read is still cached.
+# `rd.stormblock.readahead=off` turns it off.
+_ra_root="${STORM_SYSROOT:-/sysroot}"
+_ra_cat="${STORM_READAHEAD_CAT:-cat}"
+_ra_list="$_ra_root/etc/stormblock/boot-readahead"
+case " $(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null) " in
+    *" rd.stormblock.readahead=off "*) echo "Boot read-ahead: off (rd.stormblock.readahead=off)" ;;
+    *)
+        _ra_from=default
+        if [ -r "$_ra_list" ]; then
+            _ra_from="/etc/stormblock/boot-readahead"
+            _ra_paths=$(sed 's/#.*//' "$_ra_list")
+        else
+            # The engine, then the kubelet, then what the apiserver needs,
+            # then the root's own binaries.
+            _ra_paths="/p/stormblock /p/rustkube-node /p/fastetcd /p/rustkube-apiserver /p/rustkube-controller-manager /p/rustkube-scheduler /sbin"
+        fi
+        _ra_left=$((${STORM_READAHEAD_MIB:-512} * 1048576))
+        _ra_avail=$(awk '$1 == "MemAvailable:" { printf "%d", $2 * 256 }' "${STORM_MEMINFO:-/proc/meminfo}" 2>/dev/null)
+        [ -n "$_ra_avail" ] && [ "$_ra_avail" -lt "$_ra_left" ] && _ra_left=$_ra_avail
+        _ra_t0=$(cut -d' ' -f1 /proc/uptime)
+        _ra_secs="${STORM_READAHEAD_SECS:-5}"
+        _ra_n=0; _ra_bytes=0; _ra_stop=""
+        for _ra_p in $_ra_paths; do
+            [ -e "$_ra_root$_ra_p" ] || continue
+            for _ra_f in $(find "$_ra_root$_ra_p" -type f 2>/dev/null); do
+                _ra_gone=$(awk -v a="$_ra_t0" -v b="$(cut -d' ' -f1 /proc/uptime)" 'BEGIN { printf "%d", b - a }')
+                _ra_more=$((_ra_secs - _ra_gone))
+                if [ "$_ra_more" -le 0 ]; then _ra_stop="its $_ra_secs s"; break 2; fi
+                _ra_size=$(ls -lnL "$_ra_f" 2>/dev/null | awk '{ print $5 + 0 }')
+                _ra_size=${_ra_size:-0}
+                if [ "$_ra_size" -gt "$_ra_left" ]; then _ra_stop="its memory bound"; break 2; fi
+                # A file the time runs out in is cut there, not waited for.
+                timeout "$_ra_more" $_ra_cat "$_ra_f" > /dev/null 2>&1
+                _ra_left=$((_ra_left - _ra_size))
+                _ra_bytes=$((_ra_bytes + _ra_size))
+                _ra_n=$((_ra_n + 1))
+            done
+        done
+        _ra_t1=$(cut -d' ' -f1 /proc/uptime)
+        echo "Boot read-ahead: $_ra_n file(s), $((_ra_bytes / 1048576)) MiB in $(awk -v a="$_ra_t0" -v b="$_ra_t1" 'BEGIN { printf "%.2f", b - a }') s (list: $_ra_from${_ra_stop:+; stopped at $_ra_stop})"
+        ;;
+esac
+# --- END boot read-ahead
+
 # --- BEGIN system data (covered by tests/initramfs-system-data.sh)
 # The node's own record of itself (#355, stormcos docs/SYSTEM-DATA.md): the
 # `system-data` volume in the data half, which every install keeps and only a
