@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
+- **feat:** #565: rollback copies no longer pile up. A volume an install sets aside (`<name>@<previous>[.N]`) is marked a rollback copy (format-2 header tag `R` after the namespace: of, from, generation, when; older readers stop before it), said as `kind: rollback` + `rollback {…}` on the volume API (out of the Volumes view). Copies from before are recognised by name and marked at start. After a boot-ok (a boot pallet marked successful) the newest `[rollback] keep` (default 1) of each name are kept and the rest deleted; `[rollback] prune = "off"` leaves it to `POST /api/v1/rollback/prune {keep?, dry_run?}` (admin); `GET /api/v1/rollback` lists them. Never a copy in use, a migration's source or a #122 stage's volume, and nothing while a stage waits (409). forge1: 135 copies → 27.
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
 ## [v23.26.0] — 2026-11-07

@@ -2074,6 +2074,23 @@ same release (0, 3) is recovery and keeps the disk; cannot say (2) leaves
 every local drive alone. An install that cannot keep everything stops with
 the disk untouched (`docs/boot-hooks.md`).
 
+**Rollback copies are kept to one generation (#565).** A volume an install
+sets aside (`<name>@<previous>`, `.2`, `.3`… when taken) is a *rollback
+copy*: its format-2 header carries a mark after the namespace (`R`: what it
+was, from which release, its generation, when), which every older reader
+stops before. The volume API says `kind: rollback` and `rollback {of, from,
+generation, set_aside_at}`, so the console's Volumes view (`kind=volume`)
+no longer lists them. Copies set aside before #565 are recognised by their
+name (`<x>@<label>[.N]` beside a live `<x>` in the same namespace) and marked
+at start. Once a boot pallet is marked successful (boot-ok: the release that
+set them aside booted and was confirmed), the node keeps the newest
+`[rollback] keep` (default 1: enough to roll back once) of each name and
+deletes the rest; `[rollback] prune = "off"` leaves it to
+`POST /api/v1/rollback/prune {keep?, dry_run?}` (admin). Never pruned: a copy
+anything serves, a migration's source, the volumes of a #122 stage
+(`release-generations.json`), and nothing at all while a stage waits to be
+activated (409). `GET /api/v1/rollback` lists the copies.
+
 **A golden is checked against the digest it was sealed with (#384, #245).**
 When a volume is sealed on the node that made it (forge, for a release's
 goldens), the engine takes its digest in the background, with no lock held:

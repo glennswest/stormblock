@@ -1333,6 +1333,7 @@ pub async fn run() -> anyhow::Result<()> {
     state.start_eraser().await;
     state.start_digests();
     mgmt::peers::start(&state);
+    mgmt::rollback::start(&state);
 
     // What consumers will be told to dial, said once, before anything can be
     // attached — a derived address is a guess on a multi-homed node.
@@ -9228,6 +9229,7 @@ async fn handle_adopt_ublk(
         state.start_digests();
         state.start_scrub();
         crate::mgmt::peers::start(&state);
+        crate::mgmt::rollback::start(&state);
         // The first persist after a start writes its stores whole (the maps
         // were rebuilt from the slot tables). Made now, not by whoever clones
         // first (#521: 1.6 s against 0.2 s on the model, more on a real node).
@@ -11693,6 +11695,10 @@ file = "{state}"
             assert_eq!(m.find_volume("state").await, Some(e.state_id), "{when}: the node's state, by its id");
             assert_eq!(volume_bytes(m, "state").await.unwrap(), e.state_before, "{when}: state");
             assert_eq!(m.find_volume("logs@11.90").await, Some(e.logs_id), "{when}: the node's logs, aside");
+            // A rollback copy, marked so (#565), and the mark kept on disk.
+            let mark = m.rollback(&e.logs_id).unwrap_or_else(|| panic!("{when}: logs@11.90 is marked a rollback copy"));
+            assert_eq!((mark.of.as_str(), mark.from.as_str(), mark.generation), ("logs", "11.90", 1), "{when}");
+            assert!(mark.set_aside_at > 0, "{when}");
             assert_eq!(volume_bytes(m, "logs@11.90").await.unwrap(), e.logs_before, "{when}: the node's logs");
             assert_eq!(volume_bytes(m, "logs").await.unwrap()[..e.n1_logs.len()], e.n1_logs[..], "{when}: logs, N+1's");
             assert_eq!(m.find_volume("pvc-default-db").await, Some(e.pvc), "{when}: the PVC, by its id");

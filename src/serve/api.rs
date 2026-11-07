@@ -393,6 +393,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if matches!(p, "/api/v1/pallets/gpt" | "/api/v1/pallets/convert" | "/api/v1/pallets/prune" | "/api/v1/pallets/adopt") {
             return true;
         }
+        // Deleting what an install set aside to roll back with (#565).
+        if p == "/api/v1/rollback/prune" {
+            return true;
+        }
         // An image build or conversion writes a file, or an attached
         // device, as the engine's own user (#393): the admin's, like a
         // partition table.

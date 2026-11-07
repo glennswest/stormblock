@@ -426,9 +426,20 @@ async fn set_aside(
     previous: &str,
 ) -> anyhow::Result<String> {
     let to = aside_name(mgr, name, previous).await;
+    // A rollback copy (#565): marked, so the prune after a good boot keeps
+    // the newest and lets the older go.
+    let namespace = mgr.namespace(&id).to_string();
+    let generation = crate::volume::rollback::next_generation(mgr, &namespace, name).await;
     mgr.rename_volume(id, &to)
         .await
         .map_err(|e| anyhow::anyhow!("renaming the node's {name} aside: {e}"))?;
+    let mark = crate::volume::metadata::RollbackMark {
+        of: name.to_string(),
+        from: previous.to_string(),
+        generation,
+        set_aside_at: crate::volume::rollback::now(),
+    };
+    mgr.set_rollback(id, Some(mark)).map_err(|e| anyhow::anyhow!("marking the node's {name} as a rollback copy: {e}"))?;
     report.aside.push((name.to_string(), to.clone()));
     Ok(to)
 }

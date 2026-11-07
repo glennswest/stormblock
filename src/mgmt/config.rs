@@ -72,6 +72,35 @@ pub struct StormBlockConfig {
     /// Redundancy schemes this node makes (#159).
     #[serde(default)]
     pub redundancy: RedundancySection,
+    /// How many rollback copies an install's set-aside volumes keep (#565).
+    #[serde(default)]
+    pub rollback: RollbackSection,
+}
+
+/// `[rollback]` (#565): the node's volumes an install set aside
+/// (`<name>@<previous>[.N]`), kept to roll back with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RollbackSection {
+    /// Copies kept of each name: the newest `keep`. 1 rolls back once.
+    pub keep: usize,
+    /// When the prune runs: `boot-ok` (a boot pallet marked successful: the
+    /// release that set them aside has booted and been confirmed) or `off`
+    /// (only `POST /api/v1/rollback/prune`).
+    pub prune: String,
+}
+
+impl Default for RollbackSection {
+    fn default() -> Self {
+        RollbackSection { keep: 1, prune: "boot-ok".into() }
+    }
+}
+
+impl RollbackSection {
+    /// Whether a boot-ok runs the prune.
+    pub fn on_boot_ok(&self) -> bool {
+        self.prune != "off"
+    }
 }
 
 /// `[redundancy]` (#159).
@@ -560,6 +589,7 @@ impl Default for StormBlockConfig {
             fabric: FabricSection::default(),
             images: ImagesSection::default(),
             redundancy: RedundancySection::default(),
+            rollback: RollbackSection::default(),
         }
     }
 }
@@ -1516,6 +1546,9 @@ impl StormBlockConfig {
 
     /// Validate configuration values.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if !matches!(self.rollback.prune.as_str(), "boot-ok" | "off") {
+            anyhow::bail!("[rollback] prune = {:?}: boot-ok or off", self.rollback.prune);
+        }
         // Half a CHAP pair is a mistake, not a choice to run without
         // authentication (#164): refused rather than quietly served open.
         #[cfg(feature = "iscsi")]

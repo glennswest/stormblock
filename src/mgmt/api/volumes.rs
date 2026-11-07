@@ -109,6 +109,10 @@ pub struct VolumeResponse {
     /// The namespace the volume belongs to (#408): a family's project on
     /// forge (`stormcos`, `nana`, …). Names are unique within one.
     pub namespace: String,
+    /// A copy an install set aside to roll back with (#565): what it was,
+    /// from which release, its generation. `kind` says `rollback`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<crate::volume::metadata::RollbackMark>,
     /// Where the volume lives — slabs, drives, RAID partners and the state of
     /// each (#136). Always on the single-volume GET; on the listing only with
     /// `?placement=true`, since it walks the volume's extent map.
@@ -141,6 +145,7 @@ struct Described {
     origin: &'static str,
     secret: bool,
     namespace: String,
+    rollback: Option<crate::volume::metadata::RollbackMark>,
     owner: Option<crate::volume::metadata::Owner>,
 }
 
@@ -168,6 +173,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
                 origin: vm.origin(id).as_str(),
                 secret: vm.is_secret(id),
                 namespace: vm.namespace(id).to_string(),
+                rollback: vm.rollback(id).cloned(),
             }
         }
         None => Described {
@@ -189,6 +195,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
             origin: crate::volume::metadata::Origin::Unmarked.as_str(),
             secret: false,
             namespace: crate::volume::metadata::DEFAULT_NAMESPACE.to_string(),
+            rollback: None,
         },
     }
 }
@@ -586,6 +593,7 @@ async fn list_from(
             origin: d.origin,
             secret: d.secret,
             namespace: d.namespace.clone(),
+            rollback: d.rollback.clone(),
         });
         if q.placement {
             let p = super::placement::of_volume(state, vm, *id).await;
@@ -735,6 +743,7 @@ async fn get_from(
             origin: d.origin,
             secret: d.secret,
             namespace: d.namespace.clone(),
+            rollback: d.rollback.clone(),
             };
             Json(resp).into_response()
         }
@@ -924,6 +933,7 @@ async fn compose_volume(
         origin: vm.origin(&id).as_str(),
         secret: vm.is_secret(&id),
         namespace: vm.namespace(&id).to_string(),
+        rollback: vm.rollback(&id).cloned(),
         access: crate::volume::Access::ReadWrite.to_string(),
         writable: true,
         role: vm
@@ -1102,6 +1112,7 @@ async fn create_volume(
             origin: d.origin,
             secret: d.secret,
             namespace: d.namespace.clone(),
+            rollback: d.rollback.clone(),
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
         return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
@@ -1253,6 +1264,7 @@ async fn create_volume(
                 origin: vm.origin(&vol_id).as_str(),
                 secret: req.secret,
                 namespace: vm.namespace(&vol_id).to_string(),
+                rollback: vm.rollback(&vol_id).cloned(),
                 access: crate::volume::Access::ReadWrite.to_string(),
                 writable: true,
                 // What it was actually placed in, which is not always what
@@ -1982,6 +1994,7 @@ async fn clone_volume(
             origin: d.origin,
             secret: d.secret,
             namespace: d.namespace.clone(),
+            rollback: d.rollback.clone(),
             };
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
@@ -2914,6 +2927,7 @@ async fn create_snapshot(
             origin: d.origin,
             secret: d.secret,
             namespace: d.namespace.clone(),
+            rollback: d.rollback.clone(),
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -3003,6 +3017,7 @@ async fn resize_volume(
             origin: d.origin,
             secret: d.secret,
             namespace: d.namespace.clone(),
+            rollback: d.rollback.clone(),
             };
             Json(resp).into_response()
         }
@@ -3545,6 +3560,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
             origin: d.origin,
             secret: d.secret,
             namespace: d.namespace.clone(),
+            rollback: d.rollback.clone(),
     })
 }
 

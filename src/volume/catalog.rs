@@ -37,6 +37,8 @@ pub trait VolumeView {
     fn is_secret(&self, id: &VolumeId) -> bool;
     /// The namespace the volume belongs to (#408).
     fn namespace(&self, id: &VolumeId) -> &str;
+    /// A rollback copy's mark (#565).
+    fn rollback(&self, id: &VolumeId) -> Option<&super::metadata::RollbackMark>;
     fn is_template(&self, id: &VolumeId) -> bool;
     fn is_sealed(&self, id: &VolumeId) -> bool {
         self.get_volume_handle(id).map(|h| h.is_sealed()).unwrap_or(false)
@@ -72,6 +74,7 @@ struct Entry {
     origin: Origin,
     secret: bool,
     namespace: String,
+    rollback: Option<super::metadata::RollbackMark>,
 }
 
 /// The volumes as the manager last published them.
@@ -102,6 +105,7 @@ impl Catalog {
                         origin: m.origin(&id),
                         secret: m.is_secret(&id),
                         namespace: m.namespace(&id).to_string(),
+                        rollback: m.rollback(&id).cloned(),
                     },
                 ))
             })
@@ -139,6 +143,9 @@ impl VolumeView for Catalog {
     }
     fn namespace(&self, id: &VolumeId) -> &str {
         self.entries.get(id).map(|e| e.namespace.as_str()).unwrap_or(super::metadata::DEFAULT_NAMESPACE)
+    }
+    fn rollback(&self, id: &VolumeId) -> Option<&super::metadata::RollbackMark> {
+        self.entries.get(id).and_then(|e| e.rollback.as_ref())
     }
     fn is_template(&self, id: &VolumeId) -> bool {
         self.templates.contains(id)
@@ -184,6 +191,9 @@ impl VolumeView for super::VolumeManager {
     }
     fn namespace(&self, id: &VolumeId) -> &str {
         super::VolumeManager::namespace(self, id)
+    }
+    fn rollback(&self, id: &VolumeId) -> Option<&super::metadata::RollbackMark> {
+        super::VolumeManager::rollback(self, id)
     }
     fn is_template(&self, id: &VolumeId) -> bool {
         super::VolumeManager::is_template(self, id)
@@ -250,6 +260,9 @@ macro_rules! view_through {
             }
             fn namespace(&self, id: &VolumeId) -> &str {
                 VolumeView::namespace(&**self, id)
+            }
+            fn rollback(&self, id: &VolumeId) -> Option<&super::metadata::RollbackMark> {
+                VolumeView::rollback(&**self, id)
             }
             fn is_template(&self, id: &VolumeId) -> bool {
                 VolumeView::is_template(&**self, id)

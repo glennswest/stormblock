@@ -261,6 +261,26 @@ pub struct VolumeRecord {
     /// header carries it last, after the secret.
     #[serde(skip)]
     pub namespace: Option<String>,
+    /// A node volume an install set aside to roll back to (#565): what it
+    /// was, from which release, which generation. Never written by bincode;
+    /// a format v2 header carries it last, after the namespace.
+    #[serde(skip)]
+    pub rollback: Option<RollbackMark>,
+}
+
+/// A rollback copy (#565): a node volume an install or upgrade renamed aside
+/// (`<of>@<from>[.N]`) so the node can roll back once. Pruned to the newest
+/// `[rollback] keep` per `of` once a boot of the new release is marked good.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RollbackMark {
+    /// The plain name it was set aside from.
+    pub of: String,
+    /// The release it was the node's under (`previous` when that was not read).
+    pub from: String,
+    /// 1 for the first copy of `of`, one more for each after it.
+    pub generation: u32,
+    /// When it was set aside, unix seconds (0: recognised by its name, #565).
+    pub set_aside_at: u64,
 }
 
 /// Where a volume came from (#349, owner: an install drops old system
@@ -618,6 +638,7 @@ impl From<v8::VolumeMetadata> for VolumeMetadata {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                 })
                 .collect(),
         }
@@ -736,6 +757,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                 })
                 .collect(),
         }
@@ -806,6 +828,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                 })
                 .collect(),
         }
@@ -877,6 +900,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                     })
                 .collect(),
         }
@@ -943,6 +967,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                     })
                 .collect(),
         }
@@ -1011,6 +1036,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                     })
                 .collect(),
         }
@@ -1073,6 +1099,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                     })
                 .collect(),
         }
@@ -1138,6 +1165,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                     })
                 .collect(),
         }
@@ -1437,6 +1465,7 @@ mod tests {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                 }],
         }
     }
@@ -1581,6 +1610,7 @@ mod tests {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1674,6 +1704,7 @@ mod tests {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1905,6 +1936,7 @@ mod retention_tests {
                     layout: Default::default(),
                     secret: false,
                     namespace: None,
+                    rollback: None,
                 }],
         }
     }

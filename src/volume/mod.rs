@@ -33,6 +33,7 @@ mod scheme_tests;
 pub mod holds;
 pub mod pressure;
 pub mod relocate;
+pub mod rollback;
 pub mod synonym;
 pub mod target;
 pub mod throttle;
@@ -381,6 +382,8 @@ pub struct VolumeManager {
     digest_wake: Arc<tokio::sync::Notify>,
     /// The namespace each volume belongs to (#408). Absent = the default.
     namespaces: HashMap<VolumeId, String>,
+    /// Rollback copies an install set aside (#565), by volume.
+    rollbacks: HashMap<VolumeId, metadata::RollbackMark>,
     /// Why the last attempt to write this manager's record failed, if it did.
     ///
     /// A background persist cannot fail the call that triggered it — the
@@ -474,6 +477,7 @@ impl VolumeManager {
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             namespaces: HashMap::new(),
+            rollbacks: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -515,6 +519,7 @@ impl VolumeManager {
             to_digest: Default::default(),
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             namespaces: HashMap::new(),
+            rollbacks: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -956,6 +961,29 @@ impl VolumeManager {
         self.origins.get(id).copied().unwrap_or_default()
     }
 
+    /// A rollback copy's mark (#565), when the volume is one.
+    pub fn rollback(&self, id: &VolumeId) -> Option<&metadata::RollbackMark> {
+        self.rollbacks.get(id)
+    }
+
+    /// Every rollback copy's mark (#565).
+    pub fn rollbacks(&self) -> &HashMap<VolumeId, metadata::RollbackMark> {
+        &self.rollbacks
+    }
+
+    /// Mark a volume as a rollback copy (#565), or clear it; written at the
+    /// next persist.
+    pub fn set_rollback(&mut self, id: VolumeId, mark: Option<metadata::RollbackMark>) -> Result<(), VolumeError> {
+        if !self.volumes.contains_key(&id) {
+            return Err(VolumeError::VolumeNotFound(id));
+        }
+        match mark {
+            Some(m) => self.rollbacks.insert(id, m),
+            None => self.rollbacks.remove(&id),
+        };
+        Ok(())
+    }
+
     /// The namespace a volume belongs to (#408): [`metadata::DEFAULT_NAMESPACE`]
     /// unless something said otherwise.
     pub fn namespace(&self, id: &VolumeId) -> &str {
@@ -1223,6 +1251,9 @@ impl VolumeManager {
             }
         }
         handle.set_name(name).await;
+        // Renamed, a rollback copy is no longer one (#565): an install that
+        // sets one aside marks it after renaming it.
+        self.rollbacks.remove(&id);
         Ok(())
     }
 
@@ -1582,6 +1613,7 @@ impl VolumeManager {
             self.to_digest.remove(id);
             self.schemes.remove(id);
             self.namespaces.remove(id);
+            self.rollbacks.remove(id);
             self.retentions.remove(id);
             self.secrets.remove(id);
             self.gem.write().await.remove_volume(*id);
@@ -1937,6 +1969,9 @@ impl VolumeManager {
             }
             if let Some(ns) = vrec.namespace.clone().filter(|n| n != metadata::DEFAULT_NAMESPACE) {
                 self.namespaces.insert(vrec.id, ns);
+            }
+            if let Some(r) = vrec.rollback.clone() {
+                self.rollbacks.insert(vrec.id, r);
             }
             self.volumes.insert(vrec.id, handle);
             self.present.insert(vrec.id);
@@ -2507,6 +2542,7 @@ impl VolumeManager {
         self.to_digest.remove(&id);
         self.schemes.remove(&id);
         self.namespaces.remove(&id);
+        self.rollbacks.remove(&id);
         self.retentions.remove(&id);
         // A secret volume's slots are always overwritten (#74), whatever
         // the node's default.
@@ -3973,6 +4009,7 @@ impl VolumeManager {
                 layout: handle.layout(),
                 secret: self.secrets.contains(id),
                 namespace: self.namespaces.get(id).cloned(),
+                rollback: self.rollbacks.get(id).cloned(),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -4041,6 +4078,7 @@ impl VolumeManager {
                 layout: self.volumes.get(&id).map(|h| h.layout()).unwrap_or_default(),
                 secret: self.secrets.contains(&id),
                 namespace: self.namespaces.get(&id).cloned(),
+                rollback: self.rollbacks.get(&id).cloned(),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -4304,6 +4342,9 @@ impl VolumeManager {
             }
             if let Some(ns) = vrec.namespace.clone().filter(|n| n != metadata::DEFAULT_NAMESPACE) {
                 self.namespaces.insert(vrec.id, ns);
+            }
+            if let Some(r) = vrec.rollback.clone() {
+                self.rollbacks.insert(vrec.id, r);
             }
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);

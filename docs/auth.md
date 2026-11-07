@@ -82,6 +82,7 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
   default (`POST /api/v1/forge/default`, #290), and forge's trust
   (`PUT`/`DELETE /api/v1/forge/trust`, #381);
 - a release erase asked or cancelled (`POST`/`DELETE /api/v1/release`, #291);
+- pruning rollback copies (`POST /api/v1/rollback/prune`, #565);
 - the pallet verbs that write a partition table (`gpt`, `convert`, `prune`,
   `adopt`);
 - building or converting an image (`POST /api/v1/images/build`,

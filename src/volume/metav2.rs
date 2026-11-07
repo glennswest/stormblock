@@ -1266,6 +1266,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     let scheme = record.scheme;
     let spread = record.layout == crate::volume::thin::Layout::Spread;
     let secret = record.secret;
+    let rollback = record.rollback.take();
     // The default namespace is not written: a stormcos volume's header is
     // byte for byte what it was (#408).
     let namespace = record
@@ -1297,7 +1298,16 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     // either stops at the tag it does not know, so it reads everything
     // before: an engine of #74 still knows a secret is one, and reads the
     // volume as `stormcos`'s.
-    let later = tier.is_some() || digest.is_some() || scheme.is_some() || spread || secret || namespace.is_some();
+    // After the namespace, a rollback copy's mark (#565): `R`, the
+    // generation, when, then `from` and `of` each a length byte and bytes.
+    let rollback = rollback.filter(|r| r.from.len() <= 255 && r.of.len() <= 255);
+    let later = tier.is_some()
+        || digest.is_some()
+        || scheme.is_some()
+        || spread
+        || secret
+        || namespace.is_some()
+        || rollback.is_some();
     if origin != super::metadata::Origin::Unmarked || later {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
@@ -1325,8 +1335,39 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
             out.push(n.len() as u8);
             out.extend_from_slice(n.as_bytes());
         }
+        if let Some(r) = rollback {
+            out.push(ROLLBACK_TAG);
+            out.extend_from_slice(&r.generation.to_le_bytes());
+            out.extend_from_slice(&r.set_aside_at.to_le_bytes());
+            for t in [&r.from, &r.of] {
+                out.push(t.len() as u8);
+                out.extend_from_slice(t.as_bytes());
+            }
+        }
     }
     out
+}
+
+/// A rollback copy's mark in a header's extension (#565): after the namespace.
+const ROLLBACK_TAG: u8 = b'R';
+
+/// `R`, a generation, a time, two strings each a length byte and bytes.
+fn read_rollback(d: &[u8]) -> Option<(super::metadata::RollbackMark, usize)> {
+    if d.len() < 13 || d[0] != ROLLBACK_TAG {
+        return None;
+    }
+    let generation = u32::from_le_bytes(d[1..5].try_into().ok()?);
+    let set_aside_at = u64::from_le_bytes(d[5..13].try_into().ok()?);
+    let mut at = 13;
+    let mut text = || -> Option<String> {
+        let n = *d.get(at)? as usize;
+        let t = std::str::from_utf8(d.get(at + 1..at + 1 + n)?).ok()?.to_string();
+        at += 1 + n;
+        Some(t)
+    };
+    let from = text()?;
+    let of = text()?;
+    Some((super::metadata::RollbackMark { of, from, generation, set_aside_at }, at))
 }
 
 /// A secret volume in a header's extension (#74): last.
@@ -1397,6 +1438,9 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
                     }
                 }
                 d = &d[2 + n..];
+            } else if let Some((mark, used)) = read_rollback(d) {
+                rec.rollback = Some(mark);
+                d = &d[used..];
             } else {
                 break;
             }
@@ -1593,6 +1637,7 @@ mod tests {
             layout: Default::default(),
             secret: false,
             namespace: None,
+            rollback: None,
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1644,6 +1689,7 @@ mod tests {
                 layout: Default::default(),
                 secret: false,
                 namespace: None,
+                rollback: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = document_of(header_entries(id, &bytes)).unwrap();
@@ -1704,6 +1750,7 @@ mod tests {
                 layout: Default::default(),
                 secret: false,
                 namespace: None,
+                rollback: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1753,6 +1800,7 @@ mod tests {
                 layout,
                 secret: false,
                 namespace: None,
+                rollback: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1804,6 +1852,7 @@ mod tests {
                 layout,
                 secret: true,
                 namespace: None,
+                rollback: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1862,6 +1911,7 @@ mod tests {
             layout,
             secret: false,
             namespace: ns.map(String::from),
+            rollback: None,
         };
         for (d, scheme, layout) in [(None, None, Layout::Affine), (Some(digest), Some(sc), Layout::Spread)] {
             let rec = make(Some("nana"), d, scheme, layout);
@@ -1884,6 +1934,60 @@ mod tests {
         bad.extend_from_slice(HEADER_EXT_TAG);
         bad.extend_from_slice(&[Origin::Unmarked.code(), 0, NAMESPACE_TAG, 3, b'N', b'_', b'x']);
         assert_eq!(document_of(header_entries(id, &bad)).unwrap().volumes[0].namespace, None);
+    }
+
+    /// #565: a rollback copy's mark rides last, after the namespace; a
+    /// reader of #408 stops at its tag and reads the rest as before.
+    #[test]
+    fn a_rollback_copys_mark_rides_last_and_older_readers_keep_the_rest() {
+        use crate::volume::metadata::{Origin, RollbackMark};
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let mark = RollbackMark { of: "cadvisor-data.golden".into(), from: "12.70".into(), generation: 3, set_aside_at: 1_794_000_000 };
+        let rec = VolumeRecord {
+            id,
+            name: "cadvisor-data.golden@12.70".into(),
+            virtual_size: 1 << 20,
+            array_id: None,
+            extents: Default::default(),
+            retention: Default::default(),
+            redundancy: Default::default(),
+            parity: Default::default(),
+            failed_slabs: Vec::new(),
+            parent: None,
+            sealed: true,
+            template: false,
+            access: Default::default(),
+            fs: None,
+            owner: None,
+            lba: 4096,
+            extent_size: 0,
+            origin: Origin::Release,
+            tier: None,
+            digest: None,
+            scheme: None,
+            layout: Default::default(),
+            secret: false,
+            namespace: Some("nana".into()),
+            rollback: Some(mark.clone()),
+        };
+        let bytes = header_bytes(&rec, 1 << 20);
+        let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
+        assert_eq!(back.rollback.as_ref(), Some(&mark));
+        assert_eq!((back.origin, back.namespace.as_deref()), (Origin::Release, Some("nana")));
+        // A reader before #565: the tag unknown, everything before it read.
+        let at = bytes.len() - (13 + 1 + mark.from.len() + 1 + mark.of.len());
+        assert_eq!(bytes[at], b'R', "the mark last");
+        let mut older = bytes.clone();
+        older[at] = b'?';
+        let back = &document_of(header_entries(id, &older)).unwrap().volumes[0];
+        assert_eq!((back.rollback.as_ref(), back.namespace.as_deref(), back.origin), (None, Some("nana"), Origin::Release));
+        // Unmarked: the header is what it was.
+        let plain = VolumeRecord { rollback: None, ..rec.clone() };
+        assert!(header_bytes(&plain, 1 << 20).ends_with(b"N\x04nana"));
+        // A mark alone, nothing else to say, still rides (and is read back).
+        let alone = VolumeRecord { rollback: Some(mark.clone()), namespace: None, origin: Origin::Unmarked, ..rec };
+        let back = &document_of(header_entries(id, &header_bytes(&alone, 1 << 20))).unwrap().volumes[0];
+        assert_eq!(back.rollback.as_ref(), Some(&mark));
     }
 
     /// #349: a volume's origin rides after its header; a reader that knows
@@ -1917,6 +2021,7 @@ mod tests {
             layout: Default::default(),
             secret: false,
             namespace: None,
+            rollback: None,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -2179,6 +2284,7 @@ mod tests {
             layout: Default::default(),
             secret: false,
             namespace: None,
+            rollback: None,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -2219,6 +2325,7 @@ mod tests {
             layout: Default::default(),
             secret: false,
             namespace: None,
+            rollback: None,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

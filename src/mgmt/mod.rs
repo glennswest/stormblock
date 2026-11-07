@@ -32,6 +32,7 @@ pub mod live_mirror;
 pub mod volume_move;
 pub mod creators;
 pub mod namespaces;
+pub mod rollback;
 #[cfg(feature = "ui")]
 pub mod ui;
 

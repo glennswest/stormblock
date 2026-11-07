@@ -285,6 +285,7 @@ impl Context {
     /// What a volume is. The rule, in one place:
     ///
     /// * a template's scratch volume → `template`;
+    /// * a copy an install set aside (#565) → `rollback`;
     /// * not sealed → `volume` — something writes to it;
     /// * a `/v1` snapshot (a Kubernetes VolumeSnapshot, #111) → `snapshot`;
     /// * a template's sealed volume, or a blank an image shipped → `blank`;
@@ -293,6 +294,11 @@ impl Context {
     pub fn kind(&self, vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -> &'static str {
         if self.template_raw.contains(&id.0) {
             return "template";
+        }
+        // What an install set aside to roll back with (#565), sealed or not:
+        // neither in use nor an image to clone.
+        if vm.rollback(id).is_some() {
+            return "rollback";
         }
         if !vm.is_sealed(id) {
             return "volume";

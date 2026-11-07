@@ -609,7 +609,12 @@ async fn activate(State(state): State<Arc<AppState>>, Path(id): Path<String>) ->
 async fn mark_successful(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let id = with_id!(id);
     match mark_manager(&state).await.mark_successful(id).await {
-        Ok(loc) => Json(PalletResponse::from(&loc)).into_response(),
+        Ok(loc) => {
+            // Boot-ok (#565): the release running is confirmed, so the
+            // rollback copies past the newest `[rollback] keep` go.
+            crate::mgmt::rollback::after_boot_ok(&state);
+            Json(PalletResponse::from(&loc)).into_response()
+        }
         Err(e) => err(e),
     }
 }
