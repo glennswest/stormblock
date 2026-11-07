@@ -246,16 +246,18 @@ exit`, on the consoles). adopt-ublk's runtime is the same.
       blocking join) must fail `standdown`, then delete the branch; check.sh; a patch release; stage; close. Metal:
       the two adopt lines under 0.5 s apart on a reboot
 
-### A cluster worker cannot review bearers: releasing it fails 503 (2026-11-07, #557, P0, stormcentral#360) — IN PROGRESS
+### A cluster worker cannot review bearers: releasing it fails 503 (2026-11-07, #557, P0, stormcentral#360) — ENGINE HALF DONE (v23.23.0), open behind stormcluster
 
 Read from the code: pointing the engine at the VIP is not enough. A worker keeps its own `sa-token.key`, so its
 tier-0 tokens (`stormblock.token`, `stormcluster.token`) cannot verify at the cluster. Master's decision on #557: **A**,
 cluster-issued tokens and review at the cluster; **C**, the node token under the audit gate, is on stormcluster (#95)
 until A lands. Stormblock's half: follow a record of the cluster, written by stormcluster:
 `engine-cluster.json` beside the engine's token, `{api_url, ca, token}`, 0600, by rename.
-- [ ] KubeAuth follows the record at each review; a bad one fails closed; gone = its own apiserver; answers forgotten
-- [ ] test: a worker with no local apiserver takes a reviewed `POST /api/v1/release`; docs, CHANGELOG; check.sh; stage
-- [ ] stormcluster's half (issue and renew tokens at join, write and remove the record, take C out) and stormcos's, filed
+- [x] KubeAuth follows the record at each review; a bad one fails closed; gone = its own apiserver; answers forgotten
+- [x] test: a worker with no local apiserver takes a reviewed release; docs, CHANGELOG; check.sh ALL PASS at 1fcff47f
+      (1364/1364); v23.23.0; stage
+- [x] filed: https://github.com/glennswest/stormcluster/issues/99 (issue and renew tokens, write and remove the record, take C out), https://github.com/glennswest/stormcos/issues/838
+- [ ] after those: the master reruns `testhost cluster-test`; a real TLS endpoint; close
 
 ### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — PAUSED for P0 #557: v23.22.2 on main, not tagged or staged
 
