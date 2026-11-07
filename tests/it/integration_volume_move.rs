@@ -264,7 +264,10 @@ async fn a_volume_moves_onto_a_named_drive_while_written_and_stays_there() {
         (json!({ "drive": "no-such-serial" }), 8 * MIB, 404),
         (json!({ "slab_id": s1, "drive": d0 }), 8 * MIB, 400),
         (json!({ "shelf": "A" }), 8 * MIB, 400),
-        (json!({ "slab_id": s1 }), 1024 * MIB, 409),
+        // More than the slab (a 64 MiB drive), less than the node: the slab's 409.
+        (json!({ "slab_id": s1 }), 80 * MIB, 409),
+        // More than the whole node: its 507, as before.
+        (json!({ "slab_id": s1 }), 1024 * MIB, 507),
     ];
     for (i, (placement, size, want)) in refused.into_iter().enumerate() {
         let name = format!("refused-{i}");
