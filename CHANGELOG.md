@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-07
+- **docs:** #557: why a cluster worker cannot review a bearer, and the question it needs answered.
+
 ### 2026-11-06
 - **docs:** #390: `ci-shelf-raid6-verify.sh` re-run at 19bde5e0, ALL PASS. The run on the DS224C waits on the shelf being cabled to the Dell again.
 - **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.

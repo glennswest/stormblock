@@ -227,6 +227,13 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### A cluster worker cannot review bearers: releasing it fails 503 (2026-11-07, #557, P0, stormcentral#360) — WAITING ON THE OWNER
+
+Read from the code: pointing the engine at the VIP is not enough. A worker keeps its own `sa-token.key`, so its
+tier-0 tokens (`stormblock.token`, `stormcluster.token`) cannot verify at the cluster. Asked on #557: A cluster-issued
+tokens + review at the cluster (recommended, with C now), B a release-only local credential, C the node token under
+the audit gate. Nothing built. On A, stormblock's half: follow a record of endpoint and CA at each review.
+
 ### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — PAUSED for P0 #557: v23.22.2 on main, not tagged or staged
 
 Read from server7's and forge1's reboots by line (`.times`): the X9's 8.3 s "clock" is not the clock (firmware
