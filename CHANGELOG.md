@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
+- **fix:** #538: a handover's stand-down takes under a second again. Since #522 (v23.13.1) a node's exports run on one thread each, and stopping one joined its queue workers with a blocking call, so a request in flight could not finish and the worker waited out its 5 s: on every boot, before any unit's I/O could resume.
 - **docs:** #557: why a cluster worker cannot review a bearer, and the question it needs answered.
 
 ### 2026-11-06

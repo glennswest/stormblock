@@ -18,6 +18,7 @@
 #   refused    adopt-ublk told to read a slab on /dev/ublkb0: refused before
 #              the stand-down, and the server it would have replaced still
 #              serves
+#   standdown  (#538) with reads in flight, under 1 s from asking to quiesced
 #   timing     (#303) the handover's steps on the console ([adopt +T s] …,
 #              the slab devices attached before the stand-down is asked for,
 #              [boot-local stop +T s] …) and handover-state.json `serving`
@@ -163,12 +164,16 @@ read_in_gap() {
     RD=$!
 }
 
+# Requests in flight as the stand-down is asked for (#538).
+( while :; do dd if=/dev/ublkb0 of=/dev/null bs=64k count=64 iflag=direct 2>/dev/null; done ) & busy=$!
+
 # 3. retry: two failed restores, then the device is taken.
 STORMBLOCK_ADOPT_TEST_FAIL_RESTORES=2 stormblock adopt-ublk > /run/adopt-a.log 2>&1 &
 a=$!
 read_in_gap $inc /tmp/ra; rd=$RD
 for i in $(seq 1 200); do grep -q "Adopted\|adopted" /run/adopt-a.log && break; alive $a || break; sleep 0.1; done
 sleep 1
+kill $busy 2>/dev/null; wait $busy 2>/dev/null
 wait $rd 2>/dev/null
 # The console line (the log has its own ERROR line for each).
 said=$(grep -c "restore attempt [0-9]* failed (" /run/adopt-a.log)
@@ -178,6 +183,18 @@ if alive $a && cmp -s /tmp/pat /tmp/ra && [ "$said" = 2 ]; then
 else
     r retry "FAIL (adopter $(alive $a && echo up || echo down), gap read $(cmp -s /tmp/pat /tmp/ra && echo right || echo wrong))"
     log adopt-a /run/adopt-a.log 20
+fi
+
+# 3a0. standdown (#538): a request in flight holds nothing up. A blocking join
+# of the queue workers on the export's one thread made this 5 s.
+sd=$(awk '/^\[adopt \+.*asking the incumbent/ { gsub(/[^0-9.]/,"",$2); a=$2 }
+          /^\[adopt \+.*quiesced/ { gsub(/[^0-9.]/,"",$2); print $2 - a; exit }' /run/adopt-a.log)
+stuck=$(grep -c 'still running at exit' /run/boot-local.log)
+echo "GUEST standdown: ${sd:-?} s from asking to quiesced; requests left running: $stuck"
+if [ -n "$sd" ] && awk -v s="$sd" 'BEGIN { exit !(s < 1) }' && [ "$stuck" = 0 ]; then
+    r standdown PASS
+else
+    r standdown "FAIL (${sd:-?} s, $stuck left running)"
 fi
 
 # 3a. version (#189): the incumbent's version recorded, compared, rewritten.
@@ -322,7 +339,7 @@ timeout 600 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 2048 -smp 4
     -drive file="$W/a.img",if=virtio,format=raw > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG|PS|WATCHDOG)|panick'
 
-for m in incumbent-serves retry version timing give-up rerun refused version-refused sigterm-handover version-warn sigterm-capture; do
+for m in incumbent-serves retry standdown version timing give-up rerun refused version-refused sigterm-handover version-warn sigterm-capture; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $m PASS" || fail "$m"
 done
 if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi

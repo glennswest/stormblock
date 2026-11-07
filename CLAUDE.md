@@ -227,6 +227,13 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### The handover's stand-down: 5.1 s on every boot (2026-11-07, #538, P2, stormcos#804 fix 10) — IN PROGRESS
+
+Since #522 (v23.13.1) an export serves on a current-thread runtime, and `UblkServer::run` joined its workers with
+a blocking `join`: a request's task could not finish, so the worker sat out its 5 s (`1 request(s) still running at
+exit`, on the consoles). adopt-ublk's runtime is the same.
+- [ ] `join_workers` yields; unit test; ci-adopt-retry-verify.sh under a writer: stand-down < 1 s; check.sh; stage
+
 ### A cluster worker cannot review bearers: releasing it fails 503 (2026-11-07, #557, P0, stormcentral#360) — WAITING ON THE OWNER
 
 Read from the code: pointing the engine at the VIP is not enough. A worker keeps its own `sa-token.key`, so its

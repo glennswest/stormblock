@@ -1280,10 +1280,12 @@ impl UblkServer {
             self.running.store(false, Ordering::SeqCst);
         }
 
-        // Wait for all workers to exit
-        for w in workers {
-            let _ = w.join();
-        }
+        // Wait for all workers to exit, with this runtime still running: a
+        // worker waits for its requests' tasks, and on the one thread a node's
+        // export runs on (#522) they run only when this yields. A blocking
+        // join here held them all back: every handover with a request in
+        // flight on any device waited out the worker's 5 s (#538).
+        join_workers(workers).await;
 
         // Release every reference to /dev/ublkcN BEFORE DEL_DEV: the kernel's
         // synchronous DEL_DEV blocks until the char device is fully released
@@ -2723,6 +2725,16 @@ fn queue_worker(
     tracing::info!("ublk queue {} worker exiting", queue_id);
 }
 
+/// Threads joined without holding up the runtime that awaits this.
+async fn join_workers(workers: Vec<std::thread::JoinHandle<()>>) {
+    for w in workers {
+        while !w.is_finished() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let _ = w.join();
+    }
+}
+
 /// Submit a FETCH_REQ for one tag.
 fn submit_io_fetch(
     ring: &mut IoUring<squeue::Entry128>,
@@ -2763,6 +2775,34 @@ fn submit_io_fetch(
 
 #[cfg(test)]
 mod tests {
+    /// A worker waiting for a task on the runtime that waits for the worker
+    /// (#538): on one thread a blocking join is the 5 s of every handover.
+    #[test]
+    fn workers_are_joined_with_their_requests_still_running() {
+        use std::sync::atomic::AtomicBool;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let answered = Arc::new(AtomicBool::new(false));
+        let saw = Arc::new(AtomicBool::new(false));
+        let (a, s) = (answered.clone(), saw.clone());
+        let worker = std::thread::spawn(move || {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !a.load(Ordering::SeqCst) && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            s.store(a.load(Ordering::SeqCst), Ordering::SeqCst);
+        });
+        let t0 = std::time::Instant::now();
+        rt.block_on(async {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                answered.store(true, Ordering::SeqCst);
+            });
+            join_workers(vec![worker]).await;
+        });
+        assert!(saw.load(Ordering::SeqCst), "the request's task never ran while the worker was joined");
+        assert!(t0.elapsed() < std::time::Duration::from_secs(1), "{:?}", t0.elapsed());
+    }
+
     #[test]
     fn read_ahead_is_a_megabyte_unless_asked() {
         assert_eq!(read_ahead_kb(None), 1024);
