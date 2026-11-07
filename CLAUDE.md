@@ -436,7 +436,7 @@ Missing = not yet; a file there that does not parse stays an error.
       every file missing starts, health `serving: http` and all five `missing`;
       v23.14.0; stage; closed. Not on a node: stormcos#374/#497 set the keys
 
-### Shelf test: two RAID-6 sets on the DS224C, 4K+PI (2026-10-10, #390, P2) — ENGINE HALF DONE; the run WAITS ON HARDWARE (stormdrive#82)
+### Shelf test: two RAID-6 sets on the DS224C, 4K+PI (2026-10-10, #390, P2) — ENGINE HALF DONE; the run WAITS ON THE SHELF BEING CABLED, then stormdrive#82
 
 The run itself is on the Dell's shelf and waits on: shelf drives inducted
 (none in stormcentral's assets), stormdrive#82 (4K+PI formats) and #75
@@ -455,6 +455,12 @@ itself; #391 was proven in QEMU). Engine work now:
       `ci-shelf-raid6-verify.sh` (QEMU, 28 scsi_debug 4K+PI drives): ALL PASS,
       steps 1–9 incl. the cut mid-write and mid-rebuild (12.9 %: resumed)
 - [x] docs (raid-sets.md), CHANGELOG; check.sh at f3e0507c ALL PASS (1293)
+- [x] re-proven at 19bde5e0 (2026-11-06, the RAID code changed since f3e0507c):
+      ci-shelf-raid6-verify.sh ALL PASS, 27 RESULT lines, none failed (kernel 7.2.11)
+- [ ] **the shelf is not attached**: no enclosure behind the Dell's SAS9300-4i4e, its 17 drives
+      `missing` since 2026-10-10 23:15Z (stormdrive#30, #85, read 2026-11-03); stormcentral's
+      assets on 2026-11-06 list one drive on C2NR0Q2, the internal bay 4. Owner's hands:
+      `wait-owner --action`
 - [ ] the run on the Dell: after stormdrive#82/#75 (4K+PI formats, induction)
       and the master's #391 gate (host reset proven on the Dell); then
       `shelf_raid6_test run --drives <22 bays> --extra <2+>` (and the
