@@ -158,7 +158,7 @@ round() { # phase
     done
 }
 # The disk's reads, writes and flushes a call cost (/sys/block/vda/stat).
-ios() { awk '{print $1, $5, $15}' /sys/block/vda/stat; }
+ios() { awk '{print $1, $5, $16}' /sys/block/vda/stat; }
 diffios() { # before after
     echo "$1 $2" | awk '{print "reads", $4-$1, "writes", $5-$2, "flushes", $6-$3}'
 }

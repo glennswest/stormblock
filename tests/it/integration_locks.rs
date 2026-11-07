@@ -830,3 +830,126 @@ async fn a_clone_and_a_delete_read_their_table_pages_without_the_volume_manager(
     assert!(clone_worst < Duration::from_millis(100), "the volume manager waited {clone_worst:?} behind a clone");
     assert!(delete_worst < Duration::from_millis(100), "the volume manager waited {delete_worst:?} behind a delete");
 }
+
+/// Every operation a device is asked for, while `on`.
+struct OpLog {
+    inner: Arc<dyn BlockDevice>,
+    name: &'static str,
+    on: Arc<std::sync::atomic::AtomicBool>,
+    ops: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl OpLog {
+    fn note(&self, op: String) {
+        if self.on.load(std::sync::atomic::Ordering::Relaxed) {
+            self.ops.lock().unwrap().push(format!("{} {op}", self.name));
+        }
+    }
+}
+
+#[async_trait]
+impl BlockDevice for OpLog {
+    fn id(&self) -> &DeviceId {
+        self.inner.id()
+    }
+    fn capacity_bytes(&self) -> u64 {
+        self.inner.capacity_bytes()
+    }
+    fn block_size(&self) -> u32 {
+        self.inner.block_size()
+    }
+    fn optimal_io_size(&self) -> u32 {
+        self.inner.optimal_io_size()
+    }
+    fn device_type(&self) -> DriveType {
+        self.inner.device_type()
+    }
+    async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+        self.note(format!("read {offset} {}", buf.len()));
+        self.inner.read(offset, buf).await
+    }
+    async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+        self.note(format!("write {offset} {}", buf.len()));
+        self.inner.write(offset, buf).await
+    }
+    async fn flush(&self) -> DriveResult<()> {
+        self.note("flush".to_string());
+        self.inner.flush().await
+    }
+    async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.note(format!("discard {offset} {len}"));
+        self.inner.discard(offset, len).await
+    }
+    async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        self.note(format!("zeroes {offset} {len}"));
+        self.inner.write_zeroes(offset, len).await
+    }
+}
+
+/// What a clone and a delete ask of the disk (#521): a flush is what costs
+/// seconds on a drive-managed SMR disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn what_a_clone_and_a_delete_ask_of_the_disk() {
+    let dir = TempDir::new().unwrap();
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ops = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let devices = common::create_file_devices(&dir, 2, 512 * 1024 * 1024).await;
+    let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    let mut ids = Vec::new();
+    for ((dev, role), name) in devices.into_iter().zip([SlabRole::System, SlabRole::Data]).zip(["sys", "data"]) {
+        let logged: Arc<dyn BlockDevice> = Arc::new(OpLog { inner: dev, name, on: on.clone(), ops: ops.clone() });
+        let slab = Slab::format_with(
+            logged,
+            SlabFormat::new(DEFAULT_EXTENT_SIZE, StorageTier::Hot).with_role(role).with_metadata(8 << 20),
+        )
+        .await
+        .unwrap();
+        ids.push(slab.slab_id());
+        vm.add_slab(slab).await;
+    }
+    vm.persist_to_slabs(ids);
+    let vm = Arc::new(stormblock::lockwatch::TrackedMutex::new(vm));
+    let store = tokio::sync::Mutex::new(stormblock::fs::template::TemplateStore::in_memory());
+    let t = stormblock::fs::template::create(&vm, &store, &stormblock::fs::template::TemplateSpec::new("blank", 64 << 20))
+        .await
+        .unwrap();
+    let golden = t.clone_source().unwrap();
+    let clone = |name: &str| {
+        let (vm, spec) = (vm.clone(), stormblock::fs::CloneSpec { name: name.into(), ..Default::default() });
+        async move { stormblock::fs::template::clone_volume(&vm, golden, &spec).await.unwrap().volume_id }
+    };
+    // The first after a start writes its stores whole.
+    let first = clone("first").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let measure = |what: &'static str| {
+        let (on, ops) = (on.clone(), ops.clone());
+        move |phase: bool| {
+            on.store(phase, std::sync::atomic::Ordering::Relaxed);
+            if !phase {
+                let o = std::mem::take(&mut *ops.lock().unwrap());
+                let flushes = o.iter().filter(|l| l.ends_with("flush")).count();
+                println!("OPS {what}: {} operations, {flushes} flushes", o.len());
+                for l in &o {
+                    println!("OPS   {l}");
+                }
+                flushes
+            } else {
+                0
+            }
+        }
+    };
+    let m = measure("clone");
+    m(true);
+    let id = clone("second").await;
+    let flushes = m(false);
+    assert!(flushes > 0, "a clone is made durable");
+
+    let m = measure("delete");
+    m(true);
+    let pre = VolumeManager::preread_unlocked(&vm, id).await.ok();
+    vm.lock().await.delete_volume_preread(id, None, pre).await.unwrap();
+    VolumeManager::persist_detached(&vm).await;
+    m(false);
+    drop(first);
+}
