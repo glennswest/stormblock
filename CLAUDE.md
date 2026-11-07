@@ -227,6 +227,14 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### A claim on a cluster worker takes ~321 s (2026-11-07, #558, P1, stormcentral#360) — NOT stormblock's: waits on stormcluster#103
+
+Read from stormcentral's paired test b8a2d7f96a (12.70): the claim bound 0 s after its first event, the kubelet's
+`volumes` (attach + mount) 0.0 s; `wait` 318.4 s over 5 attempts, 4 × `FailedCreatePodSandBox` (cilium-cni: Cilium
+agent not reachable, 30 s timeout each). A plain pod 4 s earlier got its network in 4.1 s. No engine change.
+- [x] cause read; filed https://github.com/glennswest/stormcluster/issues/103; #558 proposed after it
+- [ ] when it lands: the next cluster test's `claim on the worker` within ~5 s of a single node; close
+
 ### forge's stormcert refused on forge/trust: reviewed as destroy (2026-11-07, #555, P0, stormcos#490) — ENGINE DONE (v23.22.3), open behind the stormcos role
 
 The issue's `update` would let every `storage-user` (`update` on `storage.storm.io` `*`) replace the CA and bootstrap
