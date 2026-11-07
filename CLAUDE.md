@@ -227,12 +227,13 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### forge's stormcert refused on forge/trust: reviewed as destroy (2026-11-07, #555, P0, stormcos#490) — IN PROGRESS
+### forge's stormcert refused on forge/trust: reviewed as destroy (2026-11-07, #555, P0, stormcos#490) — ENGINE DONE (v23.22.3), open behind the stormcos role
 
 The issue's `update` would let every `storage-user` (`update` on `storage.storm.io` `*`) replace the CA and bootstrap
 token handed to booting nodes. So its own verb, `settrust`; DELETE stays `destroy`. Needs stormcos's
 `stormcos:forge-trust` role to add the verb.
-- [ ] review_attributes, docs, test; check.sh; patch; stage; stormcos issue; then its done-when on a first boot
+- [x] review_attributes, docs, test; check.sh ALL PASS at 84f806a3 (1363/1363); v23.22.3; stage; stormcos issue
+- [ ] after the role and stormcert#144: a first boot with `[forge]` logs `gave the storage engine forge's CA`; close
 
 ### The handover's stand-down: 5.1 s on every boot (2026-11-07, #538, P2, stormcos#804 fix 10) — PAUSED for P0 #555: the fix is on main
 
