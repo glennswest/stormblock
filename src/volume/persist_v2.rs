@@ -17,6 +17,14 @@
 //! a newer one would put old values back. Batches are applied in the order
 //! they were taken ([`Ticket`]), and a batch taken before a failure that
 //! made its sink be written whole is dropped: the whole write covers it.
+//!
+//! **Group commit (#521).** A record is durable once it and every record
+//! before it are flushed, and a flush is what costs seconds on a drive-managed
+//! SMR disk. Eight clones at once took eight log flushes, one after the other.
+//! Now a batch joins its sink's queue in its turn, and whoever gets to write
+//! next writes everything queued as one record with one flush: never two
+//! separate records with only the later one on the disk, which the log's replay
+//! could read back after a second cut as if it were new.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -79,8 +87,33 @@ impl Opener {
     }
 }
 
+/// A sink's changes waiting to be written (#521).
+#[derive(Default)]
+struct Commit {
+    queue: std::sync::Mutex<Vec<Queued>>,
+    /// Held by whoever is writing: those behind it are queueing their changes.
+    running: tokio::sync::Mutex<()>,
+}
+
+impl Commit {
+    /// Nothing waiting and nothing being written.
+    fn idle(&self) -> bool {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).is_empty() && self.running.try_lock().is_ok()
+    }
+}
+
+struct Queued {
+    epoch: u64,
+    ops: Vec<Op>,
+    done: Done,
+}
+
+/// How a queued batch ended, set by whoever wrote it.
+type Done = Arc<std::sync::OnceLock<Result<(), String>>>;
+
 pub(super) struct SinkState {
     store: Arc<tokio::sync::Mutex<Option<MetaV2>>>,
+    commit: Arc<Commit>,
     /// How to open the store, for a load before the first persist opened it.
     opener: Option<Opener>,
     /// The volumes the store holds: their header's hash and chunk count.
@@ -94,7 +127,7 @@ pub(super) struct SinkState {
 
 impl SinkState {
     fn new() -> SinkState {
-        SinkState { store: Default::default(), opener: None, held: HashMap::new(), doc: None, need_full: true, epoch: 0 }
+        SinkState { store: Default::default(), commit: Default::default(), opener: None, held: HashMap::new(), doc: None, need_full: true, epoch: 0 }
     }
 }
 
@@ -137,7 +170,9 @@ impl V2State {
     /// what it was last given: the state in which a map may leave memory.
     pub(super) fn quiet(&self) -> bool {
         let next = self.order.state.lock().unwrap_or_else(|e| e.into_inner()).0;
-        next == self.next_ticket && self.sinks.values().all(|s| !s.need_full)
+        // Queued is not yet in the store, and a map that left memory is read
+        // back from the store.
+        next == self.next_ticket && self.sinks.values().all(|s| !s.need_full && s.commit.idle())
     }
 
     /// How many volumes a sink's store holds.
@@ -255,6 +290,7 @@ impl Drop for Ticket {
 pub(super) struct Batch {
     sink: Sink,
     store: Arc<tokio::sync::Mutex<Option<MetaV2>>>,
+    commit: Arc<Commit>,
     opener: Opener,
     epoch: u64,
     /// The whole store, sorted; and how many volumes it names.
@@ -381,6 +417,7 @@ pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, input: Inputs<'_>) ->
             batches.push(Batch {
                 sink: *sink,
                 store: s.store.clone(),
+                commit: s.commit.clone(),
                 opener: opener.clone(),
                 epoch: s.epoch,
                 full: Some((entries, members.len())),
@@ -455,6 +492,7 @@ pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, input: Inputs<'_>) ->
         batches.push(Batch {
             sink: *sink,
             store: s.store.clone(),
+            commit: s.commit.clone(),
             opener: opener.clone(),
             epoch: s.epoch,
             full: None,
@@ -470,22 +508,91 @@ pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, input: Inputs<'_>) ->
 pub(super) async fn apply(mut records: V2Records) -> Vec<String> {
     let Some((batches, ticket)) = records.inner.take() else { return Vec::new() };
     ticket.turn().await;
+    let state = &records.state;
     let mut failed = Vec::new();
-    for b in batches {
-        if let Err(e) = apply_one(&b, &records.state).await {
-            let mut st = records.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(s) = st.sinks.get_mut(&b.sink) {
-                s.need_full = true;
-                s.epoch += 1;
+    let mut waiting = Vec::new();
+    for mut b in batches {
+        if b.full.is_some() {
+            // In its turn, with what was queued before it written first.
+            write_queued(&b, state).await;
+            if let Err(e) = apply_one(&b, state).await {
+                failed.push(sink_failed(&b, state, e.to_string()));
             }
-            failed.push(match b.sink {
-                Sink::Slab(id) => format!("slab {} (metadata v2): {e}", id.0),
-                Sink::Dir => format!("{DIR_FILE}: {e}"),
-            });
+        } else {
+            let done = Done::default();
+            let queued = Queued { epoch: b.epoch, ops: std::mem::take(&mut b.ops), done: done.clone() };
+            b.commit.queue.lock().unwrap_or_else(|e| e.into_inner()).push(queued);
+            waiting.push((b, done));
         }
     }
+    // The order is settled: what comes next queues behind these, and shares
+    // the write that is waiting for this one's.
     drop(ticket);
+    let ended = futures_util::future::join_all(waiting.iter().map(|(b, done)| async move {
+        if done.get().is_none() {
+            write_queued(b, state).await;
+        }
+        done.get().cloned().unwrap_or_else(|| Err("not written".to_string()))
+    }))
+    .await;
+    for ((b, _), end) in waiting.iter().zip(ended) {
+        if let Err(e) = end {
+            failed.push(sink_failed(b, state, e));
+        }
+    }
     failed
+}
+
+/// The sink is written whole next time; what to report.
+fn sink_failed(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>, e: String) -> String {
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = st.sinks.get_mut(&b.sink) {
+        s.need_full = true;
+        s.epoch += 1;
+    }
+    match b.sink {
+        Sink::Slab(id) => format!("slab {} (metadata v2): {e}", id.0),
+        Sink::Dir => format!("{DIR_FILE}: {e}"),
+    }
+}
+
+/// Write everything queued on `b`'s sink as one record, once whoever is
+/// writing now has finished.
+async fn write_queued(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) {
+    let _writing = b.commit.running.lock().await;
+    let queued = std::mem::take(&mut *b.commit.queue.lock().unwrap_or_else(|e| e.into_inner()));
+    if queued.is_empty() {
+        return;
+    }
+    let epoch = state.lock().unwrap_or_else(|e| e.into_inner()).sinks.get(&b.sink).map(|s| s.epoch);
+    let mut ops = Vec::new();
+    let mut in_record = Vec::new();
+    for q in queued {
+        if Some(q.epoch) == epoch {
+            ops.extend(q.ops);
+            in_record.push(q.done);
+        } else {
+            // Taken before a failed write; the whole write that follows it
+            // covers this.
+            let _ = q.done.set(Ok(()));
+        }
+    }
+    if in_record.is_empty() {
+        return;
+    }
+    let record = Batch {
+        sink: b.sink,
+        store: b.store.clone(),
+        commit: b.commit.clone(),
+        opener: b.opener.clone(),
+        epoch: epoch.unwrap_or(b.epoch),
+        full: None,
+        ops,
+    };
+    let end = apply_one(&record, state).await.map_err(|e| e.to_string());
+    for done in in_record {
+        let _ = done.set(end.clone());
+    }
 }
 
 async fn apply_one(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::io::Result<()> {

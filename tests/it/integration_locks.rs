@@ -892,7 +892,7 @@ async fn clone_named(vm: Arc<stormblock::lockwatch::TrackedMutex<VolumeManager>>
 }
 
 /// What a clone and a delete ask of the disk (#521): a flush is what costs
-/// seconds on a drive-managed SMR disk.
+/// seconds on a drive-managed SMR disk. `--nocapture` prints every operation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn what_a_clone_and_a_delete_ask_of_the_disk() {
     let dir = TempDir::new().unwrap();
@@ -962,7 +962,9 @@ async fn what_a_clone_and_a_delete_ask_of_the_disk() {
         c.await.unwrap();
     }
     let flushes = m(false);
-    println!("OPS eight at once: {flushes}");
+    // The stamps' data and the table entries, shared as before; the records
+    // too. 12 before they shared their log writes.
+    assert!(flushes <= 8, "8 clones at once: {flushes} flushes, where one alone takes 3");
 
     let m = measure("delete");
     m(true);
