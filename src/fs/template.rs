@@ -2873,10 +2873,10 @@ mod tests {
             let mut desc = fs.group_descs()[0];
             fs.write_block(desc.block_bitmap, &bitmap).await.unwrap();
             fs.stamp_bitmap_csum(&mut desc, &bitmap, true);
-            desc.free_blocks_count -= used.into();
+            desc.free_blocks_count -= used;
             fs.group_descs_mut()[0] = desc;
             fs.flush_group_descs().await.unwrap();
-            fs.superblock_mut().free_blocks_count -= used.into();
+            fs.superblock_mut().free_blocks_count -= u64::from(used);
             fs.flush_superblock().await.unwrap();
         }
         let report = ext4::check(&dev).await.unwrap();
