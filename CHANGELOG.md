@@ -4,8 +4,12 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
-- **BREAKING:** #212 (owner's decision A): `[serve] allow_any_host` defaults to `false`. A `/serve/v1` NVMe export must name the host that attaches it (`host_nqn`); one naming none is refused with 400 (`/serve/v1/exports`, and a `/serve/v1/volumes` create with `export: true`, before any volume is made), and a row from before host binding is wired admitting no host. Every caller sends a host since stormblock-registry#102/#119 and rustkube-node#236, all in published release 12.74 (registry 590b521, rustkube-node 78bf751); vmcloud-image-operator#48 was closed as not applicable (vmimages makes no media clone). A node that still needs the old behaviour sets `allow_any_host = true` (warned at every start).
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
+
+## [v24.0.0] — 2026-11-07
+
+### Breaking
+- #212 (owner's decision A): `[serve] allow_any_host` defaults to `false`. A `/serve/v1` NVMe export must name the host that attaches it (`host_nqn`); one naming none is refused with 400 (`/serve/v1/exports`, and a `/serve/v1/volumes` create with `export: true`, before any volume is made), and a row from before host binding is wired admitting no host. Every caller sends a host since stormblock-registry#102/#119 and rustkube-node#236, all in published release 12.74 (registry 590b521, rustkube-node 78bf751); vmcloud-image-operator#48 was closed as not applicable (vmimages makes no media clone). A node that still needs the old behaviour sets `allow_any_host = true` (warned at every start).
 
 ## [v23.27.0] — 2026-11-07
 
