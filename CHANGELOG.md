@@ -4,9 +4,13 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-06
-- **feat:** #506: `/init` leaves the appliance it settled on in `/run/stormblock/appliance` (the URL alone, one line, surviving `switch_root`), however it was found: the command line, the firmware's engine, DHCP, the boothost names or multicast. stormpump's kexec reboot asks it for the boot intent (stormpump#186), so a node whose appliance came from option 17 or the DHCP server can skip the firmware too. Only an `http://` URL is left, which is what stormpump reads, so an `nvme-tcp://` boothost leaves none; with no appliance, no file.
 - **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.
 
+
+## [v23.21.0] — 2026-11-06
+
+### Added
+- #506: `/init` leaves the appliance it settled on in `/run/stormblock/appliance` (the URL alone, one line, surviving `switch_root`), however it was found: the command line, the firmware's engine, DHCP, the boothost names or multicast. stormpump's kexec reboot asks it for the boot intent (stormpump#186), so a node whose appliance came from option 17 or the DHCP server can skip the firmware too. Only an `http://` URL is left, which is what stormpump reads, so an `nvme-tcp://` boothost leaves none; with no appliance, no file.
 
 ## [v23.20.0] — 2026-11-06
 
