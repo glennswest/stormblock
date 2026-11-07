@@ -227,12 +227,16 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### The handover's stand-down: 5.1 s on every boot (2026-11-07, #538, P2, stormcos#804 fix 10) — IN PROGRESS
+### The handover's stand-down: 5.1 s on every boot (2026-11-07, #538, P2, stormcos#804 fix 10) — PAUSED for P0 #555: the fix is on main
 
 Since #522 (v23.13.1) an export serves on a current-thread runtime, and `UblkServer::run` joined its workers with
 a blocking `join`: a request's task could not finish, so the worker sat out its 5 s (`1 request(s) still running at
 exit`, on the consoles). adopt-ublk's runtime is the same.
-- [ ] `join_workers` yields; unit test; ci-adopt-retry-verify.sh under a writer: stand-down < 1 s; check.sh; stage
+- [x] `join_workers` yields; unit test; ci-adopt-retry-verify.sh with reads in flight at bd898800 ALL PASS: 0.02 s
+      asking to quiesced, 0 requests left running
+- [ ] **To resume:** the negative control: `SC_BUILD_EXPECT_FAIL=1 sc-build` on branch wip/538-control (7dd33a46, the
+      blocking join) must fail `standdown`, then delete the branch; check.sh; a patch release; stage; close. Metal:
+      the two adopt lines under 0.5 s apart on a reboot
 
 ### A cluster worker cannot review bearers: releasing it fails 503 (2026-11-07, #557, P0, stormcentral#360) — WAITING ON THE OWNER
 
@@ -250,8 +254,8 @@ NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
 - [x] path NICs beside the boot, joined before an engine connects to the appliance and before switch_root
 - [x] DNS: 1 s a try, three fresh queries; DHCP: 1 s between discovers; stamp "node named"
 - [x] tests; ci-path-nics-verify, ci-node-name-verify, ci-boot-nic-verify, ci-no-appliance-verify ALL PASS;
-      check.sh ALL PASS (1361/1361) at e7d948d1's code; v23.22.2 is cfa8ce49, its own check.sh was
-      running at the pause. **To resume:** check.sh at cfa8ce49 (or main's head), tag v23.22.2, `component
+      check.sh ALL PASS (1361/1361) at e7d948d1's code; v23.22.2 is cfa8ce49, check.sh there ALL PASS
+      (sc-build exit 0). **To resume:** tag v23.22.2 at cfa8ce49, `component
       build stormblock --no-wait`, comment on #545 (the X9's 8.3 s "clock" is path NICs 3.2 s + DNS 5.1 s;
       no concurrent modprobe: probe order names sda and ethN), `propose --after-release`
 - [x] the probe's repeated slab opens (a table scan each: SAS's 4.7 s): #556
