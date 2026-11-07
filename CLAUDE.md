@@ -247,7 +247,10 @@ Read from stormcentral's paired test b8a2d7f96a (12.70): the claim bound 0 s aft
 `volumes` (attach + mount) 0.0 s; `wait` 318.4 s over 5 attempts, 4 × `FailedCreatePodSandBox` (cilium-cni: Cilium
 agent not reachable, 30 s timeout each). A plain pod 4 s earlier got its network in 4.1 s. No engine change.
 - [x] cause read; filed https://github.com/glennswest/stormcluster/issues/103; #558 proposed after it
-- [ ] when it lands: the next cluster test's `claim on the worker` within ~5 s of a single node; close
+- [x] 2026-11-07: narrowed by the master: flowsdn's same step 2.1 s (dc28256b39, 12.71-flowsdn), cilium 320 s on
+      every release; a joined worker's agent answers no CNI ADD until cilium-operator writes its CiliumNode's
+      podCIDRs (stormcos-cilium#51; stormcluster#103 parked behind it). #558 re-proposed after stormcos-cilium#51
+- [ ] when it lands: the next cilium cluster test's `claim on the worker` within ~5 s of a single node; close
 
 ### forge's stormcert refused on forge/trust: reviewed as destroy (2026-11-07, #555, P0, stormcos#490) — ENGINE DONE (v23.22.3), open behind the stormcos role
 
