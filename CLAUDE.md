@@ -287,7 +287,9 @@ on wip/521-free-held:
 - [x] `free_held` by batches: table read and discards with no lock, the registry held for one batch's table write
 - [x] an `api:` line WARN from 1 s (the kubelet's own line), so its steps reach console and syslog; docs, CHANGELOG
 - [x] check.sh at 46ecff17 ALL PASS; merged; v23.23.1; stage
-- [ ] metal: no `the slab registry (write) was held` by the flow-over after `Flow-over: validated`; X9's clone `api:` line (now on console and syslog) says what the seconds are. `--after-release`, then close. The target below is not met; the remainder stands
+- [ ] metal: no `the slab registry (write) was held` by the flow-over after `Flow-over: validated`; X9's clone `api:` line (now on console and syslog) says what the seconds are. `--after-release`, then close.
+      2026-11-07: 12.69 (composed) carries 15ea0d7, installed nowhere yet (pvetest 12.67, X9s 12.63, both 23041f5,
+      before the fix); waiting on an X9 install of 12.69 (`wait-hardware server7`) The target below is not met; the remainder stands
 
 X9 clones 2-3.5 s (10-17 s on server1), cold 183 ms but warm-after-reboot up to 3.7 s; lists 1.9-3.3 s;
 fsck 11-28 s. Target: each claim step < 50 ms on a SAS HDD. Measure, then fix where it points:
