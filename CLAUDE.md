@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.21.0** (2026-11-06, #506: `/run/stormblock/appliance`); **v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.21.1** (2026-11-06, #544: the validation reads in disk order); **v23.21.0** (2026-11-06, #506: `/run/stormblock/appliance`); **v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Validation on spinning disks reads in disk order (2026-11-06, #544, P1, stormcos#804) — IN PROGRESS
+### Validation on spinning disks reads in disk order (2026-11-06, #544, P1, stormcos#804) — DONE (v23.21.1), closed; metal pending
 
 2.9 GB took 33-96 s at 30-88 MB/s: 16 single-extent reads at once, seeking. Disk order,
 neighbours merged into one read, sha256 per extent as before; any error falls back to
@@ -236,8 +236,9 @@ the slot alone, so a bad sector names its extent. #444's hashes stay gated.
       extent, the run's bounds); docs, CHANGELOG
 - [x] rate model, 1.5 GB, two runs each, MB/s before → after: 180 MB/s + 8 ms seek
       81-88 → 128-146; 120 MB/s + 12 ms 75 → 98-102; flash 598-623 → 642-671
-- [ ] check.sh; patch; stage. Metal: health `flow_over.validation.mb_per_s` at the next
-      HDD and SMR install (target 100 and 60; before 52-88 and 30-39)
+- [x] check.sh at f27444fc ALL PASS (1357/1357); v23.21.1; stage
+- [ ] metal: health `flow_over.validation.mb_per_s` at the next HDD and SMR install
+      (target 100 and 60; before 52-88 and 30-39)
 
 ### /init leaves the appliance it found (2026-11-06, #506, P1, stormpump#186) — DONE (v23.21.0), closed; metal pending
 
