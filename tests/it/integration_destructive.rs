@@ -509,13 +509,13 @@ async fn a_worker_with_no_local_apiserver_reviews_at_the_cluster() {
 
     // Nothing listens at the worker's own 127.0.0.1:6443.
     let worker = node_following(false, Some("http://127.0.0.1:1".into()), Some(rec.to_str().unwrap())).await;
-    assert_eq!(call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await, 503, "as stormcentral#360 saw");
+    assert_eq!(call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 503, "as stormcentral#360 saw");
 
     write(record.clone());
-    let released = call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await;
-    assert!((200..300).contains(&released), "a reviewed release on a worker: {released}");
-    assert_eq!(call(&worker, M::POST, "/release", Some("user-k8s"), Some(json!({"erase": "once"}))).await, 403, "the cluster's RBAC decides");
-    assert_eq!(call(&worker, M::POST, "/release", Some("not-a-token"), Some(json!({"erase": "once"}))).await, 401);
+    let released = call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await;
+    assert_eq!(released, 200, "a reviewed release on a worker: its dry run, through the whole gate");
+    assert_eq!(call(&worker, M::POST, "/release", Some("user-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 403, "the cluster's RBAC decides");
+    assert_eq!(call(&worker, M::POST, "/release", Some("not-a-token"), Some(json!({"erase": "once", "dry_run": true}))).await, 401);
     let reviewer = asked.lock().unwrap().iter().find(|b| b["kind"] == "TokenReview").unwrap()["reviewer"].clone();
     assert_eq!(reviewer, "Bearer issued-by-the-cluster", "the cluster's own token, not the node's");
 
@@ -533,17 +533,15 @@ async fn a_worker_with_no_local_apiserver_reviews_at_the_cluster() {
         json!({"api_url": "https://192.168.16.96:7443", "ca": "", "token": "t"}),
     ] {
         write(bad.clone());
-        assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await, 503, "{bad}");
+        assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 503, "{bad}");
     }
     std::fs::write(&rec, "not json").unwrap();
-    assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await, 503, "not json");
+    assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 503, "not json");
 
-    // Released: the record gone, its own apiserver again, and what the cluster
-    // said forgotten (bob is nobody's, here too).
+    // Released: the record gone, and its own apiserver reviews again.
     std::fs::remove_file(&rec).unwrap();
-    let again = call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await;
-    assert!(again != 503 && again != 401 && again != 403, "its own apiserver reviews again: {again}");
-    assert_eq!(call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await, 503, "the worker's own has none, so it is refused again");
+    assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 200, "its own apiserver reviews again");
+    assert_eq!(call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 503, "what the cluster said is forgotten, and this node has no apiserver of its own to ask");
 }
 
 /// forge's stormcert gives the engine forge's trust and can do nothing else
