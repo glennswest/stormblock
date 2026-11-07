@@ -178,7 +178,7 @@ type Promising = Vec<(VolumeId, u64, bool, std::sync::Arc<crate::volume::ThinVol
 fn volumes_of(v: &impl crate::volume::catalog::VolumeView) -> Promising {
     v.volume_ids()
         .into_iter()
-        .filter_map(|id| v.get_volume_handle(&id).map(|h| (id, h.capacity_bytes(), v.is_sealed(&id), h)))
+        .filter_map(|id| v.get_volume_handle(&id).map(|h| (id, crate::drive::BlockDevice::capacity_bytes(&*h), v.is_sealed(&id), h)))
         .collect()
 }
 
