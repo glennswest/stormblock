@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v23.21.1** (2026-11-06, #544: the validation reads in disk order); **v23.21.0** (2026-11-06, #506: `/run/stormblock/appliance`); **v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v23.22.0** (2026-11-06, #484: a boot's page-in: read ahead in /init, 1 MiB of read-ahead on a ublk device); **v23.21.1** (2026-11-06, #544: the validation reads in disk order); **v23.21.0** (2026-11-06, #506: `/run/stormblock/appliance`); **v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Root-volume page-in at boot: 70-124 ms a major fault (2026-11-06, #484, P1, stormcos#804 fix 4) — IN PROGRESS
+### Root-volume page-in at boot: 70-124 ms a major fault (2026-11-06, #484, P1, stormcos#804 fix 4) — DONE (v23.22.0), closed; metal pending
 
 Kubelet on a SAS HDD: `logging=1240ms(10 faults)`; the engine pages itself in for 16 s
 while 33 units read the same disk. Target: < 10 ms a fault on a boot path. Plan: measure
@@ -243,9 +243,13 @@ first, then fix where the numbers point:
       SAS HDD's 124), quiet 10-12. O_DIRECT p90 under load: ublk 148.6, disk 149.9 ms: the
       engine adds nothing, so no read priority. Exec under load, ra 128/1024/4096 KiB:
       8.6/4.6/3.5 s (52/22/10 faults), quiet 0.6/0.4/0.85 s. Read ahead: 0 faults, 2-3 ms
-- [ ] ublk devices created with 1 MiB of read-ahead (`STORMBLOCK_UBLK_READ_AHEAD_KB`)
-- [ ] docs, CHANGELOG; check.sh; re-run; patch/minor; stage; stormcos told (its list)
-- [ ] metal: kubelet `startup:` on a pvetest (issue's done-when), R6415's engine page-in
+- [x] ublk devices created with 1 MiB of read-ahead (`STORMBLOCK_UBLK_READ_AHEAD_KB`): the
+      44 MiB binary read ahead in 0.5-0.7 s, was 3 s
+- [x] docs, CHANGELOG; check.sh, ci-boot-pagein-verify.sh, ci-no-appliance-verify.sh,
+      ci-ublk-qd-verify.sh ALL PASS at the commit before v23.22.0 (1358/1358); stage; stormcos told
+- [ ] metal, on a release with this initramfs and engine: kubelet `startup:` on a pvetest
+      (no early step over ~100 ms with `cpu 0ms` and N faults), the R6415's engine page-in,
+      `Boot read-ahead:` on the consoles
 
 ### Validation on spinning disks reads in disk order (2026-11-06, #544, P1, stormcos#804) — DONE (v23.21.1), closed; metal pending
 

@@ -4,9 +4,13 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-06
-- **perf:** #484: a boot's page-in. `/init` reads the engine, the kubelet, fastetcd, the control plane and the root's `/sbin` into the page cache, one reader, before any unit starts (`/etc/stormblock/boot-readahead` replaces the list; 5 s and 512 MiB or a quarter of available memory at most; `rd.stormblock.readahead=off`). A ublk device is created with 1 MiB of read-ahead (`STORMBLOCK_UBLK_READ_AHEAD_KB`, 0 = the kernel's 128). Model (one throttled disk, 8 units reading, one fsyncing): an exec under load 8.6 s at 160-168 ms a fault; 4.6 s with the read-ahead size; 2-3 ms and no major fault read ahead. A read through ublk costs what the disk costs (p90 148.6 vs 149.9 ms), so reads got no path of their own. `examples/pagein_probe`, `ci-boot-pagein-verify.sh`.
 - **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.
 
+
+## [v23.22.0] — 2026-11-06
+
+### Changed
+- #484: a boot's page-in. `/init` reads the engine, the kubelet, fastetcd, the control plane and the root's `/sbin` into the page cache, one reader, before any unit starts (`/etc/stormblock/boot-readahead` replaces the list; 5 s and 512 MiB or a quarter of available memory at most; `rd.stormblock.readahead=off`). A ublk device is created with 1 MiB of read-ahead (`STORMBLOCK_UBLK_READ_AHEAD_KB`, 0 = the kernel's 128). Model (one throttled disk, 8 units reading, one fsyncing): an exec under load 8.6 s at 160-168 ms a fault; 4.6-5.8 s with the read-ahead size; 2-3 ms and no major fault read ahead, the 44 MiB binary read in 0.5-0.7 s (3 s at 128 KiB of read-ahead). Not yet measured on a real disk. A read through ublk costs what the disk costs (p90 148.6 vs 149.9 ms), so reads got no path of their own. `examples/pagein_probe`, `ci-boot-pagein-verify.sh`.
 
 ## [v23.21.1] — 2026-11-06
 
