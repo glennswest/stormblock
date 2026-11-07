@@ -1440,7 +1440,12 @@ access to /dev/ublk-control is stormcentral#932. Here:
       README, CHANGELOG
 - [x] check.sh at e3c79684 ALL PASS (1305/1305); v23.6.0; stage; closed
 
-### Clone verify: i-blocks-wrong on fedora-base (2026-10-17, #293, P3) — AFTER mkfs.ext4.rs#25
+### Clone verify: i-blocks-wrong on fedora-base (2026-10-17, #293, P3) — WAITING on fio.ext4.rs#18 (with #512)
+
+2026-11-07: mkfs.ext4.rs#25 fixed in mkfs-ext4 v4.1.2 (a9ac701); v4.1.3 (e009cf4,
+#512's meta_bg fix) contains it. No fio-ext4 release pins either (v1.8.2 pins
+v4.1.1): fio.ext4.rs#18 (told it covers #293 too). One pin move does both issues.
+
 
 Not extent index blocks (mkfs-ext4 v4.1.1's `walk_extents` counts them):
 the checker leaves out the xattr block (`i_file_acl`), mkfs.ext4.rs#25
