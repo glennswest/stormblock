@@ -4,10 +4,14 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-06
-- **perf:** #521: clones and deletes at once share one metadata log record and flush: eight clones 12 flushes to 5 (a single clone stays at 3: its data, its table entry, its record, each durable before the next). `GET /api/v1/slabs` and `/metrics` capacity no longer wait for the volume manager. `adopt-ublk` makes the first persist after a start itself, instead of the first clone paying for writing the stores whole. `api:` lines carry each step's time (`steps check=… preread=… snapshot=… stamp=… readback=… persist=…`). `ci-api-latency-verify.sh`.
 - **docs:** #390: `ci-shelf-raid6-verify.sh` re-run at 19bde5e0, ALL PASS. The run on the DS224C waits on the shelf being cabled to the Dell again.
 - **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.
 
+
+## [v23.22.1] — 2026-11-06
+
+### Changed
+- #521: clones and deletes at once share one metadata log record and flush: eight clones 12 flushes to 5 (a single clone stays at 3: its data, its table entry, its record, each durable before the next). `GET /api/v1/slabs` and `/metrics` capacity no longer wait for the volume manager. `adopt-ublk` makes the first persist after a start itself, instead of the first clone paying for writing the stores whole. `api:` lines carry each step's time (`steps check=… preread=… snapshot=… stamp=… readback=… persist=…`). `ci-api-latency-verify.sh`. Not yet measured on a real disk.
 
 ## [v23.22.0] — 2026-11-06
 

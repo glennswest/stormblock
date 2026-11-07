@@ -924,7 +924,7 @@ async fn what_a_clone_and_a_delete_ask_of_the_disk() {
         async move { stormblock::fs::template::clone_volume(&vm, golden, &spec).await.unwrap().volume_id }
     };
     // The first after a start writes its stores whole.
-    let first = clone("first").await;
+    clone("first").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let measure = |what: &'static str| {
@@ -972,7 +972,6 @@ async fn what_a_clone_and_a_delete_ask_of_the_disk() {
     vm.lock().await.delete_volume_preread(id, None, pre).await.unwrap();
     VolumeManager::persist_detached(&vm).await;
     m(false);
-    drop(first);
 }
 
 /// `GET /api/v1/slabs` took 3.3 s on the Dell after a reboot (#521): its
