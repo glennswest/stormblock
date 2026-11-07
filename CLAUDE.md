@@ -227,6 +227,15 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### /init leaves the appliance it found (2026-11-06, #506, P1, stormpump#186) — IN PROGRESS
+
+stormpump's kexec reboot asks forge for the intent; the rule it falls back on misses
+an appliance found by option 17 or the DHCP server (those reboot through the firmware).
+- [ ] `/run/stormblock/appliance`: the URL alone, http:// only (what stormpump reads),
+      discovered or named on the command line; nothing with no appliance
+- [ ] tests/initramfs-no-appliance.sh; through switch_root in ci-initramfs-aarch64-verify.sh
+- [ ] docs, CHANGELOG, check.sh, patch
+
 ### aarch64 initramfs for the Orion O6N (2026-11-06, #514, P1, stormcos#666) — DONE (v23.20.0), closed; the board pending
 
 The image is for its binary's architecture (read from the ELF, never `uname`).
