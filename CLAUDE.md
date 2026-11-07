@@ -227,6 +227,17 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Root-volume page-in at boot: 70-124 ms a major fault (2026-11-06, #484, P1, stormcos#804 fix 4) — IN PROGRESS
+
+Kubelet on a SAS HDD: `logging=1240ms(10 faults)`; the engine pages itself in for 16 s
+while 33 units read the same disk. Target: < 10 ms a fault on a boot path. Plan: measure
+first, then fix where the numbers point:
+- [ ] `examples/pagein_probe.rs` + `ci-boot-pagein-verify.sh`: real exec's major faults on
+      ext4 over ublk on a throttled disk, quiet and under boot load, per read_ahead_kb;
+      O_DIRECT reads of the ublk device against the disk under it (what the engine adds)
+- [ ] fix per the numbers (read-around on boot devices, boot read-ahead in /init, reads
+      not behind writes and flushes)
+
 ### Validation on spinning disks reads in disk order (2026-11-06, #544, P1, stormcos#804) — DONE (v23.21.1), closed; metal pending
 
 2.9 GB took 33-96 s at 30-88 MB/s: 16 single-extent reads at once, seeking. Disk order,
