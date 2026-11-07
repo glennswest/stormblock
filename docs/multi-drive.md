@@ -249,6 +249,50 @@ each, #269's shape), and it yields to live I/O. Whether a pass runs by itself
 after a drive is added: no, decided with decision 3 (#154): an operator runs it
 once the drive is formatted (`POST /api/v1/slabs/rebalance`, a dry run first).
 
+### Moving one volume onto a named drive, slab or array (#426)
+
+For stormvm#29 ("move disk D of VM V onto drive X", onto the NetApp shelf,
+off a drive SMART flags), with the VM running and its ublk device kept:
+
+```text
+POST   /api/v1/volumes/{id}/move  {"to": {"drive": "<path|id|serial|wwn>"}}
+                                  {"to": {"slab": "<id>"}} | {"to": {"array": "<id>"}}
+                                  {"except": {"drive": "/dev/sdc"}}       # "off sdc"
+                                  {"to": {…}, "except": {…}}
+GET    /api/v1/volumes/{id}/move  {"move": {state, to_move, moved, failed, remaining,
+                                           reason, errors, started_at, finished_at}, "target"}
+DELETE /api/v1/volumes/{id}/move  cancel (what moved stays); ?release=true also clears the target
+```
+
+The request sets the volume's **placement target** first, then moves every leg
+(data and parity) outside it, one at a time as a drain moves one: the
+destination chosen inside the target, of the leg's role and slot size, off the
+domains of the extent's other legs at the volume's rung; the copy made with
+only the slot's fence held; every map naming the slot rewritten (an extent the
+volume shares with its golden moves for every holder); the source freed after
+the map that stopped naming it is durable; live I/O first between moves.
+`state` ends `done` (nothing outside), `failed` (`reason`, and `errors` per
+leg; a leg on a slab the volume has stopped trusting is not copied: resync
+it), or `cancelled`. `GET /api/v1/volumes/{id}` carries `target` and `move`.
+
+The target **stays** after the move, so the guest's later writes and
+copy-on-writes keep to it and the move does not undo itself (an affine
+volume, #153, keeps to one slab of it). It is a hard boundary, as a pin is
+(#150): a volume whose target is full is refused space (ENOSPC), never spilled
+back where it was moved from. The rebalance leaves a targeted volume where it
+is, and `POST …/tier` is refused (409) while a target stands. The same target
+is accepted at creation, `POST /api/v1/volumes {…, "target": {"to": …}}`, for
+a leg made on a named slab (stormstorage#106); a target the volume cannot have
+(below) is no volume. Refused with 409: a volume pinned to an array (it *is*
+that storage), a slab dedicated to its array's pinned volumes (#150: create
+the volume there with `array_id`), a target with no slab of the volume's role
+and extent size, and a redundant volume moved onto fewer domains at its rung
+than it keeps copies (a `mirror:2` cannot go onto one drive; it can go off
+one). Kept in `<data_dir>/placement_targets.json`, restored at start; the
+volume records do not carry it, so an older engine reads the same slabs and
+places the volume as it always did. Not moved by it: a drain or a flow-over
+chooses its own destinations.
+
 ## 5. Capacity and overcommit
 
 **Status: built (#152, owner: the master's A with C's switch).**
