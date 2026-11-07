@@ -13832,6 +13832,15 @@ file = "{state}"
         dir: &std::path::Path,
         dest: impl FnOnce(Arc<dyn BlockDevice>) -> Arc<dyn BlockDevice>,
     ) -> (VolumeManager, crate::drive::slab::SlabId, crate::drive::slab::SlabId, crate::volume::VolumeId) {
+        golden_on_and_dest(dir, |d| d, dest).await
+    }
+
+    /// [`golden_and_dest`], with the appliance's device wrapped too.
+    async fn golden_on_and_dest(
+        dir: &std::path::Path,
+        appliance: impl FnOnce(Arc<dyn BlockDevice>) -> Arc<dyn BlockDevice>,
+        dest: impl FnOnce(Arc<dyn BlockDevice>) -> Arc<dyn BlockDevice>,
+    ) -> (VolumeManager, crate::drive::slab::SlabId, crate::drive::slab::SlabId, crate::volume::VolumeId) {
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
@@ -13842,7 +13851,7 @@ file = "{state}"
         };
         let fmt = || SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System);
         let mut mgr = VolumeManager::new(SLOT);
-        let source = Slab::format_with(open("appliance.slab").await, fmt()).await.unwrap();
+        let source = Slab::format_with(appliance(open("appliance.slab").await), fmt()).await.unwrap();
         let source_id = source.slab_id();
         mgr.add_slab(source).await;
         let golden = mgr.create_volume_any("golden", 16 * SLOT).await.unwrap();
@@ -13855,6 +13864,107 @@ file = "{state}"
         let local_id = local.slab_id();
         mgr.add_slab(local).await;
         (mgr, source_id, local_id, golden)
+    }
+
+    /// An appliance a round trip away, once `ms` is set.
+    struct Remote {
+        inner: Arc<dyn BlockDevice>,
+        ms: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl Remote {
+        async fn trip(&self) {
+            let ms = self.ms.load(std::sync::atomic::Ordering::Relaxed);
+            if ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for Remote {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.inner.id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.inner.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.inner.optimal_io_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            self.inner.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            self.trip().await;
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            self.trip().await;
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            self.trip().await;
+            self.inner.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            self.trip().await;
+            self.inner.discard(offset, len).await
+        }
+    }
+
+    /// #521: pvetest1 12.66, right after a validation: `the slab registry
+    /// (write) was held 18.7s by the flow-over`, 47 waiting, `GET /volumes`
+    /// 18.5 s. Letting go of ~3,300 source slots made its round trips to forge
+    /// (table entry, discard) one slot at a time with the registry held, and
+    /// every volume's I/O and every API call read the registry. A reader now
+    /// waits for one batch's table write, whatever the slots' round trips add
+    /// up to; and every slot is still let go, on the device too.
+    #[tokio::test]
+    async fn letting_go_of_a_flow_overs_sources_keeps_no_reader_waiting() {
+        const TRIP_MS: u64 = 50;
+        let dir = tempfile::tempdir().unwrap();
+        let ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let m2 = ms.clone();
+        let (mgr, source_id, local_id, _golden) = golden_on_and_dest(
+            dir.path(),
+            move |inner| Arc::new(Remote { inner, ms: m2 }) as Arc<dyn BlockDevice>,
+            |d| d,
+        )
+        .await;
+        let held = super::FlowHeld::default();
+        let (moved, failed) = super::flow_slabs_held(
+            mgr.gem(), mgr.registry(), &[source_id], local_id, || mgr.persist(), None, 0, Some(&held),
+        )
+        .await
+        .expect("the flow-over finished");
+        assert_eq!((moved, failed), (16, 0));
+
+        ms.store(TRIP_MS, std::sync::atomic::Ordering::Relaxed);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let reader = async {
+            let mut worst = std::time::Duration::ZERO;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let asked = std::time::Instant::now();
+                drop(mgr.registry().read().await);
+                worst = worst.max(asked.elapsed());
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            worst
+        };
+        let letting_go = async {
+            let freed = super::free_held(mgr.registry(), &held).await;
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            freed
+        };
+        let (freed, worst) = tokio::join!(letting_go, reader);
+        assert_eq!(freed, 16, "every source let go");
+        // One slot at a time: 16 × (table entry + discard) = at least 1.6 s.
+        assert!(worst < std::time::Duration::from_millis(800), "a reader waited {worst:?}");
+        assert_eq!(mgr.registry().read().await.get(&source_id).unwrap().allocated_slots(), 0);
     }
 
     /// #490 (decided A): a flow-over whose sources are held for #412's

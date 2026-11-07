@@ -275,7 +275,18 @@ NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
 - [x] the probe's repeated slab opens (a table scan each: SAS's 4.7 s): #556
 - [ ] metal: stamps on an X9 and the R6415 (targets: root ready 40 and 25 s)
 
-### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; open, back after a release carrying 3e42735c
+### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; back 2026-11-07: letting go of a flow-over's sources stalls every reader
+
+Read on metal, 2026-11-07 (consoles of 2026-11-04..07): pvetest1 12.66 `the slab registry (write) was held 18.7s by the
+flow-over`, 47 waiting, `GET /volumes` 18.5 s, straight after `Flow-over: validated`; pvetest1 and forge1 12-14 s too. It is
+`free_held`: ~3,300 source slots, each a table write and a discard to forge with the registry held. No X9 or Dell answers
+now and no X9 has run an engine with step times (server7, server8 12.63), so X9's `persist=` is still unread; and an
+under-10 s `api:` line is INFO, which reaches neither console nor syslog, so it would stay unread on a release too. Plan,
+on wip/521-free-held:
+- [ ] test `letting_go_of_a_flow_overs_sources_keeps_no_reader_waiting`; negative control at the commit before the fix
+- [ ] `free_held` by batches: table read and discards with no lock, the registry held for one batch's table write
+- [ ] an `api:` line WARN from 1 s (the kubelet's own line), so its steps reach console and syslog; docs, CHANGELOG
+- [ ] check.sh; merge; patch release; stage; `--after-release` for the X9 number; the remainder below stands
 
 X9 clones 2-3.5 s (10-17 s on server1), cold 183 ms but warm-after-reboot up to 3.7 s; lists 1.9-3.3 s;
 fsck 11-28 s. Target: each claim step < 50 ms on a SAS HDD. Measure, then fix where it points:
