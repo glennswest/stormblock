@@ -44,6 +44,13 @@ pub struct Activity {
     /// released, before it answers.
     api: bool,
     owes_persist: Arc<std::sync::atomic::AtomicBool>,
+    /// Where the time went (#521): each [`step`] and the time since the last.
+    steps: Arc<std::sync::Mutex<Steps>>,
+}
+
+struct Steps {
+    last: Instant,
+    done: Vec<(&'static str, Duration)>,
 }
 
 impl Activity {
@@ -53,7 +60,31 @@ impl Activity {
             wait_us: Arc::new(AtomicU64::new(0)),
             api: false,
             owes_persist: Default::default(),
+            steps: Arc::new(std::sync::Mutex::new(Steps { last: Instant::now(), done: Vec::new() })),
         }
+    }
+    /// See [`step`]: for code outside the activity's scope (its middleware).
+    pub fn step(&self, name: &'static str) {
+        let mut s = self.steps.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let took = now - s.last;
+        s.last = now;
+        if s.done.len() < 32 {
+            s.done.push((name, took));
+        }
+    }
+    /// The steps so far, as ` steps a=1ms b=20ms` for a request's line; empty
+    /// when it marked none.
+    pub fn steps_line(&self) -> String {
+        let s = self.steps.lock().unwrap_or_else(|e| e.into_inner());
+        if s.done.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from(" steps");
+        for (name, took) in &s.done {
+            out.push_str(&format!(" {name}={}ms", took.as_millis()));
+        }
+        out
     }
     /// An API request's activity (see `api`).
     pub fn request(name: impl Into<Arc<str>>) -> Self {
@@ -71,6 +102,13 @@ impl Activity {
 
 tokio::task_local! {
     static ACTIVITY: Activity;
+}
+
+/// The step that ends here took the time since the last one (#521): what a
+/// request's `api:` line says it spent its time on. Nothing outside a request's
+/// activity, and at most 32 a request, so a loop cannot grow it.
+pub fn step(name: &'static str) {
+    let _ = ACTIVITY.try_with(|a| a.step(name));
 }
 
 /// Run `fut` as `activity`: every tracked lock it takes is held in that name.
@@ -646,6 +684,24 @@ mod tests {
         assert!(named("failing holder", halfway(&m)).await.is_err());
         assert!(m.try_lock().is_ok(), "free after an error");
         assert!(unclaimed());
+    }
+
+    #[tokio::test]
+    async fn steps_say_where_a_request_spent_its_time() {
+        let a = Activity::request("t");
+        assert_eq!(a.steps_line(), "");
+        scope(a.clone(), async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            step("first");
+            step("second");
+        })
+        .await;
+        let line = a.steps_line();
+        assert!(line.starts_with(" steps first="), "{line}");
+        let first: u64 = line.split("first=").nth(1).unwrap().split("ms").next().unwrap().parse().unwrap();
+        assert!(first >= 30, "{line}");
+        assert!(line.contains(" second="), "{line}");
+        step("outside a request is nothing");
     }
 
     #[tokio::test]

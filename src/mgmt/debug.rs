@@ -219,7 +219,8 @@ pub async fn track(State(state): State<Arc<AppState>>, mut req: Request, next: N
     // The persist the request's changes owe, made now that its handler has
     // released the volume manager (#364): never under that lock, still
     // before the caller hears the answer.
-    if activity.take_owed_persist() {
+    let owed_persist = activity.take_owed_persist();
+    if owed_persist {
         let persisted = crate::lockwatch::scope(
             activity.clone(),
             crate::volume::VolumeManager::persist_detached_checked(&state.volume_manager),
@@ -239,17 +240,21 @@ pub async fn track(State(state): State<Arc<AppState>>, mut req: Request, next: N
             }
         }
     }
+    if owed_persist {
+        activity.step("owed_persist");
+    }
     let mut guard = guard;
     guard.done = true;
     let status = resp.status().as_u16();
     let ms = since.elapsed().as_secs_f64() * 1000.0;
     let wait = activity.lock_wait().as_secs_f64() * 1000.0;
+    let steps = activity.steps_line();
     if is_probe(&path) && status < 400 {
-        tracing::debug!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms caller {} peer {peer} req {id}", caller.get());
+        tracing::debug!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get());
     } else if status >= 500 || ms >= STALL_AFTER.as_secs_f64() * 1000.0 {
-        tracing::warn!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms caller {} peer {peer} req {id}", caller.get());
+        tracing::warn!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get());
     } else {
-        tracing::info!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms caller {} peer {peer} req {id}", caller.get());
+        tracing::info!("api: {method} {path} {status} {ms:.0}ms lock-wait {wait:.0}ms{steps} caller {} peer {peer} req {id}", caller.get());
     }
     resp
 }

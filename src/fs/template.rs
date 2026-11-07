@@ -1284,6 +1284,7 @@ async fn clone_volume_impl(
         }
     }
 
+    crate::lockwatch::step("check");
     // Across the role boundary a clone cannot share slots — a slot is in
     // one partition — so it is a copy, made with no manager lock across it
     // (#364). Within the boundary, and by default, it is the ordinary
@@ -1310,6 +1311,7 @@ async fn clone_volume_impl(
         Some(_) => None,
         None => crate::volume::VolumeManager::preread_unlocked(vm, source).await.ok(),
     };
+    crate::lockwatch::step("preread");
     let (id, size) = {
         let mut m = vm.lock().await;
         // Persists inside are owed, made below or by the mint's own
@@ -1343,6 +1345,7 @@ async fn clone_volume_impl(
         (id, size)
     };
 
+    crate::lockwatch::step("snapshot");
     // No filesystem the engine knows about: a plain clone, done.
     let Some(fs) = fs else {
         crate::volume::VolumeManager::persist_detached(vm).await;
@@ -1437,6 +1440,7 @@ async fn clone_volume_impl(
         }
     }
 
+    crate::lockwatch::step("stamp");
     // Verify what is about to be handed out (#137).
     //
     // The stamp is read back, always: it is the one write a mint makes, and
@@ -1501,6 +1505,7 @@ async fn clone_volume_impl(
         verified = true;
     }
 
+    crate::lockwatch::step("readback");
     // The record follows the filesystem: the clone's own UUID and label —
     // and the one metadata write the mint makes, covering the snapshot too.
     {
@@ -1515,6 +1520,7 @@ async fn clone_volume_impl(
     // Detached (#269): the manager is held only to take the records, so the
     // rest of the API does not wait behind this mint's flushes.
     crate::volume::VolumeManager::persist_detached(vm).await;
+    crate::lockwatch::step("persist");
 
     Ok(CloneResult {
         volume_id: id,

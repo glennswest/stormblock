@@ -227,6 +227,16 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — IN PROGRESS
+
+X9 clones 2-3.5 s (10-17 s on server1), cold 183 ms but warm-after-reboot up to 3.7 s; lists 1.9-3.3 s;
+fsck 11-28 s. Target: each claim step < 50 ms on a SAS HDD. Measure, then fix where it points:
+- [ ] `lockwatch::step`: per-step times in the `api:` line (clone, lists, delete)
+- [ ] `ci-api-latency-verify.sh`: those calls on one throttled disk, warm, after a restart, under load
+- [ ] fixes per the numbers. Suspects by reading: `/slabs` takes the manager (`capacity::account`);
+      a listing takes the extent map's lock 4+ times a volume and walks each map for health; the
+      golden check reads the slot table one entry at a time, before the batched preread
+
 ### Root-volume page-in at boot: 70-124 ms a major fault (2026-11-06, #484, P1, stormcos#804 fix 4) — DONE (v23.22.0), closed; metal pending
 
 Kubelet on a SAS HDD: `logging=1240ms(10 faults)`; the engine pages itself in for 16 s

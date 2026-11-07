@@ -463,6 +463,7 @@ async fn list_volumes(
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "volumes", "method" => "list").increment(1);
     // What is served, gathered before anything else (#138).
     let ctx = super::usage::Context::gather(&state).await;
+    crate::lockwatch::step("usage");
     // The catalog the manager published (#364): read with no manager lock,
     // so a listing never waits on a create, a clone or a persist. Only when
     // it does not name exactly the volumes that exist (one added or removed
@@ -500,6 +501,7 @@ async fn list_from(
     headers: &axum::http::HeaderMap,
 ) -> Response {
     let generation = listing_generation(state, vm, ctx).await;
+    crate::lockwatch::step("generation");
     let etag = format!("\"{generation}\"");
     let known = headers
         .get(axum::http::header::IF_NONE_MATCH)
@@ -509,6 +511,7 @@ async fn list_from(
         return (axum::http::StatusCode::NOT_MODIFIED, [(axum::http::header::ETAG, etag)]).into_response();
     }
     let vols = crate::volume::catalog::list_volumes(vm).await;
+    crate::lockwatch::step("names");
     let mut items: Vec<VolumeResponse> = Vec::with_capacity(vols.len());
     for (id, name, vsize, allocated) in &vols {
         let usage = ctx.usage(vm, id);
@@ -1880,9 +1883,11 @@ async fn clone_volume(
             if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, c.volume_id).await {
                 return r;
             }
+            crate::lockwatch::step("admit");
             if let Some(r) = crate::mgmt::namespaces::settle_new_volume(&state, c.volume_id, req.namespace.as_deref()).await {
                 return r;
             }
+            crate::lockwatch::step("namespace");
             let mut vm = state.volume_manager.lock().await;
             // Before the clone is described, so it is never briefly an orphan.
             if req.owner.is_some() {
@@ -2750,9 +2755,13 @@ async fn delete_volume(
     }
 
     // Its slot-table entries read before the manager is taken (#475).
+    crate::lockwatch::step("serving");
     let pre = crate::volume::VolumeManager::preread_unlocked(&state.volume_manager, vol_id).await.ok();
+    crate::lockwatch::step("preread");
     let mut vm = state.volume_manager.lock().await;
-    match vm.delete_volume_preread(vol_id, erase, pre).await {
+    let deleted = vm.delete_volume_preread(vol_id, erase, pre).await;
+    crate::lockwatch::step("delete");
+    match deleted {
         Ok(scrubbed) => {
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             drop(vm);

@@ -138,7 +138,9 @@ pub(crate) fn parse_tier(s: &str) -> Option<StorageTier> {
 async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "slabs", "method" => "list").increment(1);
     let acc = crate::mgmt::capacity::account(&state).await;
+    crate::lockwatch::step("account");
     let reg = state.slab_registry.read().await;
+    crate::lockwatch::step("registry");
     let items: Vec<SlabResponse> = reg.iter()
         .map(|(id, slab)| {
             let slot_size = slab.slot_size();
