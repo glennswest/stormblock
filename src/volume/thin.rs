@@ -1424,7 +1424,7 @@ impl ThinVolumeHandle {
                 .filter(|id| !registry.collides(id, apart_from, rung))
                 .filter_map(|id| registry.get(id).map(|s| (*id, s.free_slots())))
                 .collect();
-            cands.sort_by(|a, b| b.1.cmp(&a.1));
+            cands.sort_by_key(|c| std::cmp::Reverse(c.1));
             let mut not_space: Option<DriveError> = None;
             for (slab_id, _) in cands {
                 let Some(slab) = registry.get_mut(&slab_id) else { continue };
@@ -1516,7 +1516,7 @@ impl ThinVolumeHandle {
         // Affine (#153): the volume's own slab while it takes the extent.
         if self.affine() {
             if let Some(a) = self.affinity() {
-                let allowed = super::target::of(&self.id).is_none_or(|t| t.allows(&a));
+                let allowed = super::target::of(&self.id).map_or(true, |t| t.allows(&a));
                 if allowed && !self.is_failed(a) && registry.takes(&a, self.placement.role, self.slot_size) {
                     if let Some(slab) = registry.get_mut(&a) {
                         if let Ok(slot_idx) = slab.allocate_deferred(self.id, vext_idx, generation).await {

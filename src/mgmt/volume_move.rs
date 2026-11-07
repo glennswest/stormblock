@@ -256,6 +256,7 @@ fn data_dir(state: &AppState) -> Option<std::path::PathBuf> {
 }
 
 /// Set a volume's target (at creation, or by a move).
+#[allow(clippy::result_large_err)]
 pub fn keep_target(state: &AppState, id: VolumeId, t: Option<Target>) -> Result<(), Response> {
     crate::volume::target::keep(data_dir(state).as_deref(), id, t)
         .map_err(|e| ApiError::internal(format!("keeping the placement target: {e}")))
@@ -380,7 +381,7 @@ pub async fn cancel(State(state): State<Arc<AppState>>, Path(id): Path<String>, 
         }
     }
     let had_target = crate::volume::target::of(&vid).is_some();
-    if !running && !(q.release && had_target) {
+    if !(running || q.release && had_target) {
         return ApiError::not_found(format!("volume {uuid} is not moving"));
     }
     if q.release {
