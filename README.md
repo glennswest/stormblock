@@ -768,6 +768,8 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   anonymous|open> peer <addr> req <id>`, INFO (WARN at 5xx or over 10 s;
   health probes, `/metrics` and `/debug` at DEBUG). A request whose caller
   went away first is said too (`abandoned by its caller after Ns`).
+  A clone, a delete and the volume and slab listings also say where the time went
+  (#521): `steps check=0ms preread=0ms snapshot=0ms stamp=26ms readback=8ms persist=169ms`.
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
   listening, exports wired), else 503 with the blockers.
