@@ -119,6 +119,7 @@ rawd=$(api -X POST http://127.0.0.1:$port/api/v1/volumes/$rawid/attach -d '{"tra
     | sed -n 's/.*"device_hint":"\([^"]*\)".*/\1/p')
 dd if=/bin/stormblock of="$rawd" bs=1M count=64 oflag=direct 2>/dev/null
 sync
+echo "GUEST read_ahead_kb as attached: $(cat /sys/block/${D0##*/}/queue/read_ahead_kb)"
 echo "GUEST binary $(wc -c < /mnt/s0/bin) bytes; rotational $(cat /sys/block/vda/queue/rotational); scheduler $(cat /sys/block/vda/queue/scheduler)"
 
 ra() { for q in /sys/block/ublkb*/queue/read_ahead_kb; do echo "$1" > "$q"; done; }
@@ -149,6 +150,7 @@ echo "DIRECT load disk $(pagein_probe direct /dev/vda 100)"
 load_off
 echo "DIRECT quiet ublk $(pagein_probe direct "$rawd" 100)"
 echo "DIRECT quiet disk $(pagein_probe direct /dev/vda 100)"
+ra 1024
 mkdir -p /mnt/s0/p; umount /mnt/s0; mkdir -p /sysroot; mount -t ext4 "$D0" /sysroot
 mkdir -p /sysroot/p/stormblock; cp /sysroot/bin /sysroot/p/stormblock/bin; sync
 for r in 1 2 3; do
@@ -178,6 +180,7 @@ timeout 2400 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 4096 -smp 
     -drive file="$W/a.img",if=virtio,format=raw,cache=none,aio=threads,throttling.bps-total=$BPS,throttling.iops-total=$IOPS \
     > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|EXEC|DIRECT|PRE|LOG)|panick'
+tr -d '\r' < "$W/guest.log" | grep -q '^GUEST read_ahead_kb as attached: 1024' || fail "a device is not attached with 1 MiB of read-ahead"
 [ "$(tr -d '\r' < "$W/guest.log" | grep -c '^PRE then .*major_faults 0 ')" = 3 ] || fail "a read-ahead binary still took major faults"
 tr -d '\r' < "$W/guest.log" | grep -q "^RESULT done PASS" || { tail -30 "$W/guest.log"; fail "the guest did not finish"; }
 if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi

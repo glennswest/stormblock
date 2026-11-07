@@ -238,8 +238,14 @@ first, then fix where the numbers point:
 - [x] first run: quiet, a read through ublk costs what the disk costs (p90 16.2 vs 17.2 ms);
       a binary read ahead takes 0 faults and 2 ms against 52 faults and 0.9 s, under load too
       (that run's throttle counted per 64 KiB, so its read-ahead sizes mean nothing: fixed)
-- [ ] `# --- BEGIN boot read-ahead` in /init, tests/initramfs-boot-readahead.sh
-- [ ] re-measure; read_ahead_kb only if the numbers say so
+- [x] `# --- BEGIN boot read-ahead` in /init, tests/initramfs-boot-readahead.sh
+- [x] model fixed (150 MB/s, 120 requests/s): 8 readers + a writer: 160-168 ms a fault (the
+      SAS HDD's 124), quiet 10-12. O_DIRECT p90 under load: ublk 148.6, disk 149.9 ms: the
+      engine adds nothing, so no read priority. Exec under load, ra 128/1024/4096 KiB:
+      8.6/4.6/3.5 s (52/22/10 faults), quiet 0.6/0.4/0.85 s. Read ahead: 0 faults, 2-3 ms
+- [ ] ublk devices created with 1 MiB of read-ahead (`STORMBLOCK_UBLK_READ_AHEAD_KB`)
+- [ ] docs, CHANGELOG; check.sh; re-run; patch/minor; stage; stormcos told (its list)
+- [ ] metal: kubelet `startup:` on a pvetest (issue's done-when), R6415's engine page-in
 
 ### Validation on spinning disks reads in disk order (2026-11-06, #544, P1, stormcos#804) — DONE (v23.21.1), closed; metal pending
 

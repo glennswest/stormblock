@@ -549,6 +549,20 @@ instead, so the worst a misbehaving hook can do is be ignored.
 assignments and checks it did not run.
 
 
+## What is read before the units start (#484)
+
+Once the mount list is mounted, `/init` reads the binaries the node needs for
+Ready into the page cache, one file at a time. A boot's major fault otherwise
+waits in the disk's queue behind every other unit paging in. The defaults are
+the engine, kubelet, fastetcd, control-plane volumes and the root's `/sbin`. A
+release replaces them with `/etc/stormblock/boot-readahead` in its root volume: a
+path per line from the root, a directory meaning every regular file under it,
+`#` a comment, an empty file meaning nothing. A path this node does not carry is
+skipped. The read is bounded (`STORM_READAHEAD_SECS` 5, `STORM_READAHEAD_MIB`
+512, a quarter of the memory available) and what it read stays cached if it
+stops early. The console says what it did: `Boot read-ahead: N file(s), M MiB in
+S s (list: …)`. `rd.stormblock.readahead=off` turns it off.
+
 ## A volume of the mount list the kernel refuses (#532)
 
 `/init` runs `stormblock ext4-repair <device>` on a device the kernel just

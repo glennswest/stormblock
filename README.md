@@ -2363,6 +2363,15 @@ before its parent. Each volume is tried as ext4 first, then with a probing
 mount. The kernel passes an unknown `KEY=value` on its command line to
 `/init` as an environment variable.
 
+What the node needs to reach Ready is then read into the page cache, by one
+reader, before any unit starts (#484): `/p/stormblock`, `/p/rustkube-node`,
+`/p/fastetcd`, the three control-plane volumes and the root's `/sbin`, or the
+paths in the root's `/etc/stormblock/boot-readahead`. It stops at
+`STORM_READAHEAD_SECS` (5), `STORM_READAHEAD_MIB` (512) or a quarter of the
+memory available; `rd.stormblock.readahead=off` turns it off. A ublk device this
+engine creates has 1 MiB of read-ahead (`STORMBLOCK_UBLK_READ_AHEAD_KB`, 0 leaves
+the kernel's 128).
+
 **A volume the kernel refuses** (#532) is repaired and mounted again:
 `stormblock ext4-repair <device>`, as `e2fsck -fy` (the journal, the passes, and
 the orphan file blocks a mount reads, which mkfs-ext4's own check does not:

@@ -289,6 +289,32 @@ pub fn fds_for(device: &dyn BlockDevice) -> u64 {
 }
 
 /// `STORMBLOCK_FUA_BY_FLUSH=1`: no FUA declared to the kernel (#409).
+/// Read-ahead on a device this engine creates, in KiB, unless
+/// `STORMBLOCK_UBLK_READ_AHEAD_KB` says otherwise (0 leaves the kernel's 128).
+///
+/// A major fault reads this much around the page (#484). On a disk one seek
+/// costs more than the megabyte after it: a real exec's 52 faults at 128 KiB
+/// are 22 at 1 MiB, and it takes half the time under boot load; 4 MiB is slower
+/// than 1 MiB on a quiet disk (ci-boot-pagein-verify.sh). Set in sysfs and not
+/// through `io_opt`, which mkfs tools read as a RAID stripe.
+const DEFAULT_READ_AHEAD_KB: u32 = 1024;
+
+fn read_ahead_kb(env: Option<&str>) -> u32 {
+    env.and_then(|v| v.trim().parse().ok()).unwrap_or(DEFAULT_READ_AHEAD_KB)
+}
+
+fn set_read_ahead(id: u32) {
+    let kb = read_ahead_kb(std::env::var("STORMBLOCK_UBLK_READ_AHEAD_KB").ok().as_deref());
+    if kb == 0 {
+        return;
+    }
+    let path = format!("/sys/block/ublkb{id}/queue/read_ahead_kb");
+    if let Err(e) = std::fs::write(&path, kb.to_string()) {
+        // A device without it still serves; only its faults cost more.
+        tracing::warn!("ublk: read-ahead of {kb} KiB not set on {path}: {e}");
+    }
+}
+
 fn fua_by_flush() -> bool {
     std::env::var("STORMBLOCK_FUA_BY_FLUSH").is_ok_and(|v| v == "1")
 }
@@ -1172,6 +1198,11 @@ impl UblkServer {
                     }
                 }
             }
+        }
+        // Before anything can mount it: a filesystem's files take the value
+        // when they are opened. An adopted device keeps what it was given.
+        if self.adopt.is_none() {
+            set_read_ahead(assigned_id);
         }
         self.live.store(true, Ordering::Release);
         tracing::info!("ublk device started: {}", blk_path);
@@ -2732,6 +2763,14 @@ fn submit_io_fetch(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_ahead_is_a_megabyte_unless_asked() {
+        assert_eq!(read_ahead_kb(None), 1024);
+        assert_eq!(read_ahead_kb(Some(" 4096\n")), 4096);
+        assert_eq!(read_ahead_kb(Some("0")), 0);
+        assert_eq!(read_ahead_kb(Some("a lot")), 1024);
+    }
+
     use super::*;
 
     #[test]
