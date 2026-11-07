@@ -227,6 +227,15 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### The same, filed again with a rename to say (2026-11-07, #560, P0) — the parse is #559's (v23.25.1); here: a rename said
+
+#560 is #559's bug reported a second time, with two more asks: the changelog says what the fix renames (a node
+with a PTR and no option 12 goes from `storm-<mac>` to the PTR's name, a new Node on a kept-data reinstall), and
+the console names the earlier name when system-data has it. Boot records had no name, so: `hostname` in each
+record, and `node name: X (was Y on the last boot)` when it differs; nothing said against a pre-#560 record.
+- [x] system data block, tests/initramfs-system-data.sh (+3, sh and busybox sh), boot-hooks.md, CHANGELOG
+- [ ] check.sh; patch release; stage; close #560
+
 ### The initramfs never names a node from reverse DNS (2026-11-07, #559, P0) — DONE (v23.25.1), closed; metal pending
 
 busybox's nslookup prints `name = node1.g16.lo` (no root dot); the node name block's sed wanted `\.$`, so every

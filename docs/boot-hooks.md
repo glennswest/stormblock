@@ -637,9 +637,13 @@ part is the volume and the install and boot records.
     it came from. The kernel command line carries no mount list
     (stormcos#259).
   - `history/boots/<UTC time>.json`: one per boot, with `release` (the root's
-    `VERSION_ID`), `tag`, `cmdline`, `local_disk` (the disk verdict and the
-    storage inventory, #344, #345, #347) and `handover` (the slabs, devices
-    and flow-over). The newest 500 are kept.
+    `VERSION_ID`), `tag`, `hostname` (the node's name as this boot set it,
+    #560), `cmdline`, `local_disk` (the disk verdict and the storage
+    inventory, #344, #345, #347) and `handover` (the slabs, devices and
+    flow-over). The newest 500 are kept. A boot whose name differs from the
+    last record's says `node name: X (was Y on the last boot): it registers as
+    a new node`; a last record from before #560 has no name, and nothing is
+    said against it.
   - `history/installs/<UTC time>.json`: the same record, for a boot that
     installed (its handover carries `installed`, the install report).
 - A mount that fails is a `WARNING:`; the boot goes on without a record.
