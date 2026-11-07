@@ -36,6 +36,7 @@ mod integration_mgmt_api;
 mod integration_mgmt_tls;
 mod integration_moves;
 mod integration_multidrive;
+mod integration_volume_move;
 mod integration_ana_epoch;
 mod integration_nvme_hosts;
 mod integration_peers;
