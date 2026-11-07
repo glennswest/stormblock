@@ -25,10 +25,12 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
     let app = Router::new()
         .route(
             "/apis/authentication.k8s.io/v1/tokenreviews",
-            post(move |Json(b): Json<Value>| {
+            post(move |h: axum::http::HeaderMap, Json(b): Json<Value>| {
                 let a = a1.clone();
                 async move {
-                    a.lock().unwrap().push(b.clone());
+                    let mut seen = b.clone();
+                    seen["reviewer"] = json!(h.get("authorization").and_then(|v| v.to_str().ok()));
+                    a.lock().unwrap().push(seen);
                     let user = match b["spec"]["token"].as_str() {
                         Some("alice-k8s") => Some(("alice", vec!["storage-admins", "system:authenticated"])),
                         Some("bob-k8s") => Some(("bob", vec!["system:authenticated"])),
@@ -99,12 +101,16 @@ struct Node {
 }
 
 async fn node(audit_only: bool, kube: Option<String>) -> Node {
+    node_following(audit_only, kube, None).await
+}
+
+async fn node_following(audit_only: bool, kube: Option<String>, record: Option<&str>) -> Node {
     let dir = TempDir::new().unwrap();
     let mut config = StormBlockConfig::default();
     config.management.data_dir = Some(dir.path().to_string_lossy().to_string());
     config.management.api_token = Some(NODE.into());
     config.management.admin_token = Some(ADMIN.into());
-    config.management.kubernetes = kube.map(|u| KubeAuthConfig { api_url: u, ..Default::default() });
+    config.management.kubernetes = kube.map(|u| KubeAuthConfig { api_url: u, cluster_record: record.map(str::to_string), ..Default::default() });
     let mut vm = VolumeManager::new(MIB);
     let dev = stormblock::drive::filedev::FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 64 * MIB)
         .await
@@ -482,6 +488,63 @@ async fn a_drive_keeps_its_id_across_opens_and_restarts() {
     assert_ne!(r["uuid"].as_str().unwrap(), first, "another drive, another id");
 }
 
+
+/// A cluster worker runs no apiserver (#557): its engine reviews at the cluster
+/// while the record names it, with the token the cluster issued, and goes back
+/// to its own apiserver when a release removes the record.
+#[tokio::test]
+async fn a_worker_with_no_local_apiserver_reviews_at_the_cluster() {
+    use reqwest::Method as M;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let cluster = apiserver(asked.clone()).await;
+    let own = apiserver(Arc::new(Mutex::new(Vec::new()))).await;
+    let rec_dir = TempDir::new().unwrap();
+    let rec = rec_dir.path().join("engine-cluster.json");
+    let write = |v: Value| {
+        let tmp = rec.with_extension("tmp");
+        std::fs::write(&tmp, v.to_string()).unwrap();
+        std::fs::rename(&tmp, &rec).unwrap();
+    };
+    let record = json!({"api_url": cluster, "ca": "", "token": "issued-by-the-cluster"});
+
+    // Nothing listens at the worker's own 127.0.0.1:6443.
+    let worker = node_following(false, Some("http://127.0.0.1:1".into()), Some(rec.to_str().unwrap())).await;
+    assert_eq!(call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await, 503, "as stormcentral#360 saw");
+
+    write(record.clone());
+    let released = call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await;
+    assert!((200..300).contains(&released), "a reviewed release on a worker: {released}");
+    assert_eq!(call(&worker, M::POST, "/release", Some("user-k8s"), Some(json!({"erase": "once"}))).await, 403, "the cluster's RBAC decides");
+    assert_eq!(call(&worker, M::POST, "/release", Some("not-a-token"), Some(json!({"erase": "once"}))).await, 401);
+    let reviewer = asked.lock().unwrap().iter().find(|b| b["kind"] == "TokenReview").unwrap()["reviewer"].clone();
+    assert_eq!(reviewer, "Bearer issued-by-the-cluster", "the cluster's own token, not the node's");
+
+    // A renewal: the new token, with no restart.
+    write(json!({"api_url": cluster, "ca": "", "token": "renewed"}));
+    asked.lock().unwrap().clear();
+    assert_eq!(call(&worker, M::GET, "/volumes", Some("user-k8s"), None).await, 200);
+    assert_eq!(asked.lock().unwrap().iter().find(|b| b["kind"] == "TokenReview").unwrap()["reviewer"], "Bearer renewed");
+
+    // A record it cannot use: nothing reviewed, and its own apiserver not asked.
+    let joined = node_following(false, Some(own), Some(rec.to_str().unwrap())).await;
+    for bad in [
+        json!({"api_url": cluster, "ca": ""}),
+        json!({"api_url": "http://192.168.16.96:7443", "ca": "", "token": "t"}),
+        json!({"api_url": "https://192.168.16.96:7443", "ca": "", "token": "t"}),
+    ] {
+        write(bad.clone());
+        assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await, 503, "{bad}");
+    }
+    std::fs::write(&rec, "not json").unwrap();
+    assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await, 503, "not json");
+
+    // Released: the record gone, its own apiserver again, and what the cluster
+    // said forgotten (bob is nobody's, here too).
+    std::fs::remove_file(&rec).unwrap();
+    let again = call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await;
+    assert!(again != 503 && again != 401 && again != 403, "its own apiserver reviews again: {again}");
+    assert_eq!(call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once"}))).await, 503, "the worker's own has none, so it is refused again");
+}
 
 /// forge's stormcert gives the engine forge's trust and can do nothing else
 /// to forge (#555), and `update`, which every storage-user holds, does not

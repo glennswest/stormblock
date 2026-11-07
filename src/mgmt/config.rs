@@ -797,6 +797,13 @@ pub struct KubeAuthConfig {
     /// `system:auth-delegator` is). Read at each review, so a rotated token
     /// is picked up. `$STORMBLOCK_KUBE_TOKEN_FILE` overrides.
     pub token_file: Option<String>,
+    /// The record of the cluster this node is a worker of (#557), which
+    /// stormcluster writes at a join and removes at a release. While it is
+    /// there, reviews go to the cluster and not to `api_url`. Default:
+    /// `engine-cluster.json` beside `token_file`.
+    /// `$STORMBLOCK_KUBE_CLUSTER_RECORD` overrides.
+    #[serde(default)]
+    pub cluster_record: Option<String>,
 }
 
 fn default_beacon_secs() -> u64 { 5 }

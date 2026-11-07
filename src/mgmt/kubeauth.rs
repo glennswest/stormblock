@@ -19,9 +19,20 @@
 //! An answer is cached for a minute per (bearer, resource, verb): a console
 //! clicking through a list asks once, and a revoked role takes effect within
 //! the minute.
+//!
+//! **A cluster worker runs no apiserver (#557).** While the node is a worker,
+//! `engine-cluster.json` beside the engine's token names the cluster: the
+//! endpoint, its CA and the token the cluster issued this engine.
+//! stormcluster writes it at a join, by rename, renews it, and removes it at a
+//! release. It is looked at on every review, so a join or a release needs no
+//! restart, and the answers from before the change are forgotten. Gone, reviews
+//! go back to this node's own apiserver. There and not usable, nothing is
+//! reviewed (503): falling back would ask an apiserver this node no longer
+//! belongs to.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -52,60 +63,37 @@ pub enum Review {
 
 /// See the module documentation.
 pub struct KubeAuth {
-    api_url: String,
-    token_file: Option<String>,
-    client: crate::http::Client,
+    /// This node's own apiserver, from the config.
+    own: Arc<Target>,
+    /// See the module documentation (#557).
+    record: Option<PathBuf>,
+    followed: Mutex<Option<Followed>>,
     /// Keyed by the bearer's digest, resource, verb, name and namespace: a
     /// review is for one name when the role names resources (#216), and in
     /// one namespace when the volume is in one (#408).
     cache: Mutex<HashMap<(String, String, String, Option<String>, Option<String>), (Instant, Review)>>,
 }
 
-fn non_empty(v: Option<String>) -> Option<String> {
-    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+/// An apiserver to ask, and the engine's bearer there.
+struct Target {
+    api_url: String,
+    client: crate::http::Client,
+    bearer: Bearer,
 }
 
-fn digest(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let d = Sha256::digest(token.as_bytes());
-    d.iter().take(16).map(|b| format!("{b:02x}")).collect()
+enum Bearer {
+    /// Read at each review, so a rotated token is picked up.
+    File(Option<String>),
+    /// From the record, which a renewal rewrites.
+    Value(String),
 }
 
-impl KubeAuth {
-    /// From `[management.kubernetes]` and the environment; `None` when no
-    /// apiserver is named (Kubernetes bearers are then refused).
-    pub fn from_config(cfg: Option<&KubeAuthConfig>) -> Option<KubeAuth> {
-        let env = |k: &str| non_empty(std::env::var(k).ok());
-        let api_url = env("STORMBLOCK_KUBE_API").or_else(|| cfg.map(|c| c.api_url.clone()).and_then(|u| non_empty(Some(u))))?;
-        let ca = env("STORMBLOCK_KUBE_CA").or_else(|| cfg.and_then(|c| c.ca_file.clone()));
-        let token_file = env("STORMBLOCK_KUBE_TOKEN_FILE").or_else(|| cfg.and_then(|c| c.token_file.clone()));
-        let mut b = crate::http::Client::builder().timeout(Duration::from_secs(5));
-        if let Some(ca) = ca {
-            match std::fs::read(&ca) {
-                Ok(pem) => b = b.add_root_certificate_pem(pem),
-                Err(e) => {
-                    tracing::error!("kubernetes auth: cannot read CA {ca}: {e} — Kubernetes bearers will be refused");
-                    return None;
-                }
-            }
-        }
-        let client = match b.build() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("kubernetes auth: {e} — Kubernetes bearers will be refused");
-                return None;
-            }
-        };
-        Some(KubeAuth { api_url: api_url.trim_end_matches('/').to_string(), token_file, client, cache: Mutex::new(HashMap::new()) })
-    }
-
-    pub fn api_url(&self) -> &str {
-        &self.api_url
-    }
-
+impl Target {
     fn own_token(&self) -> Option<String> {
-        let f = self.token_file.as_ref()?;
-        non_empty(std::fs::read_to_string(f).ok())
+        match &self.bearer {
+            Bearer::File(f) => non_empty(std::fs::read_to_string(f.as_ref()?).ok()),
+            Bearer::Value(t) => Some(t.clone()),
+        }
     }
 
     async fn post(&self, path: &str, body: Value) -> Result<Value, String> {
@@ -126,16 +114,160 @@ impl KubeAuth {
         }
         Ok(v)
     }
+}
+
+/// The record as last read: which file it was, and what it said.
+struct Followed {
+    /// Modified, length, inode; `None` when there is no record.
+    stamp: Option<(Option<std::time::SystemTime>, u64, u64)>,
+    target: Result<Arc<Target>, String>,
+}
+
+/// What stormcluster writes (#557).
+#[derive(serde::Deserialize)]
+struct ClusterRecord {
+    api_url: String,
+    /// The cluster's CA, PEM.
+    #[serde(default)]
+    ca: String,
+    /// The bearer the cluster issued this engine, allowed `tokenreviews` and
+    /// `subjectaccessreviews` there.
+    token: String,
+}
+
+fn is_loopback_url(url: &str) -> bool {
+    let host = url.strip_prefix("http://").unwrap_or("").split(['/', ':']).next().unwrap_or("");
+    host == "127.0.0.1" || host == "localhost"
+}
+
+fn target_of_record(bytes: &[u8]) -> Result<Target, String> {
+    let r: ClusterRecord = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    let api_url = r.api_url.trim().trim_end_matches('/').to_string();
+    let token = r.token.trim().to_string();
+    if token.is_empty() {
+        return Err("it has no token".to_string());
+    }
+    // This token and every caller's bearer go there: not in the clear, and
+    // not to a certificate nothing vouches for.
+    if api_url.starts_with("https://") {
+        if r.ca.trim().is_empty() {
+            return Err(format!("{api_url} with no CA"));
+        }
+    } else if !is_loopback_url(&api_url) {
+        return Err(format!("{api_url} is not https"));
+    }
+    let mut b = crate::http::Client::builder().timeout(Duration::from_secs(5));
+    if !r.ca.trim().is_empty() {
+        b = b.add_root_certificate_pem(r.ca.into_bytes());
+    }
+    let client = b.build().map_err(|e| e.to_string())?;
+    Ok(Target { api_url, client, bearer: Bearer::Value(token) })
+}
+
+fn non_empty(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn digest(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(token.as_bytes());
+    d.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+impl KubeAuth {
+    /// From `[management.kubernetes]` and the environment; `None` when no
+    /// apiserver is named (Kubernetes bearers are then refused).
+    pub fn from_config(cfg: Option<&KubeAuthConfig>) -> Option<KubeAuth> {
+        let env = |k: &str| non_empty(std::env::var(k).ok());
+        let api_url = env("STORMBLOCK_KUBE_API").or_else(|| cfg.map(|c| c.api_url.clone()).and_then(|u| non_empty(Some(u))))?;
+        let ca = env("STORMBLOCK_KUBE_CA").or_else(|| cfg.and_then(|c| c.ca_file.clone()));
+        let token_file = env("STORMBLOCK_KUBE_TOKEN_FILE").or_else(|| cfg.and_then(|c| c.token_file.clone()));
+        let record = env("STORMBLOCK_KUBE_CLUSTER_RECORD")
+            .or_else(|| cfg.and_then(|c| c.cluster_record.clone()))
+            .map(PathBuf::from)
+            .or_else(|| {
+                token_file.as_ref().and_then(|f| std::path::Path::new(f).parent()).map(|d| d.join("engine-cluster.json"))
+            });
+        let mut b = crate::http::Client::builder().timeout(Duration::from_secs(5));
+        if let Some(ca) = ca {
+            match std::fs::read(&ca) {
+                Ok(pem) => b = b.add_root_certificate_pem(pem),
+                Err(e) => {
+                    tracing::error!("kubernetes auth: cannot read CA {ca}: {e} — Kubernetes bearers will be refused");
+                    return None;
+                }
+            }
+        }
+        let client = match b.build() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("kubernetes auth: {e} — Kubernetes bearers will be refused");
+                return None;
+            }
+        };
+        let own = Target {
+            api_url: api_url.trim_end_matches('/').to_string(),
+            client,
+            bearer: Bearer::File(token_file),
+        };
+        Some(KubeAuth { own: Arc::new(own), record, followed: Mutex::new(None), cache: Mutex::new(HashMap::new()) })
+    }
+
+    /// Whom a review asks now, as the record says.
+    pub fn api_url(&self) -> String {
+        match self.target() {
+            Ok(t) => t.api_url.clone(),
+            Err(_) => self.record.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+        }
+    }
+
+    /// The apiserver to ask: the cluster's while the record is there, else
+    /// this node's. An error means nothing can be reviewed.
+    fn target(&self) -> Result<Arc<Target>, String> {
+        let Some(path) = &self.record else { return Ok(self.own.clone()) };
+        use std::os::unix::fs::MetadataExt;
+        let stamp = match std::fs::metadata(path) {
+            Ok(m) => Some((m.modified().ok(), m.len(), m.ino())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let mut followed = self.followed.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = followed.as_ref() {
+            if f.stamp == stamp {
+                return f.target.clone();
+            }
+        }
+        let first = followed.is_none();
+        let target = match stamp {
+            None => Ok(self.own.clone()),
+            Some(_) => std::fs::read(path)
+                .map_err(|e| e.to_string())
+                .and_then(|b| target_of_record(&b))
+                .map(Arc::new)
+                .map_err(|e| format!("{}: {e}", path.display())),
+        };
+        match &target {
+            Err(e) => tracing::error!("kubernetes auth: no bearer can be reviewed: the cluster's record {e}"),
+            Ok(t) if !first || stamp.is_some() => tracing::info!("kubernetes auth: bearers are reviewed at {} now", t.api_url),
+            Ok(_) => {}
+        }
+        *followed = Some(Followed { stamp, target: target.clone() });
+        drop(followed);
+        // What another apiserver said is not what this one says.
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        target
+    }
 
     /// The cluster's Nodes (#520, `[fabric] peers_from = "kubernetes"`): each
     /// Node's name and its `InternalIP`s, as the apiserver lists them. The
     /// engine's own bearer must be allowed `list nodes`.
     pub async fn list_nodes(&self) -> Result<Vec<(String, Vec<String>)>, String> {
-        let url = format!("{}/api/v1/nodes", self.api_url);
-        let r = self
+        let t = self.target()?;
+        let url = format!("{}/api/v1/nodes", t.api_url);
+        let r = t
             .client
             .get(&url)
-            .bearer(self.own_token().as_deref())
+            .bearer(t.own_token().as_deref())
             .send()
             .await
             .map_err(|e| format!("{url}: {e}"))?;
@@ -157,6 +289,10 @@ impl KubeAuth {
     /// in a family's namespace on forge's apiserver grants it that family's
     /// volumes and no other's. `None`: the cluster-wide question.
     pub async fn review_in(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>, namespace: Option<&str>) -> Review {
+        let target = match self.target() {
+            Ok(t) => t,
+            Err(e) => return Review::Unavailable(e),
+        };
         let key =
             (digest(bearer), resource.to_string(), verb.to_string(), name.map(str::to_string), namespace.map(str::to_string));
         if let Some((at, r)) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
@@ -164,7 +300,7 @@ impl KubeAuth {
                 return r.clone();
             }
         }
-        let r = self.review_uncached(bearer, resource, verb, name, namespace).await;
+        let r = review_uncached(&target, bearer, resource, verb, name, namespace).await;
         if !matches!(r, Review::Unavailable(_)) {
             let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             c.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);
@@ -172,60 +308,60 @@ impl KubeAuth {
         }
         r
     }
+}
 
-    async fn review_uncached(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>, namespace: Option<&str>) -> Review {
-        let tr = match self
-            .post(
-                "/apis/authentication.k8s.io/v1/tokenreviews",
-                json!({ "apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview", "spec": { "token": bearer } }),
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => return Review::Unavailable(e),
-        };
-        if tr["status"]["authenticated"] != json!(true) {
-            return Review::Unauthenticated(tr["status"]["error"].as_str().unwrap_or("not authenticated").to_string());
-        }
-        let user = KubeUser {
-            username: tr["status"]["user"]["username"].as_str().unwrap_or("").to_string(),
-            groups: tr["status"]["user"]["groups"]
-                .as_array()
-                .map(|g| g.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-                .unwrap_or_default(),
-        };
-        let mut attrs = json!({ "group": "storage.storm.io", "resource": resource, "verb": verb });
-        if let Some(n) = name {
-            attrs["name"] = json!(n);
-        }
-        if let Some(ns) = namespace {
-            attrs["namespace"] = json!(ns);
-        }
-        let sar = match self
-            .post(
-                "/apis/authorization.k8s.io/v1/subjectaccessreviews",
-                json!({
-                    "apiVersion": "authorization.k8s.io/v1",
-                    "kind": "SubjectAccessReview",
-                    "spec": {
-                        "user": user.username,
-                        "groups": user.groups,
-                        "uid": tr["status"]["user"]["uid"],
-                        "resourceAttributes": attrs,
-                    },
-                }),
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => return Review::Unavailable(e),
-        };
-        if sar["status"]["allowed"] == json!(true) {
-            Review::Allowed(user)
-        } else {
-            let why = sar["status"]["reason"].as_str().unwrap_or("not allowed").to_string();
-            Review::Denied(user, why)
-        }
+async fn review_uncached(t: &Target, bearer: &str, resource: &str, verb: &str, name: Option<&str>, namespace: Option<&str>) -> Review {
+    let tr = match t
+        .post(
+            "/apis/authentication.k8s.io/v1/tokenreviews",
+            json!({ "apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview", "spec": { "token": bearer } }),
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return Review::Unavailable(e),
+    };
+    if tr["status"]["authenticated"] != json!(true) {
+        return Review::Unauthenticated(tr["status"]["error"].as_str().unwrap_or("not authenticated").to_string());
+    }
+    let user = KubeUser {
+        username: tr["status"]["user"]["username"].as_str().unwrap_or("").to_string(),
+        groups: tr["status"]["user"]["groups"]
+            .as_array()
+            .map(|g| g.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+    };
+    let mut attrs = json!({ "group": "storage.storm.io", "resource": resource, "verb": verb });
+    if let Some(n) = name {
+        attrs["name"] = json!(n);
+    }
+    if let Some(ns) = namespace {
+        attrs["namespace"] = json!(ns);
+    }
+    let sar = match t
+        .post(
+            "/apis/authorization.k8s.io/v1/subjectaccessreviews",
+            json!({
+                "apiVersion": "authorization.k8s.io/v1",
+                "kind": "SubjectAccessReview",
+                "spec": {
+                    "user": user.username,
+                    "groups": user.groups,
+                    "uid": tr["status"]["user"]["uid"],
+                    "resourceAttributes": attrs,
+                },
+            }),
+        )
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return Review::Unavailable(e),
+    };
+    if sar["status"]["allowed"] == json!(true) {
+        Review::Allowed(user)
+    } else {
+        let why = sar["status"]["reason"].as_str().unwrap_or("not allowed").to_string();
+        Review::Denied(user, why)
     }
 }
 

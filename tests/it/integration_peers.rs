@@ -389,7 +389,7 @@ async fn a_peer_is_found_among_the_clusters_nodes_even_one_that_joined_after_sta
         c.fabric.peers_from = Some("kubernetes".into());
         c.fabric.peers_port = Some(port);
         c.management.kubernetes =
-            Some(stormblock::mgmt::config::KubeAuthConfig { api_url: api_url.clone(), ca_file: None, token_file: None });
+            Some(stormblock::mgmt::config::KubeAuthConfig { api_url: api_url.clone(), ca_file: None, token_file: None, cluster_record: None });
     })
     .await;
     b.config.validate().expect("B's config validates");
@@ -447,7 +447,7 @@ async fn a_peer_is_found_among_the_clusters_nodes_even_one_that_joined_after_sta
         c.fabric.peers_from = Some("kubernetes".into());
         c.fabric.peers_port = Some(port);
         c.management.kubernetes =
-            Some(stormblock::mgmt::config::KubeAuthConfig { api_url: dead, ca_file: None, token_file: None });
+            Some(stormblock::mgmt::config::KubeAuthConfig { api_url: dead, ca_file: None, token_file: None, cluster_record: None });
     })
     .await;
     assert!(stormblock::mgmt::peers::find(&b2, &golden.to_string()).await.unwrap().is_none());

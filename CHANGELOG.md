@@ -4,7 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
-- **docs:** #557: why a cluster worker cannot review a bearer, and the question it needs answered.
+- **feat:** #557 (the master's A, stormblock's half): while `engine-cluster.json` beside the engine's token names the cluster, the engine reviews bearers there, with the token the cluster issued it; looked at on every review; gone, back to its own apiserver; not usable, nothing is reviewed (503). Inert until stormcluster writes it.
 - **docs:** #390: `ci-shelf-raid6-verify.sh` re-run at 19bde5e0, ALL PASS. The run on the DS224C waits on the shelf being cabled to the Dell again.
 
 

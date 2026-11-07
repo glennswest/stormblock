@@ -137,6 +137,22 @@ may create `tokenreviews` and `subjectaccessreviews`, as
    stormcert can give forge its trust, and can neither take it away
    (`DELETE`, `destroy`) nor turn forge off.
 
+**On a cluster worker (#557)** there is no apiserver on the node, and its own
+`sa-token.key` is not one the cluster holds. While the node is a worker,
+stormcluster keeps `engine-cluster.json` beside the engine's token
+(`[management.kubernetes] cluster_record`, `$STORMBLOCK_KUBE_CLUSTER_RECORD`),
+0600, written by rename:
+
+```json
+{"api_url": "https://192.168.16.96:7443", "ca": "<the cluster's CA, PEM>", "token": "<the token the cluster issued this engine>"}
+```
+
+It is looked at on every review, so a join, a renewal or a release needs no
+restart, and answers from before a change are forgotten. Gone, reviews go back
+to `api_url`. There and not usable (no token, no CA, not https), nothing is
+reviewed and the call gets 503, naming the file. While the cluster cannot be
+reached, the call gets 503 too. Only the admin token works then.
+
 The release's `storage-admin` ClusterRole allows these; `storage-viewer`
 does not. The outcomes:
 - a valid bearer that is not allowed: **403** with the apiserver's reason;
