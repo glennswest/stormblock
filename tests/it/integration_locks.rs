@@ -886,6 +886,11 @@ impl BlockDevice for OpLog {
     }
 }
 
+async fn clone_named(vm: Arc<stormblock::lockwatch::TrackedMutex<VolumeManager>>, golden: VolumeId, name: String) -> VolumeId {
+    let spec = stormblock::fs::CloneSpec::new(&name);
+    stormblock::fs::template::clone_volume(&vm, golden, &spec).await.unwrap().volume_id
+}
+
 /// What a clone and a delete ask of the disk (#521): a flush is what costs
 /// seconds on a drive-managed SMR disk.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -915,7 +920,7 @@ async fn what_a_clone_and_a_delete_ask_of_the_disk() {
         .unwrap();
     let golden = t.clone_source().unwrap();
     let clone = |name: &str| {
-        let (vm, spec) = (vm.clone(), stormblock::fs::CloneSpec { name: name.into(), ..Default::default() });
+        let (vm, spec) = (vm.clone(), stormblock::fs::CloneSpec::new(name));
         async move { stormblock::fs::template::clone_volume(&vm, golden, &spec).await.unwrap().volume_id }
     };
     // The first after a start writes its stores whole.
@@ -943,7 +948,19 @@ async fn what_a_clone_and_a_delete_ask_of_the_disk() {
     m(true);
     let id = clone("second").await;
     let flushes = m(false);
-    assert!(flushes > 0, "a clone is made durable");
+    // The stamp's data, then its table entry, then the record: each durable
+    // before the next is written (durability rule 1). No more than that.
+    assert_eq!(flushes, 3, "a clone's flushes on the disk it is on");
+
+    // What a kubelet starting a pod's containers asks at once: they share.
+    let m = measure("8 clones at once");
+    m(true);
+    let at_once: Vec<_> = (0..8).map(|i| tokio::spawn(clone_named(vm.clone(), golden, format!("many-{i}")))).collect();
+    for c in at_once {
+        c.await.unwrap();
+    }
+    let flushes = m(false);
+    assert!(flushes <= 12, "8 clones at once: {flushes} flushes, where one alone takes 3");
 
     let m = measure("delete");
     m(true);
