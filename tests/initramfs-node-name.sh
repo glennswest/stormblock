@@ -76,7 +76,8 @@ name() (
             return 143
         fi
         case "$1" in
-        192.168.30.2) [ -n "${PTR:-}" ] && printf 'Server: 192.168.31.252\n\n2.30.168.192.in-addr.arpa\tname = %s.\n' "$PTR" ;;
+        # busybox's form (#559): no root dot. PTRDOT=1: bind's, with it.
+        192.168.30.2) [ -n "${PTR:-}" ] && printf 'Server:\t\t192.168.31.252\nAddress:\t192.168.31.252:53\n\n2.30.168.192.in-addr.arpa\tname = %s%s\n' "$PTR" "${PTRDOT:+.}" ;;
         *) for a in ${BACK:-}; do printf 'Address: %s\n' "$a"; done ;;
         esac
         return 0
@@ -84,6 +85,18 @@ name() (
     . "$WORK/name.sh" > "$WORK/name.out" 2>&1
     echo "$NODE_NAME|$(cat "$R/sys/kernel/hostname" 2>/dev/null)|$(cat "$R/sys/kernel/domainname" 2>/dev/null)"
 )
+
+# #559: busybox prints the PTR name with no trailing dot; bind's nslookup with one.
+r=$(DNS=192.168.31.252 PTR=stormblock1.g16.lo BACK=192.168.30.2 name)
+check "a PTR as busybox prints it, no trailing dot, names the node (#559)" "stormblock1|stormblock1|g16.lo" "$r"
+r=$(PTRDOT=1 DNS=192.168.31.252 PTR=stormblock1.g16.lo BACK=192.168.30.2 name)
+check "  and as bind prints it, with the dot" "stormblock1|stormblock1|g16.lo" "$r"
+# No PTR parse in the image may insist on the root's dot again.
+if grep -n "name = .*\\\.\$/" "$GEN" > "$WORK/dotted"; then
+    echo "  FAIL  a parse of nslookup's 'name =' line needs a trailing dot: $(cat "$WORK/dotted")"; fail=1
+else
+    echo "  ok    no parse of nslookup's 'name =' line needs the trailing dot"
+fi
 
 r=$(LOST=2 PTR=stormblock1.g16.lo BACK=192.168.30.2 DNS=192.168.31.252 name)
 check "answers lost twice: asked again, and named (#545)" "stormblock1|stormblock1|g16.lo" "$r"
@@ -122,6 +135,45 @@ contains "and said" "ignoring" "$(cat "$WORK/name.out")"
 
 r=$(name)
 check "nothing at all: the MAC, no domain" "storm-06f96d|storm-06f96d|" "$r"
+
+# The real thing (#559): busybox's own nslookup, asking a DNS server that
+# knows the node, in a network namespace of the test's own (loopback only, so
+# port 53 needs no root). The stub above cannot drift from it unseen.
+real_busybox() (
+    set +e
+    R="$WORK/real"; rm -rf "$R"; mkdir -p "$R/run" "$R/sys/kernel" "$R/net/eth0"
+    : > "$R/resolv.conf"; echo "search g16.lo" >> "$R/resolv.conf"; echo "nameserver 127.0.0.1" >> "$R/resolv.conf"
+    echo "0c:c4:7a:06:f9:6d" > "$R/net/eth0/address"
+    cat > "$R/run.sh" <<RUN
+ip link set lo up 2>/dev/null || busybox ip link set lo up
+python3 "$HERE/dns-stub.py" 127.0.0.1 53 "$R/ready" \
+    "PTR:2.30.168.192.in-addr.arpa=stormblock1.g16.lo" "A:stormblock1.g16.lo=192.168.30.2" &
+stub=\$!
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -e "$R/ready" ] && break; sleep 0.1; done
+busybox nslookup 192.168.30.2 127.0.0.1 > "$R/nslookup.out" 2>&1
+STORM_NAME_RUN="$R/run"; STORM_RESOLV="$R/resolv.conf"; STORM_PROC_SYS="$R/sys"; STORM_SYSNET="$R/net"
+IFACE=eth0; UPLINK=eth0; STORM_DNS_TIMEOUT=""
+ip() { echo "2: eth0    inet 192.168.30.2/20 brd 192.168.31.255 scope global eth0"; }
+nslookup() { busybox nslookup "\$1" 127.0.0.1; }
+. "$WORK/name.sh" > "$R/name.out" 2>&1
+kill \$stub 2>/dev/null
+echo "\$NODE_NAME|\$(cat "$R/sys/kernel/hostname" 2>/dev/null)|\$(cat "$R/sys/kernel/domainname" 2>/dev/null)"
+RUN
+    unshare -rn sh "$R/run.sh"
+)
+if command -v busybox >/dev/null 2>&1 && busybox nslookup --help 2>&1 | grep -qi nslookup \
+    && command -v python3 >/dev/null 2>&1 && command -v unshare >/dev/null 2>&1 \
+    && unshare -rn true 2>/dev/null; then
+    r=$(real_busybox)
+    check "busybox's real nslookup and a real DNS answer name the node (#559)" "stormblock1|stormblock1|g16.lo" "$r"
+    contains "  busybox printed the PTR answer" "name = stormblock1.g16.lo" "$(cat "$WORK/real/nslookup.out" 2>/dev/null)"
+    contains "  and the console says the name came from DNS" "name from DNS: stormblock1 (192.168.30.2, confirmed)" \
+        "$(cat "$WORK/real/name.out" 2>/dev/null)"
+elif [ -n "${STORM_REQUIRE_REAL_DNS:-}" ]; then
+    echo "  FAIL  busybox nslookup, python3 or an unprivileged network namespace is missing, and STORM_REQUIRE_REAL_DNS is set"; fail=1
+else
+    echo "  SKIP  busybox's real nslookup: needs busybox, python3 and an unprivileged network namespace"
+fi
 
 # ---------------------------------------------------------------------------
 echo "the name DHCP is asked under:"

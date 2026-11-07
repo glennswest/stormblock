@@ -2792,8 +2792,13 @@ if [ -n "$NETADDR" ]; then
                 done
                 printf '%s\n' "$_no"
             }
+            # With or without the root's dot (#559): bind's nslookup prints
+            # `name = node1.g16.lo.`, busybox's (the one this image carries)
+            # `name = node1.g16.lo`. Taking only the first form named no node
+            # from DNS in any release.
             PTRNAME=$(ns_ask "$MYIP" \
-                      | sed -n 's/.*name = \(.*\)\.$/\1/p' | head -1)
+                      | sed -n 's/.*name = \([^[:space:]]*\).*$/\1/p' | head -1)
+            PTRNAME=${PTRNAME%.}
             # Forward-confirmed, or not at all.
             #
             # A reverse record outlives whatever held the address. This pool
@@ -3084,7 +3089,9 @@ if [ "$BOOT_MODE" = "local" ]; then
         # server having to offer option 15 or 119 at all.
         if [ -z "$BOOTDOM" ]; then
             for ns in $(awk '/^nameserver/ { print $2 }' /etc/resolv.conf 2>/dev/null); do
-                BOOTDOM=$(nslookup "$ns" 2>/dev/null | sed -n 's/.*name = [^.]*\.\(.*\)\.$/\1/p' | head -1)
+                # The dot is optional, as in the node name's PTR (#559).
+                BOOTDOM=$(nslookup "$ns" 2>/dev/null | sed -n 's/.*name = [^.[:space:]]*\.\([^[:space:]]*\).*$/\1/p' | head -1)
+                BOOTDOM=${BOOTDOM%.}
                 [ -n "$BOOTDOM" ] && { echo "  domain from the resolver's own PTR: $BOOTDOM"; break; }
             done
         fi
