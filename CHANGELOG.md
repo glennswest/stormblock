@@ -4,8 +4,12 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
-- **feat:** #426 (stormvm#29): `POST /api/v1/volumes/{id}/move {to?: {slab|drive|array}, except?: {…}}` moves a volume onto a named slab, drive or array, or off one, while it is used: same id, same ublk device. `GET …/move` reads its progress (`to_move`, `moved`, `failed`, `remaining`, a terminal `done`/`failed` with the reason, or `cancelled`); `DELETE …/move` cancels, `?release=true` also clears the target. The volume's placement target stays, so new extents and copy-on-writes keep to it (a hard boundary, as a pin); kept in `<data_dir>/placement_targets.json`. `target` on `POST /api/v1/volumes` too (stormstorage#106). The rebalance leaves a targeted volume alone; `POST …/tier` is refused while a target stands. Inert until asked.
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
+
+## [v23.24.0] — 2026-11-07
+
+### Added
+- #426 (stormvm#29): `POST /api/v1/volumes/{id}/move {to?: {slab|drive|array}, except?: {…}}` moves a volume onto a named slab, drive or array, or off one, while it is used: same id, same ublk device. `GET …/move` reads its progress (`to_move`, `moved`, `failed`, `remaining`, a terminal `done`/`failed` with the reason, or `cancelled`); `DELETE …/move` cancels, `?release=true` also clears the target. The volume's placement target stays, so new extents and copy-on-writes keep to it (a hard boundary, as a pin); kept in `<data_dir>/placement_targets.json`. `target` on `POST /api/v1/volumes` too (stormstorage#106). The rebalance leaves a targeted volume alone; `POST …/tier` is refused while a target stands. Inert until asked.
 
 ## [v23.23.1] — 2026-11-07
 
