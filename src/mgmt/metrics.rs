@@ -413,7 +413,7 @@ async fn refresh_capacity_gauges(state: &crate::mgmt::AppState) {
     }
 
     // What each pool can promise and what it has promised (#152).
-    let acc = crate::mgmt::capacity::account(state).await;
+    let acc = crate::mgmt::capacity::account_now(state).await;
     for p in &acc.pools {
         let pool = p.pool.clone();
         metrics::gauge!("stormblock_capacity_promisable_bytes", "pool" => pool.clone()).set(p.promisable_bytes as f64);

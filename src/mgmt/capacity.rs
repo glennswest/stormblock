@@ -146,6 +146,43 @@ fn pool_key(role: SlabRole, dedicated: Option<SlabId>) -> String {
 
 /// Count it all, now.
 pub async fn account(state: &AppState) -> Accounting {
+    let vols = {
+        let vm = state.volume_manager.lock().await;
+        volumes_of(&*vm)
+    };
+    account_of(state, vols).await
+}
+
+/// [`account`] for a report (#521): never in line behind a holder of the volume
+/// manager. While it is held, the catalog it last published answers, as a
+/// volume listing's does (#418); a claim's admission asks [`account`], which
+/// must count the volume just made.
+pub async fn account_now(state: &AppState) -> Accounting {
+    let latest = state.volume_catalog.latest();
+    let current = latest.as_ref().filter(|c| crate::volume::catalog::is_current(c, &state.volume_presence));
+    if let Some(c) = current {
+        return account_of(state, volumes_of(&**c)).await;
+    }
+    let vols = match state.volume_manager.try_lock() {
+        Ok(vm) => volumes_of(&*vm),
+        Err(_) => match &latest {
+            Some(c) => volumes_of(&**c),
+            None => return account(state).await,
+        },
+    };
+    account_of(state, vols).await
+}
+
+type Promising = Vec<(VolumeId, u64, bool, std::sync::Arc<crate::volume::ThinVolumeHandle>)>;
+
+fn volumes_of(v: &impl crate::volume::catalog::VolumeView) -> Promising {
+    v.volume_ids()
+        .into_iter()
+        .filter_map(|id| v.get_volume_handle(&id).map(|h| (id, h.capacity_bytes(), v.is_sealed(&id), h)))
+        .collect()
+}
+
+async fn account_of(state: &AppState, vols: Promising) -> Accounting {
     let oc = load(state);
     // Slabs: promisable and written, per pool.
     struct S {
@@ -173,14 +210,6 @@ pub async fn account(state: &AppState) -> Accounting {
         }
     }
     // Volumes: what each unsealed one can still take, per pool.
-    let vols: Vec<(VolumeId, u64, bool, std::sync::Arc<crate::volume::ThinVolumeHandle>)> = {
-        let vm = state.volume_manager.lock().await;
-        vm.list_volumes()
-            .await
-            .into_iter()
-            .filter_map(|(id, _, virt, _)| vm.get_volume_handle(&id).map(|h| (id, virt, vm.is_sealed(&id), h)))
-            .collect()
-    };
     let mut promise: HashMap<String, f64> = HashMap::new();
     {
         let gem = state.gem.read().await;

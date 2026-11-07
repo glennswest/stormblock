@@ -231,11 +231,16 @@ the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#35
 
 X9 clones 2-3.5 s (10-17 s on server1), cold 183 ms but warm-after-reboot up to 3.7 s; lists 1.9-3.3 s;
 fsck 11-28 s. Target: each claim step < 50 ms on a SAS HDD. Measure, then fix where it points:
-- [ ] `lockwatch::step`: per-step times in the `api:` line (clone, lists, delete)
-- [ ] `ci-api-latency-verify.sh`: those calls on one throttled disk, warm, after a restart, under load
-- [ ] fixes per the numbers. Suspects by reading: `/slabs` takes the manager (`capacity::account`);
-      a listing takes the extent map's lock 4+ times a volume and walks each map for health; the
-      golden check reads the slot table one entry at a time, before the batched preread
+- [x] `lockwatch::step`: per-step times in the `api:` line (clone, lists, delete)
+- [x] `ci-api-latency-verify.sh`, `integration_locks::what_a_clone_and_a_delete_ask_of_the_disk`:
+      lists 2-3 ms, lock-wait 0, not reproduced. A clone's time is its persist: 3 flushes, in the
+      order durability needs (data, table entry, record), so it costs 3 × the disk's flush
+- [x] clones at once share one log record and flush (`persist_v2`, group commit): 8 at once 12 → 5
+- [x] `/slabs` and `/metrics` capacity never wait on the manager (`capacity::account_now`)
+- [x] adopt-ublk makes the first persist (whole stores) itself, not the first caller
+- [ ] check.sh; ci-api-latency-verify.sh; docs, CHANGELOG; stage
+- [ ] metal: the `api:` steps on an X9 and the Dell: if `persist=` dominates, flush times are
+      the gap; `/debug/stalls` has them. `--after-release`, then close
 
 ### Root-volume page-in at boot: 70-124 ms a major fault (2026-11-06, #484, P1, stormcos#804 fix 4) — DONE (v23.22.0), closed; metal pending
 

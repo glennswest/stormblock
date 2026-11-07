@@ -7,7 +7,8 @@
 # interleave in the slot table) and CLONES clones of them, with DEVICES of those
 # attached over ublk, as a node carries. Then GET /volumes, GET /slabs, a clone,
 # a delete and an fsck: warm; just after the engine restarted (its slot-table
-# cache cold, as after a reboot); and warm under a writer that fsyncs. Each
+# cache cold, as after a reboot); and warm under a writer that fsyncs. Also
+# eight clones at once, as a pod's containers ask. Each
 # call's client time is printed, then the engine's own `api:` line with its
 # steps. Prints the numbers; with MAX_MS set, each median must be under it.
 #
@@ -156,6 +157,15 @@ round() { # phase
         echo "CALL $1 delete $(ms $t0 $t1)"
         echo "IOS $1 delete $(diffios "$i0" "$i1")"
     done
+    # A pod's containers: eight clones at once, the wall time for all of them.
+    i0=$(ios); t0=$(now); PIDS=""
+    for r in 1 2 3 4 5 6 7 8; do
+        api -X POST $B/volumes/$g1/clone -d "{\"name\":\"m-$1-$r\"}" > /tmp/many.$r & PIDS="$PIDS $!"
+    done
+    wait $PIDS; t1=$(now); i1=$(ios)
+    echo "CALL $1 eight $(ms $t0 $t1)"
+    echo "IOS $1 eight $(diffios "$i0" "$i1")"
+    for r in 1 2 3 4 5 6 7 8; do api -X DELETE $B/volumes/$(idof < /tmp/many.$r) >/dev/null; done
 }
 # The disk's reads, writes and flushes a call cost (/sys/block/vda/stat).
 ios() { awk '{print $1, $5, $16}' /sys/block/vda/stat; }
@@ -202,10 +212,10 @@ timeout 2400 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 4096 -smp 
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|CALL|IOS|ENGINE|LOG)|panick'
 tr -d '\r' < "$W/guest.log" | grep -q "^RESULT done PASS" || { tail -30 "$W/guest.log"; fail "the guest did not finish"; }
 for phase in warm cold load; do
-    for what in list slabs clone attach delete fsck; do
+    for what in list slabs clone eight attach delete fsck; do
         med=$(tr -d '\r' < "$W/guest.log" | awk -v p=$phase -v w=$what '$1=="CALL" && $2==p && $3==w {print $4}' | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}')
         echo "MEDIAN $phase $what ${med:-?} ms"
-        if [ -n "${MAX_MS:-}" ] && [ "$what" != fsck ] && [ "${med:-0}" -gt "$MAX_MS" ]; then fail "$phase $what ${med} ms is over ${MAX_MS} ms"; fi
+        if [ -n "${MAX_MS:-}" ] && [ "$what" != fsck ] && [ "$what" != eight ] && [ "${med:-0}" -gt "$MAX_MS" ]; then fail "$phase $what ${med} ms is over ${MAX_MS} ms"; fi
     done
 done
 if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi

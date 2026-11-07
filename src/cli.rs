@@ -9190,6 +9190,17 @@ async fn handle_adopt_ublk(
         state.start_digests();
         state.start_scrub();
         crate::mgmt::peers::start(&state);
+        // The first persist after a start writes its stores whole (the maps
+        // were rebuilt from the slot tables). Made now, not by whoever clones
+        // first (#521: 1.6 s against 0.2 s on the model, more on a real node).
+        {
+            let st = state.clone();
+            tokio::spawn(async move {
+                let t = std::time::Instant::now();
+                crate::volume::VolumeManager::persist_detached(&st.volume_manager).await;
+                tracing::info!("the first record after the handover written in {} ms", t.elapsed().as_millis());
+            });
+        }
         // Where a staged release's boot pallet goes (#122).
         *state.slab_paths.write().await = slab_paths.to_vec();
         // Their disks, so `/api/v1/pallets` lists and verifies the boot

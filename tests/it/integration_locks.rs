@@ -974,3 +974,50 @@ async fn what_a_clone_and_a_delete_ask_of_the_disk() {
     m(false);
     drop(first);
 }
+
+/// `GET /api/v1/slabs` took 3.3 s on the Dell after a reboot (#521): its
+/// capacity figures took the volume manager.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_slab_listing_answers_while_the_volume_manager_is_held() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_with_fast_disk(&dir).await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = stormblock::mgmt::api::router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    common::wait_for_listener(addr).await;
+    let c = reqwest::Client::new();
+    let made = c
+        .post(format!("http://{addr}/api/v1/volumes"))
+        .json(&serde_json::json!({"name": "v", "size": "16M"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(made.status().is_success(), "{}", made.text().await.unwrap());
+
+    let held = state.volume_manager.clone().lock_owned().await;
+    let r = tokio::time::timeout(Duration::from_secs(5), c.get(format!("http://{addr}/api/v1/slabs")).send())
+        .await
+        .expect("the slab listing waited on the volume manager")
+        .unwrap();
+    assert!(r.status().is_success());
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["count"], 2, "{v}");
+    drop(held);
+    server.abort();
+}
+
+async fn setup_with_fast_disk(dir: &TempDir) -> Arc<AppState> {
+    let devices = common::create_file_devices(dir, 2, 512 * 1024 * 1024).await;
+    let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
+    for (dev, role) in devices.into_iter().zip([SlabRole::System, SlabRole::Data]) {
+        let slab = Slab::format_with(dev, SlabFormat::new(DEFAULT_EXTENT_SIZE, StorageTier::Hot).with_role(role)).await.unwrap();
+        vm.add_slab(slab).await;
+    }
+    let mut config = StormBlockConfig::default();
+    config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
+    config.management.ublk_transport = false;
+    let reg = vm.registry().clone();
+    let gem = vm.gem().clone();
+    Arc::new(AppState::new(config, vm, reg, gem))
+}
