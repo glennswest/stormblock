@@ -109,6 +109,7 @@ net_carrier() { cat "$NET_SYSFS/$1/carrier" 2>/dev/null || echo 0; }
 pn() {
     ALL_PHYS="port0 port1" LEASED=port0 IFACE=stormbr0
     . /path-nics.sh
+    path_nics_join
 }
 pn > /run/pn.log 2>&1
 sed 's/^/GUEST block: /' /run/pn.log
