@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
+- **fix:** #559 (P0): the initramfs takes a node's name from reverse DNS again. busybox's `nslookup`, the one the image carries, prints a PTR answer as `name = node1.g16.lo`, with no root dot. The parse took only bind's `name = node1.g16.lo.`, so no node had been named from DNS in any release since #238; each named itself `storm-<mac>`. The boot domain read from the resolver's own PTR had the same fault. Both now take either form. `tests/initramfs-node-name.sh`'s stub prints busybox's form (and bind's in one case), and a new case runs the block against busybox's real `nslookup` and a DNS server (`tests/dns-stub.py`) in a network namespace of its own; `check.sh` requires it.
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
 ## [v23.25.0] — 2026-11-07

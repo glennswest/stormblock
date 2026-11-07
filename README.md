@@ -2640,7 +2640,9 @@ The node takes its name in this order:
 1. **From the lease:** DHCP option 12, the reservation's hostname. An FQDN
    there gives the domain too.
 2. **From DNS:** the PTR of the address it was leased, but only if that name
-   resolves back to the address (forward-confirmed).
+   resolves back to the address (forward-confirmed). The answer is read as
+   busybox's `nslookup` prints it (no trailing dot) or as bind's does (with
+   one); before #559 only bind's form was read, so no node was named here.
 3. **Made up:** `storm-<last 6 hex of the uplink MAC>`.
 
 Each step that gives no name says why on the console:

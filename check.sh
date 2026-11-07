@@ -50,6 +50,8 @@ if [ -n "${STORMBLOCK_TEST_DIR:-}" ]; then
 fi
 
 echo "== check: initramfs tests"
+# The node name test asks busybox's real nslookup (#559): never skipped here.
+export STORM_REQUIRE_REAL_DNS=1
 shells=sh
 command -v busybox >/dev/null 2>&1 && shells="sh busybox_sh"
 for t in tests/initramfs-*.sh; do

@@ -227,6 +227,17 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### The initramfs never names a node from reverse DNS (2026-11-07, #559, P0) — fix on wip/559-ptr-dot
+
+busybox's nslookup prints `name = node1.g16.lo` (no root dot); the node name block's sed wanted `\.$`, so every
+node fell to `storm-<mac>` since #238; the stub printed bind's form, so the test passed. The boot domain from the
+resolver's PTR (appliance discovery) had the same parse.
+- [x] both parses take either form; the stub prints busybox's form (bind's in one case); a guard that no `name =`
+      parse needs the dot; a case against busybox's real nslookup + `tests/dns-stub.py` in `unshare -rn`
+      (required by check.sh); ok under sh and busybox sh (BusyBox v1.37.0); control (the old sed) fails 9 checks
+- [ ] check.sh; merge; patch release; stage; close. Metal: a node with no option 12 and a confirmed PTR (C2NR0Q2,
+      `stormblock1`) says `name from DNS:` on a release with this initramfs
+
 ### Move a volume onto a named drive, slab or array, online, with progress (2026-11-07, #426, P1, stormvm#29, stormcos#806) — DONE (v23.24.0), closed; a node pending
 
 The retier aimed only at a tier and could not be watched. Built: a per-volume placement target
