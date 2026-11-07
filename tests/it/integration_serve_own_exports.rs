@@ -54,6 +54,9 @@ async fn node(dir: &TempDir) -> (Arc<AppState>, StormBlockConfig, [Uuid; 4]) {
     config.serve.portal_base = Some(free_ports(8));
     config.serve.portal_span = Some(8);
     config.serve.advertise_addr = Some("127.0.0.1".into());
+    // serve's rows here name no host (from before #212): opened, so the
+    // test can reach them as any host; #212's closing is integration_serve_host_bound.
+    config.serve.allow_any_host = Some(true);
     let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
     let state = Arc::new(AppState::new(config.clone(), vm, reg, gem));
     (state, config, ids)

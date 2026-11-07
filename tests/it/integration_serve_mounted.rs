@@ -180,7 +180,7 @@ async fn concurrent_exports_all_persist() {
         tokio::spawn(async move {
             let r = c
                 .post(format!("{base}/serve/v1/exports"))
-                .json(&serde_json::json!({"volume_id": id}))
+                .json(&serde_json::json!({"volume_id": id, "host_nqn": "nqn.2026-11.test:host"}))
                 .send()
                 .await
                 .unwrap();
@@ -233,7 +233,7 @@ async fn a_volume_whose_export_fails_is_not_left_behind() {
     }
     let r = c
         .post(format!("{base}/serve/v1/volumes"))
-        .json(&serde_json::json!({"name": "leaky", "size_bytes": 1048576, "export": true}))
+        .json(&serde_json::json!({"name": "leaky", "size_bytes": 1048576, "export": true, "host_nqn": "nqn.2026-11.test:host"}))
         .send()
         .await
         .unwrap();

@@ -262,7 +262,7 @@ in_use() {
     dd if=/dev/urandom of=/tmp/img bs=1M count=4 2>/dev/null
     dd if=/tmp/img of=$d bs=1M count=4 oflag=direct 2>/dev/null
     e=$(api -X POST http://127.0.0.1:$port/serve/v1/exports \
-        -d "{\"volume_id\":\"$v\",\"protocol\":\"nvme-tcp\",\"ephemeral\":true}" \
+        -d "{\"volume_id\":\"$v\",\"protocol\":\"nvme-tcp\",\"ephemeral\":true,\"host_nqn\":\"nqn.2026-11.ci:host\"}" \
         | sed -n 's/.*"export_id":"\([0-9a-f-]*\)".*/\1/p' | head -1)
     [ -n "$e" ] || { r in-use-export FAIL; sed 's/^/LOG /' /run/engine-$mode.log | tail -5; return; }
     api -X DELETE http://127.0.0.1:$port/serve/v1/exports/$e >/dev/null || { r in-use-withdraw FAIL; return; }

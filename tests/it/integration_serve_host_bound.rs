@@ -140,7 +140,8 @@ async fn discover(port: u16, host: &str) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_export_for_one_host_admits_that_host_alone() {
     let dir = TempDir::new().unwrap();
-    let s = serve(&dir, None, false).await;
+    // Opened on purpose, to show what `allow_any_host = true` still does.
+    let s = serve(&dir, Some(true), false).await;
 
     let (st, a) = export(&s, serde_json::json!({"volume_id": s.vols[0], "protocol": "nvme-tcp", "host_nqn": H1})).await;
     assert_eq!(st, 201, "{a}");
@@ -181,7 +182,8 @@ async fn an_export_for_one_host_admits_that_host_alone() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_that_allows_no_host_refuses_an_unbound_export_and_closes_old_ones() {
     let dir = TempDir::new().unwrap();
-    let s = serve(&dir, Some(false), true).await;
+    // Nothing set: the default is closed (#212, decision A).
+    let s = serve(&dir, None, true).await;
 
     // The row from before host binding is wired, and admits nobody.
     let legacy = {
@@ -242,7 +244,7 @@ async fn three_hundred_exports_share_one_listener_and_drain_one_by_one() {
     let mut made: Vec<(Uuid, u16, String)> = Vec::new();
     for i in 0..300u32 {
         let id = s.ctx.state.volume_manager.lock().await.create_volume_any(&format!("v{i}"), 1 << 20).await.unwrap().0;
-        let (st, a) = export(&s, serde_json::json!({"volume_id": id, "protocol": "nvme-tcp"})).await;
+        let (st, a) = export(&s, serde_json::json!({"volume_id": id, "protocol": "nvme-tcp", "host_nqn": H1})).await;
         assert_eq!(st, 201, "export {i}: {a}");
         made.push((id, a["attach"]["port"].as_u64().unwrap() as u16, a["attach"]["nqn"].as_str().unwrap().to_string()));
     }

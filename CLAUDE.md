@@ -3682,7 +3682,7 @@ MicroCloud blades on `boothost/S11075924402016` (#249). Asked on #202
 (needs-owner): A as proposed, B #204's rule (an operator-set alias only;
 recommended), C a named host only while it has no MAC alias. Nothing built.
 
-### /serve/v1 exports bound to one host (2026-10-08, #212) — BUILT; THE FLIP WAITS ON stormblock-registry#102 (owner: A, 2026-10-09)
+### /serve/v1 exports bound to one host (2026-10-08, #212) — FLIPPED 2026-11-07 (owner: A, 2026-10-09)
 
 Each serve export is its own subsystem on its own portal, `HostAccess::Any`.
 The one caller left is stormblock-registry (golden builds, media clones); it
@@ -3706,6 +3706,13 @@ sends no host NQN, so closing by default would break it: the owner's call.
       after #119. Rechecked 2026-10-10: #119 and rustkube-node#236 closed;
       vmcloud-image-operator#48 open, stormcos#453 unpublished: proposed
       after vmcloud-image-operator#48
+- [x] 2026-11-07: every blocker closed (vmcloud-image-operator#48 as not
+      applicable: vmimages makes no media clone); published 12.74 carries
+      registry 590b521 (⊇ #102, #119) and rustkube-node 78bf751 (⊇ #236).
+      Default `false` (serve/config.rs); tests: host_bound's closed test runs
+      at the default, the open one sets `true`; own_exports opens its legacy
+      node; serve_mounted and ci-ublk-qd-verify.sh name a host; docs
+- [ ] check.sh; v24.0.0 (a default changed); stage; close
 
 ### The listing generation moves on attach, detach and slab state (2026-10-08, #218) — DONE
 

@@ -508,7 +508,7 @@ where the drives are the engine's pool). Who may connect
 | `nqn`, `nqn_prefix` | `nqn.2026-08.lo.storm:shared`, `nqn.2026-08.lo.storm` | per-volume subsystems are `<nqn_prefix>:vol-<uuid>` |
 | `drain_grace_secs` | `120` | a withdrawn export drains this long before its LUN is pulled |
 | `reconcile_secs` | `2` | reconciler tick |
-| `allow_any_host` | `true` | an NVMe export that names no `host_nqn` admits any host (said at start); `false` refuses it and closes rows from before host binding (#212, `docs/nvme-access.md`) |
+| `allow_any_host` | `false` | an NVMe export must name its `host_nqn`: one that names none is refused (400) and rows from before host binding admit nobody; `true` admits any host to them (warned at start) (#212, `docs/nvme-access.md`) |
 | `orphan_export_grace_secs` | `300` | an export naming a missing volume is withdrawn after this; 0 = never |
 | `reap_secs`, `reap_apply`, `reap_min_age_secs`, `reap_max_per_pass` | `600`, `true`, `900`, `64` | template debris reaper |
 
@@ -2775,9 +2775,9 @@ What earlier docs described and the code does not do, each with its issue:
 - **"No C dependencies"** was never true: TLS brings in `ring` (the only
   backend since #209; `aws-lc-sys` is gone).
 - **NVMe/TCP access** (#210, `docs/nvme-access.md`): a `/serve/v1` export
-  that names no `host_nqn` still admits any host while `[serve]
-  allow_any_host` is on, the default (#212). Since #217 it serves only its
-  own exports.
+  admits only the `host_nqn` it names; one naming none is refused unless a
+  node sets `[serve] allow_any_host = true` (#212). Since #217 it serves only
+  its own exports.
 - **The slot fence (#239)** covers thin, mirrored, copy-on-write and parity
   I/O (a parity stripe is fenced whole, #240) and the StormFS chunk and
   versioned paths.

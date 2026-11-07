@@ -327,9 +327,12 @@ its own count reaches zero.
   to that host. Its subsystem admits that NQN alone, and discovery on the
   portal shows it to that host only. The host is kept on the wiring row, so a
   restart serves it the same way, and the export's JSON names it.
-- An export that names no host admits any host while `[serve]
-  allow_any_host` is on. That is the default, and the engine says so with a
-  warning at start.
-- With `allow_any_host = false`, such an export is refused (400), and a row
-  from before host binding is wired admitting no host.
+- `[serve] allow_any_host` is `false` by default (the owner's decision A on
+  #212, made once every caller sent `host_nqn`: stormblock-registry#102,
+  #119, rustkube-node#236, in release 12.74). An export naming no host is
+  refused (400, on `/serve/v1/exports` and on a `/serve/v1/volumes` create,
+  before any volume is made), and a row from before host binding is wired
+  admitting no host. The count of such rows is said at start.
+- `allow_any_host = true` reopens it: an export naming no host admits any
+  host, with a warning at every start.
 - `host_nqn` is for `nvme-tcp` exports; an iSCSI export taking one is a 400.

@@ -125,8 +125,8 @@ pub struct Wiring {
     #[serde(default)]
     pub ephemeral: bool,
     /// The one host this export's subsystem admits (#212), when the export
-    /// named one. `None`: any host, unless `[serve] allow_any_host = false`,
-    /// which admits none.
+    /// named one. `None`: no host (the default, `[serve] allow_any_host =
+    /// false`), or any host when a node sets it `true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_nqn: Option<String>,
 }
