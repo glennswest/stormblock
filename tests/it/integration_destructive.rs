@@ -33,6 +33,7 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                         Some("alice-k8s") => Some(("alice", vec!["storage-admins", "system:authenticated"])),
                         Some("bob-k8s") => Some(("bob", vec!["system:authenticated"])),
                         Some("stormcert-k8s") => Some(("system:serviceaccount:stormcert:stormcert", vec!["system:serviceaccounts"])),
+                        Some("forge-signer-k8s") => Some(("system:serviceaccount:kube-system:stormcert-forge", vec!["system:authenticated"])),
                         Some("user-k8s") => Some(("system:serviceaccount:vmimages:vmimages", vec!["storage-users"])),
                         Some("viewer-k8s") => Some(("carol", vec!["storage-viewers"])),
                         // storage-user once stormcos#557 adds `delete` (#422).
@@ -76,7 +77,11 @@ async fn apiserver(asked: Arc<Mutex<Vec<Value>>>) -> String {
                     let nana = in_group("nana-users")
                         && ra["namespace"] == "nana"
                         && matches!(verb, "get" | "list" | "watch" | "create" | "update" | "delete");
-                    let ok = (in_group("storage-admins") || stormcert || user || viewer || deleter || nana) && ra["group"] == "storage.storm.io";
+                    // stormcos's stormcos:forge-trust (#555).
+                    let forge_trust = spec["user"] == "system:serviceaccount:kube-system:stormcert-forge"
+                        && ra["resource"] == "forge"
+                        && matches!(verb, "get" | "settrust");
+                    let ok = (in_group("storage-admins") || forge_trust || stormcert || user || viewer || deleter || nana) && ra["group"] == "storage.storm.io";
                     Json(json!({ "status": { "allowed": ok, "reason": if ok { "storage-admin" } else { "no RBAC policy matched" } } }))
                 }
             }),
@@ -477,6 +482,41 @@ async fn a_drive_keeps_its_id_across_opens_and_restarts() {
     assert_ne!(r["uuid"].as_str().unwrap(), first, "another drive, another id");
 }
 
+
+/// forge's stormcert gives the engine forge's trust and can do nothing else
+/// to forge (#555), and `update`, which every storage-user holds, does not
+/// reach what every booting node is handed.
+#[tokio::test]
+async fn forges_stormcert_sets_the_trust_and_nothing_else() {
+    use reqwest::Method as M;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let api = apiserver(asked.clone()).await;
+    let n = node(false, Some(api)).await;
+    let trust = json!({
+        "ca": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+        "bootstrap_token": "abc.def"
+    });
+
+    assert_eq!(call(&n, M::PUT, "/forge/trust", Some("forge-signer-k8s"), Some(trust.clone())).await, 200, "the trust is set");
+    assert_eq!(call(&n, M::GET, "/forge/trust", Some("forge-signer-k8s"), None).await, 200, "and read");
+    assert_eq!(call(&n, M::DELETE, "/forge/trust", Some("forge-signer-k8s"), None).await, 403, "not taken away");
+    assert_eq!(call(&n, M::PUT, "/forge", Some("forge-signer-k8s"), Some(json!({}))).await, 403, "forge not turned on");
+    assert_eq!(call(&n, M::DELETE, "/forge", Some("forge-signer-k8s"), None).await, 403, "or off");
+
+    assert_eq!(call(&n, M::PUT, "/forge/trust", Some("user-k8s"), Some(trust.clone())).await, 403, "a storage-user holds update, not this");
+    assert_eq!(call(&n, M::PUT, "/forge/trust", Some("alice-k8s"), Some(trust)).await, 200, "storage-admin holds everything");
+
+    let verbs: Vec<String> = asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|b| b["kind"] == "SubjectAccessReview" && b["spec"]["resourceAttributes"]["resource"] == "forge")
+        .map(|b| b["spec"]["resourceAttributes"]["verb"].as_str().unwrap().to_string())
+        .collect();
+    assert!(verbs.iter().any(|v| v == "settrust"), "{verbs:?}");
+    assert!(verbs.iter().any(|v| v == "destroy"), "{verbs:?}");
+    assert!(!verbs.iter().any(|v| v == "update"), "{verbs:?}");
+}
 
 /// #382 (owner's (A) on stormcos#241): a Kubernetes bearer is reviewed for
 /// ordinary verbs too; destructive verbs are reviewed as `destroy`, which

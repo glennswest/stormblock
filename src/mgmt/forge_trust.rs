@@ -19,7 +19,7 @@
 //! Where it comes from: forge's own stormcert makes the CA and mints the
 //! token (stormcert#78), and gives them to forge's engine with
 //! `PUT /api/v1/forge/trust` (admin: the admin token, or a Kubernetes bearer
-//! a SubjectAccessReview allows `update` on `storm.io` `forge`). The engine
+//! a SubjectAccessReview allows `settrust` on `storage.storm.io` `forge`, #555). The engine
 //! keeps them in `<data_dir>/forge-trust.json` (0600, carried by the state
 //! volume). Every boot claim's answer carries them (`forge_trust`), and
 //! `boot-claim` in the initramfs writes the directory, which `/run` carries

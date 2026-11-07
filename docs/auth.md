@@ -131,6 +131,11 @@ may create `tokenreviews` and `subjectaccessreviews`, as
    forge. One exception, from #143: making a golden from a VM's disk and a
    ticket for it (`POST /api/v1/goldens`, `…/{name}/ticket`) are `create` on
    `goldens`, the one permission a golden builder's ServiceAccount holds.
+   And from #555: `PUT /api/v1/forge/trust` is `settrust` on `forge`, the verb
+   forge's stormcert is granted. Not `update`, which every `storage-user` holds:
+   this sets the CA and the bootstrap token handed to every booting node. So
+   stormcert can give forge its trust, and can neither take it away
+   (`DELETE`, `destroy`) nor turn forge off.
 
 The release's `storage-admin` ClusterRole allows these; `storage-viewer`
 does not. The outcomes:

@@ -526,13 +526,29 @@ fn review_target(path: &str) -> (String, Option<String>) {
 /// disk and a ticket for it are reviewed as `create` on `goldens`, the one
 /// permission a golden builder's ServiceAccount holds; neither destroys
 /// anything.
+///
+/// A second exception, #555: giving forge its trust is reviewed as
+/// [`SET_TRUST`] on `forge`, so forge's stormcert can do that and neither turn
+/// forge off nor take the trust away.
 pub const DESTROY: &str = "destroy";
+
+/// The verb `PUT /api/v1/forge/trust` is reviewed with (#555). Not `update`:
+/// `storage-user` holds `update` on all of `storage.storm.io`, and this sets
+/// the CA and the bootstrap token every booting node is handed. Only
+/// `storage-admin` (`*`) and a role that names this verb hold it.
+pub const SET_TRUST: &str = "settrust";
 
 /// The resource, verb and name a destructive call is reviewed with (#274,
 /// #382).
 pub fn review_attributes(method: &Method, path: &str) -> (String, String, Option<String>) {
     let (resource, name) = review_target(path);
-    let verb = if resource == "goldens" && *method == Method::POST { "create" } else { DESTROY };
+    let verb = if resource == "goldens" && *method == Method::POST {
+        "create"
+    } else if *method == Method::PUT && path.trim_end_matches('/') == "/api/v1/forge/trust" {
+        SET_TRUST
+    } else {
+        DESTROY
+    };
     (resource, verb.to_string(), name)
 }
 
