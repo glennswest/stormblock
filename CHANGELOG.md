@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
+- **fix:** #293: a clone of a golden whose files keep their xattrs in a block of their own (Fedora's `security.selinux`, `security.capability`) no longer fails the clone verify with `i-blocks-wrong` (one block over on each such inode, e2fsck clean). The checker counts an inode's xattr block now: mkfs-ext4 v4.1.3 (rev e009cf40, which carries mkfs.ext4.rs#25's v4.1.2 fix and #512's meta_bg fix) and fio-ext4 v1.8.3 (rev 624cbf7a, pinning it), both pins moved together, Cargo.lock by hand (same dependency sets). A block shared by several inodes (`h_refcount`) counts in each one's `i_blocks` and is in use once. #86's SELinux + ACL tar test runs again (no longer ignored); new test `fs::template::tests::a_golden_with_xattr_blocks_shared_and_not_clones_clean`. stormcentral's workaround (`verify: false`, then its own `e2fsck -fy`) can go.
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
 ## [v24.0.0] — 2026-11-07

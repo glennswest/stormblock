@@ -1440,19 +1440,15 @@ access to /dev/ublk-control is stormcentral#932. Here:
       README, CHANGELOG
 - [x] check.sh at e3c79684 ALL PASS (1305/1305); v23.6.0; stage; closed
 
-### Clone verify: i-blocks-wrong on fedora-base (2026-10-17, #293, P3) — WAITING on fio.ext4.rs#18 (with #512)
+### Clone verify: i-blocks-wrong on fedora-base (2026-10-17, #293, P3) — IN PROGRESS (pins moved)
 
-2026-11-07: mkfs.ext4.rs#25 fixed in mkfs-ext4 v4.1.2 (a9ac701); v4.1.3 (e009cf4,
-#512's meta_bg fix) contains it. No fio-ext4 release pins either (v1.8.2 pins
-v4.1.1): fio.ext4.rs#18 (told it covers #293 too). One pin move does both issues.
-
-
-Not extent index blocks (mkfs-ext4 v4.1.1's `walk_extents` counts them):
-the checker leaves out the xattr block (`i_file_acl`), mkfs.ext4.rs#25
-(also #86). Fedora's SELinux/capability xattrs spill into a block; shared
-blocks (`h_refcount`) noted there. Here, once mkfs-ext4 and fio-ext4 tag:
-both pins, un-ignore #86's SELinux+ACL tar test, a shared-xattr-block clone
-test. Nothing built.
+Not extent index blocks: the checker left out the xattr block (`i_file_acl`), mkfs.ext4.rs#25,
+fixed in mkfs-ext4 v4.1.2; v4.1.3 (e009cf40, also #512's meta_bg) and fio-ext4 v1.8.3 (624cbf7a,
+fio.ext4.rs#18) pin it.
+- [x] both pins by rev, Cargo.lock by hand; #86's SELinux+ACL tar test un-ignored; a golden with a
+      shared (`h_refcount` 2) and a private xattr block seals, clones and checks clean (wip/293-pins)
+- [ ] negative control on the old pins (wip/293-control, SC_BUILD_EXPECT_FAIL); check.sh; merge;
+      v24.0.1; stage; close. #512's own steps (ext4_large 256T, pb-scale) stay with #512
 
 ### Which remote hosts have each volume attached (2026-10-17, #292, P3; blocks stormcluster#21, P1) — DONE (in the current wave, per the master), closed
 
