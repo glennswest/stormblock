@@ -1285,7 +1285,7 @@ impl UblkServer {
         // export runs on (#522) they run only when this yields. A blocking
         // join here held them all back: every handover with a request in
         // flight on any device waited out the worker's 5 s (#538).
-        join_workers(workers).await;
+        for w in workers { let _ = w.join(); }
 
         // Release every reference to /dev/ublkcN BEFORE DEL_DEV: the kernel's
         // synchronous DEL_DEV blocks until the char device is fully released
