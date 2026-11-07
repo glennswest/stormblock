@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — IN PROGRESS
+### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; open, back after a release carrying 3e42735c
 
 X9 clones 2-3.5 s (10-17 s on server1), cold 183 ms but warm-after-reboot up to 3.7 s; lists 1.9-3.3 s;
 fsck 11-28 s. Target: each claim step < 50 ms on a SAS HDD. Measure, then fix where it points:
