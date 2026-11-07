@@ -2803,6 +2803,97 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    /// #293: a golden whose files keep their xattrs in a block of their own
+    /// (Fedora's `security.selinux`, `security.capability`) clones and
+    /// passes the clone verify. One block is shared by two inodes
+    /// (`h_refcount` 2, as the kernel's mbcache shares identical xattrs), one
+    /// is a single inode's. Each sharer counts the block in its `i_blocks`;
+    /// the bitmap holds it once. mkfs-ext4 before v4.1.2 counted neither
+    /// (`i-blocks-wrong`, one block over, on every such inode).
+    #[tokio::test]
+    async fn a_golden_with_xattr_blocks_shared_and_not_clones_clean() {
+        use mkfs_ext4::fs::Filesystem;
+        use mkfs_ext4::structs::xattr;
+
+        let (vm, store, path) = node(1024 * 1024 * 1024).await;
+        let spec = TemplateSpec {
+            format_in_core: false,
+            ..TemplateSpec::new("fedora-like", 64 * 1024 * 1024)
+        };
+        let t = create(&vm, &store, &spec).await.unwrap();
+        let dev = volume(&vm, VolumeId(t.raw_volume_id.expect("awaiting format"))).await;
+        ext4::format(&dev, &ext4::Ext4Params::default()).await.unwrap();
+
+        let (a, b, c) = {
+            let mut v = fio_ext4::Volume::open(ext4::VolumeDevice::opaque(dev.clone())).await.unwrap();
+            v.mkdir_all("/usr/bin").await.unwrap();
+            let a = v.write("/usr/bin/ping", b"#!ping\n").await.unwrap();
+            let b = v.write("/usr/bin/arping", b"#!arping\n").await.unwrap();
+            let c = v.write("/usr/bin/newuidmap", b"#!newuidmap\n").await.unwrap();
+            v.flush().await.unwrap();
+            (a, b, c)
+        };
+
+        {
+            let mut fs = Filesystem::open(ext4::VolumeDevice::opaque(dev.clone())).await.unwrap();
+            let bs = fs.block_size();
+            let sectors = bs as u64 / 512;
+            let mut bitmap = fs.read_block_bitmap(0).await.unwrap();
+            let first = fs.group_first_block(0);
+            let mut free = (0..fs.group_block_count(0) as u64)
+                .rev()
+                .filter(|&i| !Filesystem::<ext4::VolumeDevice>::test_bit(&bitmap, i))
+                .collect::<Vec<_>>()
+                .into_iter();
+            // (inodes sharing it, its attributes)
+            let label = |t: &str| xattr::Xattr::new("security.selinux", format!("system_u:object_r:{t}:s0\0").into_bytes());
+            let blocks = [
+                (vec![a, b], vec![label("ping_exec_t"), xattr::Xattr::new("security.capability", vec![1u8; 20]), xattr::Xattr::new("user.pad", vec![b'p'; 600])]),
+                (vec![c], vec![label("bin_t"), xattr::Xattr::new("user.pad", vec![b'q'; 600])]),
+            ];
+            let mut used = 0u32;
+            for (inodes, attrs) in &blocks {
+                let index = free.next().expect("a free block in group 0");
+                let block = first + index;
+                let mut buf = xattr::write_block_xattrs(bs as usize, attrs).unwrap();
+                mkfs_ext4::bytes::put_u32(&mut buf, xattr::block_off::H_REFCOUNT, inodes.len() as u32);
+                if fs.has_metadata_csum() {
+                    xattr::stamp_block_csum(&mut buf, fs.csum_seed(), block);
+                }
+                fs.write_block(block, &buf).await.unwrap();
+                for &ino in inodes {
+                    let mut inode = fs.read_inode(ino).await.unwrap();
+                    inode.file_acl = block;
+                    inode.blocks += sectors;
+                    fs.write_inode(ino, &inode).await.unwrap();
+                }
+                Filesystem::<ext4::VolumeDevice>::set_bit(&mut bitmap, index, true);
+                used += 1;
+            }
+            let mut desc = fs.group_descs()[0];
+            fs.write_block(desc.block_bitmap, &bitmap).await.unwrap();
+            fs.stamp_bitmap_csum(&mut desc, &bitmap, true);
+            desc.free_blocks_count -= used.into();
+            fs.group_descs_mut()[0] = desc;
+            fs.flush_group_descs().await.unwrap();
+            fs.superblock_mut().free_blocks_count -= used.into();
+            fs.flush_superblock().await.unwrap();
+        }
+        let report = ext4::check(&dev).await.unwrap();
+        assert!(report.is_clean(), "the golden itself: {:?}", report.problems);
+
+        let sealed = seal(&vm, &store, &t.id, false).await.unwrap();
+        assert_eq!(sealed.state, TemplateState::Ready);
+        // The clone verify runs the same check on the stamped clone.
+        let clone = clone_template(&vm, &store, "fedora-like", &CloneSpec::new("vm-1")).await.unwrap();
+        assert!(clone.verified, "the clone was checked before it was handed out");
+        let cdev = volume(&vm, clone.volume_id).await;
+        let report = ext4::check(&cdev).await.unwrap();
+        assert!(report.is_clean(), "the clone: {:?}", report.problems);
+
+        let _ = std::fs::remove_file(path);
+    }
+
     /// #336: a template is recorded `Ready` only once its volume is sealed.
     /// While the seal waits on the volume manager, the template still reads
     /// as it was; a seal cancelled there leaves template and volume unsealed

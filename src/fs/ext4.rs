@@ -1157,12 +1157,11 @@ mod tests {
     /// `tar --xattrs` of a Fedora root records), built the way `stormblock
     /// golden` builds one: unpacked, then checked.
     ///
-    /// Ignored until mkfs-ext4 counts an inode's xattr block
-    /// (mkfs.ext4.rs#25): every entry whose xattrs spill into a block reads
-    /// `i-blocks-wrong` though e2fsck 1.47.3 finds the image clean. The ACLs'
-    /// on-disk encoding is fio.ext4.rs#14. Un-ignore when the pins move.
+    /// Every entry whose xattrs spill into a block read `i-blocks-wrong`
+    /// until mkfs-ext4 v4.1.2 counted an inode's xattr block (mkfs.ext4.rs#25,
+    /// #293), though e2fsck 1.47.3 found the image clean. The ACLs' on-disk
+    /// encoding is still fio.ext4.rs#14 (the checker does not decode them).
     #[tokio::test]
-    #[ignore = "mkfs.ext4.rs#25: the checker does not count i_file_acl"]
     async fn a_tar_with_selinux_labels_and_acls_unpacks_and_checks_clean() {
         use fio_ext4::tar::{EntryKind, Header, Writer};
         let (dev, path) = scratch("xattrs", 128 * 1024 * 1024).await;
