@@ -145,15 +145,22 @@ round() { # phase
         call $1 slabs $B/slabs
     done
     for r in 1 2 3 4 5; do
-        t0=$(now); c=$(api -X POST $B/volumes/$g1/clone -d "{\"name\":\"p-$1-$r\"}" | idof); t1=$(now)
+        i0=$(ios); t0=$(now); c=$(api -X POST $B/volumes/$g1/clone -d "{\"name\":\"p-$1-$r\"}" | idof); t1=$(now); i1=$(ios)
         echo "CALL $1 clone $(ms $t0 $t1)"
+        echo "IOS $1 clone $(diffios "$i0" "$i1")"
         t0=$(now); api -X POST $B/volumes/$c/attach -d '{"transport":"ublk"}' >/dev/null; t1=$(now)
         echo "CALL $1 attach $(ms $t0 $t1)"
         api -X DELETE $B/volumes/$c/attach >/dev/null
         if [ $r = 5 ]; then call $1 fsck -X POST $B/volumes/$c/fsck; fi
-        t0=$(now); api -X DELETE $B/volumes/$c >/dev/null; t1=$(now)
+        i0=$(ios); t0=$(now); api -X DELETE $B/volumes/$c >/dev/null; t1=$(now); i1=$(ios)
         echo "CALL $1 delete $(ms $t0 $t1)"
+        echo "IOS $1 delete $(diffios "$i0" "$i1")"
     done
+}
+# The disk's reads, writes and flushes a call cost (/sys/block/vda/stat).
+ios() { awk '{print $1, $5, $15}' /sys/block/vda/stat; }
+diffios() { # before after
+    echo "$1 $2" | awk '{print "reads", $4-$1, "writes", $5-$2, "flushes", $6-$3}'
 }
 mark() { wc -l < /run/engine.log; }
 lines() { # phase from-line
@@ -192,7 +199,7 @@ timeout 2400 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 4096 -smp 
     -append "console=ttyS0 panic=-1 loglevel=4 lat.goldens=${GOLDENS:-6} lat.clones=${CLONES:-90} lat.devices=${DEVICES:-85}" \
     -drive file="$W/a.img",if=virtio,format=raw,cache=none,aio=threads,throttling.bps-total=$BPS,throttling.iops-total=$IOPS \
     > "$W/guest.log" 2>&1
-tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|CALL|ENGINE|LOG)|panick'
+tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|CALL|IOS|ENGINE|LOG)|panick'
 tr -d '\r' < "$W/guest.log" | grep -q "^RESULT done PASS" || { tail -30 "$W/guest.log"; fail "the guest did not finish"; }
 for phase in warm cold load; do
     for what in list slabs clone attach delete fsck; do
