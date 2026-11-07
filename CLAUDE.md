@@ -232,7 +232,12 @@ the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#35
 2.9 GB took 33-96 s at 30-88 MB/s: 16 single-extent reads at once, seeking. Disk order,
 neighbours merged into one read, sha256 per extent as before; any error falls back to
 the slot alone, so a bad sector names its extent. #444's hashes stay gated.
-- [ ] `validation_runs`, `validate_run`; tests; model before/after; docs, CHANGELOG, check.sh
+- [x] `validation_runs`, `validate_run`; tests (order and merging, a bad sector costs its
+      extent, the run's bounds); docs, CHANGELOG
+- [x] rate model, 1.5 GB, two runs each, MB/s before → after: 180 MB/s + 8 ms seek
+      81-88 → 128-146; 120 MB/s + 12 ms 75 → 98-102; flash 598-623 → 642-671
+- [ ] check.sh; patch; stage. Metal: health `flow_over.validation.mb_per_s` at the next
+      HDD and SMR install (target 100 and 60; before 52-88 and 30-39)
 
 ### /init leaves the appliance it found (2026-11-06, #506, P1, stormpump#186) — DONE (v23.21.0), closed; metal pending
 
