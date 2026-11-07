@@ -227,6 +227,13 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Validation on spinning disks reads in disk order (2026-11-06, #544, P1, stormcos#804) — IN PROGRESS
+
+2.9 GB took 33-96 s at 30-88 MB/s: 16 single-extent reads at once, seeking. Disk order,
+neighbours merged into one read, sha256 per extent as before; any error falls back to
+the slot alone, so a bad sector names its extent. #444's hashes stay gated.
+- [ ] `validation_runs`, `validate_run`; tests; model before/after; docs, CHANGELOG, check.sh
+
 ### /init leaves the appliance it found (2026-11-06, #506, P1, stormpump#186) — DONE (v23.21.0), closed; metal pending
 
 stormpump's kexec reboot asks forge for the intent; the rule it falls back on misses
