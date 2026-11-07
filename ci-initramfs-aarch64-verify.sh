@@ -3,7 +3,7 @@
 #
 # On this x86_64 build VM: cross-builds the engine (cargo zigbuild), lays out a
 # modules tree as stormcos's modules golden has it from Fedora's signed aarch64
-# kernel + realtek-firmware, and runs scripts/build-stormblock-initramfs.sh with
+# kernel + firmware, and runs scripts/build-stormblock-initramfs.sh with
 # nothing but that binary and that tree, as the platform will. Then:
 #
 #   * every program in the image is aarch64, and it carries r8169, nvme,
@@ -59,7 +59,7 @@ DNF=(dnf -q --releasever=44 --forcearch=aarch64 "--setopt=cachedir=$D/cache"
 SEL="kernel-core kernel-modules-core kernel-modules"
 if [ -n "${KERNEL:-}" ]; then SEL="kernel-core-$KERNEL kernel-modules-core-$KERNEL kernel-modules-$KERNEL"; fi
 # shellcheck disable=SC2086
-(cd "$W/rpm" && "${DNF[@]}" download $SEL realtek-firmware) || { echo "FAIL: dnf download"; exit 1; }
+(cd "$W/rpm" && "${DNF[@]}" download $SEL realtek-firmware linux-firmware) || { echo "FAIL: dnf download"; exit 1; }
 rpmkeys --dbpath "$W/keys" --import /etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-44-aarch64 || { echo "FAIL: key"; exit 1; }
 if rpmkeys --dbpath "$W/keys" -K "$W"/rpm/*.rpm | grep -v 'digests signatures OK' | grep .; then
     echo "FAIL: an RPM is not signed"; exit 1
