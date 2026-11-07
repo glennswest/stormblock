@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — v23.22.2 SHIPPED; open, back after a release carrying it
+### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — PAUSED for P0 #557: v23.22.2 on main, not tagged or staged
 
 Read from server7's and forge1's reboots by line (`.times`): the X9's 8.3 s "clock" is not the clock (firmware
 synced, 0 s): path NIC DHCP 3.2 s + a lost DNS answer 5.1 s, both before the stamp. Not done, on purpose:
@@ -236,7 +236,10 @@ NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
 - [x] path NICs beside the boot, joined before an engine connects to the appliance and before switch_root
 - [x] DNS: 1 s a try, three fresh queries; DHCP: 1 s between discovers; stamp "node named"
 - [x] tests; ci-path-nics-verify, ci-node-name-verify, ci-boot-nic-verify, ci-no-appliance-verify ALL PASS;
-      check.sh ALL PASS (1361/1361); v23.22.2; stage
+      check.sh ALL PASS (1361/1361) at e7d948d1's code; v23.22.2 is cfa8ce49, its own check.sh was
+      running at the pause. **To resume:** check.sh at cfa8ce49 (or main's head), tag v23.22.2, `component
+      build stormblock --no-wait`, comment on #545 (the X9's 8.3 s "clock" is path NICs 3.2 s + DNS 5.1 s;
+      no concurrent modprobe: probe order names sda and ethN), `propose --after-release`
 - [x] the probe's repeated slab opens (a table scan each: SAS's 4.7 s): #556
 - [ ] metal: stamps on an X9 and the R6415 (targets: root ready 40 and 25 s)
 
