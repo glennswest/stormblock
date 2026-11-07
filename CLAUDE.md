@@ -227,6 +227,19 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Rollback copies pile up: `<vol>@previous.N` never pruned (2026-11-07, #565) — IN PROGRESS
+
+forge1: 27 data templates × 5 generations of `<name>.golden@previous[.N]`, left by `install::set_aside` at every
+install/upgrade; nothing deletes them and the console lists them as unattached volumes. Plan:
+- [ ] `RollbackMark {of, from, generation, set_aside_at}` on the record, v2 header tag `R` (last, older readers stop
+      before it); manager map, restore/adopt/records/delete; `set_aside` marks, names `.N` past the highest
+- [ ] `mgmt/rollback.rs`: copies older than marks recognised by name (`<x>@<label>[.N]` beside a live `<x>`, never a
+      staged or kept generation of #122's `release-generations.json`) and marked; prune keeps the newest `keep` per
+      name (`[rollback] keep`, default 1; `prune = "boot-ok"|"off"`); a held copy is skipped and said
+- [ ] run after a successful boot-ok (`POST /pallets/{id}/successful`); `GET /api/v1/rollback`,
+      `POST /api/v1/rollback/prune {keep?, dry_run?}` (admin); volumes `kind: rollback` + `rollback {…}`
+- [ ] tests, docs, CHANGELOG; check.sh; stormconsole issue (group `kind=rollback`); close
+
 ### The same, filed again with a rename to say (2026-11-07, #560, P0) — DONE (v23.26.0), closed
 
 #560 is #559's bug reported a second time, with two more asks: the changelog says what the fix renames (a node
