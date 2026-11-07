@@ -302,7 +302,10 @@ tests run on.
    and over NVMe/TCP that unmaps the clone's extent on forge). When both
    halves have moved, every destination slot a sealed volume names is read
    back from the local drive (O_DIRECT there) and from its source, and the
-   sha256s compared, paced as the flow-over is (#410), 16 at once. A slot
+   sha256s compared extent by extent, paced as the flow-over is (#410). The
+   local drive is read in disk order, neighbours in one read of up to 32 MiB
+   (#544), the sources 16 at once; a read that fails sends its extents to be
+   checked alone, so a bad sector costs only its own. A slot
    only writable volumes name has been written since and is skipped (its
    golden's slots are checked). A mismatch is written again from the
    source, flushed and read back, up to 3 times. One still different is

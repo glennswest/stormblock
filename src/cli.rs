@@ -7479,11 +7479,31 @@ pub async fn run() -> anyhow::Result<()> {
         Some((s.device().clone(), s.data_offset() + leg.slot_idx * s.slot_size(), s.slot_size()))
     }
 
+    /// Written again from the source until it reads back right, up to
+    /// [`VALIDATE_TRIES`] times. `Ok(tries)`: equal after that many rewrites.
+    async fn repair_slot(ddev: &Arc<dyn BlockDevice>, doff: u64, dest: crate::volume::gem::Leg, want: &[u8]) -> Result<u32, String> {
+        use sha2::{Digest, Sha256};
+        let want_hash = Sha256::digest(want);
+        let mut got = vec![0u8; want.len()];
+        for tries in 1..=VALIDATE_TRIES {
+            {
+                // Under the slot's fence: nothing else reads or moves it meanwhile.
+                let _fence = crate::volume::fence::exclusive(dest).await;
+                ddev.write(doff, want).await.map_err(|e| format!("writing it again: {e}"))?;
+                ddev.flush().await.map_err(|e| format!("flushing it: {e}"))?;
+            }
+            ddev.read(doff, &mut got).await.map_err(|e| format!("reading it back: {e}"))?;
+            if Sha256::digest(&got) == want_hash {
+                return Ok(tries);
+            }
+        }
+        Err(format!("reads back differently after {VALIDATE_TRIES} rewrites"))
+    }
+
     /// One moved slot checked (#412): the destination read back from its
     /// device (O_DIRECT on a real drive: what the disk holds, not a cache)
     /// and the source read from forge's clone, sha256 against sha256. A
-    /// mismatch is written again from the source, flushed and read back, up
-    /// to [`VALIDATE_TRIES`] times. `Ok(tries)`: equal after that many
+    /// mismatch goes to [`repair_slot`]. `Ok(tries)`: equal after that many
     /// rewrites (0 = equal as moved).
     async fn validate_slot(
         registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
@@ -7498,23 +7518,104 @@ pub async fn run() -> anyhow::Result<()> {
         }
         let mut want = vec![0u8; slen as usize];
         sdev.read(soff, &mut want).await.map_err(|e| format!("reading the source: {e}"))?;
-        let want_hash = Sha256::digest(&want);
         let mut got = vec![0u8; dlen as usize];
-        for tries in 0..=VALIDATE_TRIES {
-            ddev.read(doff, &mut got).await.map_err(|e| format!("reading it back: {e}"))?;
-            if Sha256::digest(&got) == want_hash {
-                return Ok(tries);
-            }
-            if tries == VALIDATE_TRIES {
-                break;
-            }
-            // Written again from the source, under the slot's fence: nothing
-            // else reads or moves it meanwhile.
-            let _fence = crate::volume::fence::exclusive(dest).await;
-            ddev.write(doff, &want).await.map_err(|e| format!("writing it again: {e}"))?;
-            ddev.flush().await.map_err(|e| format!("flushing it: {e}"))?;
+        ddev.read(doff, &mut got).await.map_err(|e| format!("reading it back: {e}"))?;
+        if Sha256::digest(&got) == Sha256::digest(&want) {
+            return Ok(0);
         }
-        Err(format!("reads back differently after {VALIDATE_TRIES} rewrites"))
+        repair_slot(&ddev, doff, dest, &want).await
+    }
+
+    /// The most one read of the validation takes from the disk, the flow-over's
+    /// own run (#401): twice this is in memory, the disk's bytes and forge's.
+    const VALIDATE_RUN_BYTES: u64 = 32 * 1024 * 1024;
+
+    /// A window of moved slots, in destination order, as the reads the disk
+    /// should be asked for (#544): neighbours on one slab together, up to
+    /// `max_bytes`. Each run is one read.
+    fn validation_runs(
+        items: Vec<(crate::volume::gem::Leg, crate::volume::gem::Leg)>,
+        slot_bytes_of: impl Fn(crate::drive::slab::SlabId) -> u64,
+        max_bytes: u64,
+    ) -> Vec<Vec<(crate::volume::gem::Leg, crate::volume::gem::Leg)>> {
+        let mut runs: Vec<Vec<(crate::volume::gem::Leg, crate::volume::gem::Leg)>> = Vec::new();
+        for item in items {
+            let dest = item.1;
+            if let Some(run) = runs.last_mut() {
+                let last = run[run.len() - 1].1;
+                let next_size = (run.len() as u64 + 1) * slot_bytes_of(dest.slab_id);
+                if last.slab_id == dest.slab_id && last.slot_idx + 1 == dest.slot_idx && next_size <= max_bytes {
+                    run.push(item);
+                    continue;
+                }
+            }
+            runs.push(vec![item]);
+        }
+        runs
+    }
+
+    /// One run checked (#544): the destination's neighbours in one read, their
+    /// sources as they come from forge, compared extent by extent by sha256 off
+    /// the runtime. What differs goes to [`repair_slot`] with the bytes already
+    /// read. Any failure of the whole, a read error above all, sends each of
+    /// its slots to [`validate_slot`] alone: a bad sector costs its own extent.
+    async fn validate_run(
+        registry: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        run: Vec<(crate::volume::gem::Leg, crate::volume::gem::Leg)>,
+    ) -> Vec<(crate::volume::gem::Leg, crate::volume::gem::Leg, Result<u32, String>)> {
+        use futures_util::StreamExt;
+        use sha2::{Digest, Sha256};
+        let whole = async {
+            let (ddev, doff, slot) = slot_place(registry, run[0].1).await?;
+            let slot = slot as usize;
+            let dest_read = async {
+                let mut buf = vec![0u8; run.len() * slot];
+                match ddev.read(doff, &mut buf).await {
+                    Ok(n) if n == buf.len() => Some(buf),
+                    _ => None,
+                }
+            };
+            let sources = futures_util::stream::iter(run.iter().copied())
+                .map(|(src, _)| async move {
+                    let (sdev, soff, slen) = slot_place(registry, src).await?;
+                    if slen as usize != slot {
+                        return None;
+                    }
+                    let mut want = vec![0u8; slen as usize];
+                    sdev.read(soff, &mut want).await.ok()?;
+                    Some(want)
+                })
+                .buffered(flow_parallel())
+                .collect::<Vec<_>>();
+            let (got, wants) = tokio::join!(dest_read, sources);
+            let got = got?;
+            let wants: Vec<Vec<u8>> = wants.into_iter().collect::<Option<_>>()?;
+            let compared = tokio::task::spawn_blocking(move || {
+                let same: Vec<bool> =
+                    got.chunks(slot).zip(&wants).map(|(g, w)| Sha256::digest(g) == Sha256::digest(w)).collect();
+                (same, wants)
+            })
+            .await
+            .ok()?;
+            Some((ddev, doff, slot as u64, compared))
+        }
+        .await;
+        let mut out = Vec::with_capacity(run.len());
+        match whole {
+            Some((ddev, doff, slot, (same, wants))) => {
+                for (i, ((src, dest), want)) in run.into_iter().zip(wants).enumerate() {
+                    let r = if same[i] { Ok(0) } else { repair_slot(&ddev, doff + i as u64 * slot, dest, &want).await };
+                    out.push((src, dest, r));
+                }
+            }
+            None => {
+                for (src, dest) in run {
+                    let r = validate_slot(registry, src, dest).await;
+                    out.push((src, dest, r));
+                }
+            }
+        }
+        out
     }
 
     /// Check what a flow-over moved before the node stops depending on forge
@@ -7529,7 +7630,6 @@ pub async fn run() -> anyhow::Result<()> {
         held: &FlowHeld,
         sealed: &std::collections::HashSet<crate::volume::VolumeId>,
     ) -> Validation {
-        use futures_util::StreamExt;
         let moved: Vec<_> = held.moved.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut out = Validation::default();
         let began = std::time::Instant::now();
@@ -7566,6 +7666,13 @@ pub async fn run() -> anyhow::Result<()> {
                 out.skipped += 1;
             }
         }
+        // In the order the disk holds them (#544): a window goes over the disk
+        // once, and neighbours are one read.
+        items.sort_by_key(|(_, dest): &(crate::volume::gem::Leg, crate::volume::gem::Leg)| (dest.slab_id.0, dest.slot_idx));
+        let slot_sizes: std::collections::HashMap<crate::drive::slab::SlabId, u64> = {
+            let r = registry.read().await;
+            items.iter().filter_map(|(_, d)| r.get(&d.slab_id).map(|s| (d.slab_id, s.slot_size()))).collect()
+        };
         let total = items.len() as u64;
         let report = |out: &Validation, state: &'static str| {
             let secs = began.elapsed().as_secs_f64();
@@ -7592,11 +7699,10 @@ pub async fn run() -> anyhow::Result<()> {
             let n = pace.window.min(items.len());
             let window: Vec<_> = items.drain(..n).collect();
             crate::fglat::set_moving(true);
-            let results: Vec<_> = futures_util::stream::iter(window)
-                .map(|(src, dest)| async move { (src, dest, validate_slot(registry, src, dest).await) })
-                .buffer_unordered(flow_parallel())
-                .collect()
-                .await;
+            let mut results = Vec::with_capacity(window.len());
+            for run in validation_runs(window, |id| slot_sizes.get(&id).copied().unwrap_or(0), VALIDATE_RUN_BYTES) {
+                results.extend(validate_run(registry, run).await);
+            }
             for (src, dest, r) in results {
                 let len = slot_bytes(registry, dest).await;
                 match r {
@@ -13412,6 +13518,10 @@ file = "{state}"
         bad: std::sync::atomic::AtomicU64,
         /// Every read takes this long (a far appliance).
         delay_ms: std::sync::atomic::AtomicU64,
+        /// A read over this byte fails (a bad sector, #544).
+        unreadable: std::sync::atomic::AtomicU64,
+        /// Every read: where, how long.
+        reads: std::sync::Mutex<Vec<(u64, u64)>>,
     }
 
     #[async_trait::async_trait]
@@ -13438,6 +13548,11 @@ file = "{state}"
             let d = self.delay_ms.load(std::sync::atomic::Ordering::Relaxed);
             if d > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(d)).await;
+            }
+            self.reads.lock().unwrap().push((offset, buf.len() as u64));
+            let sector = self.unreadable.load(std::sync::atomic::Ordering::Relaxed);
+            if sector != u64::MAX && sector >= offset && sector < offset + buf.len() as u64 {
+                return Err(std::io::Error::other("a bad sector").into());
             }
             let n = self.inner.read(offset, buf).await?;
             let bad = self.bad.load(std::sync::atomic::Ordering::Relaxed);
@@ -13480,7 +13595,13 @@ file = "{state}"
         };
         let fmt = || SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System);
         let mut mgr = VolumeManager::new(SLOT);
-        let src_dev = Arc::new(Flipping { inner: open("appliance.slab").await, bad: u64::MAX.into(), delay_ms: 0.into() });
+        let src_dev = Arc::new(Flipping {
+            inner: open("appliance.slab").await,
+            bad: u64::MAX.into(),
+            delay_ms: 0.into(),
+            unreadable: u64::MAX.into(),
+            reads: Default::default(),
+        });
         let source = Slab::format_with(src_dev.clone() as Arc<dyn BlockDevice>, fmt()).await.unwrap();
         let source_id = source.slab_id();
         mgr.add_slab(source).await;
@@ -13494,7 +13615,13 @@ file = "{state}"
         let c = mgr.get_volume(&clone).unwrap();
         c.write(0, &[7u8; 4096]).await.unwrap();
         c.flush().await.unwrap();
-        let dev = Arc::new(Flipping { inner: open("local.slab").await, bad: u64::MAX.into(), delay_ms: 0.into() });
+        let dev = Arc::new(Flipping {
+            inner: open("local.slab").await,
+            bad: u64::MAX.into(),
+            delay_ms: 0.into(),
+            unreadable: u64::MAX.into(),
+            reads: Default::default(),
+        });
         let local = Slab::format_with(dev.clone() as Arc<dyn BlockDevice>, fmt()).await.unwrap();
         let local_id = local.slab_id();
         mgr.add_slab(local).await;
@@ -13519,6 +13646,68 @@ file = "{state}"
         let _ = flipping;
         *SOURCE_DEV.lock().unwrap() = Some(src_dev);
         (mgr, held, local_id, dev, golden)
+    }
+
+    /// #544: the validation asks a spinning disk for what it holds in order,
+    /// neighbours in one read, however the flow-over listed them.
+    #[tokio::test]
+    async fn the_validation_reads_the_disk_in_order_and_merges_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, held, local_id, dev, _golden) = flowed_for_validation(dir.path(), false).await;
+        held.moved.lock().unwrap().reverse();
+        let (data_at, slot) = {
+            let r = mgr.registry().read().await;
+            let s = r.get(&local_id).unwrap();
+            (s.data_offset(), s.slot_size())
+        };
+        dev.reads.lock().unwrap().clear();
+        let v = super::validate_flow(mgr.gem(), mgr.registry(), &held, &sealed_of(&mgr)).await;
+        assert_eq!((v.validated, v.mismatched, v.skipped), (16, 0, 1), "{v:?}");
+        let reads: Vec<(u64, u64)> = dev.reads.lock().unwrap().iter().copied().filter(|(at, _)| *at >= data_at).collect();
+        assert!(reads.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0), "in disk order: {reads:?}");
+        assert_eq!(reads.iter().map(|(_, n)| n).sum::<u64>(), 16 * slot, "each checked extent read once: {reads:?}");
+        assert!(reads.len() <= 2, "neighbours in one read (the slot skipped splits them at most once): {reads:?}");
+    }
+
+    /// #544: what makes a read: neighbours on one slab, up to the bound.
+    #[test]
+    fn a_validation_run_is_neighbours_on_one_slab_up_to_its_bound() {
+        use crate::drive::slab::SlabId;
+        use crate::volume::gem::Leg;
+        let (a, b) = (SlabId(uuid::Uuid::from_u128(1)), SlabId(uuid::Uuid::from_u128(2)));
+        let leg = |slab_id, slot_idx| Leg { slab_id, slot_idx };
+        let item = |slab, slot| (leg(a, 1000 + slot), leg(slab, slot));
+        let shape = |items: Vec<_>, max| -> Vec<Vec<u64>> {
+            super::validation_runs(items, |_| 10, max)
+                .into_iter()
+                .map(|r| r.into_iter().map(|(_, d): (Leg, Leg)| d.slot_idx).collect())
+                .collect()
+        };
+        assert_eq!(shape(vec![item(a, 0), item(a, 1), item(a, 2)], 100), vec![vec![0, 1, 2]]);
+        assert_eq!(shape(vec![item(a, 0), item(a, 2), item(a, 3)], 100), vec![vec![0], vec![2, 3]], "a gap");
+        assert_eq!(shape(vec![item(a, 0), item(b, 1)], 100), vec![vec![0], vec![1]], "another slab");
+        assert_eq!(shape(vec![item(a, 0), item(a, 1), item(a, 2)], 20), vec![vec![0, 1], vec![2]], "the bound");
+        assert_eq!(shape(vec![item(a, 0), item(a, 1)], 5), vec![vec![0], vec![1]], "a slot past the bound is alone");
+    }
+
+    /// #544: a read of many extents that fails costs only the extent with the
+    /// bad sector: the rest are checked alone and pass, and that one is named.
+    #[tokio::test]
+    async fn a_bad_sector_in_a_merged_read_costs_only_its_extent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mgr, held, local_id, dev, _golden) = flowed_for_validation(dir.path(), false).await;
+        let (_, dest) = *held.moved.lock().unwrap().iter().find(|(src, _)| src.slot_idx == 3).expect("a moved slot");
+        let off = {
+            let r = mgr.registry().read().await;
+            let s = r.get(&local_id).unwrap();
+            s.data_offset() + dest.slot_idx * s.slot_size()
+        };
+        dev.unreadable.store(off + 100, std::sync::atomic::Ordering::Relaxed);
+        let v = super::validate_flow(mgr.gem(), mgr.registry(), &held, &sealed_of(&mgr)).await;
+        assert_eq!((v.validated, v.mismatched, v.repaired, v.skipped), (15, 1, 0, 1), "{v:?}");
+        assert_eq!(v.unrepaired.len(), 1);
+        assert_eq!(v.unrepaired[0].1, dest, "the extent with the bad sector");
+        assert!(v.unrepaired[0].2.contains("reading it back"), "{}", v.unrepaired[0].2);
     }
 
     /// The appliance's drive of the last [`flowed_for_validation`], to slow.

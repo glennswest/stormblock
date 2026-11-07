@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-06
+- **perf:** #544: the post-flow-over validation reads the local disk in disk order, neighbouring extents in one read of up to 32 MiB, instead of 16 single-extent reads at once, which seek on a spinning disk (33-96 s of an install). The check itself is unchanged: every extent a sealed volume names compared by sha256 with the appliance's, a mismatch rewritten from it. A merged read that fails sends its extents to be checked alone, so a bad sector costs only its own extent. Hashing moved off the runtime.
 - **test:** #512: `examples/ext4_large`: a very large ext4 written into, bare and through a volume. The corruption is mkfs-ext4's (`write_group_descs` ignores meta_bg, past ~192 TiB): mkfs.ext4.rs#33.
 
 
