@@ -736,7 +736,8 @@ mod view_tests {
         assert_eq!(level("/api/v1/volumes", 200, 1000), tracing::Level::WARN);
         assert_eq!(level("/api/v1/volumes", 500, 1), tracing::Level::WARN);
         assert_eq!(level("/api/v1/health", 200, 5000), tracing::Level::DEBUG);
-        assert_eq!(level("/api/v1/health", 503, 1), tracing::Level::INFO);
+        assert_eq!(level("/api/v1/health", 503, 1), tracing::Level::WARN, "a probe that fails");
+        assert_eq!(level("/api/v1/health", 404, 1), tracing::Level::INFO);
     }
 
     /// A remote slab's flushes are given by transport in the open view.
