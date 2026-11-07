@@ -13905,12 +13905,12 @@ file = "{state}"
     }
 
     /// An appliance a round trip away, once `ms` is set.
-    struct Remote {
+    struct AfarAppliance {
         inner: Arc<dyn BlockDevice>,
         ms: Arc<std::sync::atomic::AtomicU64>,
     }
 
-    impl Remote {
+    impl AfarAppliance {
         async fn trip(&self) {
             let ms = self.ms.load(std::sync::atomic::Ordering::Relaxed);
             if ms > 0 {
@@ -13920,7 +13920,7 @@ file = "{state}"
     }
 
     #[async_trait::async_trait]
-    impl BlockDevice for Remote {
+    impl BlockDevice for AfarAppliance {
         fn id(&self) -> &crate::drive::DeviceId {
             self.inner.id()
         }
@@ -13969,7 +13969,7 @@ file = "{state}"
         let m2 = ms.clone();
         let (mgr, source_id, local_id, _golden) = golden_on_and_dest(
             dir.path(),
-            move |inner| Arc::new(Remote { inner, ms: m2 }) as Arc<dyn BlockDevice>,
+            move |inner| Arc::new(AfarAppliance { inner, ms: m2 }) as Arc<dyn BlockDevice>,
             |d| d,
         )
         .await;
