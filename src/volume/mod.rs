@@ -34,6 +34,7 @@ pub mod holds;
 pub mod pressure;
 pub mod relocate;
 pub mod synonym;
+pub mod target;
 pub mod throttle;
 
 use std::collections::{HashMap, HashSet};

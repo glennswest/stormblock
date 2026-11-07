@@ -185,7 +185,9 @@ pub fn plan(
                     }
                     // A single-copy volume kept on one drive (#153) is moved
                     // whole or not at all: the rebalance leaves it where it is.
-                    if parity.contains(&vol) || affine.contains(&vol) {
+                    // Nor does it move a volume with a placement target (#426):
+                    // where it lives was asked for.
+                    if parity.contains(&vol) || affine.contains(&vol) || crate::volume::target::of(&vol).is_some() {
                         out.left += 1;
                         continue;
                     }

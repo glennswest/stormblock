@@ -29,6 +29,7 @@ pub mod install_config;
 pub mod kernelopt;
 pub mod peers;
 pub mod live_mirror;
+pub mod volume_move;
 pub mod creators;
 pub mod namespaces;
 #[cfg(feature = "ui")]
@@ -357,6 +358,8 @@ pub struct AppState {
     pub stage_job: tokio::sync::Mutex<Option<crate::mgmt::api::releases::StageJob>>,
     /// Drives being emptied so they can be pulled (#70 item 3).
     pub drains: tokio::sync::RwLock<crate::drain::Drains>,
+    /// Volume moves onto a named slab, drive or array (#426).
+    pub volume_moves: crate::mgmt::volume_move::Moves,
     /// The pool's rebalance, the last one run (#154).
     pub rebalance: tokio::sync::Mutex<crate::rebalance::Rebalance>,
     /// Per-volume rebuilds after a drive fails (#146).
@@ -587,6 +590,11 @@ impl AppState {
         // Before any target serves: a volume this node was told is not to be
         // used through it must not answer optimized after a restart (#83).
         ana::load(&config);
+        // Where each volume with a placement target may live (#426): before
+        // anything allocates for it.
+        if let Some(dir) = config.management.data_dir.as_ref() {
+            crate::volume::target::load(std::path::Path::new(dir));
+        }
         let nvmeof_settings = config.nvmeof.clone();
         let volume_manager = Arc::new(crate::lockwatch::TrackedMutex::new(volume_manager));
         let rebuilds = crate::rebuild::Rebuilds::new(volume_manager.clone(), &config.rebuild);
@@ -657,6 +665,7 @@ impl AppState {
                 None => HashMap::new(),
             }),
             drains: tokio::sync::RwLock::new(crate::drain::Drains::default()),
+            volume_moves: Default::default(),
             rebalance: tokio::sync::Mutex::new(crate::rebalance::Rebalance::default()),
             rebuilds,
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),

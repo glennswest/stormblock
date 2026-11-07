@@ -94,7 +94,7 @@ const META_MIN: u64 = 64 * 1024;
 const META_MAX: u64 = 256 * 1024 * 1024;
 
 /// Unique identifier for a slab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SlabId(pub Uuid);
 
 impl SlabId {

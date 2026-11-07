@@ -1080,7 +1080,7 @@ impl ThinVolumeHandle {
         *self.failed.write().unwrap() = slabs.into_iter().collect();
     }
 
-    fn is_failed(&self, slab: SlabId) -> bool {
+    pub fn is_failed(&self, slab: SlabId) -> bool {
         self.failed.read().unwrap().contains(&slab)
     }
 
@@ -1410,9 +1410,48 @@ impl ThinVolumeHandle {
             registry.reserve(pin, slot_idx);
             return Ok(Leg::new(pin, slot_idx));
         }
+        let failed_drives = self.failed_domains(registry);
+        // A placement target (#426): `to` names the slabs, whatever their
+        // tier; `except` takes slabs out of the ordinary choice.
+        let target = super::target::of(&self.id);
+        if let Some(to) = target.as_ref().and_then(|t| t.to.clone()) {
+            let except = target.as_ref().map(|t| t.except.clone()).unwrap_or_default();
+            let mut cands: Vec<(SlabId, u64)> = to
+                .iter()
+                .filter(|id| !except.contains(id))
+                .filter(|id| registry.takes(id, self.placement.role, self.slot_size))
+                .filter(|id| !self.is_failed(**id) && !registry.collides(id, &failed_drives, "drive"))
+                .filter(|id| !registry.collides(id, apart_from, rung))
+                .filter_map(|id| registry.get(id).map(|s| (*id, s.free_slots())))
+                .collect();
+            cands.sort_by(|a, b| b.1.cmp(&a.1));
+            let mut not_space: Option<DriveError> = None;
+            for (slab_id, _) in cands {
+                let Some(slab) = registry.get_mut(&slab_id) else { continue };
+                match slab.allocate_deferred(self.id, vext_tag, generation).await {
+                    Ok(slot_idx) => {
+                        registry.reserve(slab_id, slot_idx);
+                        return Ok(Leg::new(slab_id, slot_idx));
+                    }
+                    Err(DriveError::NoSpace(_)) => continue,
+                    Err(e) => {
+                        tracing::warn!(volume = %self.id, slab = %slab_id, "allocation failed (not space): {e}");
+                        not_space = Some(e);
+                    }
+                }
+            }
+            if let Some(e) = not_space {
+                return Err(e);
+            }
+            return Err(DriveError::NoSpace(format!(
+                "volume {} is placed {} (#426) and no slab of it has room apart from {} domain(s) at rung '{rung}'",
+                self.id,
+                target.as_ref().map(|t| t.describe()).unwrap_or_default(),
+                apart_from.len()
+            )));
+        }
         let mut tiers = vec![self.placement.preferred_tier];
         tiers.extend(self.placement.tier_fallback.iter().copied());
-        let failed_drives = self.failed_domains(registry);
         // A slab that failed to allocate for a reason that is not space (a
         // table page that did not read, a device that timed out): said, and
         // returned if nothing else allocates, never reported as a full pool
@@ -1429,7 +1468,10 @@ impl ThinVolumeHandle {
                 ) else {
                     break;
                 };
-                if self.is_failed(slab_id) || registry.collides(&slab_id, &failed_drives, "drive") {
+                if self.is_failed(slab_id)
+                    || registry.collides(&slab_id, &failed_drives, "drive")
+                    || target.as_ref().is_some_and(|t| !t.allows(&slab_id))
+                {
                     tried.push(slab_id);
                     continue;
                 }
@@ -1474,7 +1516,8 @@ impl ThinVolumeHandle {
         // Affine (#153): the volume's own slab while it takes the extent.
         if self.affine() {
             if let Some(a) = self.affinity() {
-                if !self.is_failed(a) && registry.takes(&a, self.placement.role, self.slot_size) {
+                let allowed = super::target::of(&self.id).is_none_or(|t| t.allows(&a));
+                if allowed && !self.is_failed(a) && registry.takes(&a, self.placement.role, self.slot_size) {
                     if let Some(slab) = registry.get_mut(&a) {
                         if let Ok(slot_idx) = slab.allocate_deferred(self.id, vext_idx, generation).await {
                             registry.reserve(a, slot_idx);

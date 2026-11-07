@@ -273,6 +273,38 @@ pub struct CreateVolumeRequest {
     /// than the default; a namespace's quota is kept (`/api/v1/namespaces`).
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Where the volume's extents go (#426): `{"to": {"slab"|"drive"|"array":
+    /// …}, "except": {…}}`, narrower than a tier and kept as its placement
+    /// target, as a move leaves it. Not with `array_id` (a pin already says
+    /// where).
+    #[serde(default)]
+    pub target: Option<crate::mgmt::volume_move::TargetRequest>,
+}
+
+/// Give a just-created volume the target its create asked for (#426), or
+/// delete it and say why: a volume is never left placed somewhere else than
+/// asked.
+async fn settle_create_target(
+    state: &Arc<AppState>,
+    id: VolumeId,
+    req: Option<&crate::mgmt::volume_move::TargetRequest>,
+) -> Option<Response> {
+    let req = req?;
+    let handle = state.volume_manager.lock().await.get_volume_handle(&id)?;
+    let shape = crate::mgmt::volume_move::shape_of(&handle);
+    let res = match crate::mgmt::volume_move::build_target(state, req, &shape).await {
+        Ok(t) => crate::mgmt::volume_move::keep_target(state, id, Some(t)),
+        Err(r) => Err(r),
+    };
+    match res {
+        Ok(()) => None,
+        Err(r) => {
+            if let Err(e) = state.volume_manager.lock().await.delete_volume(id).await {
+                tracing::error!(volume = %id, "a volume whose target was refused could not be deleted: {e}");
+            }
+            Some(r)
+        }
+    }
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — say what a volume belongs to, or with
@@ -603,6 +635,13 @@ async fn get_volume_with_creator(State(state): State<Arc<AppState>>, Path(id): P
         if let Some(m) = crate::mgmt::live_mirror::status_of(&state, id).await {
             v["mirror"] = m;
         }
+        // Its placement target and its move (#426).
+        if let Some(t) = crate::mgmt::volume_move::target_json(&VolumeId(id)) {
+            v["target"] = t;
+        }
+        if let Some(m) = state.volume_moves.status(&VolumeId(id)).await {
+            v["move"] = serde_json::json!(m);
+        }
     }
     (parts.status, Json(v)).into_response()
 }
@@ -618,6 +657,7 @@ async fn delete_volume_forgetting(
     if resp.status().is_success() {
         if let Some(v) = key {
             crate::mgmt::creators::forget(&state, &crate::mgmt::creators::volume(&v.0));
+            crate::mgmt::volume_move::forget(&state, v);
         }
     }
     resp
@@ -758,6 +798,12 @@ async fn retier_volume(
         Err(r) => return r,
     };
     let vol_id = VolumeId(uuid);
+    if let Some(t) = crate::volume::target::of(&vol_id) {
+        return ApiError::conflict(format!(
+            "volume {uuid} is placed {} (#426): move it (POST …/move), or release the target first",
+            t.describe()
+        ));
+    }
 
     let Some(tier) = super::slabs::parse_tier(&req.tier) else {
         return ApiError::bad_request(format!(
@@ -1011,6 +1057,9 @@ async fn create_volume(
         if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, vol_id).await {
             return r;
         }
+        if let Some(r) = settle_create_target(&state, vol_id, req.target.as_ref()).await {
+            return r;
+        }
         if let Some(r) = crate::mgmt::namespaces::settle_new_volume(&state, vol_id, req.namespace.as_deref()).await {
             return r;
         }
@@ -1076,6 +1125,9 @@ async fn create_volume(
             None => return ApiError::bad_request(format!("tier {t}: hot, warm, cool or cold")),
         },
     };
+    if req.target.is_some() && req.array_id.is_some() {
+        return ApiError::bad_request("a volume on an array is pinned there (#150); drop \"target\"");
+    }
     if req.tier.is_some() && req.array_id.is_some() {
         return ApiError::bad_request("a volume on an array is that array's storage; drop \"tier\"");
     }
@@ -1156,6 +1208,9 @@ async fn create_volume(
             // Pool admission (#152): counted with the claim, no lock held.
             drop(vm);
             if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, vol_id).await {
+                return r;
+            }
+            if let Some(r) = settle_create_target(&state, vol_id, req.target.as_ref()).await {
                 return r;
             }
             if let Some(r) = crate::mgmt::namespaces::settle_new_volume(&state, vol_id, req.namespace.as_deref()).await {
@@ -3745,6 +3800,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/secret", get(get_secret).put(set_secret))
         .route("/{id}/resync", axum::routing::post(resync_volume))
         .route("/{id}/tier", axum::routing::post(retier_volume))
+        .route("/{id}/move", get(crate::mgmt::volume_move::get).post(crate::mgmt::volume_move::start).delete(crate::mgmt::volume_move::cancel))
         .route("/{id}/restripe", axum::routing::post(restripe_volume))
         .route("/{id}/seal", axum::routing::post(seal_volume).delete(unseal_volume))
         .route("/{id}/pallet-signature", get(pallet_signature).post(sign_pallet_volume))
