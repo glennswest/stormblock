@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
+- **docs:** refreshed from the code since 2026-10-30 (v23.13.0 to v23.23.0): README says `settrust` (#555) and the cluster record (#557); "Not built, or not wired" lists the open findings (#546, #547, #553, #556, #512, #541); CLAUDE.md's refresh date. Every other key, port and env var the commits added was already documented.
 - **docs:** #390: `ci-shelf-raid6-verify.sh` re-run at 19bde5e0, ALL PASS. The run on the DS224C waits on the shelf being cabled to the Dell again.
 
 

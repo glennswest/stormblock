@@ -165,7 +165,7 @@ PER_IO_DAEMON tuning (#505), the fd leak fixed (#510), T10 PI in health
 admin-only image build (#393), the engine's commit in health (#466), logcast
 (#477), the install boot's 20 s grace (#448), git dependencies by rev (#480).
 The README is the reference for what the code does, refreshed from the code
-on 2026-10-30; "Not built, or not wired" lists what is promised and not done.
+on 2026-10-30 and checked again on 2026-11-07 (v23.23.0); "Not built, or not wired" lists what is promised and not done.
 The older state follows.
 
 **v21.0.0** (2026-10-17, #353, f23b508, golden-stormblock-595bf69e5baa):
