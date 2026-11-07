@@ -240,6 +240,8 @@ Rebalance skips targeted volumes; retier refused while one stands. Decided here:
       stay on the drive"; docs (multi-drive.md, README), CHANGELOG
 - [x] check.sh at ccd4b948 ALL PASS; clippy clean in the new lines (cb4a1531); merged; v23.24.0; stage; stormvm#29 told; closed.
       Not on a node: stormvm's verb moving a running VM's disk onto the shelf
+- [ ] reopened by the issue's second comment (missed at the close): `/v1` create `placement: {slab_id | drive}`
+      (stormstorage#106), 404/409/400, unknown placement keys refused; on wip/426-v1-placement
 
 ### A claim on a cluster worker takes ~321 s (2026-11-07, #558, P1, stormcentral#360) — NOT stormblock's: waits on stormcluster#103
 

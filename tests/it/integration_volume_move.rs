@@ -245,4 +245,31 @@ async fn a_volume_moves_onto_a_named_drive_while_written_and_stays_there() {
     let (s, _) = call(&c, reqwest::Method::DELETE, format!("{api}/volumes/{}", leg.0), None).await;
     assert!(s == 200 || s == 204, "{s}");
     assert!(stormblock::volume::target::of(&leg).is_none());
+
+    // `/v1` create, as stormstorage#106 sends it: a slab or a drive by name.
+    let root = api.trim_end_matches("/api/v1").to_string();
+    let v1 = |name: &str, size: u64, placement: Value| json!({ "name": name, "size_bytes": size, "replica_tier": { "slaves": 0 }, "placement": placement });
+    let (s, v) = call(&c, reqwest::Method::POST, format!("{root}/v1/volumes"), Some(v1("leg-slab", 8 * MIB, json!({ "slab_id": s1 })))).await;
+    assert_eq!(s, 200, "{v}");
+    let (s, v) = call(&c, reqwest::Method::POST, format!("{root}/v1/volumes"), Some(v1("leg-drive", 8 * MIB, json!({ "drive": d0 })))).await;
+    assert_eq!(s, 200, "{v}");
+    for (name, slab, seed) in [("leg-slab", &s1, 21u8), ("leg-drive", &s0, 31)] {
+        let id = state.volume_manager.lock().await.find_volume(name).await.unwrap();
+        write(&state, id, 0..8, seed).await;
+        check(&state, id, 0..8, seed).await;
+        assert_eq!(slabs_of(&c, &api, id).await, [slab.clone()].into(), "{name}");
+    }
+    let refused = [
+        (json!({ "slab_id": uuid::Uuid::new_v4().to_string() }), 8 * MIB, 404),
+        (json!({ "drive": "no-such-serial" }), 8 * MIB, 404),
+        (json!({ "slab_id": s1, "drive": d0 }), 8 * MIB, 400),
+        (json!({ "shelf": "A" }), 8 * MIB, 400),
+        (json!({ "slab_id": s1 }), 1024 * MIB, 409),
+    ];
+    for (i, (placement, size, want)) in refused.into_iter().enumerate() {
+        let name = format!("refused-{i}");
+        let (s, e) = call(&c, reqwest::Method::POST, format!("{root}/v1/volumes"), Some(v1(&name, size, placement.clone()))).await;
+        assert_eq!(s, want, "{placement}: {e}");
+        assert!(state.volume_manager.lock().await.find_volume(&name).await.is_none(), "{name} left behind");
+    }
 }

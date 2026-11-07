@@ -196,6 +196,74 @@ pub struct CreatePlacement {
     /// is on this node, so the master is this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub array_id: Option<String>,
+    /// Every extent of the volume on this slab, new ones included (#426,
+    /// stormstorage#106): its placement target. On this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slab_id: Option<String>,
+    /// Every extent on this drive's slabs (#426): its serial, WWN, path or
+    /// id, as `/api/v1/drives` lists it. On this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<String>,
+    /// Anything else: refused, never ignored (#426). A thin create
+    /// allocates nothing, so a caller cannot check afterwards where a
+    /// placement it asked for went.
+    #[serde(flatten, default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub unknown: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+impl CreatePlacement {
+    /// The slab or drive named, as a placement target's `to` (#426).
+    fn named(&self) -> Option<crate::volume::target::Place> {
+        match (&self.slab_id, &self.drive) {
+            (Some(s), _) => Some(crate::volume::target::Place { slab: Some(s.clone()), ..Default::default() }),
+            (_, Some(d)) => Some(crate::volume::target::Place { drive: Some(d.clone()), ..Default::default() }),
+            _ => None,
+        }
+    }
+}
+
+/// Give a new volume the slab or drive its create named (#426), or refuse:
+/// 409 when it cannot hold the volume, room included.
+async fn settle_named(
+    state: &AppState,
+    id: EngineVolumeId,
+    place: &crate::volume::target::Place,
+    size_bytes: u64,
+) -> Result<(), V1Error> {
+    use crate::mgmt::volume_move;
+    let handle = state
+        .volume_manager
+        .lock()
+        .await
+        .get_volume_handle(&id)
+        .ok_or_else(|| V1Error::Internal(format!("volume {} vanished as it was made", id.0)))?;
+    let req = volume_move::TargetRequest { to: Some(place.clone()), except: None };
+    let t = volume_move::build_target_checked(state, &req, &volume_move::shape_of(&handle))
+        .await
+        .map_err(target_error)?;
+    let need = size_bytes.saturating_mul(handle.redundancy().scheme.copies() as u64);
+    if let Some(room) = volume_move::room_in(state, &t).await {
+        if room < need {
+            return Err(V1Error::Conflict(format!(
+                "{} has {room} bytes free; the volume needs {need}", place.describe()
+            )));
+        }
+    }
+    crate::volume::target::keep(
+        state.config.management.data_dir.as_ref().map(std::path::Path::new),
+        id,
+        Some(t),
+    )
+    .map_err(|e| V1Error::Internal(format!("keeping the placement target: {e}")))
+}
+
+fn target_error(e: crate::mgmt::volume_move::TargetError) -> V1Error {
+    use crate::mgmt::volume_move::TargetError;
+    match e {
+        TargetError::NotFound(m) => V1Error::NotFound(m),
+        TargetError::Invalid(m) => V1Error::BadRequest(m),
+        TargetError::Conflict(m) => V1Error::Conflict(m),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1206,6 +1274,32 @@ async fn create_volume(
             .ok_or_else(|| V1Error::BadRequest(format!("tier {t}: hot, warm, cool or cold")))?,
     };
     let asked_policy = req.redundancy.is_some() || req.spread.is_some();
+    // A named slab or drive (#426): one place, on this node, a new volume.
+    let named = match req.placement.as_ref() {
+        Some(p) => {
+            if let Some(k) = p.unknown.keys().next() {
+                return Err(V1Error::BadRequest(format!(
+                    "placement.{k}: not a placement this engine takes (array_id, slab_id or drive)"
+                )));
+            }
+            let n = [p.array_id.is_some(), p.slab_id.is_some(), p.drive.is_some()].iter().filter(|b| **b).count();
+            if n > 1 {
+                return Err(V1Error::BadRequest("placement: one of array_id, slab_id or drive".into()));
+            }
+            p.named()
+        }
+        None => None,
+    };
+    if named.is_some() {
+        if req.source.is_some() {
+            return Err(V1Error::BadRequest(
+                "placement.slab_id / drive places a new volume; it cannot also be a clone".into(),
+            ));
+        }
+        if req.tier.is_some() {
+            return Err(V1Error::BadRequest("placement.slab_id / drive names where the volume goes; drop \"tier\"".into()));
+        }
+    }
     if (asked_policy && !policy.is_none() || req.tier.is_some())
         && req.placement.as_ref().is_some_and(|p| p.array_id.is_some())
     {
@@ -1275,9 +1369,20 @@ async fn create_volume(
             Some(crate::raid::RaidArrayId(id))
         }
     };
-    let master_node = match pin_array {
-        Some(_) => Some(v1.local_node.clone()),
-        None => req.master_node.clone(),
+    // A named slab or drive is this node's: resolved before anything is made.
+    if let Some(place) = &named {
+        if req.master_node.as_deref().is_some_and(|m| m != v1.local_node) {
+            return Err(V1Error::BadRequest(format!(
+                "{} is on {}, not {}", place.describe(), v1.local_node, req.master_node.as_deref().unwrap_or("")
+            )));
+        }
+        crate::mgmt::volume_move::resolve(&state, place)
+            .await
+            .map_err(|u| target_error(u.into()))?;
+    }
+    let master_node = match (pin_array, &named) {
+        (Some(_), _) | (_, Some(_)) => Some(v1.local_node.clone()),
+        _ => req.master_node.clone(),
     };
 
     let nodes = nodes_view(&state, &v1).await;
@@ -1365,6 +1470,14 @@ async fn create_volume(
                 // Pool admission (#152): counted with the claim; a refused
                 // one is taken back and answered 507 out_of_space.
                 drop(vm);
+                // Its target before anything is written to it (#426): a
+                // create allocates nothing, so no extent lands elsewhere.
+                if let Some(place) = &named {
+                    if let Err(e) = settle_named(&state, id, place, req.size_bytes).await {
+                        let _ = state.volume_manager.lock().await.delete_volume(id).await;
+                        return Err(e);
+                    }
+                }
                 if let Err(why) = crate::mgmt::capacity::admit(&state, id).await {
                     let _ = state.volume_manager.lock().await.delete_volume(id).await;
                     return Err(V1Error::OutOfSpace(why));

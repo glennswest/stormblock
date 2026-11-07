@@ -181,21 +181,55 @@ pub struct VolumeShape {
     pub rung: String,
 }
 
+/// Why a target was refused: 404 (nothing of that name), 400 (asked
+/// wrong), 409 (it cannot hold the volume). Each door answers in its own
+/// envelope: `/api/v1`'s, `/v1`'s.
+#[derive(Debug)]
+pub enum TargetError {
+    NotFound(String),
+    Invalid(String),
+    Conflict(String),
+}
+
+impl TargetError {
+    pub fn response(self) -> Response {
+        match self {
+            TargetError::NotFound(m) => ApiError::not_found(m),
+            TargetError::Invalid(m) => ApiError::bad_request(m),
+            TargetError::Conflict(m) => ApiError::conflict(m),
+        }
+    }
+}
+
+impl From<Unresolved> for TargetError {
+    fn from(u: Unresolved) -> Self {
+        match u {
+            Unresolved::NotFound(m) => TargetError::NotFound(m),
+            Unresolved::Invalid(m) => TargetError::Invalid(m),
+        }
+    }
+}
+
+/// [`build_target_checked`] in `/api/v1`'s envelope.
+pub async fn build_target(state: &AppState, req: &TargetRequest, shape: &VolumeShape) -> Result<Target, Response> {
+    build_target_checked(state, req, shape).await.map_err(TargetError::response)
+}
+
 /// Resolve a request into a target the volume can live in, or say why not
 /// (409 for a target that cannot hold it).
-pub async fn build_target(state: &AppState, req: &TargetRequest, shape: &VolumeShape) -> Result<Target, Response> {
+pub async fn build_target_checked(state: &AppState, req: &TargetRequest, shape: &VolumeShape) -> Result<Target, TargetError> {
     if req.to.is_none() && req.except.is_none() {
-        return Err(ApiError::bad_request("a target needs to, except, or both"));
+        return Err(TargetError::Invalid("a target needs to, except, or both".into()));
     }
     let mut t = Target::default();
     if let Some(p) = &req.except {
-        p.check("except").map_err(ApiError::bad_request)?;
-        t.except = resolve(state, p).await.map_err(Unresolved::response)?;
+        p.check("except").map_err(TargetError::Invalid)?;
+        t.except = resolve(state, p).await?;
         t.except_asked = Some(p.clone());
     }
     if let Some(p) = &req.to {
-        p.check("to").map_err(ApiError::bad_request)?;
-        let named = resolve(state, p).await.map_err(Unresolved::response)?;
+        p.check("to").map_err(TargetError::Invalid)?;
+        let named = resolve(state, p).await?;
         let reg = state.slab_registry.read().await;
         let mut usable = BTreeSet::new();
         let mut why = Vec::new();
@@ -220,7 +254,7 @@ pub async fn build_target(state: &AppState, req: &TargetRequest, shape: &VolumeS
             } else {
                 format!("{} has no slab this volume can live on: {}", p.describe(), why.join("; "))
             };
-            return Err(ApiError::conflict(msg));
+            return Err(TargetError::Conflict(msg));
         }
         // A redundant volume's legs stay apart (#142): the target must hold as
         // many domains at the volume's rung as it keeps copies.
@@ -231,7 +265,7 @@ pub async fn build_target(state: &AppState, req: &TargetRequest, shape: &VolumeS
             }
         }
         if picked.len() < shape.copies {
-            return Err(ApiError::conflict(format!(
+            return Err(TargetError::Conflict(format!(
                 "{} holds {} '{}' domain(s); the volume keeps {} copies apart at that rung",
                 p.describe(),
                 picked.len(),
@@ -243,6 +277,13 @@ pub async fn build_target(state: &AppState, req: &TargetRequest, shape: &VolumeS
         t.to_asked = Some(p.clone());
     }
     Ok(t)
+}
+
+/// Bytes the slabs of a `to` target can still take for the volume.
+pub async fn room_in(state: &AppState, t: &Target) -> Option<u64> {
+    let to = t.to.as_ref()?;
+    let reg = state.slab_registry.read().await;
+    Some(to.iter().filter(|id| t.allows(id)).filter_map(|id| reg.get(id).map(|s| s.free_slots() * s.slot_size())).sum())
 }
 
 /// The shape of a volume, from its handle.

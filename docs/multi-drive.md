@@ -281,9 +281,15 @@ volume, #153, keeps to one slab of it). It is a hard boundary, as a pin is
 (#150): a volume whose target is full is refused space (ENOSPC), never spilled
 back where it was moved from. The rebalance leaves a targeted volume where it
 is, and `POST …/tier` is refused (409) while a target stands. The same target
-is accepted at creation, `POST /api/v1/volumes {…, "target": {"to": …}}`, for
-a leg made on a named slab (stormstorage#106); a target the volume cannot have
-(below) is no volume. Refused with 409: a volume pinned to an array (it *is*
+is accepted at creation, `POST /api/v1/volumes {…, "target": {"to": …}}`, and
+on `/v1` as stormstorage#106 sends it, `POST /v1/volumes {…, "replica_tier":
+{"slaves": 0}, "placement": {"slab_id": <slab>}}` or `"placement": {"drive":
+<serial|wwn|path|id>}` (a leg made on a named slab or drive of this node): 404
+for no such slab or drive, 409 when it cannot hold the volume or has less room
+free than its size, 400 combined with `array_id`, a `source`, `tier` or a
+`master_node` that is not this node, and 400 for any other `placement` key (an
+engine never ignores a placement it does not know). A target the volume cannot
+have is no volume. Refused with 409: a volume pinned to an array (it *is*
 that storage), a slab dedicated to its array's pinned volumes (#150: create
 the volume there with `array_id`), a target with no slab of the volume's role
 and extent size, and a redundant volume moved onto fewer domains at its rung

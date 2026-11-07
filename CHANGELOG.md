@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-07
+- **feat:** #426 (stormstorage#106): `/v1` create takes `placement: {slab_id}` or `placement: {drive: <serial|wwn|path|id>}`: the volume's placement target from its first extent, as `array_id` pins one (#150). 404 for no such slab or drive, 409 when it cannot hold the volume or has less room free than its size, 400 with `array_id`, a `source`, `tier` or another node's `master_node`. Any other `placement` key is refused (400), never ignored.
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
 ## [v23.24.0] — 2026-11-07
