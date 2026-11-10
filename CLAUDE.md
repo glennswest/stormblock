@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### The kube volume list deadlocks the volume manager at start (2026-11-10, #571, P1→P0) — IN PROGRESS
+### The kube volume list deadlocks the volume manager at start (2026-11-10, #571, P1→P0) — DONE (v24.1.1), closed; pvetest1 pending
 
 pvetest1 (23.25.0): `GET /apis/storage.storm.io/v1/volumes` (req 1 or 3) holds the volume manager for an hour; every
 `/api/v1/volumes` waits, the kubelet's static pods never get their volumes, no apiserver. 4 of 5 boots. Read from the
@@ -240,10 +240,14 @@ Plan:
 - [x] kube projections: what they need from the manager under a brief hold (sync getters only), then the objects
       built with nothing held; v1 and ublk read once, apart; `all_slabs` the manager first, alone
 - [x] `volumes_in_use`: ids first, then `ublk_exports`
-- [ ] test: a kube list while `v1` is held by a task waiting on the manager (and `ublk_exports` likewise) answers;
-      control: the old code hangs; docs (lock order in durability/README), CHANGELOG; check.sh; patch; stage
 - [x] `v1` and `ublk_exports` tracked (a stall names them); taking either under the manager said (#571 lock order)
-- [ ] the issue's watchdog ask: answered on the issue (an abandon of a held writer is unsafe; reads now hold nothing)
+- [x] test `the_kube_volume_list_holds_the_manager_while_waiting_for_nothing` (v1 held, ublk_exports held, the in-use
+      check): control (old kube.rs + api/mod.rs, wip/571-control, deleted) fails "the volume manager is held by the
+      kube list while it waits for v1"; README, CHANGELOG; check.sh at cc8f3f4d ALL PASS (1382/1382, no lock-order
+      line); v24.1.1; stage
+- [x] the issue's watchdog ask: answered on the issue, not built (abandoning a holder mid-mutation is unsafe; a
+      deadlock is a code fault the stall line now names, with both locks tracked)
+- [ ] pvetest1: power-cut rounds pass on a release with v24.1.1; no `stall:` holding the manager from req 1
 
 ### Flow-over: one short NVMe/TCP read left the disk "unbootable" and the install unreported (2026-11-10, #574, P0) — DONE (v24.1.0), closed; metal pending
 
