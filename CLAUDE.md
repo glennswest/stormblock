@@ -227,6 +227,29 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Flow-over: one short NVMe/TCP read left the disk "unbootable" and the install unreported (2026-11-10, #574, P0) — IN PROGRESS
+
+stormcos#904: `short read: wanted 1048576, got 4096`, then `1 extent(s) did not move`, local boot refused, no
+report: the installer waited 30 min. Read from the code:
+- the initiator never checks a response's CID or data offset: a command abandoned mid-flight (its future dropped
+  between send and answer) leaves its answer on the connection, and the next command takes it. A slot-table read
+  covers 4096 bytes: a 1 MiB read that gets it is exactly the issue's line. And "short read" is ErrorKind::Other,
+  so permanent: never retried, the connection never re-made for it
+- the flow-over does relist a failed extent (the next pass), but `failed` counts failed *attempts*, and any one
+  marks the disk unbootable and skips the validation, even when the extent moved on the next pass
+- a failure has no install report: only `laid` and `booted` exist
+Plan:
+- [ ] initiator: CID and data offset checked; a short, foreign or out-of-place answer is a protocol desync:
+      ConnectionAborted (transient), the connection dropped, retried on a new one (by another path when there is
+      one); a command dropped mid-flight drops its connection
+- [ ] flow-over: unbootable only for extents still on a source; each failure said with "tried again"; a backoff
+      before a pass after failures; the validation runs whenever nothing is left
+- [ ] `installed {stage: "failed", reason}`: host `install.state = failed` (intent stays install, so the next boot
+      installs again); the node reports it when the flow-over stops, the validation fails or the disk does not boot
+- [ ] tests: an abandoned read then a 1 MiB read on one connection (control: the old code's short read); a
+      flow-over whose source fails once is bootable; the failed stage over HTTP; docs, CHANGELOG; check.sh;
+      patch release; stage; stormcentral told (`failed` is final)
+
 ### Rollback copies pile up: `<vol>@previous.N` never pruned (2026-11-07, #565) — DONE (v23.27.0), closed; forge1 pending
 
 forge1: 27 data templates × 5 generations of `<name>.golden@previous[.N]`, left by `install::set_aside` at every
