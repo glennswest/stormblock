@@ -2779,9 +2779,9 @@ What earlier docs described and the code does not do, each with its issue:
 - **Open, filed since v23.13:** the default metadata region fails the first
   persist after a restart past ~50 % allocated (#546); a restore's peak
   memory (#547); x86_64 images built on a build VM carry no firmware or
-  microcode (#553); the probe's repeated slab opens (#556); ext4 writes past
-  ~192 TiB corrupt, in mkfs-ext4 (#512); ublk SHMEM_ZC (#541); the shelf run
-  (#390) waits on the shelf being cabled.
+  microcode (#553); the probe's repeated slab opens (#556); ublk SHMEM_ZC
+  (#541); the shelf run (#390) waits on the shelf being cabled. ext4 writes
+  past ~192 TiB (#512) are fixed by v24.0.1's mkfs-ext4 v4.1.3 pin.
 - **"No C dependencies"** was never true: TLS brings in `ring` (the only
   backend since #209; `aws-lc-sys` is gone).
 - **NVMe/TCP access** (#210, `docs/nvme-access.md`): a `/serve/v1` export
