@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-10
+- **fix:** #571 (pvetest1, 23.25.0, 4 of 5 boots): `GET /apis/storage.storm.io/v1/volumes` no longer deadlocks the volume manager. The projection held the manager while it asked, per volume, for the `/v1` state and the ublk exports; `/v1` handlers (and its 1 s expiry) take `v1` then the manager, and `volumes_in_use` (run at start by the formats resume, #141) held `ublk_exports` then asked for the manager. Two lock-order inversions: the list held the manager for an hour from start, every `/api/v1/volumes` waited behind it, the kubelet's static pods never got their volumes, no apiserver. Now the kube Volume objects take what they need from the manager under a brief hold (sync getters only) and are built with nothing held, the `/v1` state and ublk exports read once and apart; `volumes_in_use` takes the ids before `ublk_exports`; the Slab list takes the manager before the registry. The `/v1` state and the ublk exports are tracked locks now, so a stall names them (it said "waits on no tracked lock"), and taking either while holding the manager is said (a panic in the lock tests). Test `integration_fstemplates::the_kube_volume_list_holds_the_manager_while_waiting_for_nothing`.
+
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 

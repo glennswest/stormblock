@@ -319,6 +319,9 @@ fn name_of<T>() -> &'static str {
         "VolumeManager" => "volume manager",
         "SlabRegistry" => "slab registry",
         "GlobalExtentMap" => "extent map",
+        // #571: the two the kube list deadlocked with, named in a stall.
+        "V1State" => "/v1 state",
+        "UblkExportManager" => "ublk exports",
         _ => full,
     }
 }
@@ -343,6 +346,7 @@ impl<T> TrackedMutex<T> {
     }
 
     pub async fn lock(&self) -> TrackedMutexGuard<'_, T> {
+        lock_order(self.state.name);
         let wait = self.state.wait(true);
         let guard = self.inner.lock().await;
         wait.done(false);
@@ -355,6 +359,7 @@ impl<T> TrackedMutex<T> {
     }
 
     pub async fn lock_owned(self: Arc<Self>) -> OwnedTrackedMutexGuard<T> {
+        lock_order(self.state.name);
         let wait = self.state.wait(true);
         let guard = self.inner.clone().lock_owned().await;
         wait.done(false);
@@ -509,6 +514,18 @@ pub fn current_task_holds(lock: &str) -> bool {
 /// Called where the engine flushes a device: a holder there is reported, at
 /// WARN once a minute, and with `STORMBLOCK_LOCK_ASSERT=1` (the #364 tests)
 /// is a panic, so a path that breaks the rule fails its test.
+/// The lock order (#571): `/v1` state and the ublk exports are taken before
+/// the volume manager, never under it. The `/v1` handlers take `v1` then the
+/// manager, and the in-use check took `ublk_exports` then the manager; a task
+/// that held the manager and asked for either deadlocked with them (pvetest1,
+/// an hour at start). Said like [`assert_not_held`]: WARN, or a panic in the
+/// lock tests.
+fn lock_order(taking: &'static str) {
+    if matches!(taking, "/v1 state" | "ublk exports") {
+        assert_not_held("volume manager", &format!("taking the {taking} (#571: the {taking} is taken before the manager)"));
+    }
+}
+
 pub fn assert_not_held(lock: &str, across: &str) {
     if !current_task_holds(lock) {
         return;

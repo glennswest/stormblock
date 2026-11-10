@@ -247,7 +247,8 @@ pub struct AppState {
     pub slab_registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     pub gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
     /// Control-plane state behind the /v1 CSI contract surface.
-    pub v1: tokio::sync::Mutex<api::v1::V1State>,
+    /// Tracked (#571): a stall names its holder, as the manager's does.
+    pub v1: crate::lockwatch::TrackedMutex<api::v1::V1State>,
     /// StormFS chunk ownership, map versions and version pins (#49, #50).
     /// Taken **before** the volume manager wherever both are needed.
     #[cfg(feature = "stormfs-data")]
@@ -311,7 +312,8 @@ pub struct AppState {
     /// Preformatted filesystem templates — mkfs once, clone forever (#38).
     pub fstemplates: Arc<tokio::sync::Mutex<crate::fs::TemplateStore>>,
     /// Live per-volume ublk exports for the local CSI fast path.
-    pub ublk_exports: tokio::sync::Mutex<ublk_export::UblkExportManager>,
+    /// Tracked (#571), like `v1`.
+    pub ublk_exports: crate::lockwatch::TrackedMutex<ublk_export::UblkExportManager>,
     /// vhost-user-blk sockets for VMMs on this node (#82).
     #[cfg(target_os = "linux")]
     pub vhost_exports: tokio::sync::Mutex<vhost_export::VhostExports>,
@@ -616,7 +618,7 @@ impl AppState {
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,
             gem,
-            v1: tokio::sync::Mutex::new(api::v1::V1State::from_config(&config)),
+            v1: crate::lockwatch::TrackedMutex::new(api::v1::V1State::from_config(&config)),
             #[cfg(feature = "stormfs-data")]
             stormfs: tokio::sync::Mutex::new(match config.management.data_dir.as_ref() {
                 Some(dir) => api::stormfs::StormFsState::load(std::path::Path::new(dir)),
@@ -645,7 +647,7 @@ impl AppState {
                 // name: something would resolve it once and never again.
                 None => crate::volume::SynonymStore::in_memory(),
             }),
-            ublk_exports: tokio::sync::Mutex::new(ublk_export::UblkExportManager::new().with_holds(holds.clone())),
+            ublk_exports: crate::lockwatch::TrackedMutex::new(ublk_export::UblkExportManager::new().with_holds(holds.clone())),
             #[cfg(target_os = "linux")]
             vhost_exports: tokio::sync::Mutex::new(vhost_export::VhostExports::new(
                 config.management.data_dir.as_deref().map(std::path::Path::new),

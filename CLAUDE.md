@@ -237,11 +237,12 @@ code, two lock-order inversions (ABBA), no I/O needed:
 - `api::volumes_in_use` (run at start by the formats resume, #141) holds `ublk_exports`, then takes the manager
 - (and `all_slabs` holds the registry, then takes the manager)
 Plan:
-- [ ] kube projections: what they need from the manager under a brief hold (sync getters only), then the objects
+- [x] kube projections: what they need from the manager under a brief hold (sync getters only), then the objects
       built with nothing held; v1 and ublk read once, apart; `all_slabs` the manager first, alone
-- [ ] `volumes_in_use`: ids first, then `ublk_exports`
+- [x] `volumes_in_use`: ids first, then `ublk_exports`
 - [ ] test: a kube list while `v1` is held by a task waiting on the manager (and `ublk_exports` likewise) answers;
       control: the old code hangs; docs (lock order in durability/README), CHANGELOG; check.sh; patch; stage
+- [x] `v1` and `ublk_exports` tracked (a stall names them); taking either under the manager said (#571 lock order)
 - [ ] the issue's watchdog ask: answered on the issue (an abandon of a held writer is unsafe; reads now hold nothing)
 
 ### Flow-over: one short NVMe/TCP read left the disk "unbootable" and the install unreported (2026-11-10, #574, P0) — DONE (v24.1.0), closed; metal pending

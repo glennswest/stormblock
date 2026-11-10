@@ -735,7 +735,8 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
 - `GET /debug/stalls` and `/debug/locks` — public, read-only, no volume data
   (#269, #365): what the engine is doing when its API stops answering.
   `locks`: every engine-wide lock (the volume manager, the slab registry,
-  the extent map) that is held or waited on, with **its holder by name** (an
+  the extent map, the `/v1` state and the ublk exports, #571) that is held or
+  waited on, with **its holder by name** (an
   API request as `GET /api/v1/volumes (req 42)`, or a named task: `the
   flow-over`, `the eraser`, `rebuild of volume …`, `the serve reconciler`),
   how long, and its waiters; and every metadata persist in progress
@@ -748,7 +749,11 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   volume manager: held 41.2s by POST /api/v1/volumes/…/clone (req 39); 6
   waiting, …`). It never dumps threads or tasks on a timer (#365: on the Dell
   those dumps were the flood the log path dropped 21,191 lines of, the
-  holders among them). Every lock hold or wait over 1 s is logged when it
+  holders among them). **Lock order (#571):** the `/v1` state and the ublk
+  exports are taken before the volume manager, never under it; a task that
+  does otherwise is said (`lock: the volume manager is held by … across taking
+  the ublk exports`), and the Kubernetes-shaped projections hold the manager
+  only to copy what they need. Every lock hold or wait over 1 s is logged when it
   ends, with its holder (`lock: the volume manager was held 3.2s by …`,
   WARN over 10 s). Without the node token (#283) requests are named by
   route family (`/api/v1/volumes/…`), never an id, a name or a tag.
