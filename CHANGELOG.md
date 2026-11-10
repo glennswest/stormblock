@@ -3,14 +3,16 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
-### 2026-11-10
-- **fix:** #574 (stormcos#904): one short NVMe/TCP read in an install's flow-over (`short read: wanted 1048576, got 4096`) no longer leaves the disk "unbootable" and the install unreported.
+### 2026-11-07
+- **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
+
+## [v24.1.0] — 2026-11-10
+
+### Fixed
+- #574 (stormcos#904): one short NVMe/TCP read in an install's flow-over (`short read: wanted 1048576, got 4096`) no longer leaves the disk "unbootable" and the install unreported.
   - **The initiator** checks every answer against its command: the CID of each C2HData and CapsuleResp, the data offset of each piece, a read's length. An answer that is not the command's, or a short one, is a connection out of step (ConnectionAborted, a transport fault): the connection is dropped and the command retried on a new one, by another path when there is one. It was `ErrorKind::Other`, so never retried. A command whose caller gave up before its answer (the future dropped) now closes its connection: its answer used to wait there for the next command, which took it for its own. A slot-table read covers 4096 bytes, so a 1 MiB extent read after an abandoned one is the issue's line exactly. Test `integration_nvmeof::a_read_abandoned_before_its_answer_never_answers_the_next_command`.
   - **The flow-over:** a failed extent stays on its source and the next pass moves it (it did before), now said, after a backoff of 0.5 s doubling to 10 s. What did not move is what is still on a source at the end, not the count of failures on the way: one failure retried successfully had marked the disk unbootable and skipped the validation. Test `cli::…::an_extent_whose_read_failed_once_moves_on_the_next_pass`.
   - **The install report:** `POST …/boothost/<name>/installed {stage: "failed", reason}`; the host's `install` reads `failed` with the reason, the intent stays `install`. The node sends it when the flow-over stops, extents are left at its end, the validation fails, or the laid disk does not boot on its own; health's `flow_over_stalled` says the same. An appliance before this answers 400 and the node says so.
-
-### 2026-11-07
-- **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
 ## [v24.0.1] — 2026-11-07
 

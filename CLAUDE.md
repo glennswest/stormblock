@@ -152,7 +152,7 @@ clones the sealed `pvc-ext4j-<MiB>m` blank of the claim's size class through
 - `tests/it/` — the in-process integration tests, one binary (nextest); `tests-runtime/` — tests against the built binary, devices or privileges (#209; `ci-runtime-tests.sh`, #222); `benches/` — `stormblock-benches`, the criterion benches (`cargo bench -p stormblock-benches`, #211)
 
 ## Current State
-**v24.0.1** (2026-11-07, #293: mkfs-ext4 v4.1.3 / fio-ext4 v1.8.3, the xattr block counted); **v24.0.0** (2026-11-07, #212: `[serve] allow_any_host` defaults to false); **v23.27.0** (2026-11-07, #565: rollback copies marked and pruned to `[rollback] keep` after boot-ok); **v23.26.0** (2026-11-07, #560: the node's name in each boot record, a rename said); **v23.25.1** (2026-11-07, #559: the initramfs takes a PTR name busybox prints with no trailing dot); **v23.25.0** (2026-11-07, #426: `/v1` create's `placement.slab_id` / `drive`); **v23.24.0** (2026-11-07, #426: a volume moved onto a named drive, slab or array, online, with progress); **v23.23.1** (2026-11-07, #521: a flow-over's sources let go by batches, a slow answer's line reaches the console); **v23.23.0** (2026-11-07, #557: a worker's reviews follow the cluster's record); **v23.22.3** (2026-11-07, #555: forge trust reviewed as `settrust`; #538: the stand-down back under a second); **v23.22.2** (2026-11-06, #545: path NICs beside the boot, DNS and DHCP retried by the second); **v23.22.1** (2026-11-06, #521: clones at once share their log flush, step times in `api:`); **v23.22.0** (2026-11-06, #484: a boot's page-in: read ahead in /init, 1 MiB of read-ahead on a ublk device); **v23.21.1** (2026-11-06, #544: the validation reads in disk order); **v23.21.0** (2026-11-06, #506: `/run/stormblock/appliance`); **v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
+**v24.1.0** (2026-11-10, #574: NVMe/TCP answers checked against their command, a flow-over judged by what is left, install `failed` reported); **v24.0.1** (2026-11-07, #293: mkfs-ext4 v4.1.3 / fio-ext4 v1.8.3, the xattr block counted); **v24.0.0** (2026-11-07, #212: `[serve] allow_any_host` defaults to false); **v23.27.0** (2026-11-07, #565: rollback copies marked and pruned to `[rollback] keep` after boot-ok); **v23.26.0** (2026-11-07, #560: the node's name in each boot record, a rename said); **v23.25.1** (2026-11-07, #559: the initramfs takes a PTR name busybox prints with no trailing dot); **v23.25.0** (2026-11-07, #426: `/v1` create's `placement.slab_id` / `drive`); **v23.24.0** (2026-11-07, #426: a volume moved onto a named drive, slab or array, online, with progress); **v23.23.1** (2026-11-07, #521: a flow-over's sources let go by batches, a slow answer's line reaches the console); **v23.23.0** (2026-11-07, #557: a worker's reviews follow the cluster's record); **v23.22.3** (2026-11-07, #555: forge trust reviewed as `settrust`; #538: the stand-down back under a second); **v23.22.2** (2026-11-06, #545: path NICs beside the boot, DNS and DHCP retried by the second); **v23.22.1** (2026-11-06, #521: clones at once share their log flush, step times in `api:`); **v23.22.0** (2026-11-06, #484: a boot's page-in: read ahead in /init, 1 MiB of read-ahead on a ublk device); **v23.21.1** (2026-11-06, #544: the validation reads in disk order); **v23.21.0** (2026-11-06, #506: `/run/stormblock/appliance`); **v23.20.0** (2026-11-06, #514: an initramfs for its binary's architecture, aarch64 for the Orion O6N); **v23.19.2** (2026-11-06, #552: an install's pallet can boot, a node marks it good); **v23.19.1** (2026-11-06, #513: a cold map's 16 B an extent; a full drive measured); **v23.19.0** (2026-11-06, #505: ublk zero copy per request); **v23.18.0** (2026-11-06, #540: forge trust carries the apiserver's CA apart from the forge CA); **v23.17.0** (2026-11-04, #532: a refused mount repaired, what is still not mounted in health); **v23.16.0** (2026-11-03, #524: the boot verbs on their own plain port); **v23.15.0** (2026-11-03, #525: `tls_mode = "optional"`, and a count of who is still plain); **v23.14.0** (2026-11-03, #483: a TLS file not there yet is no refusal to start); **v23.13.1** (2026-11-03, #522: boot exports fit the fd limit); **v23.13.0** (2026-11-03, #520: `[fabric] peers_from = "kubernetes"`); before it **v23.12.0** (2026-10-29, #350): each staged golden since v21.0.0 carries a
 tag (v21.1.0 … v23.12.0; the CHANGELOG has each). Since v21.0.0 on main: the
 system drive known per machine (`system_drive`, first drive, #351, #478),
 system pair and moving the system (#350), release erase (#291), erasure
@@ -227,7 +227,7 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
-### Flow-over: one short NVMe/TCP read left the disk "unbootable" and the install unreported (2026-11-10, #574, P0) — IN PROGRESS
+### Flow-over: one short NVMe/TCP read left the disk "unbootable" and the install unreported (2026-11-10, #574, P0) — DONE (v24.1.0), closed; metal pending
 
 stormcos#904: `short read: wanted 1048576, got 4096`, then `1 extent(s) did not move`, local boot refused, no
 report: the installer waited 30 min. Read from the code:
@@ -239,16 +239,20 @@ report: the installer waited 30 min. Read from the code:
   marks the disk unbootable and skips the validation, even when the extent moved on the next pass
 - a failure has no install report: only `laid` and `booted` exist
 Plan:
-- [ ] initiator: CID and data offset checked; a short, foreign or out-of-place answer is a protocol desync:
+- [x] initiator: CID and data offset checked; a short, foreign or out-of-place answer is a protocol desync:
       ConnectionAborted (transient), the connection dropped, retried on a new one (by another path when there is
-      one); a command dropped mid-flight drops its connection
-- [ ] flow-over: unbootable only for extents still on a source; each failure said with "tried again"; a backoff
-      before a pass after failures; the validation runs whenever nothing is left
-- [ ] `installed {stage: "failed", reason}`: host `install.state = failed` (intent stays install, so the next boot
-      installs again); the node reports it when the flow-over stops, the validation fails or the disk does not boot
-- [ ] tests: an abandoned read then a 1 MiB read on one connection (control: the old code's short read); a
-      flow-over whose source fails once is bootable; the failed stage over HTTP; docs, CHANGELOG; check.sh;
-      patch release; stage; stormcentral told (`failed` is final)
+      one); a command dropped mid-flight drops its connection (`nvmeof_dev::ABANDONED` counts them)
+- [x] flow-over: unbootable only for extents still on a source; each failure said with "tried again"; a backoff
+      (0.5 s doubling to 10 s) before a pass after failures; the validation runs whenever nothing is left
+- [x] `installed {stage: "failed", reason}`: host `install_failure` (apart from `install`, so an older engine skips
+      it), shown as `install.state = failed`; intent stays install; the node reports it when the flow-over stops,
+      extents are left, the validation fails or the laid disk does not boot
+- [x] tests: `integration_nvmeof::a_read_abandoned_before_its_answer_never_answers_the_next_command` (control on
+      wip/574-control with the old initiator, deleted: fails with `short read: wanted 1048576, got 4096`, the
+      issue's line); `an_extent_whose_read_failed_once_moves_on_the_next_pass`; store + HTTP `failed`; docs
+      (README, auth.md, nvme-access.md), CHANGELOG; check.sh at 0c3a4d49 ALL PASS (1381/1381, no warnings);
+      v24.1.0; stage; stormcentral#1327 (`failed` is final)
+- [ ] metal: the next install over NVMe/TCP: no `short read`; any `out of step` line is followed by a moved extent
 
 ### Rollback copies pile up: `<vol>@previous.N` never pruned (2026-11-07, #565) — DONE (v23.27.0), closed; forge1 pending
 
