@@ -2134,5 +2134,16 @@ async fn the_kube_volume_list_holds_the_manager_while_waiting_for_nothing() {
             "{which}: {vols}"
         );
     }
+    // The other half: the in-use check (run at start, #141) waiting on the
+    // manager holds no `ublk_exports` meanwhile.
+    let vm = state.volume_manager.lock().await;
+    let in_use = tokio::spawn({
+        let state = state.clone();
+        async move { stormblock::mgmt::api::volumes_in_use(&state).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(state.ublk_exports.try_lock().is_ok(), "volumes_in_use holds ublk_exports while it waits on the manager (#571)");
+    drop(vm);
+    tokio::time::timeout(Duration::from_secs(10), in_use).await.expect("the in-use check answers").unwrap();
     server.abort();
 }
