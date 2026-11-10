@@ -3,6 +3,9 @@
 ## [Unreleased]
 <!-- New unreleased changes go here -->
 
+### 2026-11-10
+- **docs:** #512: writes into an ext4 past ~192 TiB no longer corrupt it, with v24.0.1's pins (mkfs-ext4 v4.1.3, which writes meta_bg descriptors where the layout puts them, mkfs.ext4.rs#33; fio-ext4 v1.8.3). Checked with `examples/ext4_large`: the small meta_bg reproduction (16 GiB) and a bare 256 TiB drive, 256 files each, clean (were corrupt: 1302 problems at 256 TiB); a 256 TiB template, its clone and 256 files through the engine, clean. No code change.
+
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
