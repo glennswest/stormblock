@@ -520,15 +520,17 @@ loader skipped it and booted the older kernel: no modules, Cilium crash loop.
       stage; stormcos#828 told; closed. Metal: forge1's next warm reset (`boot-ok: marked`,
       `SELECTED` the new kernel, tries going no lower)
 
-### Writes into an ext4 past ~192 TiB corrupt it (2026-11-06, #512, stormcos#93) — WAITING on mkfs.ext4.rs#33, fio.ext4.rs#18
+### Writes into an ext4 past ~192 TiB corrupt it (2026-11-06, #512, stormcos#93) — VERIFYING (pins in since v24.0.1)
 
 Not the engine: mkfs-ext4's `write_group_descs` ignores meta_bg, which the layout
 takes past 3/4 of a group of descriptors (~192 TiB). Reproduced with
 `examples/ext4_large`: meta_bg at 16 and 64 GiB corrupt after 8 files, classic
 clean. No guard added here: no filesystem that size exists outside stormcos's run.
 - [x] cause, reproduction; filed on both crates; #512 proposed after them
-- [ ] when released: both pins by rev (Cargo.lock by hand), `ext4_large volume 256T`
-      clean through the engine, stormcos's tools/pb-scale; check.sh; patch; stage; close
+- [x] both pins by rev: mkfs-ext4 v4.1.3 (e009cf40) + fio-ext4 v1.8.3 (624cbf7a), in v24.0.1 (#293), staged
+- [ ] 2026-11-10: `ext4_large` on a 16 GB build VM: `META_BG=1 bare 16G` (the small reproduction), `bare 256T`,
+      `volume 256T` (template, clone, 256 files through the engine), each fsck'd before and after
+- [ ] no code change, so no release of its own; stormcos's tools/pb-scale is stormcos#93's to re-run (told); close
 
 ### A full 256 TB / 1 PB drive's resident metadata at v23 (2026-11-06, #513, stormcos#93) — DONE (v23.19.1), closed
 
