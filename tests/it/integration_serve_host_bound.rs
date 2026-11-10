@@ -142,6 +142,9 @@ async fn an_export_for_one_host_admits_that_host_alone() {
     let dir = TempDir::new().unwrap();
     // Opened on purpose, to show what `allow_any_host = true` still does.
     let s = serve(&dir, Some(true), false).await;
+    let h: serde_json::Value =
+        reqwest::get(format!("{}/serve/v1/health", s.api)).await.unwrap().json().await.unwrap();
+    assert_eq!(h["allow_any_host"], serde_json::json!(true), "{h}");
 
     let (st, a) = export(&s, serde_json::json!({"volume_id": s.vols[0], "protocol": "nvme-tcp", "host_nqn": H1})).await;
     assert_eq!(st, 201, "{a}");
@@ -184,6 +187,11 @@ async fn a_node_that_allows_no_host_refuses_an_unbound_export_and_closes_old_one
     let dir = TempDir::new().unwrap();
     // Nothing set: the default is closed (#212, decision A).
     let s = serve(&dir, None, true).await;
+
+    // The open health says so, for a check with no token (#212's proof).
+    let h: serde_json::Value =
+        reqwest::get(format!("{}/serve/v1/health", s.api)).await.unwrap().json().await.unwrap();
+    assert_eq!(h["allow_any_host"], serde_json::json!(false), "{h}");
 
     // The row from before host binding is wired, and admits nobody.
     let legacy = {

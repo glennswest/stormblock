@@ -4,6 +4,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-10
+- **feat:** #212: the open `GET /serve/v1/health` says `allow_any_host` (the node's `[serve]` policy for an NVMe export that names no `host_nqn`), so a check with no token can see that a node admits only named hosts. The closed state's start line is INFO, which reaches neither console nor journal (#243), so it could not prove the fix. Reopened by stormcentral's check of release 12.78-flowsdn, whose node runs 24.1.1 and logs no #212 WARN. Tests in `integration_serve_host_bound`.
 - **docs:** #512: writes into an ext4 past ~192 TiB no longer corrupt it, with v24.0.1's pins (mkfs-ext4 v4.1.3, which writes meta_bg descriptors where the layout puts them, mkfs.ext4.rs#33; fio-ext4 v1.8.3). Checked with `examples/ext4_large`: the small meta_bg reproduction (16 GiB) and a bare 256 TiB drive, 256 files each, clean (were corrupt: 1302 problems at 256 TiB); a 256 TiB template, its clone and 256 files through the engine, clean. No code change.
 - **docs:** README's open findings no longer list #512 (fixed by v24.0.1's pins).
 

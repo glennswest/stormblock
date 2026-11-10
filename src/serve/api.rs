@@ -761,9 +761,17 @@ fn flag(q: &HashMap<String, String>, key: &str) -> bool {
 // Health, readiness, status  (issue #7)
 // ---------------------------------------------------------------------------
 
-async fn health() -> Response {
-    Json(json!({ "status": "ok", "version": crate::version::VERSION, "commit": crate::version::COMMIT }))
-        .into_response()
+/// Open, so it says nothing about volumes; `allow_any_host` is the node's
+/// policy for exports that name no host (#212), a fact a check can read
+/// without a token.
+async fn health(State(ctx): State<Arc<ServeContext>>) -> Response {
+    Json(json!({
+        "status": "ok",
+        "version": crate::version::VERSION,
+        "commit": crate::version::COMMIT,
+        "allow_any_host": ctx.cfg.allow_any_host,
+    }))
+    .into_response()
 }
 
 /// 200 only when a consumer attaching right now would get what it expects —

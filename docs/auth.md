@@ -246,7 +246,8 @@ call is logged as one `enforce` (the default) would refuse.
   from (#466), both already on health: what stormcentral compares to see that
   forge's engine changed. Two constants, nothing about the node's state.
 * `/serve/v1/health`, `/serve/v1/ready` — supervisor probes, and the same two
-  under the deprecated `/mk/v1` prefix.
+  under the deprecated `/mk/v1` prefix. `health` says the node's
+  `[serve] allow_any_host` (#212): a policy, nothing about a volume.
 * `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —
   what the engine is doing when its API stops answering (#269). Read-only,
   no volume data; a node has no ssh and the supervisor asking holds no node

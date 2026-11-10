@@ -781,7 +781,9 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   went away first is said too (`abandoned by its caller after Ns`).
   A clone, a delete and the volume and slab listings also say where the time went
   (#521): `steps check=0ms preread=0ms snapshot=0ms stamp=26ms readback=8ms persist=169ms`.
-- `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `ready` is 200 only
+- `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `health` also says
+  `allow_any_host` (#212): `false` (the default since v24.0.0) means an export
+  that names no `host_nqn` admits no host. `ready` is 200 only
   when an attach would work now (slab open, metadata restored, targets
   listening, exports wired), else 503 with the blockers.
 - `GET /api/v1/version` — public, two constants: `{"service":"stormblock",
