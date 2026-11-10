@@ -68,7 +68,12 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   connection (#301). Every NVMe/TCP command and connect is bounded
   (`STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS`, 30 s) and its sockets carry TCP
   keepalive: a connection that went silent fails the command, is dropped,
-  and the next command reconnects (#358). Once a flow-over has moved
+  and the next command reconnects (#358). An answer is checked against its
+  command (its CID and data offset, and a read's length): one that is not the
+  command's, or is short, drops the connection and the command is retried on
+  a new one, by another path when there is one; a command its caller gave up
+  on before the answer closes its connection, so the answer never reaches the
+  next command (#574). Once a flow-over has moved
   everything, the appliance's slabs are taken out of the engine, so no
   persist flushes them again (#358). Drives open and close at runtime
   (`POST /api/v1/drives`), carry their identity (serial, WWN) and labels

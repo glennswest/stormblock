@@ -106,7 +106,7 @@ async fn view(state: &AppState, h: &Host) -> serde_json::Value {
         // The boot override a claim last acted on and has not reported (#354).
         "boot_override": h.boot_override,
         // How far the last install got (#220): laid, then booted.
-        "install": h.install.as_ref().map(|p| p.json()),
+        "install": h.install_json(),
         // What its attestation must carry (#216), and its last boot claim.
         "tpm": tpm_word(h),
         "tpm_set_at": h.tpm_set_at,

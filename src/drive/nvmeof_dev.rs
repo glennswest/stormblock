@@ -327,6 +327,24 @@ struct Conn {
     cid: u16,
     /// The connection's path MTU when it was made (#407); 0 unknown.
     mtu: u32,
+    /// A command was sent and its answer not read to the end (#574). A
+    /// connection let go in this state (the caller's future dropped) is
+    /// closed, never handed to the next command: that one would read the
+    /// abandoned command's answer as its own.
+    busy: bool,
+}
+
+/// An answer that is not the command's (#574): another command's, short,
+/// or out of place. The connection is out of step with its target, so it is
+/// dropped and the command retried on a new one: a transport fault
+/// (ConnectionAborted), never the target's answer.
+fn desync(what: String) -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, format!("{what}; the connection is out of step and is dropped"))
+}
+
+/// The command identifier an SQE carries.
+fn sqe_cid(sqe: &[u8; 64]) -> u16 {
+    u16::from_le_bytes([sqe[2], sqe[3]])
 }
 
 /// How long one NVMe/TCP command may take before the connection is given up
@@ -450,6 +468,7 @@ impl Conn {
             writer: BufWriter::with_capacity(256 << 10, writer),
             cid: 1,
             mtu,
+            busy: false,
         };
         bounded("handshake", conn.ic_handshake()).await?;
         let dw0 = bounded("connect command", conn.fabric_connect_as(nqn, host_nqn, qid)).await?;
@@ -567,7 +586,8 @@ impl Conn {
         data[512..512 + n].copy_from_slice(&h[..n]);
 
         self.send_capsule(&sqe, &data).await?;
-        let cqe = self.read_capsule_resp().await?;
+        let cqe = self.read_capsule_resp(cid).await?;
+        self.busy = false;
         if cqe_status(&cqe) != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
@@ -586,6 +606,7 @@ impl Conn {
             pdo: if data.is_empty() { 0 } else { hlen },
             plen: hlen as u32 + data.len() as u32,
         };
+        self.busy = true;
         self.writer.write_all(&ch.to_bytes()).await?;
         self.writer.write_all(sqe).await?;
         if !data.is_empty() {
@@ -594,22 +615,32 @@ impl Conn {
         self.writer.flush().await
     }
 
-    async fn read_capsule_resp(&mut self) -> io::Result<NvmeCqe> {
+    /// The CapsuleResp of command `cid`.
+    async fn read_capsule_resp(&mut self, cid: u16) -> io::Result<NvmeCqe> {
         let mut hdr = [0u8; 8];
         self.reader.read_exact(&mut hdr).await?;
         let ch = CommonHeader::from_bytes(&hdr);
         if ch.pdu_type != PduType::CapsuleResp as u8 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("expected CapsuleResp, got PDU type {}", ch.pdu_type),
-            ));
+            return Err(desync(format!("command {cid}: expected a CapsuleResp, got PDU type {}", ch.pdu_type)));
         }
+        self.capsule_resp_body(&ch, cid).await
+    }
+
+    /// A CapsuleResp's CQE, its header read: refused when it answers
+    /// another command (#574).
+    async fn capsule_resp_body(&mut self, ch: &CommonHeader, cid: u16) -> io::Result<NvmeCqe> {
+        let remaining = (ch.plen as usize).checked_sub(8 + 16).ok_or_else(|| {
+            desync(format!("command {cid}: a CapsuleResp of {} bytes", ch.plen))
+        })?;
         let mut cqe = [0u8; 16];
         self.reader.read_exact(&mut cqe).await?;
-        let remaining = ch.plen as usize - 8 - 16;
         if remaining > 0 {
             let mut extra = vec![0u8; remaining];
             self.reader.read_exact(&mut extra).await?;
+        }
+        let got = u16::from_le_bytes([cqe[12], cqe[13]]);
+        if got != cid {
+            return Err(desync(format!("command {cid}: the answer is command {got}'s")));
         }
         Ok(NvmeCqe { raw: cqe })
     }
@@ -617,6 +648,15 @@ impl Conn {
     /// Command with a C2H data response: C2HData PDU(s), then either the
     /// in-band success flag or a trailing CapsuleResp.
     async fn cmd_read_data(&mut self, sqe: &[u8; 64], expect: usize) -> io::Result<Vec<u8>> {
+        let r = self.cmd_read_data_inner(sqe, expect).await;
+        if r.is_ok() {
+            self.busy = false;
+        }
+        r
+    }
+
+    async fn cmd_read_data_inner(&mut self, sqe: &[u8; 64], expect: usize) -> io::Result<Vec<u8>> {
+        let cid = sqe_cid(sqe);
         self.send_capsule(sqe, &[]).await?;
         let mut out = Vec::with_capacity(expect);
         loop {
@@ -627,7 +667,20 @@ impl Conn {
                 Some(PduType::C2HData) => {
                     let mut specific = [0u8; 16];
                     self.reader.read_exact(&mut specific).await?;
+                    let cccid = u16::from_le_bytes([specific[0], specific[1]]);
+                    let datao = u32::from_le_bytes(specific[4..8].try_into().unwrap());
                     let datal = u32::from_le_bytes(specific[8..12].try_into().unwrap());
+                    // Whose data, and where (#574): another command's answer,
+                    // or a piece out of place, is a connection out of step.
+                    if cccid != cid {
+                        return Err(desync(format!("command {cid}: data for command {cccid}")));
+                    }
+                    if datao as usize != out.len() {
+                        return Err(desync(format!(
+                            "command {cid}: data at offset {datao}, {} bytes received so far",
+                            out.len()
+                        )));
+                    }
                     let last = ch.flags & 0x04 != 0;
                     let success = ch.flags & 0x08 != 0;
                     let payload_len = (ch.plen as usize).saturating_sub(ch.hlen as usize);
@@ -636,6 +689,11 @@ impl Conn {
                             io::ErrorKind::InvalidData,
                             format!("a C2H PDU of {payload_len} bytes is more than any command carries"),
                         ));
+                    }
+                    if (datal as usize) > payload_len {
+                        return Err(desync(format!(
+                            "command {cid}: a C2H PDU says {datal} bytes and carries {payload_len}"
+                        )));
                     }
                     if payload_len > 0 {
                         let mut payload = vec![0u8; payload_len];
@@ -648,7 +706,7 @@ impl Conn {
                             return Ok(out);
                         }
                         // Status arrives in a trailing CapsuleResp.
-                        let cqe = self.read_capsule_resp().await?;
+                        let cqe = self.read_capsule_resp(cid).await?;
                         if cqe_status(&cqe) != 0 {
                             return Err(io::Error::other(format!(
                                 "read failed: status {:#x}",
@@ -659,14 +717,7 @@ impl Conn {
                     }
                 }
                 Some(PduType::CapsuleResp) => {
-                    let mut cqe = [0u8; 16];
-                    self.reader.read_exact(&mut cqe).await?;
-                    let remaining = ch.plen as usize - 8 - 16;
-                    if remaining > 0 {
-                        let mut extra = vec![0u8; remaining];
-                        self.reader.read_exact(&mut extra).await?;
-                    }
-                    let cqe = NvmeCqe { raw: cqe };
+                    let cqe = self.capsule_resp_body(&ch, cid).await?;
                     if cqe_status(&cqe) != 0 {
                         return Err(io::Error::other(format!(
                             "command failed: status {:#x}",
@@ -675,12 +726,7 @@ impl Conn {
                     }
                     return Ok(out);
                 }
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("unexpected PDU type {} in data response", ch.pdu_type),
-                    ))
-                }
+                _ => return Err(desync(format!("command {cid}: unexpected PDU type {} in a data response", ch.pdu_type))),
             }
         }
     }
@@ -688,7 +734,8 @@ impl Conn {
     /// Command with inline data out and a bare CapsuleResp back.
     async fn cmd_write_data(&mut self, sqe: &[u8; 64], data: &[u8]) -> io::Result<()> {
         self.send_capsule(sqe, data).await?;
-        let cqe = self.read_capsule_resp().await?;
+        let cqe = self.read_capsule_resp(sqe_cid(sqe)).await?;
+        self.busy = false;
         if cqe_status(&cqe) != 0 {
             return Err(io::Error::other(format!(
                 "command failed: status {:#x}",
@@ -718,11 +765,10 @@ impl Conn {
         sqe[44..48].copy_from_slice(&((slba >> 32) as u32).to_le_bytes());
         sqe[48..52].copy_from_slice(&(nlb - 1).to_le_bytes());
         let data = self.cmd_read_data(&sqe, bytes).await?;
+        // Short (#574): the target said done with less than was asked. Not
+        // an answer to trust: the connection is dropped and the read retried.
         if data.len() != bytes {
-            return Err(io::Error::other(format!(
-                "short read: wanted {bytes}, got {}",
-                data.len()
-            )));
+            return Err(desync(format!("command {cid}: short read: wanted {bytes}, got {}", data.len())));
         }
         Ok(data)
     }
@@ -851,8 +897,23 @@ impl std::ops::DerefMut for ConnGuard<'_> {
 impl Drop for ConnGuard<'_> {
     fn drop(&mut self) {
         self.path.inflight.fetch_sub(1, Ordering::Relaxed);
+        // Let go mid-command (#574): the caller gave up between the command
+        // and its answer. The answer is still coming on this connection, and
+        // the next command would take it for its own.
+        if self.guard.as_ref().is_some_and(|c| c.busy) {
+            *self.guard = None;
+            ABANDONED.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "NVMe-TCP initiator: path {}: a command was abandoned before its answer; its connection is closed",
+                self.path.name()
+            );
+        }
     }
 }
+
+/// Commands abandoned before their answer, whose connections were closed
+/// for it (#574). For tests and `/debug`.
+pub static ABANDONED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl ConnGuard<'_> {
     /// Count what this command carried.

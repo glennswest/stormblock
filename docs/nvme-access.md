@@ -275,7 +275,11 @@ What #411 asked for, and where each stands:
   target accepts.
 - **I/O queues:** 8 connections per path (`STORMBLOCK_NVME_TCP_QUEUES`,
   #410). Each carries one command at a time; several on one connection is
-  #433.
+  #433. Every answer is checked against its command: its CID, its data
+  offset, and a read's length. An answer that is not the command's is a
+  connection out of step: dropped, and the command retried on a new one
+  (#574). A command abandoned before its answer closes its connection, since
+  its answer would otherwise be read by the next command on it.
 - **Jumbo frames:** the link's MTU, which the initramfs takes from DHCP
   (#425); health's `flow_over.source_path` says the path MTU (#407).
 - **Socket buffers:** left to the kernel. Linux grows a TCP socket's buffers

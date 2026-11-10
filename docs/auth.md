@@ -419,7 +419,7 @@ PUT  /api/v1/synonyms/boothost/<name>/install-config   the YAML (#459)       adm
 PUT  /api/v1/volumes/{id}/secret        {"secret": true} (#74, one way)        admin token
 GET  /api/v1/synonyms/boothost/<name>/install-config   the YAML              admin token (it carries secrets)
 DELETE /api/v1/synonyms/boothost/<name>/install-config                       admin token
-POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>, "stage": "laid"|"booted"}  open
+POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>, "stage": "laid"|"booted"|"failed", "reason"?}  open
 GET  /api/v1/synonyms/boothost/<name>/command     → the pending command, or 404 {next_id, last_done}   open
 PUT  /api/v1/synonyms/boothost/<name>/command     {"command", "args", "id"?, "issued"?, "by"?, "host"?, "sig"?}  admin token
 POST /api/v1/synonyms/boothost/<name>/command/done   {"id", "result"}   open
@@ -463,6 +463,16 @@ decision A).**
   or after a new install request, is a 409.
 - **A disk that never boots** stays `laid`. Nothing retries on its own;
   stormcentral waits for `booted` and surfaces one that stays `laid`.
+- **Failed (#574):** an install that cannot finish says so, rather than
+  leaving the installer to time out: the flow-over stopped (too many
+  failures), extents are still on the appliance at its end, the validation
+  failed, or the laid disk does not boot on its own. The node posts
+  `stage: failed` with a `reason`; the host's `install` reads `{state:
+  failed, clone, failed_at, reason}` (kept apart from the progress record, so
+  an older engine reading `synonyms.json` skips it). The intent stays
+  `install`, so the next power cycle installs again; a `laid` report or a new
+  request clears it. Same refusals as `laid`: only the clone claimed under
+  the request, a no-op when no install is requested.
 - **Where it shows:** the record is on `GET …/<name>/intent` (`install`) and
   `GET /api/v1/boothost/<name>`.
 

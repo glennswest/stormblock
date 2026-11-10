@@ -242,6 +242,13 @@ pub struct Host {
     /// Nothing retries on its own (#220, A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install: Option<InstallProgress>,
+    /// The install under way cannot finish (#574): the node said why. Kept
+    /// apart from `install`, so an older engine reading this record skips it
+    /// rather than refusing a state it does not know. The intent stays
+    /// `install`, so the next power cycle installs again; a new request or a
+    /// `laid` report clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_failure: Option<InstallFailure>,
     /// SHA-256 (hex) of this machine's host secret (#247): minted at every
     /// boot claim of this host and handed to the machine in the reply, the
     /// last one replacing the one before. It authorises this host's own
@@ -486,6 +493,32 @@ pub struct InstallProgress {
     /// Where its install-config came from (#459): `media`, `forge`, `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_config: Option<String>,
+}
+
+/// An install the node reported it cannot finish (#574).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallFailure {
+    /// The boot clone the install was booted from.
+    pub clone: VolumeId,
+    pub failed_at: u64,
+    pub reason: String,
+}
+
+impl Host {
+    /// How far the last install got, as the API says it (#220, #574): a
+    /// failure of the install under way, else its progress.
+    pub fn install_json(&self) -> Option<serde_json::Value> {
+        match (&self.install_failure, &self.install) {
+            (Some(f), _) => Some(serde_json::json!({
+                "state": "failed",
+                "clone": f.clone.0,
+                "failed_at": f.failed_at,
+                "reason": f.reason,
+            })),
+            (None, Some(p)) => Some(p.json()),
+            (None, None) => None,
+        }
+    }
 }
 
 impl InstallProgress {
@@ -1090,6 +1123,7 @@ impl SynonymStore {
         // longer answers for this machine (#220).
         if intent == BootIntent::Install {
             h.install = None;
+            h.install_failure = None;
         }
         h.updated_at = t;
         let out = h.clone();
@@ -1221,6 +1255,35 @@ impl SynonymStore {
         h.install_claim = None;
         // Laid, not proven: the first boot off the disk says so (#220).
         h.install = Some(InstallProgress { state: InstallStage::Laid, clone, laid_at: t, booted_at: None, install_config: None });
+        h.install_failure = None;
+        h.updated_at = t;
+        let out = h.clone();
+        self.persist();
+        Ok((out, InstallDone::Reset))
+    }
+
+    /// The install booted from `clone` cannot finish (#574): kept with the
+    /// node's reason, for the installer to read as a final state. The intent
+    /// stays `install`. Refused, as `install_done` is, for a clone no claim
+    /// under the current request handed out; a no-op when no install is
+    /// requested. Reported again: the later reason is kept.
+    pub fn install_failed(&mut self, name: &str, clone: VolumeId, reason: &str) -> Result<(Host, InstallDone), SynonymError> {
+        let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
+        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent == BootIntent::Install) else {
+            let h = self.host(&host).unwrap_or_default();
+            return Ok((h, InstallDone::NotRequested));
+        };
+        if h.install_claim != Some(clone) {
+            let why = match h.install_claim {
+                Some(c) => format!("the install requested for {host} is the one booted from {}, not {}", c.0, clone.0),
+                None => format!("no claim of {host} has been made since its install was requested"),
+            };
+            return Err(SynonymError::Conflict(why));
+        }
+        let t = now();
+        // Bounded: the report is open, like the claim.
+        let reason: String = reason.chars().take(1024).collect();
+        h.install_failure = Some(InstallFailure { clone, failed_at: t, reason });
         h.updated_at = t;
         let out = h.clone();
         self.persist();
@@ -1674,6 +1737,34 @@ mod tests {
         s.set_intent("server1", BootIntent::Install).unwrap();
         assert!(s.host("server1").unwrap().install.is_none());
         assert!(s.install_booted("server1", clone).is_err());
+    }
+
+    /// #574: an install that cannot finish is reported failed, the intent
+    /// stays install; only for the clone claimed under the request; a laid
+    /// report or a new request clears it.
+    #[test]
+    fn an_install_that_cannot_finish_is_reported_failed_and_the_intent_stays_install() {
+        let mut s = SynonymStore::in_memory();
+        s.create(BOOTHOST_NS, "server1", Target::Volume { id: vol() }, None, None).unwrap();
+        let (clone, other) = (vol(), vol());
+        // No install requested: nothing to fail.
+        assert_eq!(s.install_failed("server1", clone, "x").unwrap().1, InstallDone::NotRequested);
+        s.set_intent("server1", BootIntent::Install).unwrap();
+        s.note_install_claim("server1", clone);
+        assert!(matches!(s.install_failed("server1", other, "x"), Err(SynonymError::Conflict(_))));
+        let (h, _) = s.install_failed("server1", clone, "1 extent(s) did not move").unwrap();
+        assert_eq!(h.intent, BootIntent::Install, "the next power cycle installs again");
+        let j = h.install_json().unwrap();
+        assert_eq!((j["state"].as_str(), j["reason"].as_str()), (Some("failed"), Some("1 extent(s) did not move")));
+        // The next boot's install succeeds: laid, the failure gone.
+        let (h, _) = s.install_done("server1", clone).unwrap();
+        assert_eq!(h.install_json().unwrap()["state"], "laid");
+        // A failure, then a new request: gone too.
+        s.set_intent("server1", BootIntent::Install).unwrap();
+        s.note_install_claim("server1", other);
+        s.install_failed("server1", other, "y").unwrap();
+        s.set_intent("server1", BootIntent::Install).unwrap();
+        assert!(s.host("server1").unwrap().install_json().is_none());
     }
 
     #[test]

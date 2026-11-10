@@ -1454,6 +1454,21 @@ async fn a_boot_intent_is_read_open_set_by_the_admin_and_install_is_one_shot() {
     assert_eq!(installed(&fw["volume"]["id"]).await.unwrap().status(), 409);
     assert_eq!(installed(&first["volume"]["id"]).await.unwrap().status(), 409);
     assert_eq!(intent(&client, &base, "server1").await.1["intent"], "install");
+    // #574: an install that cannot finish says so: a final state, with the
+    // node's reason, and the intent stays install for the next power cycle.
+    let failed = |vol: &serde_json::Value| {
+        client
+            .post(format!("{base}/api/v1/synonyms/boothost/server1/installed"))
+            .json(&serde_json::json!({"volume": vol, "stage": "failed", "reason": "1 extent(s) did not move onto /dev/sda"}))
+            .send()
+    };
+    assert_eq!(failed(&fw["volume"]["id"]).await.unwrap().status(), 409, "not the install's clone");
+    let r = failed(&initramfs["volume"]["id"]).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((v["intent"].as_str(), v["install"]["state"].as_str()), (Some("install"), Some("failed")), "{v}");
+    assert_eq!(v["install"]["reason"], "1 extent(s) did not move onto /dev/sda");
+    assert_eq!(intent(&client, &base, "server1").await.1["install"]["state"], "failed");
     // The right one, with no token: back to local.
     let r = installed(&initramfs["volume"]["id"]).await.unwrap();
     assert_eq!(r.status(), 200);

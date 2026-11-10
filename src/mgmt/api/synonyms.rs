@@ -1898,8 +1898,8 @@ fn intent_body(h: &Host, asked_as: &str) -> serde_json::Value {
         "updated_at": h.updated_at,
     });
     // How far the last install got (#220): laid, then booted.
-    if let Some(p) = &h.install {
-        v["install"] = p.json();
+    if let Some(p) = h.install_json() {
+        v["install"] = p;
     }
     if !synonym::host_match_key(asked_as).eq(&synonym::host_match_key(&h.name)) {
         v["resolved_from"] = json!(asked_as);
@@ -2137,9 +2137,13 @@ pub struct InstalledRequest {
     /// The boot clone the node installed from — the `volume.id` of its claim.
     pub volume: String,
     /// `laid` (or absent: an engine from before #220) from the installer's
-    /// successor once the disk is laid; `booted` from the first boot off it.
+    /// successor once the disk is laid; `booted` from the first boot off it;
+    /// `failed` when the install cannot finish (#574), with `reason`.
     #[serde(default)]
     pub stage: Option<String>,
+    /// Why, with `failed` (#574).
+    #[serde(default)]
+    pub reason: Option<String>,
     /// Where the install's install-config came from (#459): `media`,
     /// `forge` or `none`. Never its content.
     #[serde(default)]
@@ -2181,7 +2185,29 @@ async fn installed(
                 Err(e) => err(e),
             };
         }
-        Some(other) => return ApiError::bad_request(format!("stage {other:?} is laid or booted")),
+        Some("failed") => {
+            let reason = req.reason.as_deref().map(str::trim).filter(|r| !r.is_empty()).unwrap_or("no reason given");
+            let r = state.synonyms.write().await.install_failed(&name, clone, reason);
+            return match r {
+                Ok((h, outcome)) => {
+                    if outcome == InstallDone::Reset {
+                        tracing::error!(host = %h.name, volume = %clone.0, "install failed: {reason}");
+                        // An install a boot override asked for has an answer (#354).
+                        if let Some(o) = h.boot_override.as_ref().filter(|o| o["action"] == "install") {
+                            if let Some(id) = o["id"].as_str() {
+                                let what = format!("install on {} failed: {reason}", h.name);
+                                crate::mgmt::boot_override::report(&state, &h.name, id, false, what);
+                            }
+                        }
+                    }
+                    let mut v = intent_body(&h, &name);
+                    v["reset"] = json!(false);
+                    Json(v).into_response()
+                }
+                Err(e) => err(e),
+            };
+        }
+        Some(other) => return ApiError::bad_request(format!("stage {other:?} is laid, booted or failed")),
     }
     let done = {
         let mut store = state.synonyms.write().await;

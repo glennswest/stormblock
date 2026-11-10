@@ -831,3 +831,92 @@ async fn a_namespace_grown_on_its_engine_is_seen_once_identified_again() {
     assert!(back.iter().all(|&b| b == 7));
     server.abort();
 }
+
+/// #574: a read abandoned between its command and its answer (the caller's
+/// future dropped) left the answer on the connection, and the next command
+/// on it took that answer for its own: a 1 MiB read got the 4096 bytes of a
+/// slot-table read, `short read: wanted 1048576, got 4096`, never retried.
+/// Now the abandoned command's connection is closed, an answer is checked
+/// against its command's CID, and the 1 MiB read reads what was written.
+#[tokio::test]
+async fn a_read_abandoned_before_its_answer_never_answers_the_next_command() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // One I/O connection, so the next command goes by the one left behind.
+    std::env::set_var("STORMBLOCK_NVME_TCP_QUEUES", "1");
+
+    let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;
+    let (target, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+
+    // A proxy that can hold everything back, both ways.
+    let frozen = Arc::new(AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = listener.local_addr().unwrap();
+    let f = frozen.clone();
+    let proxy_task = tokio::spawn(async move {
+        loop {
+            let Ok((down, _)) = listener.accept().await else { return };
+            let Ok(up) = tokio::net::TcpStream::connect(target).await else { continue };
+            let (dr, dw) = down.into_split();
+            let (ur, uw) = up.into_split();
+            for (mut from, mut to, f) in [
+                (Box::new(dr) as Box<dyn tokio::io::AsyncRead + Unpin + Send>, Box::new(uw) as Box<dyn tokio::io::AsyncWrite + Unpin + Send>, f.clone()),
+                (Box::new(ur), Box::new(dw), f.clone()),
+            ] {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 64 * 1024];
+                    loop {
+                        while f.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        let n = match from.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        while f.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                        if to.write_all(&buf[..n]).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        }
+    });
+
+    let uri = format!("nvme-tcp://{proxy}/{SUBSYSTEM_NQN}?nsid=1");
+    let dev = open_one_drive(&uri).await.expect("attach through the proxy");
+    const MIB: usize = 1 << 20;
+    let extent: Vec<u8> = (0..MIB).map(|i| (i % 253) as u8 ^ 0x5A).collect();
+    dev.write(0, &extent).await.unwrap();
+    dev.write(2 * MIB as u64, &vec![0xEEu8; 4096]).await.unwrap();
+    dev.flush().await.unwrap();
+    let abandoned_before = stormblock::drive::nvmeof_dev::ABANDONED.load(Ordering::Relaxed);
+
+    // A slot-table read (64 bytes: the 4096-byte block that covers it),
+    // given up on while its answer is held back.
+    frozen.store(true, Ordering::SeqCst);
+    let mut entry = vec![0u8; 64];
+    let r = tokio::time::timeout(std::time::Duration::from_millis(300), dev.read(2 * MIB as u64 + 64, &mut entry)).await;
+    assert!(r.is_err(), "the read was meant to be abandoned, and it answered: {r:?}");
+    // Its answer arrives now, on the connection it was sent on.
+    frozen.store(false, Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // A whole extent, as the flow-over reads it.
+    let mut back = vec![0u8; MIB];
+    let n = dev.read(0, &mut back).await.expect("the next read reads its own answer (#574)");
+    assert_eq!(n, MIB);
+    assert!(back == extent, "the 1 MiB read returned other bytes than were written");
+    assert!(
+        stormblock::drive::nvmeof_dev::ABANDONED.load(Ordering::Relaxed) > abandoned_before,
+        "the abandoned command's connection was closed and counted"
+    );
+    // And the small read, asked again, is right.
+    dev.read(2 * MIB as u64 + 64, &mut entry).await.unwrap();
+    assert!(entry.iter().all(|b| *b == 0xEE));
+    proxy_task.abort();
+    server.abort();
+}

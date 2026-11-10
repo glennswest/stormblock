@@ -7191,6 +7191,10 @@ pub async fn run() -> anyhow::Result<()> {
                 Default::default();
             // Moves made by the pass under way, and whether it had anything.
             let (mut pass_moved, mut pass_had) = (0u64, false);
+            // Extents of the pass under way that failed, and passes in a row
+            // that had some (#574): a failed extent stays on the source, so
+            // the next pass lists it again, after a backoff.
+            let (mut pass_failed, mut failing_passes) = (0u64, 0u32);
             // How hot each source slot is, as the batch was last ordered (#411).
             let (mut hits, mut sorted_at, mut sorted_gen) =
                 (std::collections::HashMap::new(), std::time::Instant::now(), 0u64);
@@ -7219,6 +7223,20 @@ pub async fn run() -> anyhow::Result<()> {
                     } else {
                         again = 0;
                     }
+                    if pass_failed > 0 {
+                        failing_passes += 1;
+                        let wait = flow_retry_backoff(failing_passes);
+                        let line = format!(
+                            "Flow-over: {pass_failed} extent(s) on {source} did not move in that pass; trying \
+                             them again in {:.1}s (pass {failing_passes} with failures, {failed} failure(s) of 16)",
+                            wait.as_secs_f64()
+                        );
+                        println!("{line}");
+                        tracing::warn!("{line}");
+                        tokio::time::sleep(wait).await;
+                    } else if pass_had {
+                        failing_passes = 0;
+                    }
                     let g = gem.read().await;
                     batch = g
                         .slab_extents(source)
@@ -7226,7 +7244,7 @@ pub async fn run() -> anyhow::Result<()> {
                         .filter_map(|(vol, vext, loc)| loc.leg_on(source).map(|leg| (vol, vext, leg)))
                         .collect();
                     drop(g);
-                    (pass_moved, pass_had) = (0, !batch.is_empty());
+                    (pass_moved, pass_had, pass_failed) = (0, !batch.is_empty(), 0);
                     // What the node reads first (#411).
                     hits = crate::flowhot::hits();
                     let hot = crate::flowhot::hot_first(&mut batch, &hits);
@@ -7358,9 +7376,16 @@ pub async fn run() -> anyhow::Result<()> {
                         // move took the slot): the next pass lists it again if it
                         // is still on the source.
                         Err(PlacementError::Busy { .. } | PlacementError::ExtentNotFound { .. }) => {}
+                        // Still on the source (#574): listed again by the next
+                        // pass, after a backoff. Only what is left on a
+                        // source once it is done counts as not moved.
                         Err(e) => {
                             failed += 1;
-                            tracing::error!("flow-over: extent {vol:?}/{vext}: {e}");
+                            pass_failed += 1;
+                            tracing::error!(
+                                "flow-over: extent {vol:?}/{vext}: {e}; it stays on the appliance and is tried again \
+                                 in the next pass ({failed} failure(s) of 16)"
+                            );
                         }
                     }
                 }
@@ -7418,6 +7443,13 @@ pub async fn run() -> anyhow::Result<()> {
         spent.say(moved);
         report(0);
         Some((moved, failed))
+    }
+
+    /// The wait before a pass that tries again what failed in the last one
+    /// (#574): 0.5 s doubling to 10 s, `n` passes in a row with failures.
+    pub(crate) fn flow_retry_backoff(n: u32) -> std::time::Duration {
+        let ms = 500u64.saturating_mul(1u64 << n.saturating_sub(1).min(5));
+        std::time::Duration::from_millis(ms.min(10_000))
     }
 
     /// A flow-over's persist (#331, #410): the map, then the source slots it
@@ -8131,6 +8163,19 @@ pub async fn run() -> anyhow::Result<()> {
         // Weak, so a migration in flight cannot keep the whole engine alive past
         // a shutdown that is trying to end.
         let state_for_persist = Arc::downgrade(state);
+        // An install that cannot finish says so (#574): a final state for
+        // the installer, not a wait that times out.
+        let install_failed = {
+            let install = install.clone();
+            move |why: String| {
+                let install = install.clone();
+                async move {
+                    if let Some(t) = install {
+                        report_install_stage(&t, "failed", Some(&why)).await;
+                    }
+                }
+            }
+        };
         tokio::spawn(crate::lockwatch::named("the flow-over", async move {
             // Every slab that is not a data slab and is not the destination. On a
             // node that has just adopted, that is the appliance's system slab —
@@ -8148,7 +8193,9 @@ pub async fn run() -> anyhow::Result<()> {
             // An install the appliance asked for is done at that point, and only
             // at that point (#148): `local` on a disk that cannot boot would
             // leave the machine nothing to boot.
+            let install_failed_boot = install_failed.clone();
             let local_boot = |job: Option<(String, Vec<String>)>| async move {
+                let tried = job.is_some();
                 let booted = match job {
                     Some((disk, sources)) => match run_local_boot(&disk, &sources).await {
                         Ok(bootable) => bootable,
@@ -8185,11 +8232,16 @@ pub async fn run() -> anyhow::Result<()> {
                             }
                         }
                     }
-                    Some(t) => println!(
-                        "Install: not reported done to {} - the disk does not boot on its own; \
-                         the intent stays install",
-                        t.boothost
-                    ),
+                    Some(t) => {
+                        println!(
+                            "Install: not reported done to {} - the disk does not boot on its own; \
+                             the intent stays install",
+                            t.boothost
+                        );
+                        if tried {
+                            install_failed_boot("the disk was laid and does not boot on its own".into()).await;
+                        }
+                    }
                     None => {}
                 }
             };
@@ -8227,6 +8279,10 @@ pub async fn run() -> anyhow::Result<()> {
                     .copied()
                     .collect()
             };
+            // Every slab the flow-over empties: what is left on them at the
+            // end is what did not move (#574).
+            let all_sources: Vec<SlabId> =
+                sources.iter().chain(data.iter().flat_map(|(_, d)| d.iter())).copied().collect();
             let retire_sources = {
                 let state_for_persist = state_for_persist.clone();
                 move |retire: Vec<SlabId>| async move {
@@ -8320,7 +8376,8 @@ pub async fn run() -> anyhow::Result<()> {
                         flow.disk
                     );
                     println!("WARNING: flow-over onto {} stopped: {why}", flow.disk);
-                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
+                    install_failed(format!("the flow-over onto {} stopped: {why}", flow.disk)).await;
                     return;
                 };
                 moved += m;
@@ -8347,7 +8404,8 @@ pub async fn run() -> anyhow::Result<()> {
                         flow.disk
                     );
                     println!("WARNING: flow-over of the data half onto {} stopped: {why}", flow.disk);
-                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
+                    install_failed(format!("the flow-over of the data half onto {} stopped: {why}", flow.disk)).await;
                     return;
                 };
                 println!(
@@ -8361,7 +8419,16 @@ pub async fn run() -> anyhow::Result<()> {
             crate::flowhot::set_sources(&[]);
             tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
             println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
-            if failed == 0 {
+            // What did not move is what is still on a source (#574), not the
+            // failures along the way: a failed extent stays on its source and
+            // the next pass moves it.
+            let left = extents_on(&gem_arc, &all_sources).await;
+            if failed > 0 && left == 0 {
+                println!(
+                    "Flow-over: {failed} failure(s) along the way; every extent moved on a later pass"
+                );
+            }
+            if left == 0 {
                 // Proven before the node stops depending on forge (#412):
                 // every moved extent a sealed volume names, read back from
                 // the disk and compared with the appliance's.
@@ -8373,7 +8440,8 @@ pub async fn run() -> anyhow::Result<()> {
                     None => return,
                 };
                 if let Err(why) = settle_flow(&gem_arc, &reg_arc, &held, &sealed, &flow.disk, persist).await {
-                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+                    *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
+                    install_failed(format!("the flow-over onto {} did not validate: {why}", flow.disk)).await;
                     return;
                 }
                 // Every golden now on this disk, read once against the
@@ -8403,11 +8471,18 @@ pub async fn run() -> anyhow::Result<()> {
                 local_boot(then_local_boot).await;
                 retire_sources(retire).await;
             } else {
+                let left = if left == usize::MAX { "an unknown number of".to_string() } else { left.to_string() };
+                let why = format!(
+                    "{left} extent(s) did not move onto {} ({failed} failure(s))",
+                    flow.disk
+                );
                 println!(
-                    "Local boot: {} is left unbootable — {failed} extent(s) did not move, and a \
+                    "Local boot: {} is left unbootable — {why}, and a \
                      disk that boots into incomplete slabs is worse than one that netboots",
                     flow.disk
                 );
+                *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
+                install_failed(why).await;
             }
         }));
     }
@@ -9790,6 +9865,16 @@ pub(crate) enum ReportOutcome {
 pub(crate) const INSTALL_CONFIG_SOURCE: &str = "/run/stormblock/install-config.source";
 
 pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTicket, stage: &str) -> ReportOutcome {
+    report_install_stage(ticket, stage, None).await
+}
+
+/// [`report_installed`] with a reason: `failed` (#574) says why the install
+/// cannot finish, so the installer has a final answer, not a timeout.
+pub(crate) async fn report_install_stage(
+    ticket: &crate::drive::handover::InstallTicket,
+    stage: &str,
+    reason: Option<&str>,
+) -> ReportOutcome {
     let url = format!(
         "{}/api/v1/synonyms/boothost/{}/installed",
         ticket.boothost.trim_end_matches('/'),
@@ -9810,11 +9895,16 @@ pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTic
         // Where the install's install-config came from (#459), as /init
         // wrote it down; never its content.
         let source = std::fs::read_to_string(INSTALL_CONFIG_SOURCE).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-        let body = serde_json::json!({ "volume": ticket.volume, "stage": stage, "install_config": source });
+        let body = serde_json::json!({ "volume": ticket.volume, "stage": stage, "install_config": source, "reason": reason });
         let last = match client.post(&url).json(&body).send().await {
             Ok(resp) if resp.status().is_success() => {
                 match stage {
                     "booted" => println!("Install: reported to {url} that this machine booted from its own disk"),
+                    "failed" => println!(
+                        "Install: reported failed to {url}: {}; the intent stays install, so the next power cycle \
+                         installs again",
+                        reason.unwrap_or("")
+                    ),
                     _ => println!("Install: reported laid to {url}; this machine's boot intent is local again"),
                 }
                 tracing::info!("install reported {stage} to {url}");
@@ -9835,6 +9925,7 @@ pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTic
         if std::time::Instant::now() >= deadline {
             match stage {
                 "booted" => println!("Install: could not report booted to {url} ({last}); the next boot tries again"),
+                "failed" => println!("Install: could not report failed to {url} ({last})"),
                 _ => println!(
                     "Install: could not report laid to {url} ({last}); the intent stays install, \
                      so the next power cycle installs again"
@@ -13143,6 +13234,109 @@ file = "{state}"
         let mut back = vec![0u8; SLOT as usize];
         app.read(0, &mut back).await.unwrap();
         assert!(back.iter().all(|&b| b == 0xA5));
+    }
+
+    /// A source that answers one whole-extent read wrongly (#574: `short
+    /// read: wanted 1048576, got 4096`, an error no retry below took).
+    /// Armed by the test: the next whole-extent read fails, once.
+    struct FailsOnce(Arc<dyn BlockDevice>, u64, Arc<std::sync::atomic::AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl BlockDevice for FailsOnce {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.0.id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.0.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.0.block_size()
+        }
+        fn device_type(&self) -> crate::drive::DriveType {
+            self.0.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            if buf.len() as u64 == self.1 && self.2.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::drive::DriveError::Io(std::io::Error::other(format!(
+                    "short read: wanted {}, got 4096",
+                    buf.len()
+                ))));
+            }
+            self.0.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> crate::drive::DriveResult<usize> {
+            self.0.write(offset, buf).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> {
+            self.0.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> crate::drive::DriveResult<()> {
+            self.0.discard(offset, len).await
+        }
+    }
+
+    /// #574: one extent whose read fails stays on the source and the next
+    /// pass moves it. Nothing is left on the appliance at the end, which is
+    /// what the install's "did not move" now counts (not the one failure on
+    /// the way), and every byte reads as written.
+    #[tokio::test]
+    async fn an_extent_whose_read_failed_once_moves_on_the_next_pass() {
+        use crate::drive::filedev::FileDevice;
+        use crate::drive::slab::{Slab, SlabFormat, SlabRole};
+        use crate::placement::topology::StorageTier;
+
+        const SLOT: u64 = 64 * 1024;
+        const EXTENTS: u64 = 12;
+        let dir = tempfile::tempdir().unwrap();
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let slab = |name: &str, fails: bool| {
+            let path = dir.path().join(name).display().to_string();
+            let armed = armed.clone();
+            async move {
+                let mut dev = Arc::new(FileDevice::open_with_capacity(&path, 4 * EXTENTS * SLOT).await.unwrap())
+                    as Arc<dyn BlockDevice>;
+                if fails {
+                    dev = Arc::new(FailsOnce(dev, SLOT, armed));
+                }
+                Slab::format_with(dev, SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::System))
+                    .await
+                    .unwrap()
+            }
+        };
+        let mut mgr = VolumeManager::new(SLOT);
+        let source = slab("appliance.slab", true).await;
+        let source_id = source.slab_id();
+        mgr.add_slab(source).await;
+        let golden = mgr.create_volume_any("golden", EXTENTS * SLOT).await.unwrap();
+        let g = mgr.get_volume(&golden).unwrap();
+        let bytes: Vec<u8> = (0..EXTENTS * SLOT).map(|i| (i / 4096 % 251) as u8).collect();
+        g.write(0, &bytes).await.unwrap();
+        g.flush().await.unwrap();
+        // The appliance's next whole-extent read fails.
+        drop(g);
+        armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let local = slab("local.slab", false).await;
+        let local_id = local.slab_id();
+        mgr.add_slab(local).await;
+
+        let t = std::time::Instant::now();
+        let (moved, failed) = super::flow_system_half(mgr.gem(), mgr.registry(), &[source_id], local_id, || mgr.persist(), None)
+            .await
+            .expect("one failed read is no reason to give up");
+        assert!(!armed.load(std::sync::atomic::Ordering::SeqCst), "the failure was met");
+        assert_eq!((moved, failed), (EXTENTS, 1), "every extent moved; the one failure was tried again");
+        assert!(t.elapsed() >= super::flow_retry_backoff(1), "the pass after a failure waited first");
+        assert_eq!(super::extents_on(mgr.gem(), &[source_id]).await, 0, "nothing is left on the appliance");
+        let g = mgr.get_volume(&golden).unwrap();
+        let mut back = vec![0u8; bytes.len()];
+        g.read(0, &mut back).await.unwrap();
+        assert!(back == bytes, "every byte reads as written after the move");
+    }
+
+    #[test]
+    fn the_wait_before_a_retry_pass_doubles_to_ten_seconds() {
+        let ms = |n| super::flow_retry_backoff(n).as_millis();
+        assert_eq!((ms(1), ms(2), ms(3), ms(5), ms(6), ms(40)), (500, 1000, 2000, 8000, 10_000, 10_000));
     }
 
     /// What `/api/v1/health` reports as `flow_over_remaining` (#260): the
