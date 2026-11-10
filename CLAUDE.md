@@ -227,6 +227,23 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### The kube volume list deadlocks the volume manager at start (2026-11-10, #571, P1→P0) — IN PROGRESS
+
+pvetest1 (23.25.0): `GET /apis/storage.storm.io/v1/volumes` (req 1 or 3) holds the volume manager for an hour; every
+`/api/v1/volumes` waits, the kubelet's static pods never get their volumes, no apiserver. 4 of 5 boots. Read from the
+code, two lock-order inversions (ABBA), no I/O needed:
+- kube `all_volumes`/`volume_object` hold the manager and take `v1` (and `ublk_exports`) per volume; `/v1`
+  handlers and its 1 s expiry take `v1`, then the manager
+- `api::volumes_in_use` (run at start by the formats resume, #141) holds `ublk_exports`, then takes the manager
+- (and `all_slabs` holds the registry, then takes the manager)
+Plan:
+- [ ] kube projections: what they need from the manager under a brief hold (sync getters only), then the objects
+      built with nothing held; v1 and ublk read once, apart; `all_slabs` the manager first, alone
+- [ ] `volumes_in_use`: ids first, then `ublk_exports`
+- [ ] test: a kube list while `v1` is held by a task waiting on the manager (and `ublk_exports` likewise) answers;
+      control: the old code hangs; docs (lock order in durability/README), CHANGELOG; check.sh; patch; stage
+- [ ] the issue's watchdog ask: answered on the issue (an abandon of a held writer is unsafe; reads now hold nothing)
+
 ### Flow-over: one short NVMe/TCP read left the disk "unbootable" and the install unreported (2026-11-10, #574, P0) — DONE (v24.1.0), closed; metal pending
 
 stormcos#904: `short read: wanted 1048576, got 4096`, then `1 extent(s) did not move`, local boot refused, no
