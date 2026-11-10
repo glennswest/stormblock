@@ -547,16 +547,11 @@ pub async fn volumes_in_use(state: &AppState) -> std::collections::HashSet<uuid:
     }
     // ublk exports are keyed by the /v1 volume id rather than the engine's, so
     // they are matched by string against the engine ids we already have.
+    // The ids first, the manager let go, then the exports (#571): holding
+    // `ublk_exports` while waiting on the manager deadlocked with a listing
+    // that held the manager and asked for the exports.
+    let volumes: Vec<uuid::Uuid> = state.volume_manager.lock().await.volume_ids().into_iter().map(|id| id.0).collect();
     let ublk = state.ublk_exports.lock().await;
-    let volumes: Vec<uuid::Uuid> = state
-        .volume_manager
-        .lock()
-        .await
-        .list_volumes()
-        .await
-        .into_iter()
-        .map(|(id, _, _, _)| id.0)
-        .collect();
     for id in volumes {
         if ublk.is_exported(&id.to_string()) {
             in_use.insert(id);

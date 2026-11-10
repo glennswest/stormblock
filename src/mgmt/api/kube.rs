@@ -123,30 +123,89 @@ async fn api_resources() -> Json<Value> {
 
 // --------------------------------------------------------------- volumes
 
-async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: VolumeId) -> Option<Value> {
-    let handle = vm.get_volume_handle(&id)?;
+/// What a Volume object needs from the volume manager, taken under a brief
+/// hold (#571): sync getters only, nothing awaited. The object is built after
+/// the manager is let go, so nothing else is ever taken under it: the `/v1`
+/// handlers take `v1` then the manager, `volumes_in_use` took `ublk_exports`
+/// then the manager, and a list that held the manager while it asked for
+/// either deadlocked with them (pvetest1: req 1 for an hour, no apiserver).
+struct VolumeSnap {
+    id: VolumeId,
+    handle: Arc<crate::volume::thin::ThinVolumeHandle>,
+    fs: Option<Value>,
+    namespace: String,
+    parent: Option<VolumeId>,
+    children: Vec<VolumeId>,
+    retention: &'static str,
+}
+
+fn volume_snap(vm: &crate::volume::VolumeManager, id: VolumeId) -> Option<VolumeSnap> {
+    Some(VolumeSnap {
+        id,
+        handle: vm.get_volume_handle(&id)?,
+        fs: vm.fs_info(&id).map(|f| f.json()),
+        namespace: vm.namespace(&id).to_string(),
+        parent: vm.parent(&id),
+        children: vm.children(&id),
+        retention: vm.retention(&id).as_str(),
+    })
+}
+
+/// What the projection reads besides the manager, each lock taken alone and
+/// let go before the next (#571).
+struct AttachView {
+    local_node: String,
+    nsids: std::collections::HashMap<String, u32>,
+    ublk: std::collections::HashMap<String, String>,
+}
+
+async fn attach_view(state: &AppState, keys: &[String]) -> AttachView {
+    let (local_node, nsids) = {
+        let v1 = state.v1.lock().await;
+        (v1.local_node.clone(), v1.nvme_nsids.clone())
+    };
+    let ublk = {
+        let u = state.ublk_exports.lock().await;
+        keys.iter().filter_map(|k| u.device_path(k).map(|p| (k.clone(), p))).collect()
+    };
+    AttachView { local_node, nsids: nsids.into_iter().collect(), ublk }
+}
+
+/// Snapshots of every volume (or the ones asked for), the manager held only
+/// to take them.
+async fn volume_snaps(state: &AppState, only: Option<VolumeId>) -> Vec<VolumeSnap> {
+    let vm = state.volume_manager.lock().await;
+    let mut ids = match only {
+        Some(id) => vec![id],
+        None => vm.volume_ids(),
+    };
+    ids.sort_by_key(|i| i.0);
+    ids.into_iter().filter_map(|id| volume_snap(&vm, id)).collect()
+}
+
+async fn volume_object(s: &VolumeSnap, view: &AttachView) -> Value {
+    let (id, handle) = (s.id, &s.handle);
     let name = handle.name().await;
     let health = handle.health().await;
-    let fs = vm.fs_info(&id);
     let key = id.0.to_string();
-    let attach = if let Some(path) = state.ublk_exports.lock().await.device_path(&key) {
+    let attach = if let Some(path) = view.ublk.get(&key) {
         json!({ "transport": "ublk", "deviceHint": path })
-    } else if let Some(nsid) = state.v1.lock().await.nvme_nsids.get(&key).copied() {
+    } else if let Some(nsid) = view.nsids.get(&key).copied() {
         json!({ "transport": "nvme_tcp", "nsid": nsid })
     } else {
         Value::Null
     };
     let mut labels = BTreeMap::new();
     labels.insert("storm.io/name".to_string(), name.clone());
-    labels.insert("storm.io/node".to_string(), state.v1.lock().await.local_node.clone());
+    labels.insert("storm.io/node".to_string(), view.local_node.clone());
     labels.insert("storm.io/slab-role".to_string(), handle.placement_role().to_string());
     // The volume's namespace (#408). A label, not `metadata.namespace`: the
     // resource stays cluster-scoped, as discovery says.
-    labels.insert("storm.io/namespace".to_string(), vm.namespace(&id).to_string());
-    if let Some(p) = vm.parent(&id) {
+    labels.insert("storm.io/namespace".to_string(), s.namespace.clone());
+    if let Some(p) = s.parent {
         labels.insert("storm.io/parent".to_string(), p.0.to_string());
     }
-    Some(object(
+    object(
         "Volume",
         &key,
         &key,
@@ -163,9 +222,9 @@ async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: 
             // in its source's half whatever it is named, so the name is not
             // evidence and this is (#88).
             "role": handle.placement_role().to_string(),
-            "retention": vm.retention(&id).as_str(),
-            "fs": fs.map(|f| f.json()),
-            "namespace": vm.namespace(&id),
+            "retention": s.retention,
+            "fs": s.fs,
+            "namespace": s.namespace,
         }),
         json!({
             "health": health.state.to_string(),
@@ -176,24 +235,27 @@ async fn volume_object(state: &AppState, vm: &crate::volume::VolumeManager, id: 
             "failedSlabs": health.failed_slabs.iter().map(|s| s.0.to_string()).collect::<Vec<_>>(),
             "allocatedBytes": handle.allocated().await,
             "physicalBytes": handle.physical().await,
-            "parent": vm.parent(&id).map(|p| p.0.to_string()),
-            "children": vm.children(&id).iter().map(|c| c.0.to_string()).collect::<Vec<_>>(),
+            "parent": s.parent.map(|p| p.0.to_string()),
+            "children": s.children.iter().map(|c| c.0.to_string()).collect::<Vec<_>>(),
             "attach": attach,
         }),
-    ))
+    )
+}
+
+/// The Volume objects, the manager held only for their snapshots (#571).
+async fn volume_objects(state: &AppState, only: Option<VolumeId>) -> Vec<Value> {
+    let snaps = volume_snaps(state, only).await;
+    let keys: Vec<String> = snaps.iter().map(|s| s.id.0.to_string()).collect();
+    let view = attach_view(state, &keys).await;
+    let mut out = Vec::with_capacity(snaps.len());
+    for s in &snaps {
+        out.push(volume_object(s, &view).await);
+    }
+    out
 }
 
 async fn all_volumes(state: &AppState) -> Vec<Value> {
-    let vm = state.volume_manager.lock().await;
-    let mut ids: Vec<VolumeId> = vm.list_volumes().await.into_iter().map(|(id, ..)| id).collect();
-    ids.sort_by_key(|i| i.0);
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(v) = volume_object(state, &vm, id).await {
-            out.push(v);
-        }
-    }
-    out
+    volume_objects(state, None).await
 }
 
 /// By uuid, by `spec.name`, or by synonym — the manager first, so a synonym
@@ -209,8 +271,7 @@ async fn get_volume(State(state): State<Arc<AppState>>, Path(name): Path<String>
     let Some(id) = resolve_volume(&state, &name).await else {
         return status_error(StatusCode::NOT_FOUND, "NotFound", format!("volumes \"{name}\" not found"));
     };
-    let vm = state.volume_manager.lock().await;
-    match volume_object(&state, &vm, id).await {
+    match volume_objects(&state, Some(id)).await.pop() {
         Some(v) => Json(v).into_response(),
         None => status_error(StatusCode::NOT_FOUND, "NotFound", format!("volumes \"{name}\" not found")),
     }
@@ -295,7 +356,9 @@ async fn patch_volume(
             return status_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", e.to_string());
         }
     }
-    match volume_object(&state, &vm, id).await {
+    // The object after the manager is let go (#571).
+    drop(vm);
+    match volume_objects(&state, Some(id)).await.pop() {
         Some(v) => Json(v).into_response(),
         None => status_error(StatusCode::NOT_FOUND, "NotFound", format!("volumes \"{name}\" not found")),
     }
@@ -320,8 +383,10 @@ async fn delete_volume(State(state): State<Arc<AppState>>, Path(name): Path<Stri
 // ----------------------------------------------------------------- slabs
 
 async fn all_slabs(state: &AppState) -> Vec<Value> {
-    let reg = state.slab_registry.read().await;
+    // The manager alone, before the registry (#571): a hold of the registry
+    // that waits on the manager inverts the order a persist takes them in.
     let meta: Vec<_> = state.volume_manager.lock().await.metadata_slabs().to_vec();
+    let reg = state.slab_registry.read().await;
     let mut items: Vec<Value> = reg
         .iter()
         .map(|(id, slab)| {

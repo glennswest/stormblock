@@ -2091,3 +2091,48 @@ async fn a_seed_keeps_its_directories_and_asked_to_its_labels_case() {
     assert_eq!(read(id).await.label, "CIDATA");
     server.abort();
 }
+
+/// #571: the kube volume list never holds the volume manager while it waits
+/// for another lock. pvetest1 (23.25.0): `GET /apis/storage.storm.io/v1/volumes`
+/// held the manager and asked for `v1` (and `ublk_exports`), while a `/v1`
+/// handler held `v1` (and `volumes_in_use`, at start, held `ublk_exports`)
+/// and asked for the manager: an hour, every `/api/v1/volumes` behind it,
+/// no apiserver. Here each of the other locks is held while the list runs;
+/// the manager must stay free, and the list answers once the lock is let go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_kube_volume_list_holds_the_manager_while_waiting_for_nothing() {
+    use std::time::Duration;
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    state.volume_manager.lock().await.create_volume_any("vol-571", 64 << 20).await.unwrap();
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    for which in ["v1", "ublk_exports"] {
+        // The other lock, as a `/v1` handler (or the start's in-use check)
+        // holds it before it asks for the manager.
+        let v1_guard = (which == "v1").then(|| state.v1.try_lock().expect("v1 free"));
+        let ublk_guard = (which == "ublk_exports").then(|| state.ublk_exports.try_lock().expect("ublk_exports free"));
+        let list = tokio::spawn({
+            let (client, url) = (client.clone(), url.clone());
+            async move {
+                client.get(format!("{url}/apis/storage.storm.io/v1/volumes")).send().await.unwrap().json::<serde_json::Value>().await.unwrap()
+            }
+        });
+        // Let the list reach whatever it waits on.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // What the holder does next: the manager. It must not be held.
+        let vm = tokio::time::timeout(Duration::from_secs(5), state.volume_manager.lock())
+            .await
+            .unwrap_or_else(|_| panic!("the volume manager is held by the kube list while it waits for {which} (#571)"));
+        drop(vm);
+        drop(v1_guard);
+        drop(ublk_guard);
+        let vols = tokio::time::timeout(Duration::from_secs(10), list).await.expect("the list answers once let go").unwrap();
+        assert!(
+            vols["items"].as_array().unwrap().iter().any(|v| v["spec"]["name"] == "vol-571"),
+            "{which}: {vols}"
+        );
+    }
+    server.abort();
+}
