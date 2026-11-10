@@ -3754,7 +3754,7 @@ MicroCloud blades on `boothost/S11075924402016` (#249). Asked on #202
 (needs-owner): A as proposed, B #204's rule (an operator-set alias only;
 recommended), C a named host only while it has no MAC alias. Nothing built.
 
-### /serve/v1 exports bound to one host (2026-10-08, #212) — FLIPPED 2026-11-07 (owner: A, 2026-10-09); reopened 2026-11-10 for an observable proof
+### /serve/v1 exports bound to one host (2026-10-08, #212) — FLIPPED 2026-11-07 (owner: A, 2026-10-09); reopened 2026-11-10 for an observable proof — DONE (v24.2.0), closed
 
 Each serve export is its own subsystem on its own portal, `HostAccess::Any`.
 The one caller left is stormblock-registry (golden builds, media clones); it
@@ -3790,7 +3790,8 @@ sends no host NQN, so closing by default would break it: the owner's call.
       still warned; 12.78-flowsdn (pvetest2, engine 24.1.1 = 070ca74b ⊇ ed6caa93)
       logs no WARN, but the `log:` proof named the INFO line, which reaches no log
       stormcentral reads (#243). Fix: `allow_any_host` on the open `/serve/v1/health`
-- [ ] check.sh; patch release; stage; `shipped --proof 'get:http://{node}:9090/serve/v1/health ~ "allow_any_host":false'`
+- [x] check.sh at 412033fe ALL PASS; v24.2.0 (0348852b, `stormblock 24.2.0` from a `--locked` build); stage
+      4f4a156da80a; shipped with `--proof 'get:http://{node}:9090/serve/v1/health ~ "allow_any_host":false'`; closed
 
 ### The listing generation moves on attach, detach and slab state (2026-10-08, #218) — DONE
 
