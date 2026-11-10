@@ -3754,7 +3754,7 @@ MicroCloud blades on `boothost/S11075924402016` (#249). Asked on #202
 (needs-owner): A as proposed, B #204's rule (an operator-set alias only;
 recommended), C a named host only while it has no MAC alias. Nothing built.
 
-### /serve/v1 exports bound to one host (2026-10-08, #212) — FLIPPED 2026-11-07 (owner: A, 2026-10-09); reopened 2026-11-10 for an observable proof — DONE (v24.2.0), closed
+### /serve/v1 exports bound to one host (2026-10-08, #212) — FLIPPED 2026-11-07 (owner: A, 2026-10-09); reopened 2026-11-10 for an observable proof — DONE (v24.2.0); waits on 24.2.0 on a test machine (stormcentral#1344)
 
 Each serve export is its own subsystem on its own portal, `HostAccess::Any`.
 The one caller left is stormblock-registry (golden builds, media clones); it
@@ -3792,6 +3792,9 @@ sends no host NQN, so closing by default would break it: the owner's call.
       stormcentral reads (#243). Fix: `allow_any_host` on the open `/serve/v1/health`
 - [x] check.sh at 412033fe ALL PASS; v24.2.0 (0348852b, `stormblock 24.2.0` from a `--locked` build); stage
       4f4a156da80a; shipped with `--proof 'get:http://{node}:9090/serve/v1/health ~ "allow_any_host":false'`; closed
+- [ ] reopened again: checked on 12.78.1 (engine 24.1.1, no field) because shipped kept v24.0.0's commit
+      (stormcentral#1344). Proposed `--after-install stormblock>=0348852b`; then read the field on that
+      machine, `shipped` again with the same proof, close
 
 ### The listing generation moves on attach, detach and slab state (2026-10-08, #218) — DONE
 
