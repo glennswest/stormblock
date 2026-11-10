@@ -227,6 +227,23 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### Install lays every drive: ESP + pallets + system mirror:N on each, data on a stormraid set (2026-11-10, #573, P1, stormcos#902) — WAITING ON THE OWNER
+
+Contract: stormcos docs/STORAGE-LAYOUT.md (steps 1, 3–5, 7–8 ours). Dependencies all closed: stormdrive#136 (`stormdrive
+format`, static), stormraid#72 (v0.25.0: `create --role node-data` over partitions, `assemble --role node-data`, the
+daemon's SIGHUP takeover; contract in stormraid docs/node-data.md), stormuefi#74 (copies on other drives),
+storminstall#30 (`storage:` keys). stormcentral#1318 wants step 8 as one JSON object at a named route.
+Asked on #573 (wait-owner, 2026-11-10): the contract's "storage: absent = every drive" against #478 (first drive
+only), #350, #402 (system on its own SSD), #273/#347 (no external shelf), #311 (an install keeps data: a layout change
+has no path). Recommended A: the new layout only when `storage:` is present; external shelves only when listed;
+`system_drive:` with `storage:` refused; a layout change over the node's data stops unless `assimilate=force`.
+- [x] filed stormcentral#1335: the initramfs build passes stormraid and stormdrive binaries (proposed
+      `STORMBLOCK_INITRAMFS_TOOLS="stormraid=/path stormdrive=/path"`)
+- [ ] after the answer: /init `storage:` parse + selection; format step; N-drive layout (generalise #350's pair:
+      ESP + pallets on every drive, system slab legs mirror:N, drive domains); data slab on the set's /dev/ublkbN
+      (create at install, assemble every boot before the slab opens, degraded said); keep-data reinstall keeps the
+      set; the layout report route for stormcentral#1318; QEMU check with 4 drives (each boots alone, one pulled)
+
 ### The kube volume list deadlocks the volume manager at start (2026-11-10, #571, P1→P0) — DONE (v24.1.1), closed; pvetest1 pending
 
 pvetest1 (23.25.0): `GET /apis/storage.storm.io/v1/volumes` (req 1 or 3) holds the volume manager for an hour; every
