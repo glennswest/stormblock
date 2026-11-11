@@ -4,13 +4,17 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-10
-- **fix:** #546 (P0, forge's hot slab since 2026-11-11 05:08Z): a format 2 store is no longer written whole as a second tree beside the first. The first persist after a start, and every persist after a failed write, built a new tree with `replace_all` while the old one was still named, so it needed room for both: a slab whose tree had passed half its region could not be written whole again, and since any failed write is followed by a whole write, one failure (or one restart) stopped every persist after it, deletes included. Now `MetaV2::reconcile` reads the tree leaf by leaf, compares it with what the store should hold and writes only what differs as one checkpoint: a restart that changed nothing writes nothing, and a delete frees its pages, so a full slab recovers by deleting volumes. Test `metav2::tests::a_store_past_half_its_region_is_brought_up_to_date_by_what_differs` (the old whole write fails there with `metadata region full`).
-- **fix:** #546: a new format 2 slab's metadata region is sized at 64 B of tree a slot (was 48: a full drive's extent entries take ~51 B a slot once leaves are not all full, so a fill stopped at ~94 %). Slabs already laid keep their region (#429, #518).
 - **docs:** #512: writes into an ext4 past ~192 TiB no longer corrupt it, with v24.0.1's pins (mkfs-ext4 v4.1.3, which writes meta_bg descriptors where the layout puts them, mkfs.ext4.rs#33; fio-ext4 v1.8.3). Checked with `examples/ext4_large`: the small meta_bg reproduction (16 GiB) and a bare 256 TiB drive, 256 files each, clean (were corrupt: 1302 problems at 256 TiB); a 256 TiB template, its clone and 256 files through the engine, clean. No code change.
 - **docs:** README's open findings no longer list #512 (fixed by v24.0.1's pins).
 
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
+
+## [v24.2.1] — 2026-11-10
+
+### Fixed
+- #546 (P0, forge's hot slab since 2026-11-11 05:08Z): a format 2 store is no longer written whole as a second tree beside the first. The first persist after a start, and every persist after a failed write, built a new tree with `replace_all` while the old one was still named, so it needed room for both: a slab whose tree had passed half its region could not be written whole again, and since any failed write is followed by a whole write, one failure (or one restart) stopped every persist after it, deletes included. Now `MetaV2::reconcile` reads the tree leaf by leaf, compares it with what the store should hold and writes only what differs as one checkpoint: a restart that changed nothing writes nothing, and a delete frees its pages, so a full slab recovers by deleting volumes. Test `metav2::tests::a_store_past_half_its_region_is_brought_up_to_date_by_what_differs` (the old whole write fails there with `metadata region full`).
+- #546: a new format 2 slab's metadata region is sized at 64 B of tree a slot (was 48: a full drive's extent entries take ~51 B a slot once leaves are not all full, so a fill stopped at ~94 %). Slabs already laid keep their region (#429, #518).
 
 ## [v24.2.0] — 2026-11-10
 
