@@ -993,7 +993,8 @@ async fn a_record_too_large_for_either_format_refuses_creates_until_deletes_make
 /// restart brings back what the directory holds.
 #[tokio::test]
 async fn a_full_slab_region_does_not_stop_a_node_with_a_data_directory() {
-    stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
+    // No set_default_format: the slab is v2 by its format and the directory
+    // by its file, so the process-wide default other tests flip does not race it.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("metadata.v2"), b"").unwrap();
     let dev = device("4G").await;
