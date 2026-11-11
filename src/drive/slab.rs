@@ -624,14 +624,17 @@ pub fn auto_metadata_bytes(capacity: u64, slot_size: u64) -> u64 {
     align_up(want.clamp(META_MIN.min(ceiling), ceiling), 2 * META_ALIGN)
 }
 
-/// How large an auto-sized v2 metadata region is (#158): ~48 bytes of tree
-/// per slot (an extent is ~35 in a page), the log (an eighth of the region,
-/// at most 64 MiB), never under 1 MiB nor over an eighth of the device. No
-/// 256 MiB ceiling: a persist writes what changed, not the region.
+/// How large an auto-sized v2 metadata region is (#158): 64 bytes of tree
+/// per slot (an extent entry is ~51 in a full page; #546 measured 48 too few
+/// once leaves are not all full), the log (an eighth of the region, at most
+/// 64 MiB), never under 1 MiB nor over an eighth of the device. No 256 MiB
+/// ceiling: a persist writes what changed, not the region; and since #546 no
+/// write needs room for a second tree. A slab whose volumes are mostly clones
+/// of each other maps more extents than it has slots, and outgrows this.
 pub fn auto_metadata_bytes_v2(capacity: u64, slot_size: u64) -> u64 {
     let per_slot = SLOT_ENTRY_SIZE + slot_size.max(1);
     let slots = capacity.saturating_sub(HEADER_SIZE) / per_slot;
-    let tree = slots.saturating_mul(48);
+    let tree = slots.saturating_mul(64);
     let want = tree.saturating_add((tree / 7).min(64 << 20)).saturating_add(1 << 20);
     let ceiling = (capacity / 8).max(2 * META_ALIGN);
     align_up(want.min(ceiling), 2 * META_ALIGN)

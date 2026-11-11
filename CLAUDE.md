@@ -227,6 +227,19 @@ release: a P2/P3 feature goes on a `wip/` branch unless it is fit to ship.
 are inert until used, and an unmarked volume's record is byte-identical to
 the format before #74. The owner unheld the parked P2/P3 work on 2026-10-28 (#350, #291, #318, #295, #296, #290, #104, #159, #450 merged since). Newest tag: v23.12.0 (#350).
 
+### A full v2 region: the whole write needs room for two trees (2026-11-10, #546, P0, forge since 2026-11-11 05:08Z) — IN PROGRESS
+
+forge (engine 20.0.0) health: `metadata region full: 44797 pages` on hot slab 7661cf8b, 176.5 of 183.5 MB in use, 3,212
+volumes, ~3.19 M extent entries (clones and releases each map their own: 158 stormcos releases of 9 GB). Read from the code:
+`need_full` (a start, any failed write) → `replace_all`, a second tree beside the first: past half the region it never
+fits again, and each failure sets `need_full` again, so every persist fails for good, deletes too.
+- [x] `MetaV2::reconcile`: diff the tree (leaf by leaf, overlay applied) against the target, write only what differs,
+      one checkpoint; persist_v2's whole write uses it; `replace_all` only for an empty store
+- [x] default region 64 B a slot (was 48); test; docs (metadata-v2, durability rule 12, metadata-scale), CHANGELOG
+- [ ] sc-build: the metav2/persist tests; `METADATA_X=1 full_drive DIR 1T 1 16 50` (the issue's reproduction); check.sh
+- [ ] merge, tag, stage; forge needs this engine (master's runbook) and then deletes to get under its region: say so
+- [ ] follow-up issue: a clone-heavy slab (forge) maps more extents than slots; a run encoding is a format change
+
 ### Install lays every drive: ESP + pallets + system mirror:N on each, data on a stormraid set (2026-11-10, #573, P1, stormcos#902) — WAITING ON THE OWNER
 
 Contract: stormcos docs/STORAGE-LAYOUT.md (steps 1, 3–5, 7–8 ours). Dependencies all closed: stormdrive#136 (`stormdrive

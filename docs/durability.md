@@ -221,7 +221,8 @@ tests run on.
    format v2). A v2 persist writes what changed, not a snapshot, so the v1
    rule "never write an older record over a newer one" becomes: batches are
    applied in the order their records were taken, a batch taken before a
-   failed write is dropped and the store is written whole next time, and a
+   failed write is dropped and the store is brought up to date whole next time
+   (compared whole, only what differs written: #546), and a
    persist that stops before writing does the same. Rule 1 holds as before:
    the slabs are flushed after the records are taken and before the log
    record is written, and a log record is durable at its flush. A checkpoint

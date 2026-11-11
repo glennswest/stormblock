@@ -238,7 +238,7 @@ matter only through how many extents there are:
 | a map out of memory | **~0** | a `ColdMap`: counts and its slabs. Read back from the store on first use (33 k extents in ~60 ms) |
 | what stays with every map out | ~30 KiB a volume, plus bounded | headers, the free map (1 bit a committed slot), and caps: 16 MiB of slot-table pages a slab, 256 Ki entries of overlay (~25 MiB) between checkpoints, internal tree pages |
 | a restart's restore, peak | **~555** | the whole store in a `Vec`, then the whole document (#547) |
-| the first persist after a restart, peak | **~201** | the store written whole (#546) |
+| the first persist after a restart, peak | **~201** | every entry the store should hold, compared with it (#546: only what differs is written since) |
 | a write until its flush | ~2,300 | pending entries, per write outstanding, not per extent held |
 
 Really filled: **256 TiB at 8 MiB** (33.5 M extents, all of it), 16 TiB at 1 MiB

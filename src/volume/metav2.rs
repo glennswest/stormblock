@@ -292,7 +292,7 @@ impl Node {
 }
 
 /// Changes logged and not yet in the tree.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct Overlay {
     dropped: BTreeSet<[u8; 16]>,
     puts: BTreeMap<Key, Option<Vec<u8>>>,
@@ -348,6 +348,42 @@ impl Overlay {
 fn next_vol(v: [u8; 16]) -> Option<[u8; 16]> {
     let n = u128::from_be_bytes(v).checked_add(1)?;
     Some(n.to_be_bytes())
+}
+
+/// The changes from what a store holds to what it should, for
+/// [`MetaV2::reconcile`]: fed the store's entries in key order.
+struct Diff<I: Iterator<Item = (Key, Vec<u8>)>> {
+    target: std::iter::Peekable<I>,
+    /// The volumes `target` names.
+    wanted: BTreeSet<[u8; 16]>,
+    ops: Vec<Op>,
+    /// Volumes the store holds that `target` names nowhere: dropped whole.
+    dropped: BTreeSet<[u8; 16]>,
+}
+
+impl<I: Iterator<Item = (Key, Vec<u8>)>> Diff<I> {
+    fn current(&mut self, k: Key, v: &[u8]) {
+        while let Some((tk, tv)) = self.target.next_if(|(tk, _)| *tk < k) {
+            self.ops.push(Op::Put(tk, tv));
+        }
+        match self.target.next_if(|(tk, _)| *tk == k) {
+            Some((_, tv)) if tv == v => {}
+            Some((tk, tv)) => self.ops.push(Op::Put(tk, tv)),
+            None if !self.wanted.contains(&k.vol()) => {
+                self.dropped.insert(k.vol());
+            }
+            None => self.ops.push(Op::Del(k)),
+        }
+    }
+
+    fn finish(mut self) -> Vec<Op> {
+        self.ops.extend(self.target.map(|(k, v)| Op::Put(k, v)));
+        // Drops first: a drop clears the overlay's puts of its volume, and
+        // no put here is of a dropped volume.
+        let mut out: Vec<Op> = self.dropped.into_iter().map(Op::DropVolume).collect();
+        out.extend(self.ops);
+        out
+    }
 }
 
 /// What a store holds, for the pressure report.
@@ -882,6 +918,77 @@ impl MetaV2 {
             self.set_used(p, false);
         }
         Ok(())
+    }
+
+    /// Make the store hold exactly `entries` (sorted by key, no key twice)
+    /// by writing only what differs, as one checkpoint (#546). What a first
+    /// persist after a restart, or after a failed write, does.
+    ///
+    /// [`replace_all`](Self::replace_all) built a second tree beside the
+    /// first, so it needed room for both: a region past half full could
+    /// never be written whole again, and since a failed write is followed by
+    /// a whole write, one failure stopped every persist after it (forge,
+    /// 2026-11-11). This reads the tree once, leaf by leaf, and copies on
+    /// write only the leaves whose entries change: a restart that changed
+    /// nothing writes nothing, and a delete frees its pages.
+    ///
+    /// The number of changes made.
+    pub async fn reconcile(&mut self, entries: Vec<(Key, Vec<u8>)>) -> io::Result<usize> {
+        let wanted: BTreeSet<[u8; 16]> = entries.iter().map(|(k, _)| k.vol()).collect();
+        let mut diff = Diff { target: entries.into_iter().peekable(), wanted, ops: Vec::new(), dropped: BTreeSet::new() };
+        // What the store holds now: the tree, less the dropped volumes, with
+        // the overlay's puts over it, in key order.
+        let mut ov = self.overlay.puts.iter().map(|(k, v)| (*k, v.clone())).collect::<Vec<_>>().into_iter().peekable();
+        if self.root != EMPTY {
+            let mut stack = vec![self.root];
+            while let Some(p) = stack.pop() {
+                match &*self.node(p).await? {
+                    Node::Leaf(leaf) => {
+                        for (k, v) in leaf {
+                            if self.overlay.dropped.contains(&k.vol()) {
+                                continue;
+                            }
+                            while let Some((ok, ov_v)) = ov.next_if(|(ok, _)| ok < k) {
+                                if let Some(v) = ov_v {
+                                    diff.current(ok, &v);
+                                }
+                            }
+                            match ov.next_if(|(ok, _)| ok == k) {
+                                Some((_, Some(v))) => diff.current(*k, &v),
+                                Some((_, None)) => {}
+                                None => diff.current(*k, v),
+                            }
+                        }
+                    }
+                    Node::Internal { children, .. } => {
+                        for (_, c) in children.iter().rev() {
+                            stack.push(*c);
+                        }
+                    }
+                }
+            }
+        }
+        for (ok, ov_v) in ov {
+            if let Some(v) = ov_v {
+                diff.current(ok, &v);
+            }
+        }
+        let ops = diff.finish();
+        let n = ops.len();
+        if n == 0 && self.overlay.is_empty() && self.log_used == 0 {
+            return Ok(0);
+        }
+        let saved = self.overlay.clone();
+        for op in ops {
+            self.overlay.apply(op);
+        }
+        // Folded into the tree with the log, so the store is the tree alone
+        // again; on failure it is as it was (the log still names `saved`).
+        if let Err(e) = self.checkpoint().await {
+            self.overlay = saved;
+            return Err(e);
+        }
+        Ok(n)
     }
 
     /// Leaves for `entries`, written; each with its lowest key.
@@ -2178,6 +2285,59 @@ mod tests {
         assert_eq!(all.len(), 40_000);
         assert!(all.iter().all(|(k, _)| k.vol() != [2; 16]));
         assert_eq!(s.usage().pages_used, after);
+    }
+
+    /// #546: a store past half its region could not be written whole again
+    /// (a second tree beside the first), and a whole write is what follows a
+    /// restart or any failed write: forge stopped recording for good. A
+    /// reconcile writes only what differs, so it fits wherever the result
+    /// does, and a drop frees pages.
+    #[tokio::test]
+    async fn a_store_past_half_its_region_is_brought_up_to_date_by_what_differs() {
+        let size = 8 << 20;
+        let dev = mem(size).await;
+        let mut s = MetaV2::format(dev.clone(), 0, size).await.unwrap();
+        let mut bulk = Vec::new();
+        for v in 1..=8u8 {
+            for i in 0..8_500u64 {
+                bulk.push((k(v, i), vec![v ^ (i as u8); 30]));
+            }
+        }
+        s.replace_all(bulk.clone()).await.unwrap();
+        let full = s.usage();
+        let pct = full.pages_used as f64 / full.pages_total as f64;
+        assert!((0.55..0.85).contains(&pct), "filled to {:.0} % of the region", pct * 100.0);
+
+        // The old way, for the record: a second tree does not fit.
+        let e = s.replace_all(bulk.clone()).await.unwrap_err();
+        assert!(e.to_string().contains("metadata region full"), "{e}");
+        assert_eq!(s.usage().pages_used, full.pages_used, "a failed whole write leaves the store as it was");
+
+        // Nothing differs: nothing written.
+        assert_eq!(s.reconcile(bulk.clone()).await.unwrap(), 0);
+        assert_eq!(s.usage().pages_used, full.pages_used);
+
+        // Some changes still in the log (not in the tree) when it runs.
+        s.append(vec![Op::Put(k(2, 5), vec![0xEE; 40]), Op::Del(k(3, 7)), Op::Put(k(9, 1), vec![1; 10])])
+            .await
+            .unwrap();
+        let mut want: BTreeMap<Key, Vec<u8>> = bulk.into_iter().collect();
+        want.retain(|key, _| key.vol() != [4; 16]); // a volume deleted
+        want.insert(k(1, 100), vec![7; 33]); // changed
+        want.remove(&k(5, 200)); // an extent let go
+        want.insert(k(6, 99_999), vec![8; 12]); // a new extent
+        want.insert(k(3, 7), vec![3; 30]); // back after the log's delete
+        // k(2, 5) as the bulk had it (the log's put undone); k(9, *) gone.
+        let n = s.reconcile(want.clone().into_iter().collect()).await.unwrap();
+        assert_eq!(n, 2 + 4 + 1, "volumes 4 and 9 dropped, four puts, one delete");
+        let got: BTreeMap<Key, Vec<u8>> = s.scan().await.unwrap().into_iter().collect();
+        assert!(got == want, "the store holds what it was given");
+        assert!(s.usage().pages_used < full.pages_used, "the dropped volume's pages are free");
+        // And the disk alone says so.
+        let mut again = MetaV2::open(dev, 0, size).await.unwrap().unwrap();
+        let got: BTreeMap<Key, Vec<u8>> = again.scan().await.unwrap().into_iter().collect();
+        assert!(got == want, "reopened");
+        assert_eq!(again.usage().pages_used, s.usage().pages_used, "every page in use is named once");
     }
 
     /// Random puts, deletes and volume drops over a tree three levels deep,

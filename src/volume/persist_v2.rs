@@ -6,10 +6,14 @@
 //! moved, the volumes that came onto or left that sink. One log record and
 //! one flush per sink, where v1 wrote every volume's whole record.
 //!
-//! A sink is written whole (one checkpoint) when what it holds is not known:
+//! A sink is brought up to date whole (one checkpoint) when what it holds is
+//! not known:
 //! its first persist after a start (restore rebuilds the maps from the slot
 //! tables, so they may differ from what any record said), after a write to
-//! it failed, and when the GEM was not recording changes.
+//! it failed, and when the GEM was not recording changes. "Whole" is what is
+//! compared, not what is written: the store's tree is read and only the
+//! entries that differ are written (#546), so it never needs room for a
+//! second copy of itself.
 //!
 //! **Order.** Records are taken in generation order (under the manager) and
 //! written with no lock held (#269), so two persists may reach the device in
@@ -707,7 +711,13 @@ async fn apply_store(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::
                     return Ok(());
                 }
             }
-            store.replace_all(entries.clone()).await
+            // Only what differs is written (#546): a whole second tree beside
+            // the first needed room for both.
+            let n = store.reconcile(entries.clone()).await?;
+            if n > 0 {
+                tracing::debug!("metadata v2: {n} change(s) to bring the store up to date");
+            }
+            Ok(())
         }
         None => {
             if epoch != Some(b.epoch) {

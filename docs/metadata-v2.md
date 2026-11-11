@@ -198,7 +198,14 @@ on first open"), and as built:
   `DropVolume` for those that left it. Which volumes a sink carries is
   `per_slab_metadata`'s rule, with each volume's slabs kept between persists.
   The first persist after a start, after a failed write, or after the GEM was
-  not recording writes the sink whole (one checkpoint).
+  not recording brings the sink up to date whole (`MetaV2::reconcile`, one
+  checkpoint): every entry the sink should hold is compared with the tree,
+  read leaf by leaf, and only those that differ are written (#546). Until
+  #546 it built a second tree beside the first (`replace_all`), which needed
+  room for both: a region past half full could not be written whole again,
+  and since a failed write is followed by a whole write, one failure stopped
+  every persist after it (forge's hot slab, 2026-11-11). `replace_all` is
+  left for an empty store (a migration, `metadata.v2` grown).
 - **Order.** Batches are applied in the order their records were taken (a
   ticket per persist), never skipped for a newer one; a batch taken before a
   failure is dropped (the failure makes the next one whole), and a persist
