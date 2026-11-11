@@ -3345,6 +3345,11 @@ impl VolumeManager {
                 let sink = persist_v2::Sink::Slab(*slab_id);
                 let (needed, capacity) = match st.usage(sink) {
                     Some(u) => (u.pages_used * metav2::PAGE, u.pages_total * metav2::PAGE),
+                    None if st.is_stale(slab_id) => {
+                        // Full, and no longer written (#583).
+                        let c = reg.get(slab_id).map(|s| s.metadata_capacity()).unwrap_or(0);
+                        (c, c)
+                    }
                     None => (0, reg.get(slab_id).map(|s| s.metadata_capacity()).unwrap_or(0)),
                 };
                 out.push(MetadataPressure {

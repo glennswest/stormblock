@@ -985,3 +985,74 @@ async fn a_record_too_large_for_either_format_refuses_creates_until_deletes_make
     assert_eq!(read_first(&vm, "v0", 7).await, pattern(0, 7, 1));
     assert_eq!(read_first(&vm, "after", 0).await, pattern(9, 0, 9));
 }
+
+/// #583 (forge, 2026-11-11): a v2 slab's own region full while `metadata.v2`
+/// in the data directory takes every write. Restore reads the directory
+/// first, so the full region is a stale copy, not a record that cannot be
+/// written: creates and deletes go on, the slab is reported short, and a
+/// restart brings back what the directory holds.
+#[tokio::test]
+async fn a_full_slab_region_does_not_stop_a_node_with_a_data_directory() {
+    stormblock::drive::slab::set_default_format(SLAB_VERSION_2);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("metadata.v2"), b"").unwrap();
+    let dev = device("4G").await;
+    let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
+        .with_role(SlabRole::Data)
+        .with_version(SLAB_VERSION_2)
+        .with_metadata(1 << 20);
+    let s = Slab::format_with(dev.clone(), fmt).await.unwrap();
+    let sid = s.slab_id();
+    let mut vm = VolumeManager::with_data_dir(SLOT, dir.path().to_path_buf()).unwrap();
+    vm.add_slab(s).await;
+    vm.persist_to_slab(sid);
+    let stale = |p: &[stormblock::volume::MetadataPressure]| {
+        p.iter().any(|s| s.slab_id == sid.0.to_string() && !s.fits && s.needed_bytes == s.capacity_bytes)
+    };
+    let mut made = Vec::new();
+    let mut n = 0u64;
+    while !stale(&vm.metadata_pressure().await) {
+        let id = vm.create_volume_any(&format!("v{n}"), VOL).await.unwrap_or_else(|e| panic!("v{n}: {e}"));
+        let v = vm.get_volume(&id).unwrap();
+        for e in 0..8u64 {
+            v.write(e * SLOT, &pattern((n % 251) as u8, e, 1)).await.unwrap();
+        }
+        v.flush().await.unwrap();
+        vm.persist().await;
+        assert!(vm.durability_fault().is_none(), "v{n}: {:?}", vm.durability_fault());
+        made.push(format!("v{n}"));
+        n += 1;
+        assert!(n < 20_000, "the slab's region never filled");
+    }
+    // Past it: creates, and deletes, still written.
+    for i in 0..3u64 {
+        let id = vm.create_volume_any(&format!("after{i}"), VOL).await.expect("made with the region full");
+        let v = vm.get_volume(&id).unwrap();
+        v.write(0, &pattern(9, 0, i as u8)).await.unwrap();
+        v.flush().await.unwrap();
+        vm.persist_checked().await.expect("written to metadata.v2");
+    }
+    let gone: Vec<String> = made.iter().take(3).cloned().collect();
+    for name in &gone {
+        let id = vm.find_volume(name).await.unwrap();
+        vm.delete_volume(id).await.unwrap();
+        vm.persist_checked().await.expect("a delete is written");
+    }
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    eprintln!("#583: region full after {} volumes", made.len());
+    drop(vm);
+    let mut vm = VolumeManager::with_data_dir(SLOT, dir.path().to_path_buf()).unwrap();
+    vm.add_slab(Slab::open(dev).await.unwrap()).await;
+    vm.persist_to_slab(sid);
+    vm.restore().await.unwrap();
+    for name in &made {
+        assert_eq!(vm.find_volume(name).await.is_some(), !gone.contains(name), "{name} after a restart");
+    }
+    for i in 0..3u64 {
+        assert_eq!(read_first(&vm, &format!("after{i}"), 0).await, pattern(9, 0, i as u8));
+    }
+    // And the node goes on after the restart: the slab is found full again
+    // and left stale, the directory written.
+    vm.create_volume_any("restarted", VOL).await.expect("made after a restart");
+    vm.persist_checked().await.expect("written after a restart");
+}

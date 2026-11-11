@@ -10,6 +10,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.2.2] — 2026-11-11
+
+### Fixed
+- #583 (P0, forge since 2026-11-11 05:08Z): a v2 slab whose own metadata region is full no longer stops a node that keeps `metadata.v2` in its data directory. Restore reads the directory's copy first and that file grows, so when it took a write and only a slab region failed with `metadata region full`, the records are durable: the slab is marked stale (left out of persists until a restart, shown short in `/api/v1/slabs/durability`) and creates and deletes go on. Forge's hot slab at 96 % refused every create and delete for a day while its data-directory copy was written all along. Test `a_full_slab_region_does_not_stop_a_node_with_a_data_directory`.
+
 ## [v24.2.1] — 2026-11-10
 
 ### Fixed

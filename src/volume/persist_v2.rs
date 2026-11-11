@@ -143,6 +143,11 @@ pub(super) struct V2State {
     vol_slabs: HashMap<VolumeId, HashSet<SlabId>>,
     next_ticket: u64,
     order: Arc<Order>,
+    /// Slabs whose own region filled while `metadata.v2` took the record
+    /// (#583): not written again until a restart. The data directory's copy
+    /// is the one restore reads, so a full region is a stale fallback, not a
+    /// record that cannot be written.
+    stale: HashSet<SlabId>,
 }
 
 impl V2State {
@@ -152,6 +157,12 @@ impl V2State {
             s.need_full = true;
         }
         self.vol_slabs.clear();
+    }
+
+    /// Whether a slab's own copy stopped being written because its region
+    /// is full and the data directory holds the record (#583).
+    pub(super) fn is_stale(&self, id: &SlabId) -> bool {
+        self.stale.contains(id)
     }
 
     /// The store a sink has open, for the pressure report.
@@ -350,11 +361,19 @@ pub(super) struct Inputs<'a> {
 
 /// Work out each sink's batch. Called with the GEM read-locked, so the
 /// changes taken and the values read are one state.
-pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, input: Inputs<'_>) -> Option<V2Records> {
+pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, mut input: Inputs<'_>) -> Option<V2Records> {
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    // A stale slab copy is left out while the data directory takes the
+    // record (#583); with no data directory it is the record, and is tried.
+    if input.sinks.iter().any(|(s, _)| *s == Sink::Dir) {
+        let stale = &st.stale;
+        input.sinks.retain(|(s, _)| !matches!(s, Sink::Slab(id) if stale.contains(id)));
+    } else {
+        st.stale.clear();
+    }
     if input.sinks.is_empty() {
         return None;
     }
-    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     let configured: HashSet<Sink> = input.sinks.iter().map(|(s, _)| *s).collect();
     st.sinks.retain(|s, _| configured.contains(s));
     for (s, o) in &input.sinks {
@@ -520,7 +539,7 @@ pub(super) async fn apply(mut records: V2Records) -> Vec<String> {
             // In its turn, with what was queued before it written first.
             write_queued(&b, state).await;
             if let Err(e) = apply_one(&b, state).await {
-                failed.push(sink_failed(&b, state, e.to_string()));
+                failed.push((b.sink, sink_failed(&b, state, e.to_string())));
             }
         } else {
             let done = Done::default();
@@ -541,10 +560,38 @@ pub(super) async fn apply(mut records: V2Records) -> Vec<String> {
     .await;
     for ((b, _), end) in waiting.iter().zip(ended) {
         if let Err(e) = end {
-            failed.push(sink_failed(b, state, e));
+            failed.push((b.sink, sink_failed(b, state, e)));
         }
     }
-    failed
+    excuse_full_regions(state, failed)
+}
+
+/// A slab region that is full is not a record that cannot be written when
+/// `metadata.v2` took this write (#583): restore reads the data directory
+/// first, and its file grows. Such a slab is marked stale and left out until
+/// a restart, and only the other failures are reported. Forge, 2026-11-11:
+/// its hot slab's region at 96 % refused every create and every delete for
+/// a day, with the data directory's copy written all along.
+fn excuse_full_regions(state: &Arc<std::sync::Mutex<V2State>>, failed: Vec<(Sink, String)>) -> Vec<String> {
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    let dir_written = st.sinks.contains_key(&Sink::Dir) && !failed.iter().any(|(s, _)| *s == Sink::Dir);
+    let mut out = Vec::new();
+    for (sink, e) in failed {
+        match sink {
+            Sink::Slab(id) if dir_written && e.contains("metadata region full") => {
+                if st.stale.insert(id) {
+                    tracing::warn!(
+                        "slab {}: its own copy of the volume records is stale from now on ({e}); \
+                         {DIR_FILE} holds the record and restore reads it first (#583)",
+                        id.0
+                    );
+                }
+                st.sinks.remove(&sink);
+            }
+            _ => out.push(e),
+        }
+    }
+    out
 }
 
 /// The sink is written whole next time; what to report.
