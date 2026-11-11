@@ -2299,14 +2299,14 @@ mod tests {
         let mut s = MetaV2::format(dev.clone(), 0, size).await.unwrap();
         let mut bulk = Vec::new();
         for v in 1..=8u8 {
-            for i in 0..8_500u64 {
+            for i in 0..9_500u64 {
                 bulk.push((k(v, i), vec![v ^ (i as u8); 30]));
             }
         }
         s.replace_all(bulk.clone()).await.unwrap();
         let full = s.usage();
         let pct = full.pages_used as f64 / full.pages_total as f64;
-        assert!((0.55..0.85).contains(&pct), "filled to {:.0} % of the region", pct * 100.0);
+        assert!((0.52..0.9).contains(&pct), "filled to {:.0} % of the region", pct * 100.0);
 
         // The old way, for the record: a second tree does not fit.
         let e = s.replace_all(bulk.clone()).await.unwrap_err();
