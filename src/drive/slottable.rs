@@ -117,7 +117,6 @@ impl SlotTable {
     }
 
     fn page_of(idx: u64) -> (u64, usize) {
-        let idx = idx;
         (idx / ENTRIES_PER_PAGE, ((idx % ENTRIES_PER_PAGE) * SLOT_ENTRY_BYTES) as usize)
     }
 

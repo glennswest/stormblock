@@ -12547,7 +12547,7 @@ file = "{state}"
         assert_eq!(want.get("svc"), Some(&n_svc));
         drop(both);
         for alone in [&a, &b] {
-            let (m, _) = super::open_slabs_resuming(std::slice::from_ref(&alone), None, false).await.unwrap();
+            let (m, _) = super::open_slabs_resuming(std::slice::from_ref(alone), None, false).await.unwrap();
             assert_eq!(all_bytes(&m).await, want, "{alone} alone reads every volume, every byte");
         }
 
@@ -12574,7 +12574,7 @@ file = "{state}"
         assert!(report.kept.contains(&"state".to_string()), "{report:?}");
         assert!(flow.twin.is_some());
         for alone in [&a, &b] {
-            let (m, _) = super::open_slabs_resuming(std::slice::from_ref(&alone), None, false).await.unwrap();
+            let (m, _) = super::open_slabs_resuming(std::slice::from_ref(alone), None, false).await.unwrap();
             assert_eq!(volume_bytes(&m, "state").await.as_ref(), Some(&state_before), "{alone} alone: the node's state");
             assert_eq!(volume_bytes(&m, "pvc-pair").await, Some(vec![0x77u8; 4 * MIB as usize]), "{alone} alone: the PVC");
             assert_eq!(volume_bytes(&m, "svc").await.as_ref(), Some(&n1_svc), "{alone} alone: N+1's golden");
