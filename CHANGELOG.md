@@ -2,18 +2,6 @@
 
 ## [Unreleased]
 
-### 2026-11-12
-- **fix(#587):** a stale slab region that is still too full to be brought up to date in place when its retry is due is formatted empty and the record written into it whole, packed. The in-place retry at four fifths failed (`integration_metadata_v2::a_stale_slab_region_is_written_again_once_deletes_make_room`, #589) and each failure lowered the bar; the data directory holds the record, so the stale copy may be laid down afresh.
-- **fix(#585):** the flow-over and NIC test locks reset the process's flow-over progress (`FLOW`), storage path sources and path skips too: under `cargo test` a flow-over test counted every earlier flow-over's moves and persists, and the NIC planner test saw a config test's `lo`.
-- **docs:** the work plan and session history move from CLAUDE.md to docs/work-plan.md, unchanged. At their old size CLAUDE.md filled the session's context window, so the session compacted over and over.
-- **fix:** #587: a stale slab region (#583: full, with `metadata.v2` in the data directory taking the record) is written whole again once the node holds a fifth fewer volumes than when it filled, dropping the volumes it should no longer hold a few per checkpoint first, so the copy on write has free pages; a success makes it current again. Forge's slab stayed stale after GC freed 912 volumes, since nothing rewrote it short of a restart.
-- **fix:** #587: `/api/v1/slabs/durability` no longer reads a stale slab as short of room: each slab carries `stale`, a stale one does not count against `ok`, and a `stale` note names them and says the data directory holds the record. Forge read `ok:false` with every write durable.
-- **perf:** #587: a stale slab no longer makes every persist a whole write (it was counted as a sink with no store), so a node with one no longer reads every extent map into memory at every persist.
-- **test:** #585: `cargo test` (one process, tests as threads) passes like nextest does. Tests sharing process-wide state run one at a time: the flow-over tests hold `testlock::flow`, which clears the `STORMBLOCK_FLOW_*` knobs, the latency recorder and the hot-slot counts (in the lib's tests the recorder counts only what a test records), the NIC tests hold `testlock::net`, and the metadata-v2 tests hold a lock on the default slab format and put format 2 back when done. The lockwatch tests use a lock type of their own, the fence test counts only its own slab, and the loopback test says it is skipped when `lo` has no address (the build VM's case).
-- **fix(#585):** an attach of a volume this node does not hold no longer keeps the volume manager locked while it asks the peers: the manager's guard lived on through the `match` that took the peer path, and the peer attach takes the `/v1` state under it, against the #571 lock order (a deadlock with any `/v1` handler). Found by `integration_peers` under `cargo test`, where the lock tests' `STORMBLOCK_LOCK_ASSERT=1` reached it.
-- **feat(#585):** `nvmeof_dev::set_io_timeout` sets the NVMe/TCP command timeout for the process over `STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS`, which is read once by whichever command asks first.
-- **test(#585):** the TLS tests that make plain requests before a pair (counted, #525) hold the counting lock too, and the no-pair test reads its first count in plain; the ANA notice test looks for its own volume among other tests' notices.
-- **test(#585):** the in-process integration tests (`tests/it` under plain `cargo test`) pass too: the boot-override test sets its stormipmi in its own config, not `STORMBLOCK_BOOT_OVERRIDE_URL` (every other claim test read its hold); the NVMe/TCP tests that change the timeout, queues or NICs hold `common::nvme_tcp_env` and put them back; the plain-request count is measured from where it stood, under a lock; the seal digest is waited for up to 30 s.
 <!-- New unreleased changes go here -->
 
 ### 2026-11-10
@@ -22,6 +10,27 @@
 
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
+
+## [v24.3.0] — 2026-11-12
+
+### Added
+- #585: `nvmeof_dev::set_io_timeout` sets the NVMe/TCP command timeout for the process over `STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS`, which is read once by whichever command asks first.
+
+### Fixed
+- #587: a stale slab region that is still too full to be brought up to date in place when its retry is due is formatted empty and the record written into it whole, packed. The in-place retry at four fifths failed (`integration_metadata_v2::a_stale_slab_region_is_written_again_once_deletes_make_room`, #589) and each failure lowered the bar; the data directory holds the record, so the stale copy may be laid down afresh.
+- #585: the flow-over and NIC test locks reset the process's flow-over progress (`FLOW`), storage path sources and path skips too: under `cargo test` a flow-over test counted every earlier flow-over's moves and persists, and the NIC planner test saw a config test's `lo`.
+- #587: a stale slab region (#583: full, with `metadata.v2` in the data directory taking the record) is written whole again once the node holds a fifth fewer volumes than when it filled, dropping the volumes it should no longer hold a few per checkpoint first, so the copy on write has free pages; a success makes it current again. Forge's slab stayed stale after GC freed 912 volumes, since nothing rewrote it short of a restart.
+- #587: `/api/v1/slabs/durability` no longer reads a stale slab as short of room: each slab carries `stale`, a stale one does not count against `ok`, and a `stale` note names them and says the data directory holds the record. Forge read `ok:false` with every write durable.
+- #585: an attach of a volume this node does not hold no longer keeps the volume manager locked while it asks the peers: the manager's guard lived on through the `match` that took the peer path, and the peer attach takes the `/v1` state under it, against the #571 lock order (a deadlock with any `/v1` handler). Found by `integration_peers` under `cargo test`, where the lock tests' `STORMBLOCK_LOCK_ASSERT=1` reached it.
+
+### Changed
+- #587: a stale slab no longer makes every persist a whole write (it was counted as a sink with no store), so a node with one no longer reads every extent map into memory at every persist.
+- #585: `cargo test` (one process, tests as threads) passes like nextest does. Tests sharing process-wide state run one at a time: the flow-over tests hold `testlock::flow`, which clears the `STORMBLOCK_FLOW_*` knobs, the latency recorder and the hot-slot counts (in the lib's tests the recorder counts only what a test records), the NIC tests hold `testlock::net`, and the metadata-v2 tests hold a lock on the default slab format and put format 2 back when done. The lockwatch tests use a lock type of their own, the fence test counts only its own slab, and the loopback test says it is skipped when `lo` has no address (the build VM's case).
+- #585: the TLS tests that make plain requests before a pair (counted, #525) hold the counting lock too, and the no-pair test reads its first count in plain; the ANA notice test looks for its own volume among other tests' notices.
+- #585: the in-process integration tests (`tests/it` under plain `cargo test`) pass too: the boot-override test sets its stormipmi in its own config, not `STORMBLOCK_BOOT_OVERRIDE_URL` (every other claim test read its hold); the NVMe/TCP tests that change the timeout, queues or NICs hold `common::nvme_tcp_env` and put them back; the plain-request count is measured from where it stood, under a lock; the seal digest is waited for up to 30 s.
+
+### Documentation
+- the work plan and session history move from CLAUDE.md to docs/work-plan.md, unchanged. At their old size CLAUDE.md filled the session's context window, so the session compacted over and over.
 
 ## [v24.2.2] — 2026-11-11
 

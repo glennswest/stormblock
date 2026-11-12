@@ -15,6 +15,11 @@ test, `held_now(slab)`, the loopback test skips when `lo` has no address,
 `cargo test --locked` (several runs), check.sh; then close. Then #584
 (clippy -D warnings in check.sh).
 
+Verified at c840814e (2026-11-12): `cargo build --locked && cargo test
+--locked` lib 992 passed, tests/it 393 passed, 0 failed; `sh check.sh` ALL
+PASS (nextest 1385 passed). sc-build closed #585, #589, #590. Released in
+v24.3.0 with #587. Next: #584.
+
 ## #587 — a stale slab region brought back, and not counted against `ok` (2026-11-12, done in cfb56ce3)
 
 Forge after v24.2.2 (#583): its hot slab's region is full and marked stale,
