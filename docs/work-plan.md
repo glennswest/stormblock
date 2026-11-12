@@ -2,6 +2,20 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #584 — clippy `--all-targets -D warnings` clean, and in check.sh (2026-11-12)
+
+clippy 1.95 at 73239000: ~200 errors (needless_borrow in cli.rs, MSRV
+`is_none_or` 1.82 vs `rust-version = "1.75"`, type_complexity, sort_by_key,
+map.values()). #398 was the old filing. Plan:
+1. `rust-version = "1.82"`: the code already uses 1.82 APIs (`is_none_or`),
+   so 1.75 was never true; the build VMs run 1.95.
+2. `cargo clippy --fix` on a build VM, the patch carried off with
+   SC_BUILD_OUT and applied here; the rest by hand.
+3. `cargo clippy --all-targets --locked -- -D warnings` in check.sh, before
+   the tests; `[lints.rust] warnings = "deny"` is left to rustc's own check
+   (the clippy step denies warnings for every target already).
+4. CHANGELOG, README build section, close #584 (and #398 if open).
+
 ## #585 — `cargo test` passes as nextest does (2026-11-12, 4669c90f)
 
 sc-build's `cargo test --locked` runs the lib's and tests/it's tests as

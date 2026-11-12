@@ -12,7 +12,7 @@ authors = ["Glenn West"]
 description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"
 repository = "https://github.com/glennswest/stormblock"
 license = "TBD"
-rust-version = "1.75"
+rust-version = "1.82"
 # One in-process integration-test binary (tests/it), not one per file (#209).
 autotests = false
 # The benches are their own package (benches/Cargo.toml, #211); without this
