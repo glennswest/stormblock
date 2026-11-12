@@ -2029,6 +2029,7 @@ pin_cores = false
     /// the control channel keeps the management address.
     #[tokio::test]
     async fn the_data_path_is_advertised_on_the_storage_network_and_control_on_the_lan() {
+        let _serial = crate::testlock::net().await; // #585: process-wide NIC state
         let mut cfg: StormBlockConfig = toml::from_str(
             "[management]\nadvertised_addr = \"192.0.2.5\"\ndata_dir = \"/nonexistent/sb\"\n[storage]\ninterface = \"lo\"\nwait_secs = 1\n",
         )
@@ -2061,6 +2062,7 @@ pin_cores = false
     /// and say so; never the LAN, never the management address.
     #[tokio::test]
     async fn a_storage_interface_without_an_address_keeps_the_data_path_off_the_lan() {
+        let _serial = crate::testlock::net().await; // #585: process-wide NIC state
         let mut cfg: StormBlockConfig = toml::from_str(
             "[management]\nadvertised_addr = \"192.0.2.5\"\ninterface = \"lo\"\n[storage]\ninterface = \"nosuch0\"\nwait_secs = 0\n",
         )
@@ -2083,6 +2085,7 @@ pin_cores = false
     /// The control interface's address is the control fallback (#85).
     #[tokio::test]
     async fn the_control_interface_names_the_control_address() {
+        let _serial = crate::testlock::net().await; // #585: process-wide NIC state
         let mut cfg: StormBlockConfig = toml::from_str("[management]\ninterface = \"lo\"\n").unwrap();
         cfg.apply_networks().await;
         assert_eq!(cfg.management.interface_addr, Some("127.0.0.1".parse().unwrap()));

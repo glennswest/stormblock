@@ -12400,6 +12400,7 @@ file = "{state}"
     /// from it follows) and hold nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_system_moves_to_another_drive_and_the_old_one_points_to_it() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide flow-over state
         let Some(mkfs) = mkfs_ext4() else {
             eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
             return;
@@ -16749,6 +16750,7 @@ mod flow_boot_grace_tests {
     /// volume I/O has been still for the quiet window (#278).
     #[tokio::test]
     async fn a_quiet_node_gets_its_flow_over_after_the_quiet_window() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide flow-over state
         let busy = tokio::spawn(async {
             for _ in 0..10 {
                 crate::volume::thin::FOREGROUND_IO.fetch_add(1, Relaxed);
@@ -16765,6 +16767,7 @@ mod flow_boot_grace_tests {
     /// A node that never goes quiet still gets its flow-over at the bound.
     #[tokio::test]
     async fn a_busy_node_gets_its_flow_over_at_the_bound() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide flow-over state
         let busy = tokio::spawn(async {
             loop {
                 crate::volume::thin::FOREGROUND_IO.fetch_add(1, Relaxed);
