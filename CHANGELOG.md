@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+
+### 2026-11-12
+- **docs:** the work plan and session history move from CLAUDE.md to docs/work-plan.md, unchanged. At their old size CLAUDE.md filled the session's context window, so the session compacted over and over.
 <!-- New unreleased changes go here -->
 
 ### 2026-11-10
