@@ -241,6 +241,9 @@ A change to any of these needs a stormblock-test issue.
 `check.sh` builds the static (musl) `stormblock` the image carries. With
 `STORMBLOCK_TEST_DIR=<a stormblock-test checkout>`, it also runs that repo's
 own check (`test/check.sh`, the `short` suite) against this checkout.
+It then runs `cargo clippy --all-targets --workspace -- -D warnings`
+(#584): zero warnings, rustc's or clippy's. `Cargo.toml`'s `[lints.clippy]`
+allows three style lints, each with its reason.
 
 **Features** (`Cargo.toml`): `default = ["iscsi", "stormfs-data"]`;
 `cluster` is opt-in since #209. NVMe-oF/TCP is not a feature: it is always

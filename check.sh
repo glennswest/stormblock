@@ -15,6 +15,9 @@
 #      glennswest/stormblock-test (#371): with STORMBLOCK_TEST_DIR set to a
 #      checkout of it, its own check (test/check.sh, `short`) runs against
 #      this checkout too.
+#   1b. clippy over every target of the workspace with -D warnings (#584,
+#      #398; owner, stormcentral#193: zero build warnings). Three style lints
+#      are allowed in Cargo.toml's [lints.clippy], each with its reason.
 #   2. every initramfs shell test, under sh and busybox sh where it is there.
 #   3. the whole suite with cargo-nextest (installed when the build VM has
 #      none, stormcentral#534).
@@ -48,6 +51,9 @@ if [ -n "${STORMBLOCK_TEST_DIR:-}" ]; then
     echo "== check: stormblock-test's short suite against this checkout"
     STORM_COMPONENT_DIR="$root" sh "$STORMBLOCK_TEST_DIR/test/check.sh"
 fi
+
+echo "== check: clippy, every target, -D warnings (#584)"
+cargo clippy --all-targets --locked --workspace -- -D warnings
 
 echo "== check: initramfs tests"
 # The node name test asks busybox's real nslookup (#559): never skipped here.

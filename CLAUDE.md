@@ -71,6 +71,7 @@ in every checkout with `git config core.hooksPath .githooks`
 
 **The routine check is `check.sh`** (#357): the musl release build of
 `stormblock` (and stormblock-test's own check with `STORMBLOCK_TEST_DIR`, #371),
+`cargo clippy --all-targets --workspace -- -D warnings` (#584),
 every initramfs test under sh and busybox sh, the whole nextest suite, the
 runtime tests. Run
 it on a commit before calling it done: 87d2d99 reached main with neither its

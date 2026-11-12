@@ -16,6 +16,13 @@ map.values()). #398 was the old filing. Plan:
    (the clippy step denies warnings for every target already).
 4. CHANGELOG, README build section, close #584 (and #398 if open).
 
+- [x] a009f45a rust-version 1.82; 7b492c2d the machine-applicable fixes;
+  c795da9b and two follow-ups the rest by hand; `too_many_arguments`,
+  `type_complexity`, `result_large_err` allowed in `[lints.clippy]`.
+- [x] clippy --all-targets --workspace -D warnings rc=0 on a build VM.
+- [x] check.sh stage 1b; CHANGELOG, README, CLAUDE.md.
+- [ ] check.sh ALL PASS and `cargo build && cargo test` on the commit; close #584, #398.
+
 ## #585 — `cargo test` passes as nextest does (2026-11-12, 4669c90f)
 
 sc-build's `cargo test --locked` runs the lib's and tests/it's tests as
