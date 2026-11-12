@@ -2,6 +2,28 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #587 — a stale slab region brought back, and not counted against `ok` (2026-11-12, in progress)
+
+Forge after v24.2.2 (#583): its hot slab's region is full and marked stale,
+`metadata.v2` takes the record, creates work, but `/api/v1/slabs/durability`
+stays `ok:false` forever: nothing ever rewrites the region, even after GC
+freed 912 volumes.
+
+Plan:
+1. `/api/v1/slabs/durability`: each slab says `stale`; a stale slab (the data
+   directory holds its record) does not make `ok` false. `stale` listed.
+2. A stale slab is tried again, whole, when the node's volume count has
+   dropped to 80 % of what it was when the slab went stale (and at every
+   restart). A failed try sets a new baseline, so tries stay rare: a whole
+   write reads every map.
+3. A whole write into a full region that fails with `metadata region full`
+   first drops, in steps, the volumes the store holds and should not:
+   copy-on-write needs free pages to free pages, so one big reconcile of a
+   full region can fail where steps succeed. Each step is one checkpoint.
+4. A stale slab not due a try no longer makes every persist a whole one
+   (`rewrites` counted it as a sink that changed: maps never left memory).
+5. Test in tests/it/integration_metadata_v2.rs, CHANGELOG, README, docs.
+
 ## TODO — Implementation Roadmap
 
 ### Pacing: P0/P1 only until single-node stormcos is stable (master, 2026-10-17)
