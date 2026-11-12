@@ -823,10 +823,12 @@ async fn apply_store(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::
                     // Copy on write needs free pages to free pages (#587): let
                     // go of the volumes the store should no longer hold first,
                     // a few at a time, then try again.
-                    let again = if drop_in_steps(store, entries).await? == 0 {
-                        Err(e)
-                    } else {
-                        store.reconcile(entries.clone()).await
+                    // A region so full that not even one volume can be let
+                    // go of is as full as one where the reconcile after fails.
+                    let again = match drop_in_steps(store, entries).await {
+                        Ok(0) => Err(e),
+                        Ok(_) => store.reconcile(entries.clone()).await,
+                        Err(e) => Err(e),
                     };
                     match again {
                         Err(e) if stale_slab(b, state) && e.to_string().contains("metadata region full") => {
