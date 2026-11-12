@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-11-12
+- **fix(#587):** a stale slab region that is still too full to be brought up to date in place when its retry is due is formatted empty and the record written into it whole, packed. The in-place retry at four fifths failed (`integration_metadata_v2::a_stale_slab_region_is_written_again_once_deletes_make_room`, #589) and each failure lowered the bar; the data directory holds the record, so the stale copy may be laid down afresh.
 - **fix(#585):** the flow-over and NIC test locks reset the process's flow-over progress (`FLOW`), storage path sources and path skips too: under `cargo test` a flow-over test counted every earlier flow-over's moves and persists, and the NIC planner test saw a config test's `lo`.
 - **docs:** the work plan and session history move from CLAUDE.md to docs/work-plan.md, unchanged. At their old size CLAUDE.md filled the session's context window, so the session compacted over and over.
 - **fix:** #587: a stale slab region (#583: full, with `metadata.v2` in the data directory taking the record) is written whole again once the node holds a fifth fewer volumes than when it filled, dropping the volumes it should no longer hold a few per checkpoint first, so the copy on write has free pages; a success makes it current again. Forge's slab stayed stale after GC freed 912 volumes, since nothing rewrote it short of a restart.

@@ -213,8 +213,14 @@ on first open"), and as built:
   for it, until the node holds a fifth fewer volumes than when it filled;
   then it is written whole again (#587). That write lets go of the volumes
   the region should no longer hold first, a few per checkpoint (copy on
-  write needs free pages to free pages), then reconciles; a success clears
-  the mark, a failure sets a new baseline. A restart tries it too.
+  write needs free pages to free pages), then reconciles. If the region is
+  still too full for that, it is formatted empty and the record packed into
+  it whole: a stale region is not the record, so a cut between the two
+  leaves an empty copy and restore still reads `metadata.v2` first. A grown
+  tree takes more pages than a packed one, so without this a retry at four
+  fifths failed in the suite and each failure lowered the bar again. A
+  success clears the mark, a failure sets a new baseline. A restart tries it
+  too.
   `/api/v1/slabs/durability` reports such a slab `"stale": true` with a
   `stale` note, and does not count it against `ok`.
 - **Order.** Batches are applied in the order their records were taken (a

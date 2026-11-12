@@ -823,10 +823,17 @@ async fn apply_store(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::
                     // Copy on write needs free pages to free pages (#587): let
                     // go of the volumes the store should no longer hold first,
                     // a few at a time, then try again.
-                    if drop_in_steps(store, entries).await? == 0 {
-                        return Err(e);
+                    let again = if drop_in_steps(store, entries).await? == 0 {
+                        Err(e)
+                    } else {
+                        store.reconcile(entries.clone()).await
+                    };
+                    match again {
+                        Err(e) if stale_slab(b, state) && e.to_string().contains("metadata region full") => {
+                            rewrite_stale(&mut *g, b, entries).await?
+                        }
+                        r => r?,
                     }
-                    store.reconcile(entries.clone()).await?
                 }
                 r => r?,
             };
@@ -844,6 +851,45 @@ async fn apply_store(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::
             store.append(b.ops.clone()).await
         }
     }
+}
+
+/// Whether `b` writes a slab whose copy is stale (#583): the data directory
+/// holds the record, so the slab's own copy may be laid down afresh.
+fn stale_slab(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> bool {
+    match b.sink {
+        Sink::Slab(id) => state.lock().unwrap_or_else(|e| e.into_inner()).is_stale(&id),
+        Sink::Dir => false,
+    }
+}
+
+/// Write a stale slab's region whole on an empty store (#587). Brought up to
+/// date in place, its copy-on-write tree needs new pages before the old ones
+/// are free, and a region that filled stays too full to do that even with a
+/// fifth of its volumes gone (the retry at four fifths failed, and each
+/// failure lowered the bar again). The region is not the record while it is
+/// stale, so it is formatted empty and the record packed into it: a cut
+/// between the two leaves an empty copy, and restore reads `metadata.v2`
+/// first. The number of entries written.
+async fn rewrite_stale(
+    g: &mut Option<MetaV2>,
+    b: &Batch,
+    entries: &[(Key, Vec<u8>)],
+) -> std::io::Result<usize> {
+    let Opener::Region(dev, base, size) = &b.opener else {
+        return Err(std::io::Error::other("only a slab region is written afresh"));
+    };
+    *g = None;
+    let mut store = MetaV2::format(dev.clone(), *base, *size).await?;
+    store.replace_all(entries.to_vec()).await?;
+    *g = Some(store);
+    if let Sink::Slab(id) = b.sink {
+        tracing::info!(
+            "slab {}: its stale region formatted afresh and the {} entries {DIR_FILE} holds written whole (#587)",
+            id.0,
+            entries.len()
+        );
+    }
+    Ok(entries.len())
 }
 
 /// Drop from a full store, a few volumes per checkpoint, every volume it
