@@ -1052,8 +1052,84 @@ async fn a_full_slab_region_does_not_stop_a_node_with_a_data_directory() {
     for i in 0..3u64 {
         assert_eq!(read_first(&vm, &format!("after{i}"), 0).await, pattern(9, 0, i as u8));
     }
-    // And the node goes on after the restart: the slab is found full again
-    // and left stale, the directory written.
+    // And the node goes on after the restart: the slab is tried whole again
+    // (stale once more if it is still full), the directory written.
     vm.create_volume_any("restarted", VOL).await.expect("made after a restart");
     vm.persist_checked().await.expect("written after a restart");
+}
+
+#[tokio::test]
+async fn a_stale_slab_region_is_written_again_once_deletes_make_room() {
+    // #587: forge's slab stayed stale, and /slabs/durability ok:false, after
+    // GC freed 912 volumes. A stale slab is reported as such and not counted
+    // as short of room; once the node holds a fifth fewer volumes its region
+    // is written whole again, and is the record on its own.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("metadata.v2"), b"").unwrap();
+    let dev = device("4G").await;
+    let fmt = SlabFormat::new(SLOT, StorageTier::Hot)
+        .with_role(SlabRole::Data)
+        .with_version(SLAB_VERSION_2)
+        .with_metadata(1 << 20);
+    let s = Slab::format_with(dev.clone(), fmt).await.unwrap();
+    let sid = s.slab_id();
+    let mut vm = VolumeManager::with_data_dir(SLOT, dir.path().to_path_buf()).unwrap();
+    vm.add_slab(s).await;
+    vm.persist_to_slab(sid);
+    let mine = |p: Vec<stormblock::volume::MetadataPressure>| {
+        p.into_iter().find(|s| s.slab_id == sid.0.to_string()).expect("the slab is reported")
+    };
+    let mut made = Vec::new();
+    let mut n = 0u64;
+    while !mine(vm.metadata_pressure().await).stale {
+        let id = vm.create_volume_any(&format!("v{n}"), VOL).await.unwrap_or_else(|e| panic!("v{n}: {e}"));
+        let v = vm.get_volume(&id).unwrap();
+        for e in 0..8u64 {
+            v.write(e * SLOT, &pattern((n % 251) as u8, e, 1)).await.unwrap();
+        }
+        v.flush().await.unwrap();
+        vm.persist().await;
+        assert!(vm.durability_fault().is_none(), "v{n}: {:?}", vm.durability_fault());
+        made.push(format!("v{n}"));
+        n += 1;
+        assert!(n < 20_000, "the slab's region never filled");
+    }
+    let p = mine(vm.metadata_pressure().await);
+    assert!(!p.fits && p.stale, "{p:?}");
+    eprintln!("#587: region full after {} volumes", made.len());
+
+    // A tenth fewer: still left out, still stale, the record still durable.
+    let tenth = made.len() / 10;
+    for name in &made[..tenth] {
+        let id = vm.find_volume(name).await.unwrap();
+        vm.delete_volume(id).await.unwrap();
+        vm.persist_checked().await.expect("a delete is written");
+    }
+    assert!(mine(vm.metadata_pressure().await).stale, "tried before a fifth were gone");
+
+    // A third fewer: tried, written, current.
+    let gone = made.len() / 3;
+    for name in &made[tenth..gone] {
+        let id = vm.find_volume(name).await.unwrap();
+        vm.delete_volume(id).await.unwrap();
+        vm.persist_checked().await.expect("a delete is written");
+    }
+    let p = mine(vm.metadata_pressure().await);
+    assert!(!p.stale && p.fits, "the region is not current again: {p:?}");
+    assert!(vm.durability_fault().is_none(), "{:?}", vm.durability_fault());
+    // Written with the slab current: a create reaches both.
+    let id = vm.create_volume_any("after", VOL).await.expect("made");
+    let v = vm.get_volume(&id).unwrap();
+    v.write(0, &pattern(9, 0, 7)).await.unwrap();
+    v.flush().await.unwrap();
+    vm.persist_checked().await.expect("written");
+    drop(vm);
+
+    // The slab alone, no data directory: it holds the record.
+    let vm = reopen(&[dev]).await;
+    for (i, name) in made.iter().enumerate() {
+        assert_eq!(vm.find_volume(name).await.is_some(), i >= gone, "{name} from the slab alone");
+    }
+    assert_eq!(read_first(&vm, made.last().unwrap(), 0).await, pattern(((made.len() - 1) % 251) as u8, 0, 1));
+    assert_eq!(read_first(&vm, "after", 0).await, pattern(9, 0, 7));
 }

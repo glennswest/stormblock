@@ -625,12 +625,26 @@ pub async fn durability(State(state): State<Arc<AppState>>) -> Response {
     let slabs = mgr.metadata_pressure().await;
     drop(mgr);
 
+    // A stale slab (#583) does not count against `ok` (#587): its own copy is
+    // behind, but `metadata.v2` in the data directory holds the record and
+    // restore reads it first. Counted, a node whose every write is durable
+    // read as broken for as long as the region stayed full.
     let short: Vec<&crate::volume::MetadataPressure> =
-        slabs.iter().filter(|s| !s.fits).collect();
+        slabs.iter().filter(|s| !s.fits && !s.stale).collect();
+    let stale: Vec<&str> = slabs.iter().filter(|s| s.stale).map(|s| s.slab_id.as_str()).collect();
     Json(serde_json::json!({
         "ok": fault.is_none() && short.is_empty(),
         "fault": fault,
         "slabs": slabs,
+        "stale": if stale.is_empty() { serde_json::Value::Null } else {
+            serde_json::json!({
+                "slabs": stale,
+                "note": "these slabs' own metadata regions are full and their copy of the volume \
+                         record is behind; metadata.v2 in the data directory holds the record and \
+                         restore reads it first. Each is written whole again once the node holds a \
+                         fifth fewer volumes than when it filled, and at a restart",
+            })
+        },
         "remedy": if short.is_empty() { serde_json::Value::Null } else {
             serde_json::json!(
                 "a slab's metadata region is too small for the record it has to hold; \

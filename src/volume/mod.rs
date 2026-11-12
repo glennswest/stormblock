@@ -170,6 +170,11 @@ pub struct MetadataPressure {
     pub needed_bytes: u64,
     pub capacity_bytes: u64,
     pub fits: bool,
+    /// This slab's own region filled while the data directory's
+    /// `metadata.v2` took the record (#583): its copy is behind, the record
+    /// is durable, and the region is written whole again once the node holds
+    /// a fifth fewer volumes, or at a restart (#587).
+    pub stale: bool,
 }
 
 /// A metadata persist in progress, as `/debug/locks` and the API watchdog
@@ -3358,6 +3363,7 @@ impl VolumeManager {
                     needed_bytes: needed,
                     capacity_bytes: capacity,
                     fits: capacity > 0 && needed * 10 <= capacity * 9,
+                    stale: st.is_stale(slab_id),
                 });
             }
             return out;
@@ -3382,6 +3388,7 @@ impl VolumeManager {
                     needed_bytes: needed,
                     capacity_bytes: capacity,
                     fits: capacity > 0 && needed * 10 <= capacity * 9,
+                    stale: false,
                 });
                 continue;
             }
@@ -3393,6 +3400,7 @@ impl VolumeManager {
                 needed_bytes: needed,
                 capacity_bytes: capacity,
                 fits: capacity > 0 && needed <= capacity,
+                stale: false,
             });
         }
         out
@@ -3661,13 +3669,13 @@ impl VolumeManager {
             self.v2.lock().unwrap_or_else(|e| e.into_inner()).forget();
         }
         let names: Vec<Sink> = sinks.iter().map(|(s, _)| *s).collect();
-        if self.v2.lock().unwrap_or_else(|e| e.into_inner()).rewrites(&names) {
+        let headers = self.header_records().await;
+        if self.v2.lock().unwrap_or_else(|e| e.into_inner()).rewrites(&names, headers.len()) {
             // A store written whole reads every map it carries.
             if let Err(e) = gem::ensure_all_resident(&self.gem).await {
                 tracing::error!("metadata v2: loading extent maps before a whole write: {e}");
             }
         }
-        let headers = self.header_records().await;
         let pins: HashMap<VolumeId, SlabId> =
             self.volumes.iter().filter_map(|(id, h)| h.pinned_slab().map(|p| (*id, p))).collect();
         let roles: HashMap<VolumeId, SlabRole> =

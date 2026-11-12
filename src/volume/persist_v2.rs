@@ -144,10 +144,14 @@ pub(super) struct V2State {
     next_ticket: u64,
     order: Arc<Order>,
     /// Slabs whose own region filled while `metadata.v2` took the record
-    /// (#583): not written again until a restart. The data directory's copy
-    /// is the one restore reads, so a full region is a stale fallback, not a
-    /// record that cannot be written.
-    stale: HashSet<SlabId>,
+    /// (#583), each with how many volumes the node had then. The data
+    /// directory's copy is the one restore reads, so a full region is a
+    /// stale fallback, not a record that cannot be written. Tried again,
+    /// whole, once the node holds a fifth fewer volumes (#587), and at a
+    /// restart.
+    stale: HashMap<SlabId, usize>,
+    /// How many volumes the last persist was given.
+    last_total: usize,
 }
 
 impl V2State {
@@ -162,7 +166,20 @@ impl V2State {
     /// Whether a slab's own copy stopped being written because its region
     /// is full and the data directory holds the record (#583).
     pub(super) fn is_stale(&self, id: &SlabId) -> bool {
-        self.stale.contains(id)
+        self.stale.contains_key(id)
+    }
+
+    /// The stale slabs a persist of `total` volumes into `sinks` leaves out
+    /// (#583): all of them while the data directory takes the record, but
+    /// one whose node has lost a fifth of its volumes since is tried again
+    /// (#587). A try writes the slab whole, which reads every map, so it is
+    /// not made at every persist: a failed try sets a new baseline.
+    fn left_out(&self, sinks: &[Sink], total: usize) -> HashSet<SlabId> {
+        if !sinks.contains(&Sink::Dir) {
+            // With no data directory a slab's copy is the record: always tried.
+            return HashSet::new();
+        }
+        self.stale.iter().filter(|(_, then)| total * 5 > **then * 4).map(|(id, _)| *id).collect()
     }
 
     /// The store a sink has open, for the pressure report.
@@ -176,7 +193,12 @@ impl V2State {
 impl V2State {
     /// Whether a persist with these sinks writes a store whole (which reads
     /// every map it carries) or drops one (whose maps only it may hold).
-    pub(super) fn rewrites(&self, sinks: &[Sink]) -> bool {
+    ///
+    /// A stale slab left out counts as neither (#587): with it counted, a
+    /// node with one read every map at every persist.
+    pub(super) fn rewrites(&self, sinks: &[Sink], total: usize) -> bool {
+        let out = self.left_out(sinks, total);
+        let sinks: Vec<&Sink> = sinks.iter().filter(|s| !matches!(s, Sink::Slab(id) if out.contains(id))).collect();
         sinks.len() != self.sinks.len()
             || sinks.iter().any(|s| self.sinks.get(s).is_none_or(|x| x.need_full))
     }
@@ -364,12 +386,23 @@ pub(super) struct Inputs<'a> {
 pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, mut input: Inputs<'_>) -> Option<V2Records> {
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
     // A stale slab copy is left out while the data directory takes the
-    // record (#583); with no data directory it is the record, and is tried.
-    if input.sinks.iter().any(|(s, _)| *s == Sink::Dir) {
-        let stale = &st.stale;
-        input.sinks.retain(|(s, _)| !matches!(s, Sink::Slab(id) if stale.contains(id)));
-    } else {
-        st.stale.clear();
+    // record (#583), until it is due a try (#587); with no data directory it
+    // is the record, and is tried.
+    let names: Vec<Sink> = input.sinks.iter().map(|(s, _)| *s).collect();
+    let total = input.headers.len();
+    let out = st.left_out(&names, total);
+    input.sinks.retain(|(s, _)| !matches!(s, Sink::Slab(id) if out.contains(id)));
+    st.last_total = total;
+    for (s, _) in &input.sinks {
+        if let Sink::Slab(id) = s {
+            if let Some(then) = st.stale.get(id) {
+                tracing::info!(
+                    "slab {}: trying its own copy of the volume records again ({total} volumes, {then} when it \
+                     filled; #587)",
+                    id.0
+                );
+            }
+        }
     }
     if input.sinks.is_empty() {
         return None;
@@ -534,6 +567,7 @@ pub(super) async fn apply(mut records: V2Records) -> Vec<String> {
     let state = &records.state;
     let mut failed = Vec::new();
     let mut waiting = Vec::new();
+    let tried: Vec<Sink> = batches.iter().map(|b| b.sink).collect();
     for mut b in batches {
         if b.full.is_some() {
             // In its turn, with what was queued before it written first.
@@ -563,7 +597,7 @@ pub(super) async fn apply(mut records: V2Records) -> Vec<String> {
             failed.push((b.sink, sink_failed(b, state, e)));
         }
     }
-    excuse_full_regions(state, failed)
+    excuse_full_regions(state, &tried, failed)
 }
 
 /// A slab region that is full is not a record that cannot be written when
@@ -572,19 +606,43 @@ pub(super) async fn apply(mut records: V2Records) -> Vec<String> {
 /// a restart, and only the other failures are reported. Forge, 2026-11-11:
 /// its hot slab's region at 96 % refused every create and every delete for
 /// a day, with the data directory's copy written all along.
-fn excuse_full_regions(state: &Arc<std::sync::Mutex<V2State>>, failed: Vec<(Sink, String)>) -> Vec<String> {
+///
+/// A stale slab written whole again (#587) is current from then on.
+fn excuse_full_regions(
+    state: &Arc<std::sync::Mutex<V2State>>,
+    tried: &[Sink],
+    failed: Vec<(Sink, String)>,
+) -> Vec<String> {
     let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    for sink in tried {
+        if let Sink::Slab(id) = sink {
+            if !failed.iter().any(|(s, _)| s == sink) && st.stale.remove(id).is_some() {
+                tracing::info!(
+                    "slab {}: its own copy of the volume records is current again: written whole with \
+                     what {DIR_FILE} holds (#587)",
+                    id.0
+                );
+            }
+        }
+    }
     let dir_written = st.sinks.contains_key(&Sink::Dir) && !failed.iter().any(|(s, _)| *s == Sink::Dir);
+    let total = st.last_total;
     let mut out = Vec::new();
     for (sink, e) in failed {
         match sink {
             Sink::Slab(id) if dir_written && e.contains("metadata region full") => {
-                if st.stale.insert(id) {
-                    tracing::warn!(
+                match st.stale.insert(id, total) {
+                    None => tracing::warn!(
                         "slab {}: its own copy of the volume records is stale from now on ({e}); \
-                         {DIR_FILE} holds the record and restore reads it first (#583)",
+                         {DIR_FILE} holds the record and restore reads it first (#583). It is tried \
+                         again once the node holds a fifth fewer than {total} volumes (#587)",
                         id.0
-                    );
+                    ),
+                    Some(_) => tracing::info!(
+                        "slab {}: still too full for the record ({e}); tried again once the node holds \
+                         a fifth fewer than {total} volumes (#587)",
+                        id.0
+                    ),
                 }
                 st.sinks.remove(&sink);
             }
@@ -760,7 +818,18 @@ async fn apply_store(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::
             }
             // Only what differs is written (#546): a whole second tree beside
             // the first needed room for both.
-            let n = store.reconcile(entries.clone()).await?;
+            let n = match store.reconcile(entries.clone()).await {
+                Err(e) if matches!(b.sink, Sink::Slab(_)) && e.to_string().contains("metadata region full") => {
+                    // Copy on write needs free pages to free pages (#587): let
+                    // go of the volumes the store should no longer hold first,
+                    // a few at a time, then try again.
+                    if drop_in_steps(store, entries).await? == 0 {
+                        return Err(e);
+                    }
+                    store.reconcile(entries.clone()).await?
+                }
+                r => r?,
+            };
             if n > 0 {
                 tracing::debug!("metadata v2: {n} change(s) to bring the store up to date");
             }
@@ -775,6 +844,48 @@ async fn apply_store(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::
             store.append(b.ops.clone()).await
         }
     }
+}
+
+/// Drop from a full store, a few volumes per checkpoint, every volume it
+/// holds that `entries` does not name (#587). One reconcile that drops them
+/// all and adds what is new needs its new pages before the old ones are
+/// free; each step here frees pages for the next. The steps halve when one
+/// does not fit, down to one volume. How many volumes were dropped.
+///
+/// Every step is a record a restore could read after a cut: the store as
+/// it was, less volumes that are gone from it anyway.
+async fn drop_in_steps(store: &mut MetaV2, entries: &[(Key, Vec<u8>)]) -> std::io::Result<usize> {
+    let wanted: HashSet<[u8; 16]> = entries.iter().map(|(k, _)| k.vol()).collect();
+    let mut held = store.scan().await?;
+    let extra: Vec<[u8; 16]> = held
+        .iter()
+        .map(|(k, _)| k.vol())
+        .filter(|v| !wanted.contains(v))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut step = 64usize;
+    let mut done = 0;
+    while done < extra.len() {
+        let these: HashSet<[u8; 16]> = extra[done..(done + step).min(extra.len())].iter().copied().collect();
+        let target: Vec<(Key, Vec<u8>)> = held.iter().filter(|(k, _)| !these.contains(&k.vol())).cloned().collect();
+        match store.reconcile(target.clone()).await {
+            Ok(_) => {
+                done += these.len();
+                held = target;
+            }
+            Err(e) if step > 1 && e.to_string().contains("metadata region full") => step /= 2,
+            Err(e) if done > 0 => {
+                tracing::debug!("metadata v2: {done} volume(s) dropped before the region was full again: {e}");
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if done > 0 {
+        tracing::info!("metadata v2: {done} volume(s) the region no longer holds dropped first, in steps (#587)");
+    }
+    Ok(done)
 }
 
 /// The document `metadata.v2` in `dir` holds, if there is one.
