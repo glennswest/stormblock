@@ -277,7 +277,7 @@ async fn a_command_on_a_connection_that_went_silent_fails_in_bounded_time_and_th
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    std::env::set_var("STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS", "2");
+    let _env = common::nvme_tcp_env(Some(2)).await;
 
     let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;
     let (target, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
@@ -422,7 +422,7 @@ async fn killable_proxy(on: &str, to: std::net::SocketAddr) -> (std::net::Socket
 #[tokio::test]
 async fn two_paths_carry_the_io_and_one_dropping_leaves_the_other() {
     use stormblock::drive::nvmeof_dev::{NvmeTcpSpec, NvmeofDevice};
-    std::env::set_var("STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS", "3");
+    let _env = common::nvme_tcp_env(Some(3)).await;
     let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;
     let (target, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
     let (p1, _kill1) = killable_proxy("127.0.0.1:0", target).await;
@@ -641,7 +641,7 @@ async fn recording_proxy(
 #[tokio::test]
 async fn every_nic_that_reaches_the_target_carries_a_path() {
     use stormblock::drive::nvmeof_dev::{NvmeTcpSpec, NvmeofDevice};
-    std::env::set_var("STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS", "3");
+    let _env = common::nvme_tcp_env(Some(3)).await;
     // Two "NICs" on loopback addresses; the target is on their subnet.
     std::env::set_var("STORMBLOCK_IFADDRS", "nic0=127.0.0.1/8,nic1=127.0.0.2/8");
     let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;
@@ -699,7 +699,6 @@ async fn every_nic_that_reaches_the_target_carries_a_path() {
         dev.read(i * chunk as u64, &mut big).await.unwrap();
         assert!(big.iter().all(|b| *b == (i as u8).wrapping_add(1)), "block run {i}");
     }
-    std::env::remove_var("STORMBLOCK_IFADDRS");
     server.abort();
 }
 
@@ -844,6 +843,7 @@ async fn a_read_abandoned_before_its_answer_never_answers_the_next_command() {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     // One I/O connection, so the next command goes by the one left behind.
+    let _env = common::nvme_tcp_env(None).await;
     std::env::set_var("STORMBLOCK_NVME_TCP_QUEUES", "1");
 
     let (_dir, vol, _vm) = common::setup_raid1_volume(96 * 1024 * 1024, 45 * 1024 * 1024).await;

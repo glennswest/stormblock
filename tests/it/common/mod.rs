@@ -152,3 +152,27 @@ pub async fn slab_format_lock() -> SlabFormatGuard {
     static FORMAT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     SlabFormatGuard { _held: FORMAT.lock().await }
 }
+
+/// The NVMe/TCP initiator's settings are the process's: its command timeout
+/// (`nvmeof_dev::set_io_timeout`), `STORMBLOCK_NVME_TCP_QUEUES` and the NICs
+/// it binds paths to (`STORMBLOCK_IFADDRS`). A test that changes them holds
+/// this, so two such tests never run together, and on drop (also when the
+/// test panics) they are put back for the tests after it (#585).
+pub struct NvmeTcpEnv {
+    _held: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for NvmeTcpEnv {
+    fn drop(&mut self) {
+        stormblock::drive::nvmeof_dev::set_io_timeout(None);
+        std::env::remove_var("STORMBLOCK_NVME_TCP_QUEUES");
+        std::env::remove_var("STORMBLOCK_IFADDRS");
+    }
+}
+
+pub async fn nvme_tcp_env(io_timeout_secs: Option<u64>) -> NvmeTcpEnv {
+    static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let held = ENV.lock().await;
+    stormblock::drive::nvmeof_dev::set_io_timeout(io_timeout_secs.map(std::time::Duration::from_secs));
+    NvmeTcpEnv { _held: held }
+}

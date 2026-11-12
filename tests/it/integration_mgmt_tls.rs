@@ -721,6 +721,21 @@ async fn a_tls_file_that_is_there_and_broken_is_still_an_error() {
 }
 
 /// The value of one line of `/metrics`: the plain count of a caller and route.
+/// The plain-request counter is process-wide (the metrics recorder is), and
+/// every test in this binary shares it: the tests that count take this lock
+/// and count from what was there when they started (#585).
+async fn plain_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static L: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    L.lock().await
+}
+
+/// One caller + route's count, as `/metrics` serves it.
+async fn plain_caller_count(pki: &Pki, base: &str, caller: &str, route: &str) -> u64 {
+    let body = pki.client(None).get(format!("{base}/metrics")).bearer_auth(TOKEN).send().await.unwrap().text().await.unwrap();
+    let line = format!("stormblock_mgmt_plain_requests_total{{caller=\"{caller}\",route=\"{route}\"}} ");
+    body.lines().find_map(|l| l.strip_prefix(&line)).map(|v| v.parse::<u64>().unwrap()).unwrap_or(0)
+}
+
 async fn plain_count(pki: &Pki, base: &str, route: &str) -> u64 {
     let body = pki.client(None).get(format!("{base}/metrics")).bearer_auth(TOKEN).send().await.unwrap().text().await.unwrap();
     let want = format!("route=\"{route}\"");
@@ -758,23 +773,30 @@ async fn an_optional_listener_answers_both_and_counts_only_the_plain_one() {
     // A caller saying nothing keeps nobody else waiting.
     let _silent = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
 
+    // Counted from here: the counter is the process's (#585).
+    let _counting = plain_lock().await;
+    let get0 = plain_count(&pki, &tls, "GET /api/v1/volumes").await;
+    let post0 = plain_count(&pki, &tls, "POST /api/v1/volumes").await;
+    let id0 = plain_count(&pki, &tls, "GET /api/v1/volumes/…").await;
+    let caller0 = plain_caller_count(&pki, &tls, "127.0.0.1", "GET /api/v1/volumes").await;
+
     // The same request, both ways, the same answer.
     let over_tls = pki.client(None).get(format!("{tls}/api/v1/volumes")).bearer_auth(TOKEN).send().await.unwrap();
     assert_eq!(over_tls.status(), 200);
     let over_tls = over_tls.text().await.unwrap();
-    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, 0, "TLS is not counted");
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, get0, "TLS is not counted");
 
     let client = reqwest::Client::new();
     let over_plain = client.get(format!("{plain}/api/v1/volumes")).bearer_auth(TOKEN).send().await.unwrap();
     assert_eq!(over_plain.status(), 200);
     assert_eq!(over_plain.text().await.unwrap(), over_tls);
-    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, 1, "the plain one is");
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, get0 + 1, "the plain one is");
 
     // Each request, also on a connection kept; a refused one too (its token
     // would have crossed in the clear all the same).
     let r = client.get(format!("{plain}/api/v1/volumes")).send().await.unwrap();
     assert_eq!(r.status(), 401, "plain changes nothing about who may call");
-    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, 2);
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes").await, get0 + 2);
 
     // A body comes through the peek whole.
     let r = client
@@ -785,17 +807,14 @@ async fn an_optional_listener_answers_both_and_counts_only_the_plain_one() {
         .await
         .unwrap();
     assert!(r.status().is_success(), "a plain create: {}", r.status());
-    assert_eq!(plain_count(&pki, &tls, "POST /api/v1/volumes").await, 1);
+    assert_eq!(plain_count(&pki, &tls, "POST /api/v1/volumes").await, post0 + 1);
 
     // No id in a route, and the caller by address alone.
     let _ = client.get(format!("{plain}/api/v1/volumes/some-name-525")).bearer_auth(TOKEN).send().await.unwrap();
-    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes/…").await, 1);
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/volumes/…").await, id0 + 1);
     let body = pki.client(None).get(format!("{tls}/metrics")).bearer_auth(TOKEN).send().await.unwrap().text().await.unwrap();
     assert!(!body.contains("some-name-525"), "an id in a label");
-    assert!(
-        body.contains(r#"stormblock_mgmt_plain_requests_total{caller="127.0.0.1",route="GET /api/v1/volumes"} 2"#),
-        "{body}"
-    );
+    assert_eq!(plain_caller_count(&pki, &tls, "127.0.0.1", "GET /api/v1/volumes").await, caller0 + 2, "{body}");
 
     // One audit line per caller + route, however many requests.
     let mut lines = Vec::new();
@@ -848,6 +867,8 @@ async fn an_optional_listener_with_no_pair_yet_is_plain_then_both() {
     let tls = format!("https://127.0.0.1:{port}");
     let plain = format!("http://127.0.0.1:{port}");
 
+    let _counting = plain_lock().await;
+    let slabs0 = plain_count(&pki, &tls, "GET /api/v1/slabs").await;
     let r = reqwest::Client::new().get(format!("{plain}/api/v1/slabs")).bearer_auth(TOKEN).send().await.unwrap();
     assert_eq!(r.status(), 200, "no pair yet: plain");
     assert!(pki.client(None).get(format!("{tls}/api/v1/health")).send().await.is_err(), "no pair yet: no TLS");
@@ -866,7 +887,7 @@ async fn an_optional_listener_with_no_pair_yet_is_plain_then_both() {
 
     let r = reqwest::Client::new().get(format!("{plain}/api/v1/slabs")).bearer_auth(TOKEN).send().await.unwrap();
     assert_eq!(r.status(), 200, "a pair, and plain still answers");
-    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/slabs").await, 2, "both plain requests, either side of the pair");
+    assert_eq!(plain_count(&pki, &tls, "GET /api/v1/slabs").await, slabs0 + 2, "both plain requests, either side of the pair");
 }
 
 /// #525: `required`, also when it is not written down, refuses plain once there

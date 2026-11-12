@@ -347,6 +347,17 @@ fn sqe_cid(sqe: &[u8; 64]) -> u16 {
     u16::from_le_bytes([sqe[2], sqe[3]])
 }
 
+/// [`io_timeout`] set by the process itself, over the environment; 0 = not set.
+static IO_TIMEOUT_OVERRIDE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Set (or with `None` clear) [`io_timeout`] for this process. The environment
+/// is read once, by whichever command asks first; a test that needs a short
+/// timeout sets it here, where no other test's first command fixes it (#585).
+pub fn set_io_timeout(t: Option<std::time::Duration>) {
+    let ms = t.map(|d| d.as_millis().clamp(1, u64::MAX as u128) as u64).unwrap_or(0);
+    IO_TIMEOUT_OVERRIDE_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// How long one NVMe/TCP command may take before the connection is given up
 /// (#358): `STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS`, default 30 s, Linux's
 /// `nvme_core.io_timeout`. With no bound a command on a connection that died
@@ -355,6 +366,10 @@ fn sqe_cid(sqe: &[u8; 64]) -> u16 {
 /// stopped answering for hours. A timeout drops the connection, the command
 /// fails like any other I/O error, and the next one reconnects.
 pub fn io_timeout() -> std::time::Duration {
+    let set = IO_TIMEOUT_OVERRIDE_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if set > 0 {
+        return std::time::Duration::from_millis(set);
+    }
     static T: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
     *T.get_or_init(|| {
         let secs = std::env::var("STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS")

@@ -876,8 +876,10 @@ async fn a_sealed_volumes_seal_digest_is_taken_in_the_background_and_reported() 
     dev.flush().await.unwrap();
     n.state.volume_manager.lock().await.seal_volume(vid, None).await.unwrap();
 
+    // Up to 30 s: in one process with every other test (plain `cargo test`),
+    // the background digest shares the machine with them (#585).
     let mut seal = Value::Null;
-    for _ in 0..100 {
+    for _ in 0..600 {
         let r = c.get(format!("{}/volumes/{id}/digest", n.base)).bearer_auth(NODE).send().await.unwrap();
         let v: Value = r.json().await.unwrap();
         if !v["seal"].is_null() {

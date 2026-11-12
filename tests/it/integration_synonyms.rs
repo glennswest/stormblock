@@ -1885,11 +1885,15 @@ async fn forge_acts_on_a_machines_boot_override_and_reports_the_result() {
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let ipmi_addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, ipmi).await.unwrap() });
-    std::env::set_var("STORMBLOCK_BOOT_OVERRIDE_URL", format!("http://{ipmi_addr}"));
-
+    // This test's own config, never the process-wide env: every other claim
+    // test in this binary would read a "hold" from it (#585).
     let dir = TempDir::new().unwrap();
     let (mut state, v1, v2) = setup(&dir).await;
-    Arc::get_mut(&mut state).unwrap().claim_grace = std::time::Duration::ZERO;
+    {
+        let s = Arc::get_mut(&mut state).unwrap();
+        s.claim_grace = std::time::Duration::ZERO;
+        s.config.management.boot_override_url = Some(format!("http://{ipmi_addr}"));
+    }
     let (base, server) = start(state.clone()).await;
     let client = reqwest::Client::new();
     sealed(&state, &[v1, v2]).await;

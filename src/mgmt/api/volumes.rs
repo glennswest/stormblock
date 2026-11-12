@@ -2076,7 +2076,11 @@ async fn attach_volume(
         Err(r) => return r,
     };
     let vol_id = VolumeId(uuid);
-    let device = match state.volume_manager.lock().await.get_volume(&vol_id) {
+    // The manager's guard ends with this statement: in a `match` scrutinee it
+    // would live through the arms, and a peer's attach takes the /v1 state
+    // under it, against the lock order (#571, #585).
+    let found = state.volume_manager.lock().await.get_volume(&vol_id);
+    let device = match found {
         Some(d) => d,
         None if crate::mgmt::peers::configured(&state) => {
             let r = ApiError::not_found(format!("volume {uuid} not found"));
