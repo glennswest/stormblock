@@ -21,7 +21,7 @@ map.values()). #398 was the old filing. Plan:
   `type_complexity`, `result_large_err` allowed in `[lints.clippy]`.
 - [x] clippy --all-targets --workspace -D warnings rc=0 on a build VM.
 - [x] check.sh stage 1b; CHANGELOG, README, CLAUDE.md.
-- [ ] check.sh ALL PASS and `cargo build && cargo test` on the commit; close #584, #398.
+- [x] check.sh at a48f80e6 ALL PASS (nextest 1385/1385); cargo build+test pass, no warnings; #584 closed. #398 (same ask) left for the owner to close.
 
 ## #585 — `cargo test` passes as nextest does (2026-11-12, 4669c90f)
 
