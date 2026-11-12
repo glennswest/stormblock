@@ -56,6 +56,7 @@ async fn read_first(vm: &VolumeManager, name: &str, extent: u64) -> Vec<u8> {
 
 #[tokio::test]
 async fn a_v2_node_keeps_its_volumes_across_restarts() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     let dev = device("256M").await;
     let s = slab(&dev, SLAB_VERSION_2, SlabRole::Data).await;
     let sid = s.slab_id();
@@ -111,6 +112,7 @@ async fn a_v2_node_keeps_its_volumes_across_restarts() {
 /// record, not the volume's whole record.
 #[tokio::test]
 async fn a_persist_writes_what_changed() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     let dev = device("1G").await;
     let s = slab(&dev, SLAB_VERSION_2, SlabRole::Data).await;
     let sid = s.slab_id();
@@ -147,6 +149,7 @@ async fn a_persist_writes_what_changed() {
 /// restart finds.
 #[tokio::test]
 async fn persists_at_once_land_in_the_order_they_were_taken() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     let dev = device("512M").await;
     let s = slab(&dev, SLAB_VERSION_2, SlabRole::Data).await;
     let sid = s.slab_id();
@@ -202,6 +205,7 @@ async fn persists_at_once_land_in_the_order_they_were_taken() {
 /// its own format.
 #[tokio::test]
 async fn a_v1_slab_and_a_v2_slab_side_by_side() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     let (d1, d2) = (device("128M").await, device("128M").await);
     let s1 = slab(&d1, SLAB_VERSION, SlabRole::System).await;
     let s2 = slab(&d2, SLAB_VERSION_2, SlabRole::Data).await;
@@ -242,6 +246,7 @@ async fn a_v1_slab_and_a_v2_slab_side_by_side() {
 /// The data directory in format v2: `metadata.v2` instead of `volumes.dat`.
 #[tokio::test]
 async fn the_data_directory_keeps_metadata_v2() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     let dir = tempfile::tempdir().unwrap();
     // Already v2: the gate is not needed for a directory that has the file.
     std::fs::write(dir.path().join("metadata.v2"), b"").unwrap();
@@ -268,6 +273,7 @@ async fn the_data_directory_keeps_metadata_v2() {
 /// none of its slots; a write to it after a restart lands where it should.
 #[tokio::test]
 async fn an_idle_map_leaves_memory_and_comes_back() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     let dev = device("256M").await;
     let s = slab(&dev, SLAB_VERSION_2, SlabRole::Data).await;
     let sid = s.slab_id();
@@ -342,6 +348,7 @@ async fn an_idle_map_leaves_memory_and_comes_back() {
 /// done, the slab is v2 and its volumes come back.
 #[tokio::test]
 async fn a_v1_slab_migrates_in_place_and_a_cut_leaves_it_v1() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     // Format 1 until the migration (this test's process only, under nextest).
     stormblock::drive::slab::set_default_format(SLAB_VERSION);
     let dev = device("256M").await;
@@ -399,6 +406,7 @@ async fn a_v1_slab_migrates_in_place_and_a_cut_leaves_it_v1() {
 /// back at its size; a move never takes an extent into a slot of another size.
 #[tokio::test]
 async fn volumes_of_each_extent_size_live_in_their_own_pool() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     use stormblock::volume::{CreateOptions, BULK_EXTENT};
     const MIB: u64 = 1 << 20;
     let (d1, d8) = (device("512M").await, device("1G").await);
@@ -490,6 +498,7 @@ async fn read_at(vm: &VolumeManager, name: &str, off: u64) -> Vec<u8> {
 /// lost to a full file, and a restart reads what the grown file holds.
 #[tokio::test]
 async fn the_data_directory_file_grows_as_it_fills() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     std::env::set_var("STORMBLOCK_METADATA_DIR_INITIAL", (256 * 1024).to_string());
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("metadata.v2"), b"").unwrap();
@@ -532,6 +541,7 @@ async fn the_data_directory_file_grows_as_it_fills() {
 /// so an older engine finds no record rather than a stale one.
 #[tokio::test]
 async fn a_data_directory_moves_to_metadata_v2() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     stormblock::drive::slab::set_default_format(SLAB_VERSION);
     let dir = tempfile::tempdir().unwrap();
     let dev = device("128M").await;
@@ -577,6 +587,7 @@ async fn a_data_directory_moves_to_metadata_v2() {
 #[tokio::test]
 #[ignore]
 async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     use std::time::Instant;
     use stormblock::volume::redundancy::RedundancyPolicy;
     use stormblock::volume::CreateOptions;
@@ -766,6 +777,7 @@ async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
 /// and both panicked on a cold map.
 #[tokio::test]
 async fn copy_and_restripe_use_the_volumes_extent_size_and_load_a_cold_map() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     use stormblock::drive::slab::SlabRole;
     use stormblock::volume::{CreateOptions, RedundancyPolicy, BULK_EXTENT};
     const MIB: u64 = 1 << 20;
@@ -832,6 +844,7 @@ async fn copy_and_restripe_use_the_volumes_extent_size_and_load_a_cold_map() {
 /// freed the slots the durable records still named.
 #[tokio::test]
 async fn a_restripe_or_create_whose_records_fail_frees_nothing_and_says_so() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     use stormblock::volume::RedundancyPolicy;
     let name = format!("mv2-witness-{}", uuid::Uuid::new_v4());
     let witness = stormblock::drive::open_path(&format!("emulated://{name}?size=64M"), false).await.unwrap();
@@ -939,6 +952,7 @@ async fn outgrow_format_1(extents: u64) -> (VolumeManager, Vec<String>, stormblo
 /// what is left is there and what was deleted is not.
 #[tokio::test]
 async fn a_record_too_large_for_either_format_refuses_creates_until_deletes_make_room() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     let (mut vm, made, sid, dev, capacity) = outgrow_format_1(8).await;
     // What the last record written (just under a copy) takes in format 2:
     // each entry a 25-byte key and its length beside the value, in 4 KiB
@@ -993,6 +1007,7 @@ async fn a_record_too_large_for_either_format_refuses_creates_until_deletes_make
 /// restart brings back what the directory holds.
 #[tokio::test]
 async fn a_full_slab_region_does_not_stop_a_node_with_a_data_directory() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     // No set_default_format: the slab is v2 by its format and the directory
     // by its file, so the process-wide default other tests flip does not race it.
     let dir = tempfile::tempdir().unwrap();
@@ -1060,6 +1075,7 @@ async fn a_full_slab_region_does_not_stop_a_node_with_a_data_directory() {
 
 #[tokio::test]
 async fn a_stale_slab_region_is_written_again_once_deletes_make_room() {
+    let _format = crate::common::slab_format_lock().await; // #585: the default format is process-wide
     // #587: forge's slab stayed stale, and /slabs/durability ok:false, after
     // GC freed 912 volumes. A stale slab is reported as such and not counted
     // as short of room; once the node holds a fifth fewer volumes its region

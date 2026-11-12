@@ -24,6 +24,8 @@ pub mod logging;
 pub mod logcast;
 pub mod lockwatch;
 pub mod fglat;
+#[cfg(test)]
+mod testlock;
 pub mod flowhot;
 pub mod flowprogress;
 pub mod retry;

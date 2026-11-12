@@ -85,6 +85,11 @@ pub fn moving() -> bool {
 
 /// Count one request of `class` that took `took`.
 pub fn record(class: Class, took: Duration) {
+    // The lib's tests run in one process, and every volume I/O any of them
+    // does would land here: a test sees only what it records (#585).
+    if cfg!(test) {
+        return;
+    }
     record_at(class, MOVING.load(Relaxed), now_second(), took);
 }
 
@@ -162,6 +167,22 @@ pub fn record_for_test(class: Class, moving: bool, took: Duration, n: u64) {
     }
 }
 
+/// For tests: nothing counted, no flow-over moving (#585).
+#[cfg(test)]
+pub(crate) fn clear_for_test() {
+    for class in &BUCKETS {
+        for phase in class {
+            for b in phase {
+                b.second.store(0, Relaxed);
+                for x in &b.bins {
+                    x.store(0, Relaxed);
+                }
+            }
+        }
+    }
+    MOVING.store(false, Relaxed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +197,7 @@ mod tests {
 
     #[test]
     fn a_quantile_is_of_the_window_and_the_phase_asked_for() {
+        let _serial = crate::testlock::flow_blocking(); // #585: process-wide state, one test at a time
         // Seconds far from anything a real record uses, so other tests in
         // this process do not land in them.
         let now = 1_000_000;

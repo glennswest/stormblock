@@ -455,7 +455,12 @@ mod tests {
 
     #[test]
     fn loopback_has_its_address_and_a_state() {
-        let a = primary_address("lo").expect("lo has an address");
+        let _serial = crate::testlock::net_blocking(); // #585: process-wide state, one test at a time
+        // What it requires (#585): a loopback the kernel lists an address on.
+        let Some(a) = primary_address("lo") else {
+            eprintln!("skipped: lo has no address on this machine");
+            return;
+        };
         assert!(a.is_loopback());
         let s = state_of("lo", Some(a), None);
         assert_eq!(s.state, "up", "{s:?}");
@@ -469,6 +474,7 @@ mod tests {
 
     #[test]
     fn a_link_that_is_down_says_so() {
+        let _serial = crate::testlock::net_blocking(); // #585: process-wide state, one test at a time
         let dir = tempfile::tempdir().unwrap();
         let ifdir = dir.path().join("lo");
         std::fs::create_dir_all(&ifdir).unwrap();
@@ -484,6 +490,7 @@ mod tests {
 
     #[test]
     fn a_wildcard_bind_is_narrowed_to_the_storage_address() {
+        let _serial = crate::testlock::net_blocking(); // #585: process-wide state, one test at a time
         let wild: SocketAddr = "0.0.0.0:4420".parse().unwrap();
         let fixed: SocketAddr = "192.0.2.7:4420".parse().unwrap();
         set_data_address(None);
@@ -496,6 +503,7 @@ mod tests {
 
     #[test]
     fn every_storage_address_is_bound_and_paths_spread_over_the_nics() {
+        let _serial = crate::testlock::net_blocking(); // #585: process-wide state, one test at a time
         let a: IpAddr = "10.99.0.1".parse().unwrap();
         let b: IpAddr = "10.99.0.11".parse().unwrap();
         set_data_addresses(vec![a, b]);
@@ -524,6 +532,7 @@ mod tests {
 
     #[test]
     fn every_nic_that_reaches_a_target_is_a_path_unless_skipped() {
+        let _serial = crate::testlock::net_blocking(); // #585: process-wide state, one test at a time
         // Two NICs on the target's subnet, one elsewhere (#450).
         std::env::set_var("STORMBLOCK_IFADDRS", "nic0=127.0.0.1/8,nic1=127.0.0.2/8,other=10.77.0.1/24");
         let t: IpAddr = "127.0.0.1".parse().unwrap();

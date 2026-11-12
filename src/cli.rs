@@ -10780,6 +10780,7 @@ mod install_tests {
     /// fresh open of the image and the disk (the engine that adopts the boot).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_fresh_install_seeds_every_data_volume_byte_for_byte() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let Some(mkfs) = mkfs_ext4() else {
             eprintln!("SKIP: needs e2fsprogs mkfs.ext4 (the golden is made by it, #239)");
             return;
@@ -11076,6 +11077,7 @@ file = "{state}"
     /// disk, fetches what it misses from the image and finishes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn the_data_half_moves_while_written_and_a_cut_resumes_it() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let dir = tempfile::tempdir().unwrap();
         let p = |n: &str| dir.path().join(n).display().to_string();
         let mut seed = 0x285u64;
@@ -11342,6 +11344,7 @@ file = "{logs}"
     /// before #239 (expected to fail: those writes are not on the fresh one).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_power_cut_anywhere_in_the_flow_over_keeps_every_acknowledged_write() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         if std::env::var("RELOCATE_OFF_239").is_ok() {
             crate::volume::fence::RELOCATE_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -11721,6 +11724,7 @@ file = "{state}"
     /// under the same ids; N+1 is held; the second drive is untouched.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_install_over_a_node_keeps_every_byte_of_its_data_half() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::slab::SlabRole;
         let Some(mkfs) = mkfs_ext4() else {
             eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
@@ -11848,6 +11852,7 @@ file = "{state}"
     /// alone, and the node's data keeps every byte under its id.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_held_disk_whose_root_fails_is_laid_again_keeping_its_data() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let Some(mkfs) = mkfs_ext4() else {
             eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
             return;
@@ -12136,6 +12141,7 @@ file = "{state}"
     /// after the handover and the flow-over, and from the disk alone.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_data_half_cut_short_mid_flow_over_gets_its_goldens_from_the_release() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::slab::SlabRole;
         use crate::volume::metadata::Origin;
         let Some(mkfs) = mkfs_ext4() else {
@@ -12249,6 +12255,7 @@ file = "{state}"
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_install_carries_the_nodes_system_half_volumes_and_drops_the_old_releases() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::slab::SlabRole;
         use crate::volume::metadata::Origin;
         let Some(mkfs) = mkfs_ext4() else {
@@ -12724,6 +12731,7 @@ file = "{state}"
     /// either drive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_system_drive_without_room_for_an_update_is_refused_and_nothing_written() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let Some(mkfs) = mkfs_ext4() else {
             eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
             return;
@@ -13167,6 +13175,7 @@ file = "{state}"
     /// out at 60 s for the whole install.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_flow_over_copy_holds_no_lock_the_node_needs() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
@@ -13284,6 +13293,7 @@ file = "{state}"
     /// the way), and every byte reads as written.
     #[tokio::test]
     async fn an_extent_whose_read_failed_once_moves_on_the_next_pass() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
@@ -13347,6 +13357,7 @@ file = "{state}"
     /// done, never going up on the way.
     #[tokio::test]
     async fn the_flow_over_counts_down_what_is_left_on_the_appliance() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
@@ -13411,6 +13422,7 @@ file = "{state}"
     /// back as it was, and nothing is left on the source.
     #[tokio::test]
     async fn a_flow_over_writes_large_runs_in_disk_order_and_does_not_copy_zeros() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::drive::DriveResult;
@@ -13566,6 +13578,7 @@ file = "{state}"
     /// destination's flush time held it to one extent per flush.
     #[tokio::test]
     async fn a_flow_over_runs_flat_out_onto_a_slow_flushing_disk_and_persists_in_batches() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
@@ -13632,6 +13645,7 @@ file = "{state}"
     /// (smaller windows, pauses, said in health) and still moves everything.
     #[tokio::test]
     async fn a_flow_over_backs_off_when_the_node_is_slower_for_it() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::fglat::{record_for_test, Class};
@@ -13696,6 +13710,7 @@ file = "{state}"
     /// windows of 4 the first window is those four, and health counts them.
     #[tokio::test]
     async fn the_extents_the_node_reads_from_the_appliance_move_first() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
@@ -13904,6 +13919,7 @@ file = "{state}"
     /// neighbours in one read, however the flow-over listed them.
     #[tokio::test]
     async fn the_validation_reads_the_disk_in_order_and_merges_neighbours() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let dir = tempfile::tempdir().unwrap();
         let (mgr, held, local_id, dev, _golden) = flowed_for_validation(dir.path(), false).await;
         held.moved.lock().unwrap().reverse();
@@ -13946,6 +13962,7 @@ file = "{state}"
     /// bad sector: the rest are checked alone and pass, and that one is named.
     #[tokio::test]
     async fn a_bad_sector_in_a_merged_read_costs_only_its_extent() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let dir = tempfile::tempdir().unwrap();
         let (mgr, held, local_id, dev, _golden) = flowed_for_validation(dir.path(), false).await;
         let (_, dest) = *held.moved.lock().unwrap().iter().find(|(src, _)| src.slot_idx == 3).expect("a moved slot");
@@ -13975,6 +13992,7 @@ file = "{state}"
     /// source slots are freed only after it passes.
     #[tokio::test]
     async fn the_validation_catches_a_flipped_byte_and_repairs_it_from_the_appliance() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let dir = tempfile::tempdir().unwrap();
         let (mgr, held, local_id, dev, golden) = flowed_for_validation(dir.path(), false).await;
         // A byte of a golden's slot changes on the disk.
@@ -14166,6 +14184,7 @@ file = "{state}"
     /// up to; and every slot is still let go, on the device too.
     #[tokio::test]
     async fn letting_go_of_a_flow_overs_sources_keeps_no_reader_waiting() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         const TRIP_MS: u64 = 50;
         let dir = tempfile::tempdir().unwrap();
         let ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -14216,6 +14235,7 @@ file = "{state}"
     /// what the node is left with.
     #[tokio::test]
     async fn a_held_flow_over_skips_the_read_back_and_the_validation_catches_a_lying_drive() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         const SLOT: u64 = 64 * 1024;
         let dir = tempfile::tempdir().unwrap();
         let lying = std::sync::Arc::new(std::sync::Mutex::new(None::<Arc<Lying>>));
@@ -14256,6 +14276,7 @@ file = "{state}"
     /// as it is written (#239), and a lying drive's copy fails at the move.
     #[tokio::test]
     async fn a_flow_over_without_a_validation_reads_every_copy_back() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         const SLOT: u64 = 64 * 1024;
         let dir = tempfile::tempdir().unwrap();
         let lying = std::sync::Arc::new(std::sync::Mutex::new(None::<Arc<Lying>>));
@@ -14287,6 +14308,7 @@ file = "{state}"
     /// are the sources freed.
     #[tokio::test]
     async fn a_cut_during_the_validation_lets_go_of_nothing() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         std::env::set_var("STORMBLOCK_FLOW_WINDOW", "2");
         std::env::set_var("STORMBLOCK_FLOW_PARALLEL", "1");
         let dir = tempfile::tempdir().unwrap();
@@ -14323,6 +14345,7 @@ file = "{state}"
     /// appliance's slot, and the volume reads right (from there).
     #[tokio::test]
     async fn a_drive_that_does_not_keep_what_it_is_given_is_corrupt_and_read_from_the_appliance() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let dir = tempfile::tempdir().unwrap();
         let (mgr, held, local_id, dev, golden) = flowed_for_validation(dir.path(), true).await;
         let (src, dest) = *held.moved.lock().unwrap().iter().find(|(s, _)| s.slot_idx == 5).unwrap();
@@ -14356,6 +14379,7 @@ file = "{state}"
     /// closes (expected to fail then; not part of the routine check).
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn the_flow_over_moves_a_live_clone_without_losing_a_byte() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
@@ -14527,6 +14551,7 @@ file = "{state}"
     /// bytes. `FENCE_OFF_239=1` shows what it did before: zeros.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_io_that_found_its_slot_before_a_move_reads_what_was_there() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use crate::drive::filedev::FileDevice;
         use crate::drive::slab::{Slab, SlabFormat, SlabRole};
         use crate::placement::topology::StorageTier;
@@ -14987,6 +15012,7 @@ file = "{state}"
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn a_real_release_installs_byte_for_byte() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         let Ok(image) = std::env::var("AUDIT_239_IMAGE") else {
             eprintln!("SKIP: set AUDIT_239_IMAGE to a release image");
             return;
@@ -15619,6 +15645,7 @@ mod forge_mode_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     #[ignore]
     async fn flow_over_rate_model() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         use std::time::{Duration, Instant};
         let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
         let extents = env("FLOW_MODEL_EXTENTS", 1500);
@@ -16506,6 +16533,7 @@ mod flow_over_api_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore]
     async fn server3_api_during_flow_over() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
         std::env::set_var("STORMBLOCK_TASK_DUMP", "1"); // a model that dumps (#368: off by default)
         const SLOT: u64 = 1024 * 1024;
         const MIB: u64 = 1024 * 1024;
@@ -16753,6 +16781,7 @@ mod flow_boot_grace_tests {
     /// one 90 s (#278); each its own variable.
     #[test]
     fn an_install_boot_waits_less_than_a_resumed_flow_over() {
+        let _serial = crate::testlock::flow_blocking(); // #585: process-wide state, one test at a time
         // Neither variable set in this test's process (nextest: one process
         // a test).
         if std::env::var_os("STORMBLOCK_FLOW_INSTALL_GRACE_SECS").is_some()

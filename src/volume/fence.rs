@@ -209,10 +209,11 @@ pub fn try_exclusive(leg: Leg) -> Option<Exclusive> {
     Some(Exclusive { leg, _guard: Some(g) })
 }
 
-/// Slots with a lock in the table now (tests).
+/// Slots of `slab` with a lock in the table now (tests: only their own
+/// slab, since every test's I/O shares the table, #585).
 #[cfg(test)]
-fn held_now() -> usize {
-    FENCE.iter().map(|t| t.lock().unwrap().len()).sum()
+fn held_now(slab: crate::drive::slab::SlabId) -> usize {
+    FENCE.iter().map(|t| t.lock().unwrap().keys().filter(|l| l.slab_id == slab).count()).sum()
 }
 
 #[cfg(test)]
@@ -257,6 +258,6 @@ mod tests {
         w.abort();
         let _ = w.await;
         drop(ex);
-        assert_eq!(held_now(), 0, "every lock dropped with its last guard");
+        assert_eq!(held_now(leg(0).slab_id), 0, "every lock dropped with its last guard");
     }
 }

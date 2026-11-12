@@ -626,14 +626,19 @@ pub fn line(v: &LockView) -> String {
 mod tests {
     use super::*;
 
-    struct VolumeManager;
+    // Each test its own lock type: `snapshot()` is every lock in the
+    // process, and other tests' real volume managers are in it too (#585).
+    struct NamedLock;
+    struct PanicLock;
+    struct CancelLock;
+    struct WaitLock;
 
     #[tokio::test]
     async fn a_holder_is_named_and_gone_when_its_guard_drops() {
-        let m = Arc::new(TrackedMutex::new(VolumeManager));
+        let m = Arc::new(TrackedMutex::new(NamedLock));
         let g = named("POST /api/v1/volumes/x/clone (req 39)", async { m.lock().await }).await;
         let held = |s: &[LockView]| -> Vec<String> {
-            s.iter().filter(|v| v.lock == "volume manager").flat_map(|v| v.holders.iter().map(|h| h.who.to_string())).collect()
+            s.iter().filter(|v| v.lock == name_of::<NamedLock>()).flat_map(|v| v.holders.iter().map(|h| h.who.to_string())).collect()
         };
         assert_eq!(held(&snapshot()), vec!["POST /api/v1/volumes/x/clone (req 39)".to_string()]);
         // A waiter is listed while it waits, and gone when it is dropped
@@ -641,19 +646,19 @@ mod tests {
         let m2 = m.clone();
         let waiter = tokio::spawn(named("GET /api/v1/volumes (req 42)", async move { m2.lock().await; }));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let v = snapshot().into_iter().find(|v| v.lock == "volume manager").unwrap();
+        let v = snapshot().into_iter().find(|v| v.lock == name_of::<NamedLock>()).unwrap();
         assert_eq!(v.waiters.len(), 1);
         assert!(line(&v).contains("held") && line(&v).contains("1 waiting") && line(&v).contains("req 42"), "{}", line(&v));
         waiter.abort();
         let _ = waiter.await;
-        assert!(snapshot().iter().find(|v| v.lock == "volume manager").unwrap().waiters.is_empty());
+        assert!(snapshot().iter().find(|v| v.lock == name_of::<NamedLock>()).unwrap().waiters.is_empty());
         drop(g);
         assert!(held(&snapshot()).is_empty(), "a dropped guard leaves no holder");
     }
 
     #[tokio::test]
     async fn a_panic_while_holding_leaves_the_lock_free_and_unclaimed() {
-        let m = Arc::new(TrackedMutex::new(VolumeManager));
+        let m = Arc::new(TrackedMutex::new(PanicLock));
         let m2 = m.clone();
         let r = tokio::spawn(async move {
             let _g = m2.lock().await;
@@ -662,7 +667,7 @@ mod tests {
         .await;
         assert!(r.is_err());
         assert!(m.try_lock().is_ok(), "the next caller proceeds at once");
-        let v = snapshot().into_iter().find(|v| v.lock == "volume manager");
+        let v = snapshot().into_iter().find(|v| v.lock == name_of::<PanicLock>());
         assert!(v.map(|v| v.holders.is_empty()).unwrap_or(true));
     }
 
@@ -672,11 +677,11 @@ mod tests {
     /// named.
     #[tokio::test]
     async fn a_holder_cancelled_mid_io_or_failing_leaves_the_lock_free_and_unclaimed() {
-        let m = Arc::new(TrackedMutex::new(VolumeManager));
+        let m = Arc::new(TrackedMutex::new(CancelLock));
         let unclaimed = || {
             snapshot()
                 .into_iter()
-                .filter(|v| v.lock == "volume manager")
+                .filter(|v| v.lock == name_of::<CancelLock>())
                 .all(|v| v.holders.iter().all(|h| !h.who.contains("cancelled") && !h.who.contains("failing")))
         };
 
@@ -692,7 +697,7 @@ mod tests {
         assert!(m.try_lock().is_ok(), "free once cancelled");
         assert!(unclaimed());
 
-        async fn halfway(m: &TrackedMutex<VolumeManager>) -> Result<(), &'static str> {
+        async fn halfway(m: &TrackedMutex<CancelLock>) -> Result<(), &'static str> {
             let _g = m.lock().await;
             tokio::task::yield_now().await;
             Err("the device said no")?;
@@ -723,7 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn lock_wait_is_added_up_for_the_activity() {
-        let m = Arc::new(TrackedMutex::new(VolumeManager));
+        let m = Arc::new(TrackedMutex::new(WaitLock));
         let g = m.lock().await;
         let a = Activity::new("GET /api/v1/fstemplates (req 7)");
         let a2 = a.clone();

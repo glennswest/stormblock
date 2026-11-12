@@ -132,3 +132,23 @@ pub fn stormblock_bin() -> String {
     std::env::var("STORMBLOCK_BIN")
         .expect("STORMBLOCK_BIN must name the stormblock binary under test (tests-runtime/ runs against a built binary)")
 }
+
+/// The format new slabs are written in is process-wide
+/// (`slab::set_default_format`), and `cargo test` runs this binary's tests
+/// as threads of one process: a test that writes format 1 for a while holds
+/// this, so another cannot put format 2 back under it (#585). Dropped, it
+/// puts format 2 back (also when the test panics), then lets go.
+pub struct SlabFormatGuard {
+    _held: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for SlabFormatGuard {
+    fn drop(&mut self) {
+        stormblock::drive::slab::set_default_format(stormblock::drive::slab::SLAB_VERSION_2);
+    }
+}
+
+pub async fn slab_format_lock() -> SlabFormatGuard {
+    static FORMAT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    SlabFormatGuard { _held: FORMAT.lock().await }
+}

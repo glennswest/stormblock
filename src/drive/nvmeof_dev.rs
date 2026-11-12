@@ -1515,6 +1515,7 @@ mod plan_tests {
 
     #[tokio::test]
     async fn one_address_and_two_nics_make_two_paths() {
+        let _serial = crate::testlock::net().await; // #585: process-wide state, one test at a time
         std::env::set_var("STORMBLOCK_IFADDRS", "nic0=127.0.0.1/8,nic1=127.0.0.2/8");
         let p = plan_paths(&["127.0.0.1:4420"]).await;
         assert_eq!(p.len(), 2, "{p:?}");

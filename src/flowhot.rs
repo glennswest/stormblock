@@ -67,6 +67,13 @@ fn count(leg: Leg, n: u32) {
     }
 }
 
+/// For tests: no sources, nothing counted (#585).
+#[cfg(test)]
+pub(crate) fn clear_for_test() {
+    set_sources(&[]);
+    *HITS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// How often each slot was read from a source.
 pub fn hits() -> HashMap<Leg, u32> {
     HITS.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
