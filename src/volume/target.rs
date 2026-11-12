@@ -75,7 +75,7 @@ pub struct Target {
 impl Target {
     /// Whether an extent of the volume may be on `slab`.
     pub fn allows(&self, slab: &SlabId) -> bool {
-        self.to.as_ref().map_or(true, |t| t.contains(slab)) && !self.except.contains(slab)
+        self.to.as_ref().is_none_or(|t| t.contains(slab)) && !self.except.contains(slab)
     }
 
     /// Whether this target constrains nothing.

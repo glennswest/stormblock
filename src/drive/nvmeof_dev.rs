@@ -300,7 +300,7 @@ pub fn decode_identify_ns(data: &[u8]) -> Option<(u64, u32)> {
         return None;
     }
     let lbads = data[lbaf_off + 2];
-    if lbads < 9 || lbads > 16 {
+    if !(9..=16).contains(&lbads) {
         return None; // 512..64K — anything else is a decode error
     }
     Some((nsze, 1u32 << lbads))
@@ -420,10 +420,7 @@ async fn connect_path(addr: &str, source: Option<&crate::netif::PathSource>) -> 
 pub async fn plan_paths(addrs: &[&str]) -> Vec<(String, Option<crate::netif::PathSource>)> {
     let mut groups: Vec<(Vec<crate::netif::PathSource>, Vec<String>)> = Vec::new();
     for a in addrs {
-        let ip = match tokio::net::lookup_host(*a).await.ok().and_then(|mut i| i.next()) {
-            Some(t) => Some(t.ip()),
-            None => None,
-        };
+        let ip = tokio::net::lookup_host(*a).await.ok().and_then(|mut i| i.next()).map(|t| t.ip());
         let sources = ip.map(crate::netif::sources_for).unwrap_or_default();
         match groups.iter_mut().find(|(s, _)| *s == sources) {
             Some((_, v)) => v.push(a.to_string()),

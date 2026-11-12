@@ -437,10 +437,7 @@ const T_STAT: usize = 6;
 const T_CLOSE: usize = 7;
 
 fn eio(name: &str) -> DriveError {
-    DriveError::Io(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("emulated drive {name} is failed (EIO)"),
-    ))
+    DriveError::Io(std::io::Error::other(format!("emulated drive {name} is failed (EIO)")))
 }
 
 impl EmulatedDevice {

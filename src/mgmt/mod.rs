@@ -757,7 +757,7 @@ pub async fn serve_tls(
             _ = tick.tick() => {
                 // Off the runtime: on a node the files are on a volume this
                 // engine serves. One look at a time, however long it takes.
-                if looking.as_ref().map_or(true, |h| h.is_finished()) {
+                if looking.as_ref().is_none_or(|h| h.is_finished()) {
                     let r = reloader.clone();
                     looking = Some(tokio::task::spawn_blocking(move || r.refresh()));
                 }

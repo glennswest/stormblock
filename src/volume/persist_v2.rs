@@ -466,7 +466,7 @@ pub(super) fn take(state: &Arc<std::sync::Mutex<V2State>>, mut input: Inputs<'_>
                 entries.extend(all_of(h, bytes));
                 held.insert(h.id, (hash(bytes), metav2::header_chunks(bytes.len())));
             }
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            entries.sort_by_key(|e| e.0);
             s.need_full = false;
             s.held = held;
             s.doc = Some(doc_hash);
@@ -760,7 +760,7 @@ async fn grow_dir(b: &Batch, path: &std::path::Path) -> std::io::Result<()> {
             }
         }
     }
-    let bytes: u64 = all.iter().map(|(_, v)| v.len() as u64 + 32).sum();
+    let bytes: u64 = all.values().map(|v| v.len() as u64 + 32).sum();
     let mut size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0).max(dir_initial()) * 2;
     while size < bytes * 4 {
         size *= 2;
@@ -832,7 +832,7 @@ async fn apply_store(b: &Batch, state: &Arc<std::sync::Mutex<V2State>>) -> std::
                     };
                     match again {
                         Err(e) if stale_slab(b, state) && e.to_string().contains("metadata region full") => {
-                            rewrite_stale(&mut *g, b, entries).await?
+                            rewrite_stale(&mut g, b, entries).await?
                         }
                         r => r?,
                     }

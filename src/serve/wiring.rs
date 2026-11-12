@@ -32,17 +32,12 @@ pub const WIRING_FILE: &str = "wiring.json";
 /// row with no `protocol` field means: those were written before NVMe support
 /// existed and are iSCSI, so the field deserializes through `legacy_proto`
 /// rather than through `Default`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WireProto {
     Iscsi,
+    #[default]
     Nvmeof,
-}
-
-impl Default for WireProto {
-    fn default() -> Self {
-        WireProto::Nvmeof
-    }
 }
 
 /// The protocol of a wiring row that predates the `protocol` field. Every such

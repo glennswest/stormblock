@@ -87,7 +87,7 @@ pub fn generation() -> u64 {
 /// Slots read, hottest first: what the boot read, for its successor.
 pub fn save(path: &Path) -> std::io::Result<usize> {
     let mut v: Vec<(Leg, u32)> = hits().into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.sort_by_key(|e| std::cmp::Reverse(e.1));
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }

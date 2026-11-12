@@ -740,7 +740,7 @@ impl V1State {
     }
 
     fn mark_persisted(&mut self) {
-        self.last_persisted = Box::new(PersistedSnapshot {
+        *self.last_persisted = PersistedSnapshot {
             volumes: self.volumes.clone(),
             snapshots: self.snapshots.clone(),
             group_snapshots: self.group_snapshots.clone(),
@@ -748,7 +748,7 @@ impl V1State {
             attachments: self.attachments.clone(),
             nvme_nsids: self.nvme_nsids.clone(),
             nodes: self.nodes.clone(),
-        });
+        };
     }
 
     /// Apply one journal record.
@@ -2835,8 +2835,7 @@ mod persistence_tests {
     use super::*;
 
     fn state_at(dir: &std::path::Path) -> V1State {
-        let mut s = V1State::default();
-        s.persist_path = Some(dir.join("v1_state.json"));
+        let mut s = V1State { persist_path: Some(dir.join("v1_state.json")), ..Default::default() };
         s.mark_persisted();
         s
     }

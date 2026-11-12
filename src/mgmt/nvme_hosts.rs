@@ -91,14 +91,14 @@ impl HostSubsystem {
     fn access(&self) -> HostAccess {
         let mut m = HashMap::new();
         for h in &self.hosts {
-            let key = h.dhchap_secret.as_deref().and_then(|s| match DhchapKey::parse(s) {
-                Ok(k) => Some(k),
+            let key = h.dhchap_secret.as_deref().map(|s| match DhchapKey::parse(s) {
+                Ok(k) => k,
                 Err(e) => {
                     // A stored secret that does not parse must not open the
                     // door: the host stays listed, and will fail to
                     // authenticate against a key it cannot know.
                     tracing::error!("nvme host {} on {}: stored secret unusable ({e})", h.nqn, self.nqn);
-                    Some(DhchapKey::generate())
+                    DhchapKey::generate()
                 }
             });
             m.insert(h.nqn.clone(), key);

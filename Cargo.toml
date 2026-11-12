@@ -169,6 +169,17 @@ nix = { version = "0.29", features = ["fs", "ioctl"] }
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 
+# #584: check.sh runs `cargo clippy --all-targets -- -D warnings`. These two
+# are taste, not defects: the engine's handlers and placement passes take
+# their state as arguments, and the I/O plumbing names its closures and
+# channels where they are used. `result_large_err` is axum's `Response` as
+# the error of a handler's helpers: it is the answer, not a cold path.
+# Every other clippy lint is held to.
+[lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+result_large_err = "allow"
+
 [features]
 # `ui` is off by default (#79): the engine serves an API; stormview is the
 # UI. `--features ui` puts the embedded pages back.

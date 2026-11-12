@@ -1462,12 +1462,9 @@ impl ThinVolumeHandle {
             // that then fails to allocate (a race), or that sits on a drive
             // this volume has stopped trusting, is tried past — by id.
             let mut tried: Vec<SlabId> = Vec::new();
-            loop {
-                let Some(slab_id) = registry.best_slab_for_tier_apart_from_except(
-                    tier, apart_from, rung, self.placement.role, self.slot_size, &tried,
-                ) else {
-                    break;
-                };
+            while let Some(slab_id) = registry.best_slab_for_tier_apart_from_except(
+                tier, apart_from, rung, self.placement.role, self.slot_size, &tried,
+            ) {
                 if self.is_failed(slab_id)
                     || registry.collides(&slab_id, &failed_drives, "drive")
                     || target.as_ref().is_some_and(|t| !t.allows(&slab_id))
@@ -1516,7 +1513,7 @@ impl ThinVolumeHandle {
         // Affine (#153): the volume's own slab while it takes the extent.
         if self.affine() {
             if let Some(a) = self.affinity() {
-                let allowed = super::target::of(&self.id).map_or(true, |t| t.allows(&a));
+                let allowed = super::target::of(&self.id).is_none_or(|t| t.allows(&a));
                 if allowed && !self.is_failed(a) && registry.takes(&a, self.placement.role, self.slot_size) {
                     if let Some(slab) = registry.get_mut(&a) {
                         if let Ok(slot_idx) = slab.allocate_deferred(self.id, vext_idx, generation).await {

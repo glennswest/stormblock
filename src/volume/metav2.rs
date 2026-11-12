@@ -147,7 +147,7 @@ struct Superblock {
 }
 
 impl Superblock {
-    fn to_bytes(&self) -> Vec<u8> {
+    fn to_bytes(self) -> Vec<u8> {
         let mut b = vec![0u8; PAGE as usize];
         b[0..8].copy_from_slice(&SB_MAGIC);
         b[8..12].copy_from_slice(&SB_VERSION.to_le_bytes());
@@ -1237,7 +1237,7 @@ impl MetaV2 {
                     }
                 }
             }
-            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out.sort_by_key(|e| e.0);
         }
         let puts: Vec<(Key, Option<Vec<u8>>)> =
             self.overlay.puts.range(lo..=hi).map(|(k, v)| (*k, v.clone())).collect();
@@ -1626,7 +1626,7 @@ pub fn document_entries(doc: &VolumeMetadata) -> Vec<(Key, Vec<u8>)> {
     for v in &doc.volumes {
         out.extend(volume_entries(v, doc.extent_size));
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.sort_by_key(|e| e.0);
     out
 }
 
@@ -1751,7 +1751,7 @@ mod tests {
         entries.push((Key::new(*id.0.as_bytes(), 9, 0), vec![1, 2, 3]));
         let orphan = uuid::Uuid::new_v4();
         entries.push((Key::new(*orphan.as_bytes(), 9, 0), vec![4]));
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries.sort_by_key(|e| e.0);
         let back = document_of(entries).expect("unknown kinds are skipped");
         assert_eq!(back.volumes.len(), 1, "the orphan key is no volume");
         assert_eq!(back.volumes[0].id, id);

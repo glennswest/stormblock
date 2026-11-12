@@ -121,10 +121,6 @@ fn default_tier() -> String {
     "hot".to_string()
 }
 
-/// How much of a data slab is set aside for its own volume record. Two
-/// copies are kept, so this is the space for both; 4 MiB holds thousands of
-/// volumes and costs nothing on a drive measured in terabytes.
-
 pub(crate) fn parse_tier(s: &str) -> Option<StorageTier> {
     match s.to_lowercase().as_str() {
         "hot" => Some(StorageTier::Hot),

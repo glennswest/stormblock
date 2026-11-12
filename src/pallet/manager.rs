@@ -595,7 +595,7 @@ impl PalletManager {
             let bs = spec
                 .block_size
                 .unwrap_or_else(|| super::gpt::default_lba_size(&drive.device));
-            if built.as_ref().map_or(true, |(b, _)| *b != bs) {
+            if built.as_ref().is_none_or(|(b, _)| *b != bs) {
                 builder = builder.block_size(bs);
                 built = Some((bs, builder.build().await?));
             }

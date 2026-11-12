@@ -50,7 +50,7 @@ pub fn cmdline_value(cmdline: &str, key: &str) -> Option<String> {
     cmdline
         .split_whitespace()
         .filter_map(|w| w.strip_prefix(&prefix))
-        .last()
+        .next_back()
         .map(|v| v.trim_matches('"').to_string())
         .filter(|v| !v.is_empty())
 }
@@ -128,6 +128,38 @@ pub fn init(node: bool) {
     }
 }
 
+/// A panic anywhere in a node's engine ends the process (#368).
+///
+/// On the Dell (11.98) a tokio worker panicked inside the scheduler
+/// (`state.rs:120 next.is_notified()`). The process stayed up with that
+/// worker gone: the API stopped answering, the watchdog (blocked in a task
+/// dump that waited on the dead worker) stopped logging, and nothing
+/// restarted it. Alive and silent is the worst outcome a supervisor can be
+/// handed. So the panic is said, with a backtrace captured here (whatever
+/// `RUST_BACKTRACE` is), on stderr (every console, and stormpump's log) and
+/// in the record, and the process aborts. stormpump restarts the engine, and
+/// `adopt-ublk` takes the devices back as from any incumbent.
+pub fn abort_on_panic(mode: &'static str) {
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
+        let bt = std::backtrace::Backtrace::force_capture();
+        let msg = format!(
+            "FATAL: {mode}: panic on thread '{thread}': {info}; aborting so the supervisor restarts the engine (#368)\n{bt}"
+        );
+        eprintln!("{msg}");
+        // The record, from a thread of its own and bounded: a panic taken
+        // while the log's own lock was held must not keep the abort waiting.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let m = msg.clone();
+        let _ = std::thread::Builder::new().name("panic-log".into()).spawn(move || {
+            tracing::error!("{m}");
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
+        std::process::abort();
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,36 +210,4 @@ mod tests {
         assert_eq!(cmdline_value("stormblock.log=", "stormblock.log"), None);
         assert_eq!(cmdline_value("stormblock.log=\"debug\"", "stormblock.log").as_deref(), Some("debug"));
     }
-}
-
-/// A panic anywhere in a node's engine ends the process (#368).
-///
-/// On the Dell (11.98) a tokio worker panicked inside the scheduler
-/// (`state.rs:120 next.is_notified()`). The process stayed up with that
-/// worker gone: the API stopped answering, the watchdog (blocked in a task
-/// dump that waited on the dead worker) stopped logging, and nothing
-/// restarted it. Alive and silent is the worst outcome a supervisor can be
-/// handed. So the panic is said, with a backtrace captured here (whatever
-/// `RUST_BACKTRACE` is), on stderr (every console, and stormpump's log) and
-/// in the record, and the process aborts. stormpump restarts the engine, and
-/// `adopt-ublk` takes the devices back as from any incumbent.
-pub fn abort_on_panic(mode: &'static str) {
-    std::panic::set_hook(Box::new(move |info| {
-        let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
-        let bt = std::backtrace::Backtrace::force_capture();
-        let msg = format!(
-            "FATAL: {mode}: panic on thread '{thread}': {info}; aborting so the supervisor restarts the engine (#368)\n{bt}"
-        );
-        eprintln!("{msg}");
-        // The record, from a thread of its own and bounded: a panic taken
-        // while the log's own lock was held must not keep the abort waiting.
-        let (tx, rx) = std::sync::mpsc::channel();
-        let m = msg.clone();
-        let _ = std::thread::Builder::new().name("panic-log".into()).spawn(move || {
-            tracing::error!("{m}");
-            let _ = tx.send(());
-        });
-        let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
-        std::process::abort();
-    }));
 }

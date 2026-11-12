@@ -396,5 +396,5 @@ async fn promote_and_an_expired_window_take_the_data_path_with_the_record() {
         v["attachments"].as_array().is_none_or(|a| a.iter().all(|a| a["node"] != "peer")),
         "the record went too: {v}"
     );
-    assert!(n.state.v1.lock().await.dual_attach.get(&id).is_none());
+    assert!(!n.state.v1.lock().await.dual_attach.contains_key(&id));
 }

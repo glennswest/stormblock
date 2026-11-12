@@ -296,12 +296,7 @@ pub fn host_scoped(method: &Method, path: &str) -> Option<String> {
     if tag.is_empty() || tag == "." || tag == ".." {
         return None;
     }
-    let ok = match (method, &seg[6..]) {
-        (&Method::PUT, []) => true,
-        (&Method::POST, ["rollback"]) => true,
-        (&Method::PUT, ["intent"]) => true,
-        _ => false,
-    };
+    let ok = matches!((method, &seg[6..]), (&Method::PUT, []) | (&Method::POST, ["rollback"]) | (&Method::PUT, ["intent"]));
     ok.then(|| tag.to_string())
 }
 
@@ -622,7 +617,7 @@ pub fn decide(
     };
 
     match presented {
-        Some(t) if accepted.iter().any(|a| *a == t) => Ok(()),
+        Some(t) if accepted.contains(&t) => Ok(()),
         _ if destructive && auth.admin_token.is_some() => Err(NEEDS_ADMIN),
         _ => Err(MISSING_TOKEN),
     }

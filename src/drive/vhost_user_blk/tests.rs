@@ -99,7 +99,7 @@ impl Vmm {
 
         // SAFETY: a new memfd sized and mapped shared here.
         let (memfd, mem) = unsafe {
-            let fd = libc::memfd_create(b"guest\0".as_ptr() as *const libc::c_char, libc::MFD_CLOEXEC);
+            let fd = libc::memfd_create(c"guest".as_ptr(), libc::MFD_CLOEXEC);
             assert!(fd >= 0);
             assert_eq!(libc::ftruncate(fd, MEM as i64), 0);
             let p = libc::mmap(std::ptr::null_mut(), MEM, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);

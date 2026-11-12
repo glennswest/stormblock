@@ -297,7 +297,7 @@ impl PalletStore {
             .await
             .into_iter()
             .filter(|p| p.attributes.is_candidate())
-            .filter(|p| kind.map_or(true, |k| p.kind == k))
+            .filter(|p| kind.is_none_or(|k| p.kind == k))
             .collect();
         v.sort_by_key(|p| std::cmp::Reverse(p.order_key()));
         v

@@ -123,26 +123,6 @@ pub fn who(caller: Option<&crate::mgmt::auth::Caller>) -> String {
     caller.map(|c| c.0.clone()).unwrap_or_else(|| "node".into())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_record_is_kept_and_found_by_label() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut c = Creators::load(Some(dir.path()));
-        let sa = "system:serviceaccount:stormbootx-test:runner";
-        c.set(volume(&uuid::Uuid::nil()), Creator::new(format!("kubernetes:{sa}"), [(TEST_RUN_LABEL.into(), "r1".into())].into()));
-        c.set(synonym("boothost", "mac-1"), Creator::new("node", Default::default()));
-        let again = Creators::load(Some(dir.path()));
-        let v = again.get(&volume(&uuid::Uuid::nil())).unwrap();
-        assert!(v.is(sa));
-        assert!(!v.is("system:serviceaccount:other:x"));
-        assert!(!again.get(&synonym("boothost", "mac-1")).unwrap().is(sa), "the node's is no SA's");
-        assert_eq!(again.labelled(TEST_RUN_LABEL, "r1"), vec![volume(&uuid::Uuid::nil())]);
-    }
-}
-
 /// Run a create handler and, when it succeeds, record its caller as the
 /// creator of what it made (#422): `key_of` finds the record's key in the
 /// response body; `labels` come from the request body's `labels` object.
@@ -193,4 +173,24 @@ pub fn of(state: &crate::mgmt::AppState, key: &str) -> Option<Creator> {
 /// Forget `key` (the object is gone).
 pub fn forget(state: &crate::mgmt::AppState, key: &str) {
     state.creators.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_record_is_kept_and_found_by_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Creators::load(Some(dir.path()));
+        let sa = "system:serviceaccount:stormbootx-test:runner";
+        c.set(volume(&uuid::Uuid::nil()), Creator::new(format!("kubernetes:{sa}"), [(TEST_RUN_LABEL.into(), "r1".into())].into()));
+        c.set(synonym("boothost", "mac-1"), Creator::new("node", Default::default()));
+        let again = Creators::load(Some(dir.path()));
+        let v = again.get(&volume(&uuid::Uuid::nil())).unwrap();
+        assert!(v.is(sa));
+        assert!(!v.is("system:serviceaccount:other:x"));
+        assert!(!again.get(&synonym("boothost", "mac-1")).unwrap().is(sa), "the node's is no SA's");
+        assert_eq!(again.labelled(TEST_RUN_LABEL, "r1"), vec![volume(&uuid::Uuid::nil())]);
+    }
 }

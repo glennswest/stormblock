@@ -1123,8 +1123,8 @@ mod tests {
                     }
                 }
                 s.recover(len).unwrap_or_else(|e| panic!("lost {a},{b}: {e}"));
-                for i in 0..n {
-                    assert_eq!(s.data[i].as_ref().unwrap(), &data[i], "lost {a},{b}: data {i}");
+                for (i, d) in data.iter().enumerate() {
+                    assert_eq!(s.data[i].as_ref().unwrap(), d, "lost {a},{b}: data {i}");
                 }
                 assert_eq!(s.p.as_ref().unwrap(), &p, "lost {a},{b}: P");
                 assert_eq!(s.q.as_ref().unwrap().as_ref().unwrap(), &q, "lost {a},{b}: Q");

@@ -1297,7 +1297,7 @@ impl RaidArray {
         }))
         .await;
         let mut res = Ok(());
-        for ((s, out), r) in segs.iter().zip(pieces.into_iter()).zip(results) {
+        for ((s, out), r) in segs.iter().zip(pieces).zip(results) {
             let Some((m, err)) = r else { continue };
             if let Some(e) = err {
                 self.fail_member(m, &format!("read error in stripe {}: {e}", s.stripe));
@@ -1434,10 +1434,7 @@ impl RaidArray {
                     }
                     // Later pieces of this stripe read the parity this one
                     // wrote, so write it now.
-                    let results = self.issue_writes(&holders, std::mem::take(&mut pending)).await;
-                    if let Err(e) = results {
-                        return Err(e);
-                    }
+                    self.issue_writes(&holders, std::mem::take(&mut pending)).await?;
                 }
                 if ok {
                     return self.check_after_write();

@@ -255,7 +255,7 @@ async fn summarise(state: &AppState, r: &Release) -> ReleaseSummary {
 
 /// Newest first, which is the order anyone asking "what is current" wants.
 fn sorted(mut releases: Vec<Release>) -> Vec<Release> {
-    releases.sort_by(|a, b| b.created_unix.cmp(&a.created_unix));
+    releases.sort_by_key(|r| std::cmp::Reverse(r.created_unix));
     releases
 }
 
@@ -1167,12 +1167,12 @@ mod tests {
     /// one nobody reads twice.
     #[test]
     fn only_a_different_digest_counts_as_a_change() {
-        let old = vec![
+        let old = [
             entry("stormblock", "aaaa", "13.3.0"),
             entry("rustkube", "bbbb", "0.7.35"),
             entry("gone", "cccc", "1.0.0"),
         ];
-        let new = vec![
+        let new = [
             entry("stormblock", "dddd", "13.4.0"),
             entry("rustkube", "bbbb", "0.7.35"),
             entry("arrived", "eeee", "0.1.0"),

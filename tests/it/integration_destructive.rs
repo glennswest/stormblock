@@ -307,9 +307,11 @@ async fn stormcert_reads_an_attestation_with_its_own_bearer_and_only_that() {
 #[test]
 fn an_admin_token_is_minted_apart_from_the_node_token() {
     let dir = TempDir::new().unwrap();
-    let mut m = stormblock::mgmt::config::ManagementConfig::default();
-    m.data_dir = Some(dir.path().join("engine").to_string_lossy().to_string());
-    m.admin_token_file = Some(dir.path().join("admin/admin_token").to_string_lossy().to_string());
+    let m = stormblock::mgmt::config::ManagementConfig {
+        data_dir: Some(dir.path().join("engine").to_string_lossy().to_string()),
+        admin_token_file: Some(dir.path().join("admin/admin_token").to_string_lossy().to_string()),
+        ..Default::default()
+    };
     let r = stormblock::mgmt::auth::resolve(&m).unwrap();
     let admin = r.auth.admin_token.clone().unwrap();
     assert_ne!(Some(admin.clone()), r.auth.api_token);

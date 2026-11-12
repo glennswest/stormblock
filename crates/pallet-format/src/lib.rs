@@ -799,6 +799,8 @@ pub struct Mapping {
 /// `block_size` — which stormblock writes equal to the media's sector size, so
 /// on a real device the two coincide and there is no unit to convert.
 pub trait BlockReader {
+    /// No error detail: the reader's own environment (UEFI, a test) reports it.
+    #[allow(clippy::result_unit_err)]
     fn read_blocks(&self, block: u64, buf: &mut [u8]) -> core::result::Result<(), ()>;
 }
 

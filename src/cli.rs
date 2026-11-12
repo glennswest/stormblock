@@ -3259,7 +3259,7 @@ pub async fn run() -> anyhow::Result<()> {
     /// `boot-local` at boot and `adopt-ublk` at handover — because they need
     /// exactly the same three things and disagreeing about any of them would mean
     /// the two halves of a handover had different ideas of what the node holds.
-
+    ///
     /// Whether `path` carries a data slab, and what names it.
     ///
     /// Asked of the *device*, never of the path: the answer has to hold when an
@@ -8212,7 +8212,8 @@ pub async fn run() -> anyhow::Result<()> {
                     // first boot off the disk makes is left on the disk
                     // (through the state volume) for it (#220).
                     Some(t) if booted => {
-                        if report_installed(&t, "laid").await == ReportOutcome::Done {
+                        let done = report_installed(&t, "laid").await == ReportOutcome::Done;
+                        if done {
                             if let Some(dir) = data_dir.as_deref() {
                                 let at = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
@@ -9321,7 +9322,8 @@ async fn handle_adopt_ublk(
         // Their disks, so `/api/v1/pallets` lists and verifies the boot
         // pallet this node booted — on a netbooted node the claimed clone's
         // (#314).
-        set_boot_disks(&state, std::mem::take(&mut *opened_disks.lock().unwrap())).await;
+        let disks = std::mem::take(&mut *opened_disks.lock().unwrap());
+        set_boot_disks(&state, disks).await;
         // The boot devices this process now serves are in use, and a volume
         // listing must say so — they were recorded nowhere (#138).
         {
@@ -10246,8 +10248,8 @@ async fn handle_boot_local(
     // Writable thin volumes (var, containers) at the next indices after root
     // (0) and image-store (1). Order preserved so the caller maps each ublk
     // device to its mount point.
-    let mut next_dev = exports.len() as u32;
-    for sel in writable {
+    let first_dev = exports.len() as u32;
+    for (next_dev, sel) in (first_dev..).zip(writable) {
         let wid = resolve_boot_volume(&mgr, sel).await?;
         let wname = mgr
             .get_volume_handle(&wid)
@@ -10255,7 +10257,6 @@ async fn handle_boot_local(
             .name()
             .await;
         exports.push((next_dev, wname, mgr.get_volume(&wid).expect("resolved volume exists")));
-        next_dev += 1;
     }
 
     println!("Boot volume: {root_name} ({})", root_id.0);
@@ -12546,7 +12547,7 @@ file = "{state}"
         assert_eq!(want.get("svc"), Some(&n_svc));
         drop(both);
         for alone in [&a, &b] {
-            let (m, _) = super::open_slabs_resuming(&[alone.clone()], None, false).await.unwrap();
+            let (m, _) = super::open_slabs_resuming(std::slice::from_ref(&alone), None, false).await.unwrap();
             assert_eq!(all_bytes(&m).await, want, "{alone} alone reads every volume, every byte");
         }
 
@@ -12573,7 +12574,7 @@ file = "{state}"
         assert!(report.kept.contains(&"state".to_string()), "{report:?}");
         assert!(flow.twin.is_some());
         for alone in [&a, &b] {
-            let (m, _) = super::open_slabs_resuming(&[alone.clone()], None, false).await.unwrap();
+            let (m, _) = super::open_slabs_resuming(std::slice::from_ref(&alone), None, false).await.unwrap();
             assert_eq!(volume_bytes(&m, "state").await.as_ref(), Some(&state_before), "{alone} alone: the node's state");
             assert_eq!(volume_bytes(&m, "pvc-pair").await, Some(vec![0x77u8; 4 * MIB as usize]), "{alone} alone: the PVC");
             assert_eq!(volume_bytes(&m, "svc").await.as_ref(), Some(&n1_svc), "{alone} alone: N+1's golden");
@@ -16305,7 +16306,7 @@ mod release_erase_tests {
         again.persist().await;
         let again = run_release_ticket(again).await.unwrap();
         assert_eq!(names(&again).await, want);
-        assert_eq!(file(&again, "stormcos-state", "/config/install-config.yaml").await.is_some(), true);
+        assert!(file(&again, "stormcos-state", "/config/install-config.yaml").await.is_some());
     }
 }
 
@@ -16523,7 +16524,7 @@ mod flow_over_api_tests {
         }
     }
 
-    fn pct(v: &mut Vec<f64>, p: f64) -> f64 {
+    fn pct(v: &mut [f64], p: f64) -> f64 {
         if v.is_empty() {
             return 0.0;
         }
@@ -17037,13 +17038,14 @@ mod config_arrays_tests {
     }
 
     fn config(drives: &[String]) -> StormBlockConfig {
-        let mut c = StormBlockConfig::default();
-        c.arrays = vec![ArrayConfig { name: "data".into(), level: crate::raid::RaidLevel::Raid1, drives: drives.to_vec(), stripe_kb: 64 }];
-        c.volumes = vec![
-            VolumeConfig { name: "vol0".into(), size: "64M".into(), array: "data".into(), redundancy: None },
-            VolumeConfig { name: "lost".into(), size: "64M".into(), array: "nowhere".into(), redundancy: None },
-        ];
-        c
+        StormBlockConfig {
+            arrays: vec![ArrayConfig { name: "data".into(), level: crate::raid::RaidLevel::Raid1, drives: drives.to_vec(), stripe_kb: 64 }],
+            volumes: vec![
+                VolumeConfig { name: "vol0".into(), size: "64M".into(), array: "data".into(), redundancy: None },
+                VolumeConfig { name: "lost".into(), size: "64M".into(), array: "nowhere".into(), redundancy: None },
+            ],
+            ..Default::default()
+        }
     }
 
     #[tokio::test]

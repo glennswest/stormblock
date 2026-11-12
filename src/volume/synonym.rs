@@ -692,7 +692,7 @@ impl SynonymStore {
     pub fn list(&self, namespace: Option<&str>) -> Vec<&Synonym> {
         self.synonyms
             .values()
-            .filter(|s| namespace.map_or(true, |ns| s.namespace == ns))
+            .filter(|s| namespace.is_none_or(|ns| s.namespace == ns))
             .collect()
     }
 

@@ -40,7 +40,8 @@ struct Bucket {
 
 #[allow(clippy::declare_interior_mutable_const)]
 const BUCKET: Bucket = Bucket { second: AtomicU64::new(0), bins: [const { AtomicU64::new(0) }; BINS] };
-#[allow(clippy::declare_interior_mutable_const)]
+// Only `BUCKETS`' initializer reads it: no copy is made at run time.
+#[allow(clippy::declare_interior_mutable_const, clippy::large_const_arrays)]
 const SET: [Bucket; SECONDS] = [BUCKET; SECONDS];
 
 /// [class][moving][second % SECONDS].

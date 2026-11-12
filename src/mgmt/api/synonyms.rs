@@ -607,28 +607,6 @@ fn yes() -> bool {
     true
 }
 
-/// `POST /api/v1/synonyms/{ns}/{name}/claim` — take a writable clone of what
-/// a name points at.
-///
-/// **You write to a clone, never to the golden.** A golden is the master copy
-/// and is sealed, so what a consumer wants from a name is not the volume it
-/// resolves to but a copy-on-write clone of it: its own filesystem identity,
-/// its own divergence, costing nothing until written. This is that in one
-/// call — resolve, clone, and (optionally) bind a name to the clone in the
-/// caller's own namespace, which is how one golden ends up behind many
-/// consumers each holding a name of their own.
-/// Release the clone a consumer has just stopped naming.
-///
-/// Deliberately timid, because the cost of being wrong is someone else's data.
-/// Three things must all hold, and any of them failing means leaving it alone
-/// and saying so:
-///
-/// * **nothing else names it** — another synonym pointing here is a reference
-///   held by something that knows what it is doing;
-/// * **it is not sealed** — a sealed volume is what clones descend *from*, and
-///   nothing here should ever delete a golden;
-/// * **it is a clone of the same source** — which is what makes it this claim
-///   path's own leftover rather than a volume that merely had the name.
 /// When each claim clone was minted.
 ///
 /// A machine claims **twice per boot**: stormbootx claims to load the kernel,
@@ -659,20 +637,20 @@ fn claims() -> &'static std::sync::Mutex<std::collections::HashMap<VolumeId, std
     CLAIMED_AT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// How long a fresh clone is protected from being released by the next claim.
-///
-/// Long enough to cover firmware handing over to the initramfs — seconds on
-/// the machine this was measured on — with room for a slow POST. Short enough
-/// that it never protects a clone from the *next boot*, which is what the
-/// release is for.
-
-
 fn note_claim(id: VolumeId) {
     let mut m = claims().lock().unwrap();
     m.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(3600));
     m.insert(id, std::time::Instant::now());
 }
 
+/// How long ago `id` was claimed, if within `grace` (`AppState::claim_grace`):
+///
+/// How long a fresh clone is protected from being released by the next claim.
+///
+/// Long enough to cover firmware handing over to the initramfs — seconds on
+/// the machine this was measured on — with room for a slow POST. Short enough
+/// that it never protects a clone from the *next boot*, which is what the
+/// release is for.
 fn claimed_within_grace(
     id: VolumeId,
     grace: std::time::Duration,
@@ -691,6 +669,17 @@ fn lineage_of(syn: &synonym::Synonym, source: VolumeId) -> Vec<VolumeId> {
 
 /// Release a clone a newer claim superseded, if every guard allows it.
 /// Returns whether it was released.
+///
+/// Deliberately timid, because the cost of being wrong is someone else's data.
+/// Three things must all hold, and any of them failing means leaving it alone
+/// and saying so:
+///
+/// * **nothing else names it** — another synonym pointing here is a reference
+///   held by something that knows what it is doing;
+/// * **it is not sealed** — a sealed volume is what clones descend *from*, and
+///   nothing here should ever delete a golden;
+/// * **it is a clone of the same source** — which is what makes it this claim
+///   path's own leftover rather than a volume that merely had the name.
 async fn release_superseded_clone(state: &Arc<AppState>, old: VolumeId, parents: &[VolumeId]) -> bool {
     // Still being booted from? A clone minted moments ago is the stage before
     // this one, not an abandoned predecessor.
@@ -894,6 +883,16 @@ fn add_paths(v: &mut serde_json::Value, hosts: &[String], port: u16, rest: &str)
     v["uri_multipath"] = json!(format!("nvme-tcp://{}/{rest}", paths.join(",")));
 }
 
+/// `POST /api/v1/synonyms/{ns}/{name}/claim` — take a writable clone of what
+/// a name points at.
+///
+/// **You write to a clone, never to the golden.** A golden is the master copy
+/// and is sealed, so what a consumer wants from a name is not the volume it
+/// resolves to but a copy-on-write clone of it: its own filesystem identity,
+/// its own divergence, costing nothing until written. This is that in one
+/// call — resolve, clone, and (optionally) bind a name to the clone in the
+/// caller's own namespace, which is how one golden ends up behind many
+/// consumers each holding a name of their own.
 async fn claim(state: Arc<AppState>, namespace: &str, name: &str, req: ClaimRequest, reached: Option<String>) -> Response {
     // A machine claiming its boot image is the one caller that arrives with
     // no credential, so its claim is a different, narrower verb (#107).
