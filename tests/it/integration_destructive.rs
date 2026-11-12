@@ -307,7 +307,7 @@ async fn stormcert_reads_an_attestation_with_its_own_bearer_and_only_that() {
 #[test]
 fn an_admin_token_is_minted_apart_from_the_node_token() {
     let dir = TempDir::new().unwrap();
-    let m = stormblock::mgmt::config::ManagementConfig {
+    let mut m = stormblock::mgmt::config::ManagementConfig {
         data_dir: Some(dir.path().join("engine").to_string_lossy().to_string()),
         admin_token_file: Some(dir.path().join("admin/admin_token").to_string_lossy().to_string()),
         ..Default::default()
