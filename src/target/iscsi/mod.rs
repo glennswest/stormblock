@@ -428,20 +428,20 @@ impl IscsiTarget {
 
             match opcode {
                 Opcode::ScsiCommand => {
-                    self.handle_scsi_pdu(&req, reader, writer, &conn, params, header_digest, data_digest, max_data_seg, &mut pending).await?;
+                    self.handle_scsi_pdu(&req, reader, writer, conn, params, header_digest, data_digest, max_data_seg, &mut pending).await?;
                 }
                 Opcode::NopOut => {
-                    self.handle_nop_out(&req, writer, &conn, header_digest, data_digest).await?;
+                    self.handle_nop_out(&req, writer, conn, header_digest, data_digest).await?;
                 }
                 Opcode::TextRequest => {
-                    self.handle_text_request(&req, writer, &conn, local_addr, header_digest, data_digest).await?;
+                    self.handle_text_request(&req, writer, conn, local_addr, header_digest, data_digest).await?;
                 }
                 Opcode::LogoutRequest => {
-                    self.handle_logout(&req, writer, &conn, header_digest, data_digest).await?;
+                    self.handle_logout(&req, writer, conn, header_digest, data_digest).await?;
                     return Ok(());
                 }
                 Opcode::TaskMgmtRequest => {
-                    self.handle_task_mgmt(&req, writer, &conn, header_digest, data_digest).await?;
+                    self.handle_task_mgmt(&req, writer, conn, header_digest, data_digest).await?;
                 }
                 _ => {
                     tracing::warn!("iSCSI: ignoring unsupported opcode: {opcode}");

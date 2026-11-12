@@ -515,7 +515,7 @@ pub async fn pass(ctx: &Arc<ServeContext>) -> anyhow::Result<()> {
                 // deletes the volume once it is detached — dropping the row
                 // here would leak it, deleting it took the containers' files.
                 Err(crate::volume::thin::VolumeError::InUse { by, .. }) => {
-                    if ctx.blocked_reported.lock().await.insert(row.export_id.clone()) {
+                    if ctx.blocked_reported.lock().await.insert(row.export_id) {
                         tracing::warn!(
                             "gc: ephemeral volume {} of withdrawn export {} is still in use by {} — \
                              kept until it is detached",

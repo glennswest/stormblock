@@ -256,7 +256,7 @@ pub async fn plan_paired(
                     *gone.entry(*s).or_default() += 1;
                 }
                 for (s, n) in gone {
-                    missing.entry(s).or_insert_with(Vec::new).push((v.name.clone(), n));
+                    missing.entry(s).or_default().push((v.name.clone(), n));
                 }
             }
             if away.is_empty() {

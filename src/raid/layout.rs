@@ -164,7 +164,7 @@ mod tests {
     fn raid5_every_member_is_used_once_per_stripe() {
         let g = Geometry { level: RaidLevel::Raid5, n: 5, unit: 4096 };
         for s in 0..20 {
-            let mut seen = vec![false; 5];
+            let mut seen = [false; 5];
             seen[g.p_member(s)] = true;
             for d in 0..g.data_count() {
                 let m = g.data_member(s, d);
@@ -187,7 +187,7 @@ mod tests {
         let g = Geometry { level: RaidLevel::Raid6, n: 11, unit: 65536 };
         assert_eq!(g.data_count(), 9);
         for s in 0..40 {
-            let mut seen = vec![false; 11];
+            let mut seen = [false; 11];
             for m in [g.p_member(s), g.q_member(s)] {
                 assert!(!seen[m]);
                 seen[m] = true;

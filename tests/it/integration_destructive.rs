@@ -715,7 +715,7 @@ async fn a_sealed_volumes_digest_is_every_byte_and_kept_for_its_seal() {
     assert_eq!((again["sha256"].clone(), again["cached"].clone()), (first["sha256"].clone(), json!(true)), "kept for the seal");
     let (_, refreshed) = digest("?refresh=true").await;
     assert_eq!((refreshed["sha256"].clone(), refreshed["cached"].clone()), (first["sha256"].clone(), json!(false)));
-    assert_eq!(call(&n, reqwest::Method::GET, &format!("/volumes/golden-x/digest"), Some(NODE), None).await, 200, "by name too");
+    assert_eq!(call(&n, reqwest::Method::GET, "/volumes/golden-x/digest", Some(NODE), None).await, 200, "by name too");
 
     // Unsealed, written, sealed again: the old digest is not the answer.
     assert_eq!(call(&n, reqwest::Method::DELETE, &format!("/volumes/{id}/seal"), Some(ADMIN), None).await, 200);

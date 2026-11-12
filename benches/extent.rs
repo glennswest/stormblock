@@ -11,7 +11,7 @@ fn bench_sequential_allocation(c: &mut Criterion) {
             b.iter(|| {
                 let array_id = RaidArrayId(Uuid::new_v4());
                 let mut alloc = ExtentAllocator::new(4096);
-                alloc.add_array(array_id, count as u64 * 4096 * 2); // room for 2x
+                alloc.add_array(array_id, count * 4096 * 2); // room for 2x
                 alloc.allocate(array_id, count).unwrap();
             });
         });
@@ -26,7 +26,7 @@ fn bench_alloc_free_cycle(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             let array_id = RaidArrayId(Uuid::new_v4());
             let mut alloc = ExtentAllocator::new(4096);
-            alloc.add_array(array_id, count as u64 * 4096 * 4);
+            alloc.add_array(array_id, count * 4096 * 4);
 
             b.iter(|| {
                 let extents = alloc.allocate(array_id, count).unwrap();

@@ -1253,7 +1253,7 @@ pub async fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
             SubCommand::Ext4Repair { device } => {
-                std::process::exit(ext4_repair(&device).await);
+                std::process::exit(ext4_repair(device).await);
             }
             SubCommand::Discover { wait_ms } => {
                 let got = crate::mgmt::finder::discover(std::time::Duration::from_millis(*wait_ms), None)?;
@@ -2167,9 +2167,9 @@ pub async fn run() -> anyhow::Result<()> {
                     slab.free_slots() * slab.slot_size()));
             }
             SlabAction::Cat { slabs, volume, out, path } => {
-                match volume_file_on_slabs(&slabs, &volume, &path).await {
+                match volume_file_on_slabs(slabs, volume, path).await {
                     Ok(bytes) => {
-                        if let Err(e) = std::fs::write(&out, &bytes) {
+                        if let Err(e) = std::fs::write(out, &bytes) {
                             println!("cannot write {out}: {e}");
                             std::process::exit(2);
                         }
@@ -2273,7 +2273,7 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SlabAction::Designated { slabs, sys, dev } => {
                 use crate::drive::designation;
-                let bytes = match volume_file_on_slabs(&slabs, designation::VOLUME, designation::FILE).await {
+                let bytes = match volume_file_on_slabs(slabs, designation::VOLUME, designation::FILE).await {
                     Ok(b) => b,
                     Err((1, why)) => {
                         println!("no system drive designated ({why})");
@@ -2372,7 +2372,7 @@ pub async fn run() -> anyhow::Result<()> {
                 }
             }
             SlabAction::Upgrade { device } => {
-                let dev = crate::drive::open_path(&device, false).await?;
+                let dev = crate::drive::open_path(device, false).await?;
                 let mut slab = Slab::open(dev).await.map_err(|e| anyhow::anyhow!("{device}: {e}"))?;
                 if slab.format_version() == crate::drive::slab::SLAB_VERSION_2 {
                     println!("{device}: slab {} is already format 2", slab.slab_id());
@@ -5910,7 +5910,7 @@ pub async fn run() -> anyhow::Result<()> {
         // this disk and the flow-over leaves it be. `STORMBLOCK_SEED_DATA_SYNC`
         // seeds it here, as before.
         if std::env::var_os("STORMBLOCK_SEED_DATA_SYNC").is_some() {
-            seed_data_half(&mgr, data_id, disk, SeedWhen::Always).await?;
+            seed_data_half(mgr, data_id, disk, SeedWhen::Always).await?;
         } else {
             flow.data_flow = true;
             println!(
@@ -6248,7 +6248,7 @@ pub async fn run() -> anyhow::Result<()> {
                 ps.set_partner(Some(to_data)).await.map_err(|e| anyhow::anyhow!("pairing the partner with {to}: {e}"))?;
             }
         }
-        let bootable = match run_local_boot(to, &[from.clone()]).await {
+        let bootable = match run_local_boot(to, std::slice::from_ref(&from)).await {
             Ok(b) => b,
             Err(e) => {
                 println!("WARNING: system move: local boot on {to}: {e}");
@@ -9220,7 +9220,7 @@ async fn handle_adopt_ublk(
         // read. The flags stay, as overrides, because a handover may need to
         // put the API somewhere the file does not say.
         let mut config = match crate::mgmt::config::StormBlockConfig::load(
-            &config_path,
+            config_path,
         ) {
             Ok(c) => c,
             Err(e) => {
@@ -10840,7 +10840,7 @@ file = "{state}"
             .unwrap();
 
         // The install boot: the image's slabs, then the empty local disk.
-        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true)
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&image), None, true)
             .await
             .unwrap();
         let before = digests(&mgr).await;
@@ -10899,7 +10899,7 @@ file = "{state}"
         drop(succ);
 
         // And the disk alone: what the node boots from next time.
-        let (local, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false)
+        let (local, _) = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, false)
             .await
             .unwrap();
         let alone = digests(&local).await;
@@ -10973,7 +10973,7 @@ file = "{state}"
 
         // Chosen as a drive with an identity this device does not have: not
         // written, the error naming why.
-        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&image), None, true).await.unwrap();
         let wrong = "wwn=naa.5000c500deadbeef;serial=SER-X;model=MODEL-X;size=1";
         let e = super::prove_chosen(&disk, None, (Some(wrong), None)).unwrap_err().to_string();
         assert!(e.contains("not the drive chosen") && e.contains("#351"), "{e}");
@@ -11028,7 +11028,7 @@ file = "{state}"
         };
 
         // A first install lays the table and both slabs.
-        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&image), None, true).await.unwrap();
         super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
         drop(mgr);
         let dev = open_disk().await;
@@ -11043,7 +11043,7 @@ file = "{state}"
         drop(dev);
 
         // The next install takes it fresh, both halves, with no force.
-        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&image), None, true).await.unwrap();
         let laid = super::take_local_disk(&mut mgr, &disk, "hot", false).await;
         let flow = laid.expect("a table with an empty data partition is laid fresh").expect("laid");
         assert!(flow.data_flow, "laid fresh: the data half is moved in");
@@ -11061,7 +11061,7 @@ file = "{state}"
         dev.write(at, &hdr).await.unwrap();
         dev.flush().await.unwrap();
         drop(dev);
-        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&image), None, true).await.unwrap();
         let e = super::take_local_disk(&mut mgr, &disk, "hot", false).await.expect_err("a broken data slab is refused");
         assert!(e.to_string().contains("not installing over"), "{e}");
         let dev = open_disk().await;
@@ -11121,7 +11121,7 @@ file = "{logs}"
             .unwrap();
 
         // The install boot lays the disk and hands both halves on.
-        let (mut mgr, _) = super::open_slabs_resuming(&[image.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&image), None, true).await.unwrap();
         let disk = p("disk.raw");
         std::fs::File::create(&disk).unwrap().set_len(80 * 1024 * MIB).unwrap();
         let flow = super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
@@ -11185,7 +11185,7 @@ file = "{logs}"
         // The next boot: the disk, and the extents it misses from a fresh
         // clone (here, the image itself).
         std::env::set_var("STORMBLOCK_RESUME_SOURCE", &image);
-        let (next, resumed) = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await.unwrap();
+        let (next, resumed) = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, true).await.unwrap();
         std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
         assert!(resumed.is_some(), "the boot resumes the flow-over");
         let id = next.find_volume("state").await.expect("the disk names the state volume");
@@ -11423,7 +11423,7 @@ file = "{state}"
             let disk = format!("emulated://cut172-{trial}-{}?size=80G&volatile=1", uuid::Uuid::new_v4().simple());
 
             // The install boot lays the disk and hands both halves on.
-            let (mut mgr, _) = super::open_slabs_resuming(&[first.clone()], None, true).await.unwrap();
+            let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&first), None, true).await.unwrap();
             let flow = super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
             assert!(flow.data_flow);
             super::quarantine_flow_sources(&mgr, &flow).await;
@@ -11503,7 +11503,7 @@ file = "{state}"
                 r = flow_both => panic!("{t}: the flow-over was meant to be cut: {r:?}"),
                 _ = cut.notified() => {}
             }
-            let left = super::extents_on(succ.gem(), &sys_src).await + super::extents_on(succ.gem(), &data_src).await;
+            let left = super::extents_on(succ.gem(), sys_src).await + super::extents_on(succ.gem(), data_src).await;
             // The power goes: the consumers stop where they are, and the
             // disk keeps a random part of what it had not flushed.
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -11521,7 +11521,7 @@ file = "{state}"
             // for what it misses.
             let second = claim(format!("claim-{trial}-2.raw"));
             std::env::set_var("STORMBLOCK_RESUME_SOURCE", &second);
-            let opened = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await;
+            let opened = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, true).await;
             std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
             let (next, resumed) = match opened {
                 Ok(o) => o,
@@ -11558,7 +11558,7 @@ file = "{state}"
             drop(next);
             // A clean power-off now loses nothing that was flushed.
             crate::drive::emulated::crash(&disk, 0x272 + trial as u64, 0.0);
-            match super::open_slabs_resuming(&[flow.disk.clone()], None, false).await {
+            match super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, false).await {
                 Ok((alone, _)) => bad.extend(check_volumes(&t, "the disk alone", &alone, &names, &goldens, &logs).await),
                 Err(e) => bad.push(format!("{t}: the disk alone does not open: {e}")),
             }
@@ -11689,7 +11689,7 @@ file = "{state}"
         // written), lay the disk, flow both halves, and run from the disk.
         let claim = p("claim-11.90.raw");
         std::fs::copy(&image_n, &claim).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
         let disk = p("disk.raw");
         std::fs::File::create(&disk).unwrap().set_len(80 * 1024 * MIB).unwrap();
         let flow = super::take_local_disk(&mut mgr, &disk, "hot", false).await.unwrap().expect("laid");
@@ -11734,7 +11734,7 @@ file = "{state}"
         let (disk, _image_n, image_n1, _n_svc, n1_svc, n1_logs) = release_fixture(mkfs, &dir).await;
 
         // The node runs from its disk: its data, and a PVC.
-        let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (mut node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         for (vol, mark) in [("state", 0x51u8), ("logs", 0x52)] {
             let v = node.get_volume(&node.find_volume(vol).await.unwrap()).unwrap();
             v.write(4096, &[mark; 8192]).await.unwrap();
@@ -11766,7 +11766,7 @@ file = "{state}"
         // it, no force.
         let claim = dir.path().join("claim-11.91.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
         let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await.unwrap();
         let flow = flow.expect("the system half laid again");
         let report = report.expect("the data half kept");
@@ -11833,7 +11833,7 @@ file = "{state}"
         drop(succ);
 
         // The disk alone, as the next boot opens it.
-        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         check(&alone, "from the disk alone", &e).await;
         drop(alone);
         let l = super::open_storage(&disk).await.unwrap();
@@ -11861,7 +11861,7 @@ file = "{state}"
         let (disk, image_n, ..) = release_fixture(mkfs, &dir).await;
 
         // The node's data, and a root broken under its own id.
-        let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (mut node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         let state = node.find_volume("state").await.unwrap();
         {
             let v = node.get_volume(&state).unwrap();
@@ -11901,7 +11901,7 @@ file = "{state}"
 
         // The fallback: laid again from the image.
         let c2 = claim("claim-again-2.raw");
-        let (mut mgr, _) = super::open_slabs_resuming(&[c2.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&c2), None, true).await.unwrap();
         std::env::set_var("STORMBLOCK_RELAY_SYSTEM_HALF", "1");
         let r = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await;
         std::env::remove_var("STORMBLOCK_RELAY_SYSTEM_HALF");
@@ -11929,7 +11929,7 @@ file = "{state}"
         succ.persist().await;
         drop(succ);
 
-        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         assert_eq!(volume_bytes(&alone, "stormpump").await.unwrap(), image_root, "the root, the image's again");
         assert_eq!(alone.find_volume("state").await, Some(state), "the node's state, by its id");
         assert_eq!(volume_bytes(&alone, "state").await.unwrap(), state_before, "the node's state, every byte");
@@ -11968,7 +11968,7 @@ file = "{state}"
         let dir = tempfile::tempdir().unwrap();
         let (disk, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
         // The node fills its data half, leaving almost nothing free.
-        let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (mut node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         let (free, slot) = {
             let reg = node.registry().read().await;
             let s = reg.iter().find(|(_, s)| s.is_data()).map(|(_, s)| s).unwrap();
@@ -11991,7 +11991,7 @@ file = "{state}"
 
         let claim = dir.path().join("claim-n1.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
         let e = match super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await {
             Ok(_) => panic!("an install with no room for the release's data must be refused"),
             Err(e) => e.to_string(),
@@ -12000,7 +12000,7 @@ file = "{state}"
         drop(mgr);
         // Nothing written: the disk opens as it was, the node's data reads
         // back, and nothing of N+1 (kubelet-data is new in it) is on it.
-        let (after, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (after, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         assert_eq!(after.find_volume("filler").await, Some(id));
         let mut b = vec![0u8; slot as usize];
         after.get_volume(&id).unwrap().read(0, &mut b).await.unwrap();
@@ -12024,7 +12024,7 @@ file = "{state}"
         ] {
             let dir = tempfile::tempdir().unwrap();
             let (disk, _image_n, image_n1, ..) = release_fixture(mkfs.clone(), &dir).await;
-            let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+            let (mut node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
             let id = node
                 .create_volume_with(name, 8 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::System))
                 .await
@@ -12072,7 +12072,7 @@ file = "{state}"
 
             let claim = dir.path().join("claim-n1.raw").display().to_string();
             std::fs::copy(&image_n1, &claim).unwrap();
-            let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+            let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
             // The WARNs of the install (what reaches the console, #243).
             #[derive(Clone, Default)]
             struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -12155,7 +12155,7 @@ file = "{state}"
         let peek = dir.path().join("peek-n1.raw").display().to_string();
         std::fs::copy(&image_n1, &peek).unwrap();
         let (golden_id, golden_bytes) = {
-            let (m, _) = super::open_slabs_resuming(&[peek.clone()], None, true).await.unwrap();
+            let (m, _) = super::open_slabs_resuming(std::slice::from_ref(&peek), None, true).await.unwrap();
             let id = m.find_volume("kubelet-data.golden").await.expect("N+1 carries the golden");
             (id, volume_bytes(&m, "kubelet-data.golden").await.unwrap())
         };
@@ -12219,7 +12219,7 @@ file = "{state}"
         // N+1 installed over it from its own claim; N's clone is gone.
         let claim = dir.path().join("claim-n1-451.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
         let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump"))
             .await
             .unwrap_or_else(|e| panic!("the install refused: {e}"));
@@ -12248,7 +12248,7 @@ file = "{state}"
         succ.persist().await;
         assert_eq!(volume_bytes(&succ, "kubelet-data.golden").await.unwrap(), golden_bytes, "after the flow-over");
         drop(succ);
-        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         assert_eq!(volume_bytes(&alone, "kubelet-data.golden").await.unwrap(), golden_bytes, "from the disk alone");
         assert_eq!(volume_bytes(&alone, "pvc-from-golden").await.unwrap(), pvc_bytes, "the node's PVC from the disk alone");
     }
@@ -12264,7 +12264,7 @@ file = "{state}"
         };
         let dir = tempfile::tempdir().unwrap();
         let (disk, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
-        let (mut node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (mut node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         assert_eq!(node.origin(&node.find_volume("svc").await.unwrap()), Origin::Release, "an image build lays the release's");
         let mut made = Vec::new();
         for (name, mark, seal, origin) in [
@@ -12295,7 +12295,7 @@ file = "{state}"
         // Install N+1 over it, as a boot does.
         let claim = dir.path().join("claim-n1.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
         let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump"))
             .await
             .expect("the install carries the node's volumes rather than stopping");
@@ -12334,7 +12334,7 @@ file = "{state}"
         super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
         succ.persist().await;
         drop(succ);
-        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         for (name, mark, seal, id) in &made[..3] {
             assert_eq!(alone.find_volume(name).await, Some(*id), "{name}: from the disk alone");
             assert_eq!(volume_bytes(&alone, name).await.unwrap(), vec![*mark; 8 * MIB as usize], "{name}: from the disk alone");
@@ -12409,7 +12409,7 @@ file = "{state}"
         let (disk, ..) = release_fixture(mkfs, &dir).await;
         let to = dir.path().join("moved-to.raw").display().to_string();
         std::fs::File::create(&to).unwrap().set_len(40 * 1024 * MIB).unwrap();
-        let (node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         let want = all_bytes(&node).await;
         assert!(want.contains_key("svc") && want.contains_key("state"));
         let data_dir = dir.path().join("engine-move");
@@ -12444,7 +12444,7 @@ file = "{state}"
         let to_data = st["report"]["data_slab"].as_str().unwrap().to_string();
         drop(state);
 
-        let (alone, _) = super::open_slabs_resuming(&[to.clone()], None, false).await.unwrap();
+        let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&to), None, false).await.unwrap();
         assert_eq!(all_bytes(&alone).await, want, "the new drive alone reads every volume, every byte");
         drop(alone);
         let old = super::open_storage(&disk).await.unwrap();
@@ -12483,7 +12483,7 @@ file = "{state}"
             let (a, b) = (a.clone(), b.clone());
             async move {
                 std::fs::copy(&image, &claim).unwrap();
-                let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+                let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
                 let (flow, report) = super::take_local_disks(&mut mgr, &a, None, Some(&b), "hot", false, Some("stormpump"))
                     .await
                     .expect("a pair is taken");
@@ -12609,7 +12609,7 @@ file = "{state}"
         let (hdd, image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
 
         // The node's data: `state` written, and a PVC.
-        let (mut node, _) = super::open_slabs_resuming(&[hdd.clone()], None, false).await.unwrap();
+        let (mut node, _) = super::open_slabs_resuming(std::slice::from_ref(&hdd), None, false).await.unwrap();
         let v = node.get_volume(&node.find_volume("state").await.unwrap()).unwrap();
         v.write(4096, &[0x51u8; 8192]).await.unwrap();
         v.flush().await.unwrap();
@@ -12641,7 +12641,7 @@ file = "{state}"
 
         let claim = dir.path().join("claim-11.91.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
         let (flow, report) = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), None, "hot", false, Some("stormpump")).await.unwrap();
         let flow = flow.expect("laid");
         assert_eq!(flow.disk, ssd, "the system drive is where local boot goes");
@@ -12715,7 +12715,7 @@ file = "{state}"
         // N again, over the split node: the system drive laid again in place.
         let claim_n = dir.path().join("claim-11.90.raw").display().to_string();
         std::fs::copy(&image_n, &claim_n).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim_n.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim_n), None, true).await.unwrap();
         let (flow, report) = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), None, "hot", false, Some("stormpump")).await.unwrap();
         let flow = flow.expect("laid again");
         assert!(report.is_some(), "the data half kept again");
@@ -12749,7 +12749,7 @@ file = "{state}"
         let (hdd_before, ssd_before) = (mtime(&hdd), mtime(&ssd));
         let claim = dir.path().join("claim-11.91.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
         let e = super::take_local_disks(&mut mgr, &hdd, Some(&ssd), None, "hot", false, Some("stormpump"))
             .await
             .expect_err("no room for an update");
@@ -12762,7 +12762,7 @@ file = "{state}"
     async fn install_over(dir: &tempfile::TempDir, disk: &str, image: &str, tag: &str) -> crate::image::install::Report {
         let claim = dir.path().join(format!("claim-{tag}.raw")).display().to_string();
         std::fs::copy(image, &claim).unwrap();
-        let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
         let (flow, report) = super::take_local_disk_for(&mut mgr, disk, "hot", false, Some("stormpump"))
             .await
             .unwrap_or_else(|e| panic!("install {tag}: {e}"));
@@ -12831,13 +12831,13 @@ file = "{state}"
         let first = make_claim(&disk, "pvc-ext4j-8m", "gate-1", 0xC1).await;
         let up = install_over(&dir, &disk, &image_n1, "up").await;
         {
-            let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+            let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
             assert_eq!(alone.find_volume("gate-1").await, Some(first), "after N+1: {up:?}");
             assert_eq!(volume_bytes(&alone, "gate-1").await.unwrap(), claim_bytes(0xC1), "after N+1");
         }
         let second = make_claim(&disk, "pvc-ext4j-8m", "gate-2", 0xC2).await;
         let down = install_over(&dir, &disk, &image_n, "down").await;
-        let (alone, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         for (name, id, mark) in [("gate-1", first, 0xC1u8), ("gate-2", second, 0xC2)] {
             assert_eq!(alone.find_volume(name).await, Some(id), "{name} after going back to N: {down:?}");
             assert_eq!(volume_bytes(&alone, name).await.unwrap(), claim_bytes(mark), "{name} after going back to N");
@@ -12870,7 +12870,7 @@ file = "{state}"
         { let h = held(image_n1.clone()).await; assert!(matches!(h, crate::image::local::ReleaseHeld::NotHeld { .. }), "{}: {h:?}", "N+1 not yet"); }
 
         // The node runs from its disk and writes its data.
-        let (node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         for (vol, mark) in [("state", 0x51u8), ("logs", 0x52)] {
             let v = node.get_volume(&node.find_volume(vol).await.unwrap()).unwrap();
             v.write(4096, &[mark; 8192]).await.unwrap();
@@ -12988,7 +12988,7 @@ file = "{state}"
         };
         let dir = tempfile::tempdir().unwrap();
         let (disk, image_n, image_n1, _n_svc, _n1_svc, _n1_logs) = release_fixture(mkfs, &dir).await;
-        let (node, _) = super::open_slabs_resuming(&[disk.clone()], None, false).await.unwrap();
+        let (node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
         let data_dir = dir.path().join("engine");
         std::fs::create_dir_all(&data_dir).unwrap();
         let mut config = crate::mgmt::config::StormBlockConfig::default();
@@ -14744,7 +14744,7 @@ size = "64M"
         let disk = p("disk.raw");
         std::fs::File::create(&disk).unwrap().set_len(40 * 1024 * MIB).unwrap();
         let first = claim("claim1.raw");
-        let (mut mgr, _) = super::open_slabs_resuming(&[first.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&first), None, true).await.unwrap();
         let flow = super::take_local_disk(&mut mgr, &disk, "hot", true).await.unwrap().expect("laid");
         drop(mgr);
         let mut mgr = super::open_slabs_and_restore(&[first.clone(), flow.disk.clone()], None).await.unwrap();
@@ -14768,7 +14768,7 @@ size = "64M"
         // Boot 2: the disk, and a fresh claim to finish the flow-over from.
         let second = claim("claim2.raw");
         std::env::set_var("STORMBLOCK_RESUME_SOURCE", &second);
-        let (mgr, resumed) = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await.unwrap();
+        let (mgr, resumed) = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, true).await.unwrap();
         std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
         let svc = super::resolve_boot_volume(&mgr, "svc").await.unwrap();
         let v = mgr.get_volume(&svc).unwrap();
@@ -14867,7 +14867,7 @@ file = "{state}"
         let disk = p("disk.raw");
         std::fs::File::create(&disk).unwrap().set_len(40 * 1024 * MIB).unwrap();
         let first = claim("claim1.raw");
-        let (mut mgr, _) = super::open_slabs_resuming(&[first.clone()], None, true).await.unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&first), None, true).await.unwrap();
         let want = digests(&mgr).await;
         let flow = super::take_local_disk(&mut mgr, &disk, "hot", true).await.unwrap().expect("laid");
         drop(mgr);
@@ -14913,7 +14913,7 @@ file = "{state}"
             .await
             .unwrap();
         std::env::set_var("STORMBLOCK_RESUME_SOURCE", &other);
-        let wrong = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await;
+        let wrong = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, true).await;
         std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
         match wrong {
             Ok(_) => panic!("the boot resumed from another machine's image and came up"),
@@ -14923,7 +14923,7 @@ file = "{state}"
         // Boot 2, from the disk, finishing the flow-over from a fresh claim.
         let second = claim("claim2.raw");
         std::env::set_var("STORMBLOCK_RESUME_SOURCE", &second);
-        let (mgr, resumed) = super::open_slabs_resuming(&[flow.disk.clone()], None, true).await.unwrap();
+        let (mgr, resumed) = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, true).await.unwrap();
         std::env::remove_var("STORMBLOCK_RESUME_SOURCE");
         assert!(resumed.is_some(), "the boot from the disk did not resume the flow-over");
         let got = digests(&mgr).await;
@@ -15039,7 +15039,7 @@ file = "{state}"
                 .status()
                 .unwrap();
             assert!(st.success(), "copying the image");
-            let (mut mgr, _) = super::open_slabs_resuming(&[claim.clone()], None, true).await.unwrap();
+            let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
             if before.is_empty() {
                 before = digests(&mgr).await;
                 eprintln!("{} volumes in the image", before.len());
@@ -15137,7 +15137,7 @@ file = "{state}"
             }
             drop(mgr);
 
-            let (local, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false).await.unwrap();
+            let (local, _) = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, false).await.unwrap();
             if used {
                 bad.extend(compare_sealed(&format!("{round}: goldens on the disk alone"), &before, &local).await);
                 for (name, model) in &models {
@@ -15160,12 +15160,12 @@ file = "{state}"
             // is a golden that reads as the clone (#239).
             if round == "fresh disk" {
                 drop(local);
-                let (live, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false).await.unwrap();
+                let (live, _) = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, false).await.unwrap();
                 noise_over_clones(&live).await;
                 bad.extend(compare_sealed(&format!("{round}: goldens after the clones were written"), &before, &live).await);
                 live.persist().await;
                 drop(live);
-                let (local, _) = super::open_slabs_resuming(&[flow.disk.clone()], None, false).await.unwrap();
+                let (local, _) = super::open_slabs_resuming(std::slice::from_ref(&flow.disk), None, false).await.unwrap();
                 bad.extend(compare_sealed(&format!("{round}: goldens after a reopen"), &before, &local).await);
                 drop(local);
                 continue;
@@ -15970,7 +15970,7 @@ mod forge_mode_tests {
         .uri();
 
         // The node: its slabs from the claimed clone, as adopt-ublk opens them.
-        let (node, _, disks) = super::open_slabs_with_disks(&[uri.clone()], None, false).await.unwrap();
+        let (node, _, disks) = super::open_slabs_with_disks(std::slice::from_ref(&uri), None, false).await.unwrap();
         assert!(node.registry().read().await.iter().count() >= 2, "the clone's slabs opened");
         let node_dir = dir.path().join("node");
         std::fs::create_dir_all(&node_dir).unwrap();
@@ -16852,7 +16852,7 @@ mod system_disk_tests {
             mgr.persist().await;
         }
         // As adopt-ublk opens it: the slabs from the disk, the disk kept.
-        let (vm, _, disks) = super::open_slabs_with_disks(&[disk.clone()], None, false).await.unwrap();
+        let (vm, _, disks) = super::open_slabs_with_disks(std::slice::from_ref(&disk), None, false).await.unwrap();
         let slabs = vm.registry().read().await.iter().count();
         assert!(slabs >= 2, "both halves opened");
         let node_dir = dir.path().join("node");

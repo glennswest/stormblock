@@ -1243,7 +1243,7 @@ async fn delete_volume(
     // `scrub=used` (#313): at least one pass over what this volume was the
     // last user of. The node's default applies without it.
     let scrub = crate::mgmt::api::volumes::scrub_level(q.get("scrub").map(String::as_str))
-        .map_err(|e| MkError::bad(e))?;
+        .map_err(MkError::bad)?;
     let mut vm = ctx.state.volume_manager.lock().await;
     let scrubbed = vm.delete_volume_erasing(VolumeId(id), scrub).await.map_err(|e| match e {
         // Even with force: the node has it as a device (#267).
@@ -1494,7 +1494,7 @@ async fn unpack_volume(
 ) -> MkResult {
     let id = id.parse::<Uuid>().map_err(|_| MkError::bad(format!("invalid uuid {id}")))?;
     let compression = tarfs::parse_compression(q.get("compression").map(|s| s.as_str()))
-        .map_err(|e| MkError::bad(e))?;
+        .map_err(MkError::bad)?;
     let into = q.get("into").map(|s| s.as_str()).unwrap_or("/").to_string();
     let whiteouts = flag(&q, "whiteouts");
 
@@ -1506,7 +1506,7 @@ async fn unpack_volume(
     // `axum::Error` is not an `io::Error`, so the body stream is re-typed
     // before it can be read as one. Boxing it pinned is what makes the reader
     // `Unpin`, which the walker requires.
-    let stream = body.into_data_stream().map_err(|e| std::io::Error::other(e));
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
     let reader = tokio_util::io::StreamReader::new(Box::pin(stream));
 
     let allocated_before = allocated_bytes(&ctx, id).await;
@@ -1554,7 +1554,7 @@ async fn pack_volume(
 ) -> MkResult {
     let id = id.parse::<Uuid>().map_err(|_| MkError::bad(format!("invalid uuid {id}")))?;
     let compression = tarfs::parse_compression(q.get("compression").map(|s| s.as_str()))
-        .map_err(|e| MkError::bad(e))?;
+        .map_err(MkError::bad)?;
     let from = q.get("from").map(|s| s.as_str()).unwrap_or("/").to_string();
 
     let dev = volume_device(&ctx, id).await?;

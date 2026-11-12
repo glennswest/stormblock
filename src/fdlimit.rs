@@ -34,7 +34,7 @@ pub fn open_now() -> Option<u64> {
 /// The soft `RLIMIT_NOFILE`.
 pub fn limit() -> Option<u64> {
     let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } == 0).then_some(r.rlim_cur as u64)
+    (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) } == 0).then_some(r.rlim_cur)
 }
 
 /// Both, for health; a warning in the log past 80 % (once a minute).
@@ -71,7 +71,7 @@ pub fn raise_soft_limit() {
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) != 0 {
             return;
         }
-        let (was_soft, was_hard) = (r.rlim_cur as u64, r.rlim_max as u64);
+        let (was_soft, was_hard) = (r.rlim_cur, r.rlim_max);
         let want = TARGET.min(nr_open.unwrap_or(TARGET)).max(was_hard);
         if want > was_hard {
             let up = libc::rlimit { rlim_cur: want as _, rlim_max: want as _ };

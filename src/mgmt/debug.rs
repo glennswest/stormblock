@@ -306,7 +306,7 @@ async fn stalls(full: Option<axum::Extension<crate::mgmt::auth::FullView>>) -> R
     let r = reports().lock().unwrap_or_else(|e| e.into_inner());
     out.push_str(&format!("\n{} watchdog report(s) kept, newest last\n", r.len()));
     for rep in r.iter() {
-        out.push_str("\n");
+        out.push('\n');
         out.push_str(if full { &rep.full } else { &rep.open });
     }
     text(out)

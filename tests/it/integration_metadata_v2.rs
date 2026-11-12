@@ -673,7 +673,7 @@ async fn a_v2_node_on_petabyte_drives_keeps_its_volumes_across_restarts() {
     assert_eq!(read_mib(&vm, "old", 15).await, pattern(5, 15, 0));
 
     // 8 PiB thin: extents at 0, 1 PiB, and past 2^32.
-    let far = [0u64, 1, 1 << 30, u32::MAX as u64 + 5, 5 << 30, (8 * PIB >> 20) - 1];
+    let far = [0u64, 1, 1 << 30, u32::MAX as u64 + 5, 5 << 30, ((8 * PIB) >> 20) - 1];
     let h = vm.create_volume_any("huge", 8 * PIB).await.unwrap();
     let hv = vm.get_volume(&h).unwrap();
     for &e in &far {

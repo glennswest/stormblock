@@ -1048,7 +1048,7 @@ impl GoldenSource {
         // wants and the invocation says which engine holds it, so neither
         // pins the other.
         let list = client
-            .get(&format!("{base}/api/v1/volumes"))
+            .get(format!("{base}/api/v1/volumes"))
             .send()
             .await
             .map_err(|e| spec_err(format!("asking {base} for volumes: {e}")))?
@@ -1085,7 +1085,7 @@ impl GoldenSource {
             "dhchap": true,
         });
         let resp = client
-            .post(&format!("{base}/api/v1/exports"))
+            .post(format!("{base}/api/v1/exports"))
             .json(&body)
             .send()
             .await

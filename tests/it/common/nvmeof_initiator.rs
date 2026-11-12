@@ -146,8 +146,7 @@ impl NvmeofInitiator {
         // Check status
         let status = u16::from_le_bytes(cqe.raw[14..16].try_into().unwrap());
         if status & 0xFFFE != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("fabric connect failed: status={status:#x}"),
             ));
         }
@@ -295,8 +294,7 @@ impl NvmeofInitiator {
         let (cqe, _) = self.read_capsule_resp().await?;
         let status = u16::from_le_bytes(cqe.raw[14..16].try_into().unwrap());
         if status & 0xFFFE != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 format!("NVMe write failed: status={status:#x}"),
             ));
         }
@@ -367,7 +365,7 @@ impl NvmeofInitiator {
         let (cqe, _) = self.read_capsule_resp().await?;
         let status = u16::from_le_bytes(cqe.raw[14..16].try_into().unwrap());
         if status & 0xFFFE != 0 {
-            return Err(io::Error::new(io::ErrorKind::Other, "flush failed"));
+            return Err(io::Error::other("flush failed"));
         }
         Ok(())
     }

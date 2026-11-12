@@ -1136,8 +1136,8 @@ mod tests {
         let mut gold_new = entry("stormpump", "bbbb", "0.1.0");
         gold_new.kind = "golden".into();
 
-        let old = vec![bin_old, gold_old];
-        let new = vec![bin_new, gold_new];
+        let old = [bin_old, gold_old];
+        let new = [bin_new, gold_new];
 
         let before: std::collections::HashMap<(&str, &str), &ManifestEntry> = old
             .iter()

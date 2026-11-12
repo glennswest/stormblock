@@ -531,8 +531,7 @@ impl IscsiInitiator {
             Some(Opcode::ScsiResponse) => {
                 let status = resp.bhs.status();
                 if status != 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
+                    return Err(io::Error::other(
                         format!("SCSI write failed with status {status:#x}"),
                     ));
                 }
@@ -551,7 +550,7 @@ impl IscsiInitiator {
         bhs.set_immediate(true);
         bhs.set_final(true);
         // Reason code 0 = close session (byte 1 bits 6:0)
-        bhs.raw[1] = (bhs.raw[1] & 0x80) | 0x00;
+        bhs.raw[1] &= 0x80;
         bhs.set_initiator_task_tag(itt);
         bhs.set_cmd_sn(self.cmd_sn);
         bhs.set_exp_stat_sn(self.exp_stat_sn);

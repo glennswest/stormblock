@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
         "{DRIVES} drives ({}), {VOLUMES} mirror:2 volumes x {EXTENTS} MiB, one drive fails; median of {repeats}",
         if buffered { "page cache" } else { "O_DIRECT" }
     );
-    println!("{:>9} {:>10} {:>10} {:>8} {:>9}  {}", "parallel", "in_flight", "copied", "secs", "MiB/s", "each run, MiB/s");
+    println!("{:>9} {:>10} {:>10} {:>8} {:>9}  each run, MiB/s", "parallel", "in_flight", "copied", "secs", "MiB/s");
     let configs = [(1, 1), (4, 1), (1, 4), (4, 4), (8, 8)];
     let mut rates: Vec<Vec<(u64, f64)>> = vec![Vec::new(); configs.len()];
     // Interleaved, so drift on a shared host does not land on one setting.

@@ -820,7 +820,7 @@ impl PlacementEngine {
             let r = registry.read().await;
             let src = r.get(&old.slab_id).ok_or(PlacementError::SlabNotFound(old.slab_id))?;
             let size = src.slot_size();
-            (src.device().clone(), src.data_offset() + old.slot_idx as u64 * size, size)
+            (src.device().clone(), src.data_offset() + old.slot_idx * size, size)
         };
         let mut data = vec![0u8; slot_size as usize];
         let read_err = |e: String| PlacementError::ReadFailed {

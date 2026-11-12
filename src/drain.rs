@@ -145,7 +145,7 @@ async fn persist_then_release(
     registry: &Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     engine: &PlacementEngine,
 ) {
-    crate::volume::VolumeManager::persist_detached(&volumes).await;
+    crate::volume::VolumeManager::persist_detached(volumes).await;
     let mut reg = registry.write().await;
     engine.release_owed(&mut reg).await;
 }

@@ -1739,7 +1739,7 @@ impl Slab {
     ) -> DriveResult<usize> {
         self.in_range(slot_idx)?;
         let phys_offset = self.header.data_offset
-            + (slot_idx as u64) * self.header.slot_size
+            + slot_idx * self.header.slot_size
             + offset_in_slot;
         self.device.read(phys_offset, buf).await
     }
@@ -1753,7 +1753,7 @@ impl Slab {
     ) -> DriveResult<usize> {
         self.in_range(slot_idx)?;
         let phys_offset = self.header.data_offset
-            + (slot_idx as u64) * self.header.slot_size
+            + slot_idx * self.header.slot_size
             + offset_in_slot;
         self.device.write(phys_offset, buf).await
     }
@@ -2252,7 +2252,7 @@ impl Slab {
                 slab: self.id,
                 slot: idx,
                 device: self.device.clone(),
-                offset: self.header.data_offset + idx as u64 * self.header.slot_size,
+                offset: self.header.data_offset + idx * self.header.slot_size,
                 len: self.header.slot_size,
                 level,
                 volume,
@@ -2345,7 +2345,7 @@ impl Slab {
             )));
         }
         let phys_offset = self.header.data_offset
-            + (slot_idx as u64) * self.header.slot_size
+            + slot_idx * self.header.slot_size
             + offset_in_slot;
         Ok((Arc::clone(&self.device), phys_offset))
     }
@@ -3974,7 +3974,7 @@ mod erase_tests {
 
     async fn raw(dev: &Arc<dyn BlockDevice>, slab: &Slab, idx: u64) -> Vec<u8> {
         let mut b = vec![0u8; SLOT as usize];
-        dev.read(slab.data_offset() + idx as u64 * SLOT, &mut b).await.unwrap();
+        dev.read(slab.data_offset() + idx * SLOT, &mut b).await.unwrap();
         b
     }
 
