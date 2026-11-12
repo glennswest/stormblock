@@ -4,16 +4,20 @@
 
 <!-- New unreleased changes go here -->
 
-### 2026-11-12
-- **fix:** #584, #398: `cargo clippy --all-targets --workspace -- -D warnings` is clean (clippy 1.95): about 180 lints fixed, the machine-applicable ones by `clippy --fix`, the rest by hand (docs reattached to the functions they describe, items moved above test modules, a mutex guard no longer held across an await in the boot-disk step, `is_none_or`, `sort_by_key`). `too_many_arguments`, `type_complexity` and `result_large_err` are allowed in `[lints.clippy]`, each with its reason; `rust-version = "1.82"`.
-- **build:** #584: `check.sh` runs that clippy as stage 1b, so a lint fails the routine check like a rustc warning.
-
 ### 2026-11-10
 - **docs:** #512: writes into an ext4 past ~192 TiB no longer corrupt it, with v24.0.1's pins (mkfs-ext4 v4.1.3, which writes meta_bg descriptors where the layout puts them, mkfs.ext4.rs#33; fio-ext4 v1.8.3). Checked with `examples/ext4_large`: the small meta_bg reproduction (16 GiB) and a bare 256 TiB drive, 256 files each, clean (were corrupt: 1302 problems at 256 TiB); a 256 TiB template, its clone and 256 files through the engine, clean. No code change.
 - **docs:** README's open findings no longer list #512 (fixed by v24.0.1's pins).
 
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
+
+## [v24.3.1] — 2026-11-12
+
+### Fixed
+- #584, #398: `cargo clippy --all-targets --workspace -- -D warnings` is clean (clippy 1.95): about 180 lints fixed, among them docs reattached to the functions they describe, items moved above test modules and a std mutex guard no longer held across an await in the boot-disk step. `too_many_arguments`, `type_complexity` and `result_large_err` are allowed in `[lints.clippy]`, each with its reason; `rust-version = "1.82"`.
+
+### Changed
+- #584: `check.sh` runs that clippy as stage 1b, so a lint or a rustc warning fails the routine check.
 
 ## [v24.3.0] — 2026-11-12
 
