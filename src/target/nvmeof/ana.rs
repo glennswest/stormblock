@@ -314,7 +314,15 @@ mod tests {
         assert!(!set(v, AnaState::Inaccessible), "no change, no notice");
         assert_eq!(state_of(v), AnaState::Inaccessible);
         assert!(change_count() > before);
-        assert_eq!(rx.try_recv().unwrap(), v);
+        // The channel is the process's: other tests' notices may be ahead.
+        let announced = loop {
+            match rx.try_recv() {
+                Ok(n) if n == v => break true,
+                Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(_) => break false,
+            }
+        };
+        assert!(announced, "the change is announced");
         assert!(set(v, AnaState::Optimized));
         assert!(!all().contains_key(&v), "the default is not kept");
     }

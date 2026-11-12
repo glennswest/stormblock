@@ -532,6 +532,9 @@ async fn every_tls_file_is_taken_up_as_it_appears_and_a_missing_crl_fails_closed
         eprintln!("SKIP: needs the openssl CLI to make the certificates");
         return;
     }
+    // Its plain requests before the pair are counted (#525), on the
+    // process's counter: not while a test is counting (#585).
+    let _counting = plain_lock().await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let tmp = TempDir::new().unwrap();
     let pki = Pki::new(&tmp);
@@ -672,6 +675,9 @@ async fn a_tls_file_that_is_there_and_broken_is_still_an_error() {
         eprintln!("SKIP: needs the openssl CLI to make the certificates");
         return;
     }
+    // Its plain requests before the pair are counted (#525), on the
+    // process's counter: not while a test is counting (#585).
+    let _counting = plain_lock().await;
     let tmp = TempDir::new().unwrap();
     let pki = Pki::new(&tmp);
     let live = tmp.path().join("live");
@@ -720,10 +726,11 @@ async fn a_tls_file_that_is_there_and_broken_is_still_an_error() {
     assert!(reloader.serving_tls());
 }
 
-/// The value of one line of `/metrics`: the plain count of a caller and route.
 /// The plain-request counter is process-wide (the metrics recorder is), and
-/// every test in this binary shares it: the tests that count take this lock
-/// and count from what was there when they started (#585).
+/// every test in this binary shares it: the tests that count, and the tests
+/// that make plain requests a listener counts (optional, or no pair yet), take
+/// this lock; the counting ones count from what was there when they started
+/// (#585).
 async fn plain_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static L: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     L.lock().await
@@ -868,7 +875,8 @@ async fn an_optional_listener_with_no_pair_yet_is_plain_then_both() {
     let plain = format!("http://127.0.0.1:{port}");
 
     let _counting = plain_lock().await;
-    let slabs0 = plain_count(&pki, &tls, "GET /api/v1/slabs").await;
+    // No pair yet: the count is read in plain too.
+    let slabs0 = plain_count(&pki, &plain, "GET /api/v1/slabs").await;
     let r = reqwest::Client::new().get(format!("{plain}/api/v1/slabs")).bearer_auth(TOKEN).send().await.unwrap();
     assert_eq!(r.status(), 200, "no pair yet: plain");
     assert!(pki.client(None).get(format!("{tls}/api/v1/health")).send().await.is_err(), "no pair yet: no TLS");
