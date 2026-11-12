@@ -164,6 +164,20 @@ impl FlowProgress {
         *self.pace.lock().unwrap_or_else(|e| e.into_inner()) = Some(p);
     }
 
+    /// Back to no flow-over begun (#585): the lib's tests run many
+    /// flow-overs in one process, and each counts from zero.
+    #[cfg(test)]
+    pub(crate) fn clear_for_test(&self) {
+        *self.began.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        for c in [&self.moved, &self.zeroed, &self.bytes, &self.persists, &self.hot] {
+            c.store(0, Relaxed);
+        }
+        *self.source.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.source_device.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.pace.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.validation.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// Nothing when no flow-over has begun in this process.
     pub fn snapshot(&self) -> Option<Snapshot> {
         let began = (*self.began.lock().unwrap_or_else(|e| e.into_inner()))?;

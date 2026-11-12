@@ -37,6 +37,7 @@ fn flow_reset() {
     }
     crate::fglat::clear_for_test();
     crate::flowhot::clear_for_test();
+    crate::flowprogress::FLOW.clear_for_test();
 }
 
 /// One flow-over test at a time, each from a clean slate.
@@ -55,10 +56,24 @@ pub(crate) fn flow_blocking() -> MutexGuard<'static, ()> {
 
 /// One test of the NIC environment at a time.
 pub(crate) async fn net() -> MutexGuard<'static, ()> {
-    NET.lock().await
+    let g = NET.lock().await;
+    net_reset();
+    g
+}
+
+/// Nothing configured: no storage interfaces, nothing skipped, the NIC
+/// environment unset (a config test's `apply_networks` sets the first two).
+fn net_reset() {
+    for k in ["STORMBLOCK_IFADDRS", "STORMBLOCK_SYSFS_NET", "STORMBLOCK_PATH_SKIP", "STORMBLOCK_STORAGE_INTERFACE"] {
+        std::env::remove_var(k);
+    }
+    crate::netif::set_path_sources(Vec::new());
+    crate::netif::set_path_skip(Vec::new());
 }
 
 /// [`net`] for a test that is not async.
 pub(crate) fn net_blocking() -> MutexGuard<'static, ()> {
-    NET.blocking_lock()
+    let g = NET.blocking_lock();
+    net_reset();
+    g
 }
