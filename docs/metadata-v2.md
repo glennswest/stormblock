@@ -206,6 +206,17 @@ on first open"), and as built:
   and since a failed write is followed by a whole write, one failure stopped
   every persist after it (forge's hot slab, 2026-11-11). `replace_all` is
   left for an empty store (a migration, `metadata.v2` grown).
+- **A full slab region, with a data directory.** A slab whose own region is
+  full while `metadata.v2` took the same write is marked stale (#583): its
+  copy is behind, restore reads the directory's first, and its failure is not
+  a durability fault. It is left out of persists, and its maps are not read
+  for it, until the node holds a fifth fewer volumes than when it filled;
+  then it is written whole again (#587). That write lets go of the volumes
+  the region should no longer hold first, a few per checkpoint (copy on
+  write needs free pages to free pages), then reconciles; a success clears
+  the mark, a failure sets a new baseline. A restart tries it too.
+  `/api/v1/slabs/durability` reports such a slab `"stale": true` with a
+  `stale` note, and does not count it against `ok`.
 - **Order.** Batches are applied in the order their records were taken (a
   ticket per persist), never skipped for a newer one; a batch taken before a
   failure is dropped (the failure makes the next one whole), and a persist

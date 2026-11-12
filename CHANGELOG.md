@@ -4,6 +4,9 @@
 
 ### 2026-11-12
 - **docs:** the work plan and session history move from CLAUDE.md to docs/work-plan.md, unchanged. At their old size CLAUDE.md filled the session's context window, so the session compacted over and over.
+- **fix:** #587: a stale slab region (#583: full, with `metadata.v2` in the data directory taking the record) is written whole again once the node holds a fifth fewer volumes than when it filled, dropping the volumes it should no longer hold a few per checkpoint first, so the copy on write has free pages; a success makes it current again. Forge's slab stayed stale after GC freed 912 volumes, since nothing rewrote it short of a restart.
+- **fix:** #587: `/api/v1/slabs/durability` no longer reads a stale slab as short of room: each slab carries `stale`, a stale one does not count against `ok`, and a `stale` note names them and says the data directory holds the record. Forge read `ok:false` with every write durable.
+- **perf:** #587: a stale slab no longer makes every persist a whole write (it was counted as a sink with no store), so a node with one no longer reads every extent map into memory at every persist.
 <!-- New unreleased changes go here -->
 
 ### 2026-11-10

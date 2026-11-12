@@ -2,7 +2,7 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
-## #587 — a stale slab region brought back, and not counted against `ok` (2026-11-12, in progress)
+## #587 — a stale slab region brought back, and not counted against `ok` (2026-11-12, done in cfb56ce3)
 
 Forge after v24.2.2 (#583): its hot slab's region is full and marked stale,
 `metadata.v2` takes the record, creates work, but `/api/v1/slabs/durability`
@@ -23,6 +23,13 @@ Plan:
 4. A stale slab not due a try no longer makes every persist a whole one
    (`rewrites` counted it as a sink that changed: maps never left memory).
 5. Test in tests/it/integration_metadata_v2.rs, CHANGELOG, README, docs.
+
+Done: all five (cfb56ce3). `a_stale_slab_region_is_written_again_once_deletes_make_room`
+fills a 1 MiB region (3241 volumes), checks `stale` and no fault, deletes a
+tenth (still stale), then a third (current again, fits), and restores the
+slab alone with no data directory. Passed on a build VM with the #583 test.
+Next: check.sh, v24.3.0 (new `stale` field), stage, close #587; then #585,
+then #584.
 
 ## TODO — Implementation Roadmap
 
