@@ -49,6 +49,14 @@ Increments (each committed, pushed, checked):
 
 Verification on forge1 needs stormcentral#1335 (the tools in the image).
 
+2026-11-13 (later): stormcentral#1335 closed (blob-4c89bd62d5063397 carries
+stormraid bed77aa206bb and stormdrive 524bc965f52e beside v24.4.0) and
+stormcentral#1381 closed (the format holds the stage limit). forge1's last
+install (12.78, 17:11Z) was cancelled before the layout. The item waits
+`--after-install stormblock>=9b74751b@forge1`; then check forge1's console
+(`LAY:` per-drive format lines, `System legs`) and `GET /api/v1/storage/layout`
+`state: ok` with the 3+1 set, and close #573.
+
 - [x] A: e52171be (tools in the initramfs, `tests/initramfs-tools.sh`).
 - [x] B (plan): 1cb48235 `image storage-plan` (`src/image/storage.rs`); clippy fix after.
 - [x] B (/init): `storage layout` + `storage format` blocks,
