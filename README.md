@@ -692,6 +692,11 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     before writing, #351). A diskless node whose drive carries slabs says which
     drive and why. `controllers` and `drives` are the boot's storage
     inventory (#345) (`docs/boot-hooks.md`).
+  - `storage_layout` (#573): on a node laid by `storage:`, the drives, the
+    format each got and its live block size and PI, the system legs (present,
+    missing) and the node-data set's state; `state` `ok` or `degraded`. Also
+    `GET /api/v1/storage/layout` (token; 404 on a node with no layout).
+    Shape: [docs/storage-layout.md](docs/storage-layout.md#the-layout-reported-step-8).
   And `"ublk_stuck"` (#337): every request a ublk device was handed and has
   not answered for 30 s or more, oldest first, with `device`
   (`volume:<id>`), `ublk` (`/dev/ublkbN`), `queue`, `tag`, `op` (`flush`,

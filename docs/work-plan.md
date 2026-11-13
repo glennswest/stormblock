@@ -34,7 +34,11 @@ Increments (each committed, pushed, checked):
 - **G.** ESP + pallets on every drive (`run_local_boot` per drive; the
   handover record carries the list).
 - **H.** `GET /api/v1/storage/layout` (shape per stormcentral#1318), a summary
-  in health; named on #573 and stormcentral#1318.
+  in health; named on #573 and stormcentral#1318. **Done** (df84ba5f,
+  2d6373b8): `/run/stormblock/storage-layout.json` from `/init`, in the boot
+  record, on the API and in health.
+- **Next: keep-reinstall.** `storage-lay --check`: drives that already carry
+  this node's layout are kept on a keep-data reinstall, never relaid.
 
 Verification on forge1 needs stormcentral#1335 (the tools in the image).
 

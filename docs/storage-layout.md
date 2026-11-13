@@ -115,4 +115,35 @@ after the first leg's own local boot on the install, and again at each start
 of a node whose record names legs, so a leg replaced since gets them back
 (`System legs: <drive> boots on its own`). Any leg then starts the node.
 
-Not yet: the layout on the API (H).
+## The layout, reported (step 8)
+
+`/init` writes `/run/stormblock/storage-layout.json` on the boot that laid the
+drives (`"from": "install"`) and on every boot that serves the node-data set
+(`"from": "boot"`), and keeps it in the boot record in system-data
+(`storage_layout`): an install's record is its result. A node laid without
+`storage:` has none.
+
+```json
+{
+  "from": "install",
+  "drives": [{"device": "/dev/sda", "format": "formatted", "protection": "none", "method": "auto"}],
+  "asked": {"block_size": 4096, "protection": "type1", "parity": 1, "spares": 0},
+  "regions": {"data_bytes": 0, "system_bytes": 0},
+  "system_legs": ["/dev/sda", "/dev/sdb", "/dev/sdc", "/dev/sdd"],
+  "set": {"device": "/dev/ublkb64", "state": "optimal", "parity": 1, "slots": 4,
+          "spares": 0, "members": ["/dev/sda3", "..."], "missing": []}
+}
+```
+
+`format` is `formatted` (with the `protection` and `method` used) or
+`already` (the drive was at the format); null on a later boot. `set.state` is
+`optimal`, `degraded` (a member missing: `missing` quotes stormraid's line) or
+`not-served`; `"set": null` with one drive or `data_raid: none`.
+
+The engine serves it at `GET /api/v1/storage/layout` (token; 404 when there is
+none) and in health as `storage_layout`, with what it sees now laid over it:
+each drive's `logical_block` and `integrity` from the kernel (a format that
+did not take shows here), `legs_present` / `legs_missing` (the legs with a
+local system slab open; left out until the first slab report) and `state`:
+`ok`, or `degraded` when the set is not whole or a leg is missing. Health's
+own `status` does not follow it.
