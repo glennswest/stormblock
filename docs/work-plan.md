@@ -58,7 +58,17 @@ Verification on forge1 needs stormcentral#1335 (the tools in the image).
   appliance's `install` record `state: formatting` (`InstallStep`), the
   sense quoted in FATAL. stormcentral#1381: hold `laid_secs` while
   `formatting` reports come in, show it as the stage.
-- [ ] E next: the other legs' system slabs, system volumes `mirror:N`.
+- [ ] E (in progress): the other legs' system slabs, system volumes `mirror:N`.
+  Plan: boot-local `--system-leg DEV` (repeatable, the other legs). Install:
+  each leg must carry a SLAB system partition and no data half, else refused
+  with nothing written; reformat it and register it (role System). Every
+  boot: the leg's system partition is opened with the slabs, and the record
+  names the legs (`Record.system_legs`), so only a node laid with legs is
+  mirrored. A legs mend in `pair.rs` sets each System-role volume to
+  `mirror:N` at `drive` and resyncs it, after the flow-over settles and at
+  start; a leg missing is a WARNING. /init passes `--system-leg` for every
+  STORAGE_SYSTEM leg after the first, and on a normal boot for each drive
+  whose stormblock-raid member was served and which carries a SLAB partition.
 - [x] F: cd2cec7f. Not behind stormraid#76 after all: `stormraid serve --id
   64 <members>` opens the set from the members given (degraded when one is
   missing). The `storage serve` block, before the probe, serves every
