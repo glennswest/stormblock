@@ -98,14 +98,6 @@ fn split_key(t: &str) -> Option<(String, String)> {
     Some((key, rest.trim().to_string()))
 }
 
-fn unquote(s: &str) -> String {
-    let s = s.trim();
-    if s.len() >= 2 && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\''))) {
-        return s[1..s.len() - 1].to_string();
-    }
-    s.to_string()
-}
-
 /// A flow value: `{a: 1, b: [x, y]}`, `[a, b]` or a scalar.
 fn parse_flow(s: &str) -> Result<Yaml, String> {
     let chars: Vec<char> = s.trim().chars().collect();
