@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-13
+- **feat:** #573: the initramfs carries the storage layout's tools when given them: `STORMBLOCK_INITRAMFS_TOOLS="stormraid=/path stormdrive=/path"` installs each at `/usr/sbin/<name>`, refused unless it is a static ELF for the image's machine (`tests/initramfs-tools.sh`). Without them the image builds as before.
 - **docs:** refreshed from the code since 2026-11-06 (v23.23.1 … v24.3.1): README names v24.3.1 and says `/v1` create's `placement.array_id|slab_id|drive` (#426); the rest (allow_any_host default, rollback `keep`, stale slab regions, lock order, clippy gate, node name in boot records) already matched the code. No open promise found that the code does not keep.
 
 ### 2026-11-10

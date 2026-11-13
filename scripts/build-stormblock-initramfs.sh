@@ -407,6 +407,44 @@ fi
 cp "$STORMBLOCK_BIN" "$INITRD_DIR/usr/sbin/stormblock"
 chmod 755 "$INITRD_DIR/usr/sbin/stormblock"
 
+# --- BEGIN initramfs tools (covered by tests/initramfs-tools.sh)
+# The storage layout's tools (#573): `stormraid` assembles and creates the
+# node's data set, `stormdrive` formats the drives. They come from their own
+# repos, so the image is given them, as
+# STORMBLOCK_INITRAMFS_TOOLS="stormraid=/path stormdrive=/path"
+# (stormcentral#1335), and each lands at /usr/sbin/<name>. Without them the
+# image builds as before and /init says a `storage:` layout cannot run.
+# A tool must be a static ELF for this image's machine: there is no loader in
+# the initramfs, and a binary for another machine fails at boot as "not found".
+INITRAMFS_TOOL_NAMES="stormraid stormdrive"
+tool_refused() { # name path machine -> the reason, empty when it may go in
+    case " $INITRAMFS_TOOL_NAMES " in
+        *" $1 "*) ;;
+        *) echo "$1 is not a tool this image carries ($INITRAMFS_TOOL_NAMES)"; return 0 ;;
+    esac
+    [ -f "$2" ] || { echo "$1: $2 not found"; return 0; }
+    _tm=$(elf_machine "$2")
+    [ -n "$_tm" ] || { echo "$1: $2 is not an ELF binary"; return 0; }
+    [ "$_tm" = "$3" ] || { echo "$1: $2 is for machine $_tm, this image is for $3"; return 0; }
+    if LC_ALL=C grep -aq -e '/ld-linux' -e '/ld-musl' "$2"; then
+        echo "$1: $2 is dynamically linked; there is no loader in this initramfs"
+    fi
+}
+# --- END initramfs tools
+
+for _tool in ${STORMBLOCK_INITRAMFS_TOOLS:-}; do
+    _tname=${_tool%%=*}
+    _tpath=${_tool#*=}
+    [ "$_tname" != "$_tool" ] || { echo "ERROR: STORMBLOCK_INITRAMFS_TOOLS: '$_tool' is not name=path"; exit 1; }
+    _why=$(tool_refused "$_tname" "$_tpath" "$TARGET_MACHINE")
+    if [ -n "$_why" ]; then
+        echo "ERROR: STORMBLOCK_INITRAMFS_TOOLS: $_why"
+        exit 1
+    fi
+    install -m 755 "$_tpath" "$INITRD_DIR/usr/sbin/$_tname"
+    echo "  tool:       $_tname ($(du -h "$_tpath" | cut -f1))"
+done
+
 # Kernel modules — what is needed to reach the root, and nothing else.
 #
 # The initramfs is loaded into RAM in full on every boot, so everything in it
