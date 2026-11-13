@@ -28,6 +28,14 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.4.0] — 2026-11-13
+
+### Added
+- #573: drives laid by an install-config's `storage:` section (stormcos STORAGE-LAYOUT.md; without the section nothing changes). Every taken drive is formatted to the asked block size (stormdrive `--method auto`, progress and every sense on the console, the boot record's stage `formatting`), laid alike by `image storage-lay` (an ESP, a system leg, a data region the smallest drive's size), and its data regions are made one stormraid set at the asked parity, served at `/dev/ublkb64` on every boot. The system half is mirrored on every leg and every leg boots the node on its own. The layout is reported at `GET /api/v1/storage/layout` and in health's `storage_layout`. A keep-data reinstall keeps the layout it finds. A changed layout stops and writes nothing unless the wipe word (`rd.stormblock.assimilate=force`) is given.
+
+### Fixed
+- #573: a drive in bay 0 is in a bay. #591: the flow-over round-trip test names its `leg_disks`.
+
 ## [v24.3.1] — 2026-11-12
 
 ### Fixed
