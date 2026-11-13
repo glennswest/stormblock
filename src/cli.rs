@@ -711,6 +711,10 @@ enum SlabAction {
         /// Drives to look among; the machine's disks when none is given
         #[arg(long = "among")]
         among: Vec<String>,
+        /// Devices to look at besides those (#573: the node-data set a
+        /// `storage:` layout serves, `/dev/ublkb64`, which is no disk)
+        #[arg(long = "also")]
+        also: Vec<String>,
         /// The sysfs root the machine's disks are listed under
         #[arg(long, default_value = "/sys")]
         sys: String,
@@ -2277,7 +2281,7 @@ pub async fn run() -> anyhow::Result<()> {
                     }
                 }
             }
-            SlabAction::Partner { disk, among, sys, dev } => {
+            SlabAction::Partner { disk, among, also, sys, dev } => {
                 use crate::image::partner;
                 let d = match inspect_storage(disk).await {
                     Ok(d) => d,
@@ -2292,7 +2296,7 @@ pub async fn run() -> anyhow::Result<()> {
                     println!("{disk}: no slab");
                     std::process::exit(2);
                 }
-                let candidates: Vec<String> = if among.is_empty() {
+                let mut candidates: Vec<String> = if among.is_empty() {
                     crate::drive::designation::disks_in(std::path::Path::new(&sys))
                         .into_iter()
                         .map(|n| format!("{dev}/{n}"))
@@ -2300,6 +2304,7 @@ pub async fn run() -> anyhow::Result<()> {
                 } else {
                     among.clone()
                 };
+                candidates.extend(also.iter().filter(|a| !candidates.contains(a)).cloned().collect::<Vec<_>>());
                 let found = partner::find_among(&own, &candidates, disk).await;
                 let names = own.iter().filter_map(|s| s.partner).map(|p| p.to_string()).collect::<Vec<_>>();
                 match found.as_slice() {

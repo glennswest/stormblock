@@ -1189,6 +1189,80 @@ done
 # claimed image: the one local drive an install may take (#273).
 SLAB_NAMED="$SLAB"
 
+# --- BEGIN storage serve (covered by tests/initramfs-storage-serve.sh)
+# A node laid by storage: (#573) keeps its data half on a stormraid set over
+# every drive's `stormblock-raid` partition. On every boot the set is served
+# before the probe looks for the node's halves, at the id the install served
+# it at, so the system half on a leg finds its data half on it (partner_of).
+# A member missing is no reason not to boot: the set opens degraded, and
+# that is said loudly. A set that does not open is said too, and the boot
+# goes on as if there were none (the probe then asks the appliance, or
+# stops saying why).
+STORAGE_SERVED=""
+STORAGE_SERVE_PID=""
+storage_serve() {
+    _ss_sys="${STORM_SYS_BLOCK:-/sys/block}"
+    _ss_dev="${STORAGE_DEV:-/dev}"
+    _ss_id="${STORAGE_UBLK_ID:-64}"
+    _ss_m=""
+    for _ss_ev in "$_ss_sys"/*/*/uevent; do
+        [ -f "$_ss_ev" ] || continue
+        grep -qx 'PARTNAME=stormblock-raid' "$_ss_ev" 2>/dev/null || continue
+        _ss_p="${_ss_ev%/uevent}"; _ss_p="$_ss_dev/${_ss_p##*/}"
+        # A stormraid superblock is in block 0 or 1 (stormraid layout.rs).
+        _ss_mg=$(dd if="$_ss_p" bs=4096 count=1 2>/dev/null | head -c 8)
+        [ "$_ss_mg" = STORMRD1 ] || _ss_mg=$(dd if="$_ss_p" bs=4096 skip=1 count=1 2>/dev/null | head -c 8)
+        if [ "$_ss_mg" = STORMRD1 ]; then
+            _ss_m="$_ss_m $_ss_p"
+        else
+            echo "storage: $_ss_p is named stormblock-raid and carries no stormraid superblock - left out"
+        fi
+    done
+    _ss_m="${_ss_m# }"
+    [ -n "$_ss_m" ] || return 0
+    _ss_sr="${STORM_STORMRAID:-/usr/sbin/stormraid}"
+    if [ ! -x "$_ss_sr" ]; then
+        echo "WARNING: this node's data is on a stormraid set ($_ss_m), and this initramfs"
+        echo "  has no stormraid ($_ss_sr): it is built with it (stormcentral#1335). Not served."
+        return 0
+    fi
+    _ss_log="${STORM_RUN:-/run/stormblock}/stormraid.log"
+    mkdir -p "${_ss_log%/*}"
+    echo "storage: serving the node-data set over $_ss_m at $_ss_dev/ublkb$_ss_id (#573)"
+    # shellcheck disable=SC2086
+    "$_ss_sr" serve --id "$_ss_id" $_ss_m > "$_ss_log" 2>&1 &
+    STORAGE_SERVE_PID=$!
+    _ss_w=0
+    while [ ! -b "$_ss_dev/ublkb$_ss_id" ] && [ "$_ss_w" -lt "${STORAGE_SERVE_WAIT:-30}" ]; do
+        kill -0 "$STORAGE_SERVE_PID" 2>/dev/null || break
+        sleep 1; _ss_w=$((_ss_w + 1))
+    done
+    if [ ! -b "$_ss_dev/ublkb$_ss_id" ]; then
+        echo "WARNING: the node-data set did not come up as $_ss_dev/ublkb$_ss_id:"
+        sed 's/^/  /' "$_ss_log"
+        kill "$STORAGE_SERVE_PID" 2>/dev/null
+        STORAGE_SERVE_PID=""
+        return 0
+    fi
+    sed 's/^/  /' "$_ss_log"
+    if grep -q 'is missing' "$_ss_log"; then
+        echo "WARNING: NODE-DATA SET DEGRADED: a member is not on this machine:"
+        grep 'is missing' "$_ss_log" | sed 's/^/  /'
+        echo "  Booting on what is left; one more drive lost loses the node's data (#573)."
+    fi
+    STORAGE_SERVED="$_ss_dev/ublkb$_ss_id"
+}
+# Before a format or a lay over the same drives: the set is let go first.
+storage_unserve() {
+    [ -n "$STORAGE_SERVE_PID" ] || return 0
+    echo "storage: letting go of the node-data set ($STORAGE_SERVED) before the drives are laid again"
+    kill "$STORAGE_SERVE_PID" 2>/dev/null
+    _ss_w=0
+    while kill -0 "$STORAGE_SERVE_PID" 2>/dev/null && [ "$_ss_w" -lt 10 ]; do sleep 1; _ss_w=$((_ss_w + 1)); done
+    STORAGE_SERVE_PID=""; STORAGE_SERVED=""
+}
+# --- END storage serve
+
 # --- BEGIN node halves (covered by tests/initramfs-boot-hook.sh)
 # A node whose system half has a drive of its own (#402: the X9 blades' SSD)
 # keeps its data half on another (the HDD). Either one alone is half a node,
@@ -1203,7 +1277,9 @@ disk_of() { # slab path -> its drive (a partition's disk; anything else as is)
     esac
 }
 partner_of() { # drive -> the drive holding this node's other half; 1 when none
-    _po=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab partner "$1" 2>/dev/null) || return 1
+    # The node-data set a storage: layout serves is no disk, so it is named
+    # besides them (#573): a leg's system half finds its data half on it.
+    _po=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab partner "$1" ${STORAGE_SERVED:+--also "$STORAGE_SERVED"} 2>/dev/null) || return 1
     _po=$(printf '%s\n' "$_po" | tail -n 1)
     [ -n "$_po" ] && [ "$_po" != "$1" ] || return 1
     echo "$_po"
@@ -3500,6 +3576,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     # this can — the whole of /sys/block, the ESP, the loader entry, whose
     # disk it is — and a probe that can only re-ask the narrower question
     # would overrule a better answer with a worse one.
+    storage_serve
     # --- BEGIN local-slab probe (covered by tests/initramfs-boot-hook.sh)
     SB="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
     # A disk this node cannot boot: with an appliance, ask it instead; with
@@ -5049,6 +5126,7 @@ $1|$_svp|$3"
         rescue_shell
     }
     if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ]; then
+        command -v storage_unserve >/dev/null 2>&1 && storage_unserve
         _st_tool="${STORM_STORMDRIVE:-/usr/sbin/stormdrive}"
         [ -x "$_st_tool" ] || storage_fail "storage: in ${STORAGE_FROM##*/} formats every drive, and this initramfs has no stormdrive ($_st_tool): it is built with STORMDRIVE_BIN (stormcentral#1335)"
         _st_dir="${STORM_RUN:-/run/stormblock}/storage-format"

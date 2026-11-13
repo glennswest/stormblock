@@ -2577,6 +2577,16 @@ An install of such a node is over the data drive; the survey's scan never lays
 over one half of a pair. Half a node (the other drive gone) does not boot from
 its disk: with an appliance it asks it, without one it stops and says why.
 
+**Booting from a `storage:` layout (#573).** A node laid by the
+install-config's `storage:` keeps its data half on a stormraid set over every
+drive's `stormblock-raid` partition. On every boot `/init` serves that set at
+`/dev/ublkb64` (`stormraid serve --id 64` over the partitions that carry a
+stormraid superblock) before the probe runs, and `slab partner … --also
+/dev/ublkb64` finds the data half on it from the system half on a leg. A
+member missing opens the set degraded and the console says
+`NODE-DATA SET DEGRADED`; a set that does not open is said, and the boot goes
+on as if there were none.
+
 `ci-split-verify.sh` boots the shipped initramfs in QEMU from the two drives
 the split install test leaves: either drive named, and the data drive alone.
 
