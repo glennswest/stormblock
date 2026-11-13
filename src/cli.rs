@@ -5900,6 +5900,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 data_disk: None,
                 twin: None,
                 legs: Vec::new(),
+                leg_disks: Vec::new(),
             };
             println!(
                 "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
@@ -6007,6 +6008,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             data_disk: None,
             twin: None,
             legs: Vec::new(),
+            leg_disks: Vec::new(),
         };
         {
             let mut reg = mgr.registry().write().await;
@@ -6664,6 +6666,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 data_disk: Some(data_disk.to_string()),
                 twin: None,
                 legs: Vec::new(),
+                leg_disks: Vec::new(),
             }),
             report,
         ))
@@ -8611,7 +8614,14 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                         say_legs(&r);
                     }
                 }
+                let leg_boot = then_local_boot.clone();
                 local_boot(then_local_boot).await;
+                // Each leg made bootable too (#573): any drive of the system
+                // starts the node alone. Its pallets come from the leg the
+                // node booted from, and from where that leg's came.
+                if let Some((first, srcs)) = leg_boot {
+                    lay_leg_boots(&flow.leg_disks, &first, &srcs).await;
+                }
                 retire_sources(retire).await;
             } else {
                 let left = if left == usize::MAX { "an unknown number of".to_string() } else { left.to_string() };
@@ -8628,6 +8638,21 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 install_failed(why).await;
             }
         }));
+    }
+
+    /// Local boot on each system leg (#573): the ESP and the boot pallets,
+    /// from `first` (the leg the node booted from) and `sources`. A leg that
+    /// fails is said; the others go on.
+    async fn lay_leg_boots(legs: &[String], first: &str, sources: &[String]) {
+        for leg in legs.iter().filter(|l| l.as_str() != first) {
+            let mut from: Vec<String> = vec![first.to_string()];
+            from.extend(sources.iter().filter(|s| *s != leg && !legs.contains(s)).cloned());
+            match run_local_boot(leg, &from).await {
+                Ok(true) => println!("System legs: {leg} boots on its own (#573)"),
+                Ok(false) => println!("WARNING: system legs: {leg} does not boot on its own"),
+                Err(e) => println!("WARNING: system legs: local boot on {leg}: {e}"),
+            }
+        }
     }
 
     /// What making a pair did, on the console (#350).
@@ -9639,12 +9664,16 @@ async fn handle_adopt_ublk(
                     }
                 }));
             }
+            let leg_disks: Vec<String> = record.as_ref().map(|r| r.system_legs.clone()).unwrap_or_default();
             if let Some((disk, sources)) = local_boot {
                 tokio::spawn(async move {
                     if let Err(e) = run_local_boot(&disk, &sources).await {
                         println!("Local boot: {disk}: {e}");
                         tracing::warn!("local boot on {disk}: {e}");
                     }
+                    // The legs too (#573): a leg replaced since gets its ESP
+                    // and pallets back.
+                    lay_leg_boots(&leg_disks, &disk, &sources).await;
                 });
             }
         }
@@ -10586,6 +10615,7 @@ async fn handle_boot_local(
                         data_disk: None,
                         twin: None,
                         legs: Vec::new(),
+                        leg_disks: Vec::new(),
                     });
                 }
             }
@@ -10600,6 +10630,7 @@ async fn handle_boot_local(
         }
         if let Some(f) = laid_flow_over.as_mut() {
             f.legs = legs.iter().flat_map(|(_, ids)| ids.iter().map(|i| i.0.to_string())).collect();
+            f.leg_disks = legs.iter().map(|(p, _)| p.clone()).collect();
         }
         // From here the appliance's system slabs are on their way out: a
         // write to an extent still on one lands on the local disk (#239).

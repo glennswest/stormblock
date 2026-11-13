@@ -109,5 +109,10 @@ start of a node whose record names legs, every system volume is set to
 (`pair::legs_up_unlocked`). A leg missing is said:
 `WARNING: SYSTEM LEGS DEGRADED`, and the system runs on the legs it has.
 
-Not yet: the ESP and the boot pallets on every leg (G), and the layout on
-the API (H).
+Each leg is then made bootable like the first: its ESP and boot pallets
+copied from the leg the node booted from (and from that leg's sources), right
+after the first leg's own local boot on the install, and again at each start
+of a node whose record names legs, so a leg replaced since gets them back
+(`System legs: <drive> boots on its own`). Any leg then starts the node.
+
+Not yet: the layout on the API (H).

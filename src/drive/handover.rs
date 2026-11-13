@@ -89,6 +89,10 @@ pub struct FlowOver {
     /// them once the flow-over is proved. Empty: none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub legs: Vec<String>,
+    /// The drives `legs` are on (#573): each made bootable like `disk` (its
+    /// ESP and boot pallets) once the system volumes are mirrored onto it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leg_disks: Vec<String>,
 }
 
 /// The second drive of a system pair (#350), by its slabs' ids.
@@ -681,7 +685,7 @@ mod tests {
         mixed.slabs.push("iscsi://10.0.0.1:3260/iqn.x".into());
         assert!(!local_only_boot(&mixed), "any remote slab");
         let mut flowing = a_record();
-        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false, data_disk: None, twin: None, legs: Vec::new() });
+        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false, data_disk: None, twin: None, legs: Vec::new(), leg_disks: Vec::new() });
         assert!(!local_only_boot(&flowing), "the install boot itself");
         let mut installing = a_record();
         installing.install = Some(InstallTicket { boothost: "http://f".into(), host: "h".into(), volume: "v".into() });
@@ -755,7 +759,7 @@ mod tests {
         assert!(f.local_slab_ids().contains(&"2c0c4f5e-6a2f-4c8e-9f57-3f1b7e0f9a11".to_string()));
         // A record with none says nothing of them, so an older engine reads it.
         let mut plain = a_record();
-        plain.flow_over = Some(FlowOver { legs: Vec::new(), ..f.clone() });
+        plain.flow_over = Some(FlowOver { legs: Vec::new(), leg_disks: Vec::new(), ..f.clone() });
         let text = String::from_utf8(serde_json::to_vec(&plain).expect("encodes")).expect("utf-8");
         assert!(!text.contains("legs"), "{text}");
     }

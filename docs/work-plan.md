@@ -69,6 +69,9 @@ Verification on forge1 needs stormcentral#1335 (the tools in the image).
   start; a leg missing is a WARNING. /init passes `--system-leg` for every
   STORAGE_SYSTEM leg after the first, and on a normal boot for each drive
   whose stormblock-raid member was served and which carries a SLAB partition.
+- [x] G (code; check.sh pending): `lay_leg_boots` — each leg's ESP and
+  pallets from the first leg after its local boot (flow-over's `leg_disks`)
+  and at each start (`Record.system_legs`).
 - [x] F: cd2cec7f. Not behind stormraid#76 after all: `stormraid serve --id
   64 <members>` opens the set from the members given (degraded when one is
   missing). The `storage serve` block, before the probe, serves every
