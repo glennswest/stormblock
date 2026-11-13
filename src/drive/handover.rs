@@ -750,6 +750,7 @@ mod tests {
             data_disk: None,
             twin: None,
             legs: vec!["2c0c4f5e-6a2f-4c8e-9f57-3f1b7e0f9a11".into()],
+            leg_disks: vec!["/dev/sdb".into()],
         });
         rec.system_legs = vec!["/dev/sdb".into(), "/dev/sdc".into()];
         let bytes = serde_json::to_vec(&rec).expect("encodes");
