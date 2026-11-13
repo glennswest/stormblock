@@ -143,6 +143,11 @@ check "spares" "0" "$(lay 'L["set"]["spares"]')"
 check "members" "4" "$(lay 'len(L["set"]["members"])')"
 check "none missing" "[]" "$(lay 'L["set"]["missing"]')"
 
+echo "the layout reported on a kept reinstall says so"
+run "SLAB=$WORK/dev/sda" "STORAGE_KEPT=1"
+check "from" "reinstall" "$(lay 'L["from"]')"
+check "the set's drives" "4" "$(lay 'len(L["drives"])')"
+
 echo "the layout reported on the boot that laid the drives: the format each got"
 reset
 for d in sda sdb sdc sdd; do member "$d" "${d}3" stormblock-raid STORMRD1; done

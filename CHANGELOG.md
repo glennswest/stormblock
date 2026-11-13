@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-13
+- **feat:** #573: a keep-data reinstall keeps the layout it finds: when the served node-data set is exactly the drives `storage:` takes, each at the asked block size, nothing is formatted or laid (`KEEP:`) and the report says `from: reinstall`; a drive outside the set, a member not taken or another block size stops naming what differs, unless the wipe word is given.
 - **feat:** #573: the layout reported (STORAGE-LAYOUT step 8). `/init` writes `/run/stormblock/storage-layout.json` on the install (each drive's format, what was asked, the regions) and on every boot that serves the node-data set: drives, system legs, the set's state (`optimal`, `degraded` with the missing slot, `not-served`), parity, members. It is kept in the boot record (`storage_layout`). The engine serves it at `GET /api/v1/storage/layout` and in health as `storage_layout`, with each drive's live block size and PI, the legs present and missing, and `state` `ok`/`degraded`.
 - **fix:** #591: the flow-over round-trip test names its `leg_disks`.
 - **feat:** #573: every system leg boots the node: after the first leg's local boot, each other leg gets its ESP and boot pallets from it (`lay_leg_boots`), on the install and again at each start (a replaced leg gets them back); the handover's flow-over names the leg drives (`leg_disks`). A leg that does not take them is a WARNING; the others go on.

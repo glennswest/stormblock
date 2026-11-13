@@ -1335,6 +1335,8 @@ storage_report() {
             "$(storage_json_num "${STORAGE_BOOT_AREA:-}")" "$(storage_json_num "${STORAGE_SYSTEM_REGION:-}")" "$(storage_json_num "${STORAGE_REGION:-}")")
     elif [ -n "$STORAGE_SERVE_MEMBERS" ]; then
         _sr_from=boot
+        # A keep-data reinstall that found the layout already there (#573).
+        [ -n "${STORAGE_KEPT:-}" ] && _sr_from=reinstall
         _sr_drives="$STORAGE_MEMBER_DISKS"; _sr_members="$STORAGE_SERVE_MEMBERS"
         _sr_set="$STORAGE_SERVED"; _sr_state="$STORAGE_SET_STATE"
         # The boot's own system drive, then the others it mirrors to.
@@ -4643,7 +4645,11 @@ if [ "$BOOT_MODE" = "local" ]; then
             # What it carries, said by name when it is refused: this node's
             # own drive carries this node, which is no refusal.
             _car=""
-            if [ "$_dev" != "$_st_over" ]; then
+            # The drives of the node-data set this boot serves are this
+            # node's own: a keep-data reinstall finds them carrying it (#573).
+            _st_own=""
+            case " ${STORAGE_MEMBER_DISKS:-} " in *" $_dev "*) _st_own=1 ;; esac
+            if [ "$_dev" != "$_st_over" ] && [ -z "$_st_own" ]; then
                 if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
                     _car="stormblock slabs (an install)"
                 else
@@ -5255,7 +5261,35 @@ $1|$_svp|$3"
         ld_write failed "${LOCAL_DISK:-}" "storage: $1"
         rescue_shell
     }
-    if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ]; then
+    # A keep-data reinstall over the layout storage: asks keeps it (#573,
+    # STORAGE-LAYOUT.md: "a keep-data reinstall never relays a drive"): the
+    # drives taken are the node-data set's members this boot serves, each at
+    # the block size asked. Then nothing is formatted or laid; the set stays
+    # served and the node's halves on it are kept. Anything else is a layout
+    # change, stopped below unless the wipe word is given.
+    STORAGE_KEPT=""
+    if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "$STORAGE_FORCE" ] \
+       && [ -n "${STORAGE_SERVED:-}" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ]; }; then
+        _sk_off=""
+        for _dev in $STORAGE_DRIVES; do
+            case " $STORAGE_MEMBER_DISKS " in
+            *" $_dev "*) ;;
+            *) _sk_off="$_sk_off $_dev(not in the node's set)"; continue ;;
+            esac
+            _lb=$(cat "$SURVEY_SYS/${_dev##*/}/queue/logical_block_size" 2>/dev/null)
+            [ "$_lb" = "$STORAGE_BLOCK_SIZE" ] || _sk_off="$_sk_off $_dev(${_lb:-unknown}-byte blocks)"
+        done
+        for _dev in $STORAGE_MEMBER_DISKS; do
+            case " $STORAGE_DRIVES " in *" $_dev "*) ;; *) _sk_off="$_sk_off $_dev(in the set, not taken)" ;; esac
+        done
+        if [ -z "$_sk_off" ]; then
+            STORAGE_KEPT=1
+            echo "  KEEP: $STORAGE_DRIVES carry this node's layout ($STORAGE_BLOCK_SIZE-byte blocks, the set at $STORAGE_SERVED): nothing is formatted or laid"
+        else
+            echo "  storage: in ${STORAGE_FROM##*/} differs from what the drives carry:$_sk_off"
+        fi
+    fi
+    if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "$STORAGE_KEPT" ]; then
         command -v storage_unserve >/dev/null 2>&1 && storage_unserve
         _st_tool="${STORM_STORMDRIVE:-/usr/sbin/stormdrive}"
         [ -x "$_st_tool" ] || storage_fail "storage: in ${STORAGE_FROM##*/} formats every drive, and this initramfs has no stormdrive ($_st_tool): it is built with STORMDRIVE_BIN (stormcentral#1335)"
@@ -5396,7 +5430,7 @@ $1|$_svp|$3"
     STORAGE_UBLK_ID=${STORAGE_UBLK_ID:-64}
     STORAGE_DEV=${STORAGE_DEV:-/dev}
     STORAGE_MEMBERS=""; STORAGE_SET=""
-    if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ]; then
+    if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "${STORAGE_KEPT:-}" ]; then
         _sl_full=""
         if [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ]; }; then
             for _dev in $STORAGE_DRIVES; do

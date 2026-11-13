@@ -75,6 +75,16 @@ slabs or a foreign table stops, names the drives and what they hold, and
 writes nothing (STORAGE-LAYOUT.md: a layout change is a destructive verb,
 never automatic).
 
+**A keep-data reinstall keeps the layout it finds** (STORAGE-LAYOUT.md: "a
+keep-data reinstall never relays a drive"). When the set this boot serves is
+made of exactly the drives `storage:` takes, and each is already at the asked
+block size, `/init` says `KEEP: … nothing is formatted or laid`, skips the
+format and the lay, and the install writes its system half onto the kept
+legs; the report says `"from": "reinstall"`. Anything else (a drive outside
+the set, a member not taken, another block size) stops as above, naming what
+differs, unless the wipe word is given; the wipe word relays even this node's
+own layout.
+
 ## The lay: `image storage-lay`
 
 After the format, every drive taken gets a fresh GPT: a boot area, a

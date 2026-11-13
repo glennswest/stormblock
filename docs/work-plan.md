@@ -37,8 +37,11 @@ Increments (each committed, pushed, checked):
   in health; named on #573 and stormcentral#1318. **Done** (df84ba5f,
   2d6373b8): `/run/stormblock/storage-layout.json` from `/init`, in the boot
   record, on the API and in health.
-- **Next: keep-reinstall.** `storage-lay --check`: drives that already carry
-  this node's layout are kept on a keep-data reinstall, never relaid.
+- **Keep-reinstall. Done:** drives that are the served set's members at the
+  asked block size are kept on a keep-data reinstall (`KEEP:`), never
+  relaid; anything else stops unless the wipe word is given.
+- **Next:** check.sh green on the head, v24.4.0, image requested; forge1
+  verification after stormcentral#1335 and #1381.
 
 Verification on forge1 needs stormcentral#1335 (the tools in the image).
 

@@ -275,6 +275,16 @@ has "a foreign table said by name" "$WORK/plan.args" "dev=/dev/sdc;.*carries=gpt
 has "this node's own drive carries nothing" "$WORK/plan.args" "dev=/dev/sda;.*carries=;"
 hasnt "no wipe word, no --force" "$WORK/plan.args" "^--force$"
 
+echo "the layout: the drives of the set this boot serves are this node's"
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+printf "STORAGE_DRIVES='/dev/sda /dev/sdb'\nSTORAGE_SYSTEM='/dev/sda /dev/sdb'\n" > "$WORK/plan.out"
+for d in sda sdb sdc; do echo "superblock: data slab" > "$WORK/slabs.$d"; done
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'INSTALL_OVER=/dev/sda4' "STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
+has "a member carries nothing" "$WORK/plan.args" "dev=/dev/sdb;.*carries=;"
+has "the node's own drive still carries nothing" "$WORK/plan.args" "dev=/dev/sda;.*carries=;"
+has "a drive outside the set is said" "$WORK/plan.args" "dev=/dev/sdc;.*carries=stormblock slabs (an install);"
+
 echo "the layout: the wipe word reaches the engine"
 reset
 printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
@@ -380,6 +390,38 @@ has "names what is held" "$WORK/out" "/dev/sda(stormblock slabs)"
 has "rescue" "$WORK/out" "RESCUE"
 check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
 
+echo "the format: a keep-data reinstall over this node's layout keeps it"
+reset
+for d in sda sdb; do mkdir -p "$SYS/$d/queue"; echo 4096 > "$SYS/$d/queue/logical_block_size"; echo "superblock: data slab" > "$WORK/slabs.$d"; done
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb64 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
+has "KEEP said" "$WORK/out" "KEEP: /dev/sda /dev/sdb carry this node's layout"
+hasnt "no STOP" "$WORK/out" "STOP"
+check "nothing formatted" "" "$(val FORMATTED)"
+check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
+check "keep-data stands" "1" "$(val INSTALL_KEEP)"
+
+echo "the format: a keep-data reinstall over another block size stops"
+reset
+echo 512 > "$SYS/sdb/queue/logical_block_size"
+echo "superblock: data slab" > "$WORK/slabs.sda"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb64 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
+has "what differs" "$WORK/out" "differs from what the drives carry: /dev/sdb(512-byte blocks)"
+has "STOP" "$WORK/out" "STOP: storage:"
+echo 4096 > "$SYS/sdb/queue/logical_block_size"
+
+echo "the format: a keep-data reinstall taking a drive outside the set stops"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sda"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb64 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdc'"
+has "what differs" "$WORK/out" "/dev/sdb(not in the node's set) /dev/sdc(in the set, not taken)"
+has "STOP" "$WORK/out" "STOP: storage:"
+
+echo "the format: the wipe word relays even this node's layout"
+reset
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH="" STORAGE_FORCE=1' "STORAGE_SERVED=/dev/ublkb64 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
+hasnt "no KEEP" "$WORK/out" "KEEP:"
+check "both formatted" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+
 echo "the format: an ordinary boot over a foreign table formats nothing"
 reset
 echo "gpt (other)" > "$WORK/sig.sdb"
@@ -465,6 +507,14 @@ has "STOP" "$WORK/out" "STOP: storage: .* lays /dev/sda"
 has "names it" "$WORK/out" "/dev/sdc(stormblock slabs)"
 has "rescue" "$WORK/out" "RESCUE"
 check "nothing laid" "no" "$([ -e "$WORK/lay.args" ] && echo yes || echo no)"
+
+echo "the lay: a kept layout lays nothing"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sdc"
+lay "$D4" 'INSTALL_KEEP=1 INSTALL_FRESH="" STORAGE_KEPT=1'
+check "nothing laid" "no" "$([ -e "$WORK/lay.args" ] && echo yes || echo no)"
+hasnt "no STOP" "$WORK/out" "STOP"
+check "no new set" "no" "$([ -e "$WORK/raid.args" ] && echo yes || echo no)"
 
 echo "the lay: an ordinary boot over a foreign table lays nothing"
 reset
