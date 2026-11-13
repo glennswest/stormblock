@@ -143,6 +143,13 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// first answer could be read without waiting (unknown, not settled).
         #[serde(skip_serializing_if = "Option::is_none")]
         slabs: Option<super::slab_report::SlabReport>,
+        /// The drives' layout (#573, STORAGE-LAYOUT.md step 8) on a node laid
+        /// by `storage:`: drives and the format each got, system legs, the
+        /// node-data set's state; as `GET /api/v1/storage/layout`. Left out
+        /// on a node laid otherwise. `status` does not follow it: its own
+        /// `state` says `degraded`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        storage_layout: Option<serde_json::Value>,
         /// Requests a ublk device was handed and has not answered for 30 s
         /// or more, oldest first: device (`volume:<id>`), `/dev/ublkbN`,
         /// queue, tag, op, seconds (#337). A FLUSH here is a consumer's
@@ -251,6 +258,8 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     };
     #[cfg(not(target_os = "linux"))]
     let lost_status: Option<&'static str> = None;
+    let slabs = super::slab_report::for_health(&state);
+    let storage_layout = super::storage_layout::report(slabs.as_ref());
     let boot_mounts = crate::mgmt::boot_mounts::read();
     let mounts_failed = boot_mounts.as_ref().is_some_and(|m| !m.failed.is_empty());
     Json(Health {
@@ -272,7 +281,8 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         release: release_erase::pending_here(&state).then_some("pending"),
         flow_over,
         flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-        slabs: super::slab_report::for_health(&state),
+        slabs,
+        storage_layout,
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
         #[cfg(target_os = "linux")]
         ublk_lost: lost_devices.clone(),
@@ -294,6 +304,20 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
 /// Which build this engine is (#466): `{service, version, commit}`. Open,
 /// like health, and cheaper: nothing read but two constants, for a caller
 /// (stormcentral's performance gate) that only wants to see a change.
+/// `GET /api/v1/storage/layout` (#573): the drives' layout, or 404 on a node
+/// not laid by `storage:`.
+async fn storage_layout(axum::extract::State(state): axum::extract::State<Arc<AppState>>) -> Response {
+    let slabs = super::slab_report::for_health(&state);
+    match super::storage_layout::report(slabs.as_ref()) {
+        Some(v) => Json(v).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "this node was not laid by a storage: section (no storage-layout.json)"})),
+        )
+            .into_response(),
+    }
+}
+
 async fn version() -> Response {
     Json(serde_json::json!({
         "service": "stormblock",
@@ -308,6 +332,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let r = Router::new()
         .route("/api/v1/health", axum::routing::get(health).with_state(state.clone()))
         .route("/api/v1/version", axum::routing::get(version))
+        .route("/api/v1/storage/layout", axum::routing::get(storage_layout).with_state(state.clone()))
         .nest("/api/v1/drives", drives::router(state.clone()))
         .nest("/api/v1/arrays", arrays::router(state.clone()))
         .nest("/api/v1/shelves", shelves::shelves_router(state.clone()))
