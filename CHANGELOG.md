@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-13
+- **docs:** refreshed from the code since 2026-11-06 (v23.23.1 … v24.3.1): README names v24.3.1 and says `/v1` create's `placement.array_id|slab_id|drive` (#426); the rest (allow_any_host default, rollback `keep`, stale slab regions, lock order, clippy gate, node name in boot records) already matched the code. No open promise found that the code does not keep.
+
 ### 2026-11-10
 - **docs:** #512: writes into an ext4 past ~192 TiB no longer corrupt it, with v24.0.1's pins (mkfs-ext4 v4.1.3, which writes meta_bg descriptors where the layout puts them, mkfs.ext4.rs#33; fio-ext4 v1.8.3). Checked with `examples/ext4_large`: the small meta_bg reproduction (16 GiB) and a bare 256 TiB drive, 256 files each, clean (were corrupt: 1302 problems at 256 TiB); a 256 TiB template, its clone and 256 files through the engine, clean. No code change.
 - **docs:** README's open findings no longer list #512 (fixed by v24.0.1's pins).

@@ -7,7 +7,7 @@ with per-volume redundancy, and serves those volumes as local block devices
 stormcos nodes run from: sealed goldens, pallets, GPT disk images, and the
 claim a machine makes for its boot image.
 
-One binary, `stormblock` (v24.2.1). It is a daemon, an initramfs boot agent
+One binary, `stormblock` (v24.3.1). It is a daemon, an initramfs boot agent
 and a set of offline tools, chosen by subcommand.
 
 ```
@@ -856,7 +856,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/api/v1/exports`, `/luns`, `/sessions`, `/discovery`, `/cluster` | engine exports, iSCSI LUNs and sessions, discovery (`/discovery/cluster`, `…/join`, `…/leave`), cluster (`nodes`, `nodes/{id}`, `status`, `heartbeat`) |
 | `/raft/{vote,append,snapshot}` | openraft RPCs between cluster peers (feature `cluster`) |
 | `/api/v1/stormfs` | the StormFS data path (`docs/stormfs-api.md`) |
-| `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement`, `prestage`, `fence`, `promote`, `dual-attach` |
+| `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement` (create takes `placement.array_id`, `slab_id` or `drive`, exactly one, on this node: a slab or drive that cannot hold it is `409`, one this node lacks `507`, #426), `prestage`, `fence`, `promote`, `dual-attach` |
 | `/serve/v1` (and `/mk/v1`) | the serving layer: `health`, `ready`, `status`, `volumes` (list, create, delete), exports, tar, raw, trim |
 | `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` |
 | `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
