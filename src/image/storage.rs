@@ -623,15 +623,16 @@ impl SeenDrive {
         s
     }
 
-    fn digits(s: &str) -> String {
-        s.chars().filter(|c| c.is_ascii_digit()).collect::<String>().trim_start_matches('0').to_string()
+    /// The number in a bay's name ("bay 03" is 3, "0" is 0), if it has one.
+    fn number(s: &str) -> Option<u64> {
+        s.chars().filter(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
     }
 
     fn bay_is(&self, v: &str) -> bool {
         let b = self.bay.to_ascii_lowercase();
         let v = v.to_ascii_lowercase();
-        !b.is_empty() && (b == v || (!Self::digits(&v).is_empty() && Self::digits(&b) == Self::digits(&v)
-            && v.chars().all(|c| c.is_ascii_digit())))
+        !b.is_empty() && (b == v || (v.chars().all(|c| c.is_ascii_digit())
+            && Self::number(&v).is_some() && Self::number(&b) == Self::number(&v)))
     }
 
     fn matches(&self, entry: &[(String, String)]) -> bool {
@@ -663,7 +664,7 @@ impl SeenDrive {
             "external" => 4,
             _ => 3,
         };
-        let bay_n = Self::digits(&self.bay).parse().unwrap_or(u64::MAX);
+        let bay_n = Self::number(&self.bay).unwrap_or(u64::MAX);
         (pos, bay_n, self.bay.clone(), self.serial.clone(), self.dev.clone())
     }
 }
