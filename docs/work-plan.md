@@ -2,6 +2,17 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #592 — the storage inventory waits for every SAS drive (2026-11-13, P0)
+
+forge1's mpt3sas showed sda only; the wait ended at the first drive, so the
+#573 layout saw one of four. Fix in the inventory block of
+`scripts/build-stormblock-initramfs.sh`: per-controller counts must hold for
+`STORM_STORAGE_SETTLE` (5 s, SAS/RAID only), and drives the SAS layer found
+(end device without target, type-0 SCSI device under an end device without
+a block device) extend the wait to `STORM_STORAGE_PENDING_WAIT` (60 s).
+- [x] code + `tests/initramfs-storage-inventory.sh` (forge1 cases)
+- [ ] `sc-build 'sh check.sh'`, image, shipped with a console proof
+
 ## #573 — every selected drive laid alike: ESP, pallets, mirrored system, data on a stormraid set (2026-11-13, P0)
 
 Owner's stormcos#902 / STORAGE-LAYOUT.md; forge1 (4 × 10 TB SAS, HBA330) is

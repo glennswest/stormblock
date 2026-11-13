@@ -232,7 +232,16 @@ WARNING: storage controller 0000:00:05.0 [1000:0012] (class 0x0100) has no drive
 A controller with no driver is a WARNING naming its PCI id. A SAS, RAID,
 NVMe or SCSI controller whose driver bound but which shows no drive yet is
 waited for, bounded by `STORM_STORAGE_WAIT` (30 s): SAS and expander
-discovery runs on after the driver loads. The inventory goes into
+discovery runs on after the driver loads. A SAS HBA or RAID card finds its
+drives one by one, so the first one is not the end of the wait (#592): each
+such controller's drive count must also hold still for
+`STORM_STORAGE_SETTLE` (5 s) inside the same bound, and a drive the SAS layer
+has already found (an end device with no SCSI target yet, or a SCSI disk with
+no block device yet: sd still spinning it up) is waited for up to
+`STORM_STORAGE_PENDING_WAIT` (60 s). Drives that kept arriving are said
+(`storage: 1 -> 4 drives on 0000:c1:00.0 after 6s`); one found that never
+became a disk is a WARNING naming it. A machine with no SAS/RAID controller
+(NVMe, virtio, AHCI only) does not wait. The inventory goes into
 `local-disk.json` as `controllers` and `drives`, kept by the verdict below.
 
 **The appliance `/init` settled on (#506)** is left in

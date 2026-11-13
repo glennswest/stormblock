@@ -2155,7 +2155,10 @@ shelf_json() { # /sys/block/X -> {"id": …, "position": …, "bay": …, "ident
 # each. A controller with no driver is a WARNING naming its PCI id: its drives
 # cannot be seen at all. A SAS/RAID/NVMe/SCSI controller whose driver bound
 # and that shows no drive yet is waited for (bounded, STORM_STORAGE_WAIT, 30 s:
-# SAS and expander discovery runs on after the driver loads), not skipped. The
+# SAS and expander discovery runs on after the driver loads), not skipped; a
+# SAS/RAID controller's drive count must then hold still for
+# STORM_STORAGE_SETTLE (5 s), and a drive the SAS layer already found is
+# waited for up to STORM_STORAGE_PENDING_WAIT (60 s) (#592). The
 # inventory goes into /run/stormblock/local-disk.json (`controllers`,
 # `drives`), which the slab decision's verdict (#344) keeps, and from there
 # into the engine's health for stormcentral to hold against what it knows the
@@ -2197,20 +2200,104 @@ inv_waiting() { # -> bound SAS/RAID/NVMe/SCSI controllers with no drive yet
         [ -n "$(inv_disks_of "$_p")" ] || echo "$_p"
     done
 }
+# A SAS HBA or RAID card finds its drives one by one after its driver loads
+# (#592: forge1's mpt3sas showed 1 of 4 when the first one ended the wait).
+# So the drive count of each such controller must also hold still for
+# INV_SETTLE seconds, and a drive the SAS layer already knows (an end device
+# with no SCSI target yet, or a disk-type SCSI device under an end device with
+# no block device yet: sd is still spinning it up) is waited for up to
+# INV_PENDING_WAIT seconds in all.
+INV_SCSI="${STORM_INV_SCSI:-/sys/bus/scsi/devices}"
+INV_SAS_END="${STORM_INV_SAS_END:-/sys/class/sas_end_device}"
+INV_SETTLE="${STORM_STORAGE_SETTLE:-5}"
+INV_PENDING_WAIT="${STORM_STORAGE_PENDING_WAIT:-60}"
+inv_settling() { # -> bound SAS/RAID controllers (their drives arrive one by one)
+    inv_controllers | while read -r _p _cls _id _drv; do
+        [ "$_drv" = - ] && continue
+        case "$_cls" in 0x0104*|0x0107*) echo "$_p" ;; esac
+    done
+}
+inv_counts() { # -> "pci=N" for every bound SAS/RAID/NVMe/SCSI controller
+    inv_controllers | while read -r _p _cls _id _drv; do
+        [ "$_drv" = - ] && continue
+        case "$_cls" in 0x0100*|0x0104*|0x0107*|0x0108*) ;; *) continue ;; esac
+        echo "$_p=$(inv_disks_of "$_p" | wc -l | tr -d ' ')"
+    done
+}
+inv_pending() { # -> "pci:what" for each drive the SAS layer knows and no block device shows yet
+    for _e in "$INV_SAS_END"/end_device-*; do
+        [ -e "$_e" ] || continue
+        _ed=$(readlink -f "$_e")
+        _ed=${_ed%/sas_end_device/*}
+        _et=""
+        for _t in "$_ed"/target*; do [ -e "$_t" ] && _et=1; done
+        [ -n "$_et" ] && continue
+        for _p in $(inv_settling); do
+            case "$_ed" in */"$_p"/*) echo "$_p:${_ed##*/}" ;; esac
+        done
+    done
+    for _s in "$INV_SCSI"/*:*:*:*; do
+        [ -e "$_s" ] || continue
+        [ "$(cat "$_s/type" 2>/dev/null)" = 0 ] || continue
+        _sp=$(readlink -f "$_s")
+        case "$_sp" in */end_device-*) ;; *) continue ;; esac
+        _sb=""
+        for _b in "$_s"/block/*; do [ -e "$_b" ] && _sb=1; done
+        [ -n "$_sb" ] && continue
+        for _p in $(inv_settling); do
+            case "$_sp" in */"$_p"/*) echo "$_p:${_s##*/}" ;; esac
+        done
+    done
+}
 _iw=0
 _iwhat=$(inv_waiting)
-if [ -n "$_iwhat" ]; then
-    echo "  storage: waiting up to ${INV_WAIT}s for drives on $(echo $_iwhat)"
-    while [ "$_iw" -lt "$INV_WAIT" ] && [ -n "$(inv_waiting)" ]; do
-        sleep 1
-        _iw=$((_iw + 1))
-    done
-    _iwhat=$(inv_waiting)
-    if [ -n "$_iwhat" ]; then
-        echo "  storage: after ${_iw}s still no drive on $(echo $_iwhat)"
-    else
-        echo "  storage: drives appeared after ${_iw}s"
+_ipend=$(inv_pending)
+_icounts0=$(inv_counts)
+_icounts=$_icounts0
+_istable=0
+_ilast=0
+_iset=$(inv_settling)
+_isaid=""
+while :; do
+    _ibound=$INV_WAIT
+    [ -n "$_ipend" ] && [ "$INV_PENDING_WAIT" -gt "$_ibound" ] && _ibound=$INV_PENDING_WAIT
+    [ "$_iw" -lt "$_ibound" ] || break
+    if [ -z "$_iwhat" ] && [ -z "$_ipend" ]; then
+        # Nothing known to be missing: done, unless a SAS/RAID controller's
+        # count has not held still for INV_SETTLE seconds yet.
+        [ -z "$_iset" ] && break
+        [ "$_istable" -ge "$INV_SETTLE" ] && break
+    elif [ -z "$_isaid" ]; then
+        _isaid=1
+        [ -n "$_iwhat" ] && echo "  storage: waiting up to ${INV_WAIT}s for drives on $(echo $_iwhat)"
+        [ -n "$_ipend" ] && echo "  storage: waiting up to ${_ibound}s for drives still coming up: $(echo $_ipend)"
     fi
+    sleep 1
+    _iw=$((_iw + 1))
+    _inew=$(inv_counts)
+    if [ "$_inew" = "$_icounts" ]; then
+        _istable=$((_istable + 1))
+    else
+        _istable=0
+        _icounts=$_inew
+        _ilast=$_iw
+    fi
+    _iwas=$_iwhat
+    _iwhat=$(inv_waiting)
+    [ -n "$_iwas" ] && [ -z "$_iwhat" ] && echo "  storage: drives appeared after ${_iw}s"
+    _ipend=$(inv_pending)
+done
+# Each controller whose drives kept arriving is said with what it went from
+# and to, and when the last one came (#592).
+for _ic in $_icounts; do
+    _ip=${_ic%=*}; _in=${_ic#*=}
+    _io=0
+    for _ic0 in $_icounts0; do [ "${_ic0%=*}" = "$_ip" ] && _io=${_ic0#*=}; done
+    [ "$_io" = "$_in" ] || echo "  storage: $_io -> $_in drives on $_ip after ${_ilast}s"
+done
+[ -n "$_iwhat" ] && echo "  storage: after ${_iw}s still no drive on $(echo $_iwhat)"
+if [ -n "$_ipend" ]; then
+    echo "WARNING: storage: after ${_iw}s these drives the SAS layer found still have no block device: $(echo $_ipend) (#592)"
 fi
 INV_CONTROLLERS=""
 INV_DRIVES=""

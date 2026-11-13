@@ -9,6 +9,10 @@
 #     VPD page 0x80), size, transport, SES bay;
 #   * a bound SAS/RAID/NVMe controller with no drive yet is waited for
 #     (bounded), and the console says whether its drives came;
+#   * a SAS HBA's drives that arrive one by one are all waited for: the
+#     count must hold still for STORM_STORAGE_SETTLE, a drive the SAS layer
+#     found but sd has not made a disk of yet is waited for past the plain
+#     bound, and a machine with no SAS/RAID controller does not wait (#592);
 #   * the inventory is written to local-disk.json as `controllers` and
 #     `drives`, as JSON the engine reads (#344's verdict file).
 #
@@ -87,17 +91,51 @@ nvme_appears() {
 
 inventory() ( # -> console in inv.out, JSON in report.json
     set +e
-    STORM_PCI_SYS="$T/pci"; STORM_INV_BLOCK="$T/block"; STORM_STORAGE_WAIT=3
+    STORM_PCI_SYS="$T/pci"; STORM_INV_BLOCK="$T/block"; STORM_STORAGE_WAIT=${WAIT:-3}
+    STORM_INV_SCSI="$T/scsi"; STORM_INV_SAS_END="$T/sas_end_device"
+    STORM_STORAGE_SETTLE=${SETTLE:-1}; STORM_STORAGE_PENDING_WAIT=${PWAIT:-3}
     STORM_LOCAL_DISK_REPORT="$WORK/report.json"
     rm -f "$WORK/report.json"
     SLEPT=0
     sleep() {
         SLEPT=$((SLEPT + 1))
         [ "${LATE:-}" = 1 ] && [ ! -e "$T/block/nvme0n1" ] && nvme_appears
+        [ -n "${ON_SLEEP:-}" ] && $ON_SLEEP
         :
     }
     . "$WORK/inv.sh" > "$WORK/inv.out" 2>&1
+    echo "$SLEPT" > "$WORK/slept"
 )
+
+# forge1 (#592): an R6415's HBA330 (mpt3sas) with four SAS drives, sda there
+# at once; the others found by the SAS layer and made disks later.
+make_forge() {
+    T="$WORK/t"; rm -rf "$T"; mkdir -p "$T/pci" "$T/block" "$T/scsi" "$T/sas_end_device" "$T/drivers/mpt3sas"
+    hba="$T/devices/pci0000:c0/0000:c0:03.1/0000:c1:00.0"
+    mkdir -p "$T/pci/0000:c1:00.0"
+    echo 0x010700 > "$T/pci/0000:c1:00.0/class"; echo 0x1000 > "$T/pci/0000:c1:00.0/vendor"; echo 0x0097 > "$T/pci/0000:c1:00.0/device"
+    ln -s "$T/drivers/mpt3sas" "$T/pci/0000:c1:00.0/driver"
+    forge_end 0
+    forge_scsi 0
+    forge_disk 0
+}
+forge_end() { # n -> the SAS layer finds end device n (no SCSI target yet)
+    _e="$hba/host0/port-0:$1/end_device-0:$1"
+    mkdir -p "$_e/sas_end_device/end_device-0:$1"
+    ln -s "$_e/sas_end_device/end_device-0:$1" "$T/sas_end_device/end_device-0:$1"
+}
+forge_scsi() { # n -> its SCSI disk (type 0), no block device yet
+    _s="$hba/host0/port-0:$1/end_device-0:$1/target0:0:$1/0:0:$1:0"
+    mkdir -p "$_s"; echo 0 > "$_s/type"; echo "H7210A520SUN010T" > "$_s/model"
+    ln -s "$_s" "$T/scsi/0:0:$1:0"
+}
+forge_disk() { # n -> sd made it a disk
+    _s="$hba/host0/port-0:$1/end_device-0:$1/target0:0:$1/0:0:$1:0"
+    _n=sd$(printf '%s' "$1" | tr 0123 abcd)
+    mkdir -p "$_s/block/$_n"; ln -s "$_s" "$_s/block/$_n/device"
+    echo 19134414848 > "$_s/block/$_n/size"
+    ln -s "$_s/block/$_n" "$T/block/$_n"
+}
 
 echo "storage inventory:"
 make_tree
@@ -134,5 +172,52 @@ LATE=never inventory
 out=$(cat "$WORK/inv.out")
 contains "a controller whose drives never come: waited for, bounded, and said" \
     "after 3s still no drive on 0000:02:00.0" "$out"
+
+echo "SAS drives that arrive one by one (#592):"
+# One more drive found and made a disk every other second: the count never
+# holds 3 s until the fourth.
+forge_step() {
+    case "$SLEPT" in
+    2) forge_end 1; forge_scsi 1; forge_disk 1 ;;
+    4) forge_end 2; forge_scsi 2; forge_disk 2 ;;
+    6) forge_end 3; forge_scsi 3; forge_disk 3 ;;
+    esac
+}
+make_forge
+WAIT=30 SETTLE=3 PWAIT=3 ON_SLEEP=forge_step inventory
+out=$(cat "$WORK/inv.out")
+contains "all four drives seen, not the first alone" "0000:c1:00.0 [1000:0097] class 0x010700: mpt3sas, 4 drive(s)" "$out"
+contains "  and said, with when the last one came" "storage: 1 -> 4 drives on 0000:c1:00.0 after 6s" "$out"
+check "  the wait ends once the count held for the settle time" 9 "$(cat "$WORK/slept")"
+
+# A drive the SAS layer found whose disk sd makes only at 8 s: past the 3 s
+# plain bound, inside the pending bound.
+forge_late() {
+    [ "$SLEPT" = 1 ] && { forge_end 1; forge_scsi 1; }
+    [ "$SLEPT" = 8 ] && forge_disk 1
+    :
+}
+make_forge
+SETTLE=1 PWAIT=20 ON_SLEEP=forge_late inventory
+out=$(cat "$WORK/inv.out")
+contains "a drive still spinning up is said" "waiting up to 20s for drives still coming up: 0000:c1:00.0:0:0:1:0" "$out"
+contains "  and waited for past the plain bound" "mpt3sas, 2 drive(s)" "$out"
+contains "  and its arrival said" "storage: 1 -> 2 drives on 0000:c1:00.0 after 8s" "$out"
+
+# An end device whose target never comes: bounded, and a WARNING.
+forge_never() { [ "$SLEPT" = 1 ] && forge_end 2; :; }
+make_forge
+SETTLE=1 PWAIT=6 ON_SLEEP=forge_never inventory
+out=$(cat "$WORK/inv.out")
+contains "a found drive that never comes up is a WARNING, bounded" \
+    "WARNING: storage: after 6s these drives the SAS layer found still have no block device: 0000:c1:00.0:end_device-0:2" "$out"
+contains "  the inventory goes on with what is there" "mpt3sas, 1 drive(s)" "$out"
+
+# No SAS/RAID controller bound (NVMe there at once): no settle wait at all.
+make_tree
+rm "$T/pci/0000:01:00.0/driver"
+nvme_appears
+SETTLE=5 inventory
+check "no SAS/RAID controller: the boot does not wait" 0 "$(cat "$WORK/slept")"
 
 [ "$fail" = 0 ] && echo "all storage inventory checks passed" || { echo "FAILURES"; exit 1; }
