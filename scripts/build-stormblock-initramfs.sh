@@ -5122,11 +5122,108 @@ $1|$_svp|$3"
             INSTALL_KEEP=""
             FORCE_LOCAL=1
         fi
-        # Increments C-H of #573 (docs/work-plan.md): until they land, the
-        # system and data are laid on the first drive as before, and the
-        # other drives are left formatted and blank.
     fi
     # --- END storage format
+
+    # --- BEGIN storage lay (covered by tests/initramfs-storage.sh)
+    # Every drive laid alike (#573): the same regions at the same offsets,
+    # the smallest drive's size; the system region a leg on the first
+    # system_mirror drives; the data regions one stormraid set (parity 1 by
+    # default: four drives are three data and one parity). The set is served
+    # at /dev/ublkb$STORAGE_UBLK_ID, clear of the engine's own devices
+    # (root is /dev/ublkb0, and the rest follow it), and boot-local lays the
+    # node's data half on it and its system half on the first leg.
+    # Destructive: only over drives this boot formatted, with the wipe word,
+    # on a fresh install, or over drives that carry nothing.
+    STORAGE_UBLK_ID=${STORAGE_UBLK_ID:-64}
+    STORAGE_DEV=${STORAGE_DEV:-/dev}
+    STORAGE_MEMBERS=""; STORAGE_SET=""
+    if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ]; then
+        _sl_full=""
+        if [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ]; }; then
+            for _dev in $STORAGE_DRIVES; do
+                case " $STORAGE_FORMATTED " in *" $_dev "*) continue ;; esac
+                if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
+                    _sl_full="$_sl_full $_dev(stormblock slabs)"
+                else
+                    _st_sig=$(drive_signature "$_dev" "$SURVEY_SYS/${_dev##*/}")
+                    [ -n "$_st_sig" ] && _sl_full="$_sl_full $_dev($_st_sig)"
+                fi
+            done
+        fi
+        if [ -n "$_sl_full" ]; then
+            echo "  STOP: storage: in ${STORAGE_FROM##*/} lays $STORAGE_DRIVES afresh, and what they hold is"
+            echo "  not to be lost:$_sl_full. Nothing was written. Install with"
+            echo "  rd.stormblock.assimilate=force (what they hold is lost), or leave storage: out."
+            storage_fail "laying storage: over what the drives hold, without the wipe word:$_sl_full"
+        fi
+        # Device paths carry no spaces: the words below are split on purpose
+        # (positional parameters are /init's own, never reset here).
+        _sl_legs=""
+        for _dev in $STORAGE_SYSTEM; do _sl_legs="$_sl_legs --leg $_dev"; done
+        _st_dir="${_st_dir:-${STORM_RUN:-/run/stormblock}/storage-format}"
+        mkdir -p "$_st_dir"
+        echo "  LAY: $STORAGE_DRIVES, all at once - legs: ${STORAGE_SYSTEM:-none}"
+        # shellcheck disable=SC2086
+        if ! _sl_out=$("$SURVEY_SB" image storage-lay --system-bytes "${STORAGE_SYSTEM_BYTES:-0}" $_sl_legs $STORAGE_DRIVES 2>"$_st_dir/lay.log"); then
+            sed 's/^/  /' "$_st_dir/lay.log"
+            storage_fail "laying the drives failed: $(tail -n 1 "$_st_dir/lay.log")"
+        fi
+        sed 's/^/  /' "$_st_dir/lay.log"
+        eval "$_sl_out"
+        echo "  every drive: a ${STORAGE_BOOT_AREA}-byte boot area, a ${STORAGE_SYSTEM_REGION}-byte system region, a ${STORAGE_REGION}-byte data region"
+        # The partitions' nodes, from the tables just re-read.
+        for _m in $STORAGE_MEMBERS; do
+            _w=0
+            while [ ! -b "$_m" ] && [ "$_w" -lt 10 ]; do sleep 1; _w=$((_w + 1)); done
+            [ -b "$_m" ] || storage_fail "$_m did not appear after its drive was laid"
+        done
+        _sl_first=${STORAGE_MEMBERS%% *}
+        _sl_n=$(printf '%s\n' $STORAGE_MEMBERS | grep -c .)
+        if [ "$STORAGE_RAID" = yes ] && [ "$_sl_n" -gt 1 ]; then
+            _sr="${STORM_STORMRAID:-/usr/sbin/stormraid}"
+            [ -x "$_sr" ] || storage_fail "storage: in ${STORAGE_FROM##*/} makes a raid set, and this initramfs has no stormraid ($_sr): it is built with it (stormcentral#1335)"
+            # The last STORAGE_SPARES members are hot spares.
+            _sl_i=0; _sl_keep=$((_sl_n - ${STORAGE_SPARES:-0})); _sl_args=""
+            for _m in $STORAGE_MEMBERS; do
+                _sl_i=$((_sl_i + 1))
+                if [ "$_sl_i" -gt "$_sl_keep" ]; then _sl_args="--spare $_m $_sl_args"; else _sl_args="$_sl_args $_m"; fi
+            done
+            echo "  RAID: node-data over $STORAGE_MEMBERS, parity $STORAGE_PARITY$([ "${STORAGE_SPARES:-0}" -gt 0 ] && echo ", $STORAGE_SPARES spare(s)")"
+            # shellcheck disable=SC2086
+            if ! "$_sr" create --role node-data --name node-data --parity "$STORAGE_PARITY" --pi auto --force $_sl_args \
+                    > "$_st_dir/raid-create.log" 2>&1; then
+                sed 's/^/  /' "$_st_dir/raid-create.log"
+                storage_fail "stormraid create failed: $(tail -n 1 "$_st_dir/raid-create.log")"
+            fi
+            sed 's/^/  /' "$_st_dir/raid-create.log"
+            # Served at a fixed id (stormraid assemble picks the first free
+            # one, the engine's /dev/ublkb0: stormraid#76). This process
+            # serves it until the node's stormraid daemon takes it over.
+            STORAGE_SET="$STORAGE_DEV/ublkb$STORAGE_UBLK_ID"
+            # shellcheck disable=SC2086
+            "$_sr" serve --id "$STORAGE_UBLK_ID" $STORAGE_MEMBERS > "${STORM_RUN:-/run/stormblock}/stormraid.log" 2>&1 &
+            _w=0
+            while [ ! -b "$STORAGE_SET" ] && [ "$_w" -lt 30 ]; do sleep 1; _w=$((_w + 1)); done
+            if [ ! -b "$STORAGE_SET" ]; then
+                sed 's/^/  /' "${STORM_RUN:-/run/stormblock}/stormraid.log"
+                storage_fail "the node-data set did not come up as $STORAGE_SET"
+            fi
+            echo "  the node-data set is $STORAGE_SET: the node's data half goes on it"
+            LOCAL_DISK="$STORAGE_SET"
+        else
+            [ "$_sl_n" -gt 1 ] && echo "  data_raid: none - the data half on $_sl_first; the other drives' data regions are left laid and empty"
+            LOCAL_DISK="$_sl_first"
+        fi
+        LOCAL_DISK_ID=""
+        SYSTEM_DISK=${STORAGE_SYSTEM%% *}
+        SYSTEM_DISK_ID=""
+        [ -n "$SYSTEM_DISK" ] && SYSTEM_DISK_ID=$(drive_ident "$SURVEY_SYS/${SYSTEM_DISK##*/}")
+        PAIR_DISK=""; PAIR_DISK_ID=""
+        INSTALL_KEEP=""
+        FORCE_LOCAL=1
+    fi
+    # --- END storage lay
 
     # --- BEGIN diskless refused (covered by tests/initramfs-diskless.sh)
     # A node never runs diskless by default (#427; owner, #344: the

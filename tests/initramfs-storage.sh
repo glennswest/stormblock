@@ -1,9 +1,10 @@
 #!/bin/sh
 # The install-config's `storage:` in /init (#573; stormcos docs/STORAGE-LAYOUT.md).
 #
-# Two blocks: the layout (what the engine's `image storage-plan` makes of the
+# Three blocks: the layout (what the engine's `image storage-plan` makes of the
 # config and the drives seen) and the format (every drive taken formatted to
-# its block size and protection, all at once). What matters most here is
+# its block size and protection, all at once) and the lay (every drive
+# partitioned alike, the data regions one stormraid set). What matters most here is
 # what must not happen: a format is every byte on the drive, so a keep-data
 # reinstall, an ordinary boot over a drive that holds something, or a plan
 # that stops, formats nothing.
@@ -23,6 +24,9 @@ sed -n '/# --- BEGIN storage layout/,/# --- END storage layout/p' "$GEN" > "$WOR
 grep -q 'END storage layout' "$WORK/layout.sh" || { echo "FAIL: could not extract the storage layout block"; exit 1; }
 sed -n '/# --- BEGIN storage format/,/# --- END storage format/p' "$GEN" > "$WORK/format.sh"
 grep -q 'END storage format' "$WORK/format.sh" || { echo "FAIL: could not extract the storage format block"; exit 1; }
+# The lay block, its device checks pointed at files under $WORK/dev.
+sed -n '/# --- BEGIN storage lay (/,/# --- END storage lay$/p' "$GEN" | sed 's/\[ -b /[ -e /g; s/\[ ! -b /[ ! -e /g' > "$WORK/lay.sh"
+grep -q 'END storage lay$' "$WORK/lay.sh" || { echo "FAIL: could not extract the storage lay block"; exit 1; }
 
 fail=0
 check() { # name expected actual
@@ -76,6 +80,22 @@ case "$1 $2" in
 "slab list")
     cat "$W/slabs.${3##*/}" 2>/dev/null
     exit 0 ;;
+"image storage-lay")
+    shift 2
+    for a in "$@"; do printf '%s\n' "$a"; done > "$W/lay.args"
+    echo "Storage: laid" >&2
+    [ -e "$W/lay.rc" ] && { echo "error: laying /dev/sdb: short write" >&2; exit 1; }
+    m=""; leg=""
+    for a in "$@"; do
+        [ -n "$leg" ] && { leg=""; continue; }
+        case "$a" in
+        --leg|--system-bytes) leg=1 ;;
+        /dev/sd*) m="$m $W/dev/${a##*/}3"; touch "$W/dev/${a##*/}3" ;;
+        esac
+    done
+    echo "STORAGE_MEMBERS='${m# }'"
+    echo "STORAGE_REGION=9000"; echo "STORAGE_SYSTEM_REGION=800"; echo "STORAGE_BOOT_AREA=100"
+    exit 0 ;;
 esac
 exit 2
 EOF
@@ -110,16 +130,37 @@ exit "$(cat "$W/rc.$n.$prot" 2>/dev/null || echo 0)"
 EOF
 chmod +x "$WORK/stormdrive"
 
+# stormraid: create keeps its arguments (exit raid.rc); serve keeps its
+# and makes the device.
+cat > "$WORK/stormraid" <<EOF
+#!/bin/sh
+W="$WORK"
+EOF
+cat >> "$WORK/stormraid" <<'EOF'
+case "$1" in
+create) shift; for a in "$@"; do printf '%s\n' "$a"; done > "$W/raid.args"
+    echo "stormraid: created node-data"
+    exit "$(cat "$W/raid.rc" 2>/dev/null || echo 0)" ;;
+serve) shift; for a in "$@"; do printf '%s\n' "$a"; done > "$W/serve.args"
+    touch "$W/dev/ublkb$2"; exit 0 ;;
+esac
+exit 2
+EOF
+chmod +x "$WORK/stormraid"
+
 # The /init around the blocks: what they call, stubbed.
 cat > "$WORK/env.sh" <<EOF
 SURVEY_SB="$WORK/sb"
 SURVEY_SYS="$SYS"
 STORM_RUN="$WORK/run"
 STORM_STORMDRIVE="$WORK/stormdrive"
+STORM_STORMRAID="$WORK/stormraid"
+STORAGE_DEV="$WORK/dev"
 W="$WORK"
 EOF
 cat >> "$WORK/env.sh" <<'EOF'
-mkdir -p "$STORM_RUN"
+mkdir -p "$STORM_RUN" "$STORAGE_DEV"
+drive_ident() { echo "ID-${1##*/}"; }
 sd_drives() { for d in sda sdb sdc sdd; do echo "$SURVEY_SYS/$d"; done; }
 shelf_of() { echo "-|0|0"; }
 drive_serial() { echo "SER-${1##*/}"; }
@@ -136,7 +177,8 @@ EOF
 reset() {
     rm -rf "$WORK/run" "$WORK"/plan.* "$WORK"/slabs.* "$WORK"/at.* "$WORK"/rc.* \
            "$WORK"/sig.* "$WORK/format.log" "$WORK/skips" "$WORK/ldwrite" "$WORK/out" \
-           "$WORK/install-config.yaml"
+           "$WORK/install-config.yaml" "$WORK/dev" "$WORK"/lay.args "$WORK"/lay.rc \
+           "$WORK"/raid.* "$WORK/serve.args"
 }
 
 layout() { # vars... -> runs the layout block, prints its variables to out
@@ -171,6 +213,26 @@ echo "=INSTALL_KEEP=$INSTALL_KEEP"
 EOF
     } > "$WORK/run-format.sh"
     sh "$WORK/run-format.sh" > "$WORK/out" 2>&1 || echo "EXIT $?" >> "$WORK/out"
+}
+
+lay() { # vars... -> runs the lay block
+    {
+        cat "$WORK/env.sh"
+        echo 'STORAGE_FROM=/run/install-config.yaml STORAGE_SYSTEM_BYTES=0 STORAGE_RAID=yes STORAGE_PARITY=1 STORAGE_SPARES=0'
+        echo 'LOCAL_DISK=/dev/sda4 SYSTEM_DISK=/dev/sdb PAIR_DISK=/dev/sdc INSTALL_KEEP="" INSTALL_FRESH=1 STORAGE_FORCE="" FORCE_LOCAL="" STORAGE_FORMATTED=""'
+        for v in "$@"; do echo "$v"; done
+        echo 'storage_fail() { echo "FATAL: $1 (#573)"; ld_write failed "${LOCAL_DISK:-}" "storage: $1"; rescue_shell; }'
+        cat "$WORK/lay.sh"
+        cat <<'EOF'
+echo "=LOCAL_DISK=$LOCAL_DISK"
+echo "=SYSTEM_DISK=$SYSTEM_DISK"
+echo "=SYSTEM_DISK_ID=$SYSTEM_DISK_ID"
+echo "=PAIR_DISK=$PAIR_DISK"
+echo "=FORCE_LOCAL=$FORCE_LOCAL"
+echo "=MEMBERS=$STORAGE_MEMBERS"
+EOF
+    } > "$WORK/run-lay.sh"
+    sh "$WORK/run-lay.sh" > "$WORK/out" 2>&1 || echo "EXIT $?" >> "$WORK/out"
 }
 
 BASE='OVERRIDE="" ASSIMILATE="" SLAB="" NAMED_DISK="" CHOSEN_BY="" INSTALL_OVER=""'
@@ -331,6 +393,106 @@ reset
 format "STORAGE_DRIVES=''" "STORM_STORMDRIVE=$WORK/none"
 check "nothing formatted" "" "$(val FORMATTED)"
 hasnt "no rescue" "$WORK/out" "RESCUE"
+
+D4="STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc /dev/sdd' STORAGE_SYSTEM='/dev/sda /dev/sdb /dev/sdc /dev/sdd'"
+
+echo "the lay: four drives, one set at parity 1"
+reset
+lay "$D4"
+has "every drive laid" "$WORK/lay.args" "^/dev/sdd$"
+check "every drive a leg" "4" "$(grep -c '^--leg$' "$WORK/lay.args")"
+has "the system size passed" "$WORK/lay.args" "^--system-bytes$"
+has "the set made at parity 1" "$WORK/raid.args" "^--parity$"
+has "as node-data" "$WORK/raid.args" "^node-data$"
+has "over the old bytes" "$WORK/raid.args" "^--force$"
+check "four members" "4" "$(grep -c "^$WORK/dev/sd.3$" "$WORK/raid.args")"
+hasnt "no spare" "$WORK/raid.args" "^--spare$"
+has "served at id 64" "$WORK/serve.args" "^64$"
+check "the data half on the set" "$WORK/dev/ublkb64" "$(val LOCAL_DISK)"
+check "the system half on the first leg" "/dev/sda" "$(val SYSTEM_DISK)"
+check "known by its identity" "ID-sda" "$(val SYSTEM_DISK_ID)"
+check "no pair" "" "$(val PAIR_DISK)"
+check "laid fresh" "1" "$(val FORCE_LOCAL)"
+has "the regions said" "$WORK/out" "a 9000-byte data region"
+hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the lay: a spare is the last member"
+reset
+lay "$D4" 'STORAGE_SPARES=1'
+check "the spare" "$WORK/dev/sdd3" "$(sed -n '/^--spare$/{n;p;}' "$WORK/raid.args")"
+has "said" "$WORK/out" "parity 1, 1 spare(s)"
+
+echo "the lay: data_raid none, or one drive, makes no set"
+reset
+lay "$D4" 'STORAGE_RAID=no'
+check "no set" "no" "$([ -e "$WORK/raid.args" ] && echo yes || echo no)"
+check "the first data region" "$WORK/dev/sda3" "$(val LOCAL_DISK)"
+has "said" "$WORK/out" "data regions are left laid and empty"
+reset
+lay "STORAGE_DRIVES='/dev/sdb' STORAGE_SYSTEM='/dev/sdb'"
+check "one drive: no set" "no" "$([ -e "$WORK/raid.args" ] && echo yes || echo no)"
+check "one drive: its data region" "$WORK/dev/sdb3" "$(val LOCAL_DISK)"
+
+echo "the lay: legs only where system_mirror puts them"
+reset
+lay "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc' STORAGE_SYSTEM='/dev/sdb /dev/sdc'"
+check "two legs" "2" "$(grep -c '^--leg$' "$WORK/lay.args")"
+check "the first leg takes the system half" "/dev/sdb" "$(val SYSTEM_DISK)"
+
+echo "the lay: a keep-data reinstall over a node's drives lays nothing"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sdc"
+lay "$D4" 'INSTALL_KEEP=1 INSTALL_FRESH=""'
+has "STOP" "$WORK/out" "STOP: storage: .* lays /dev/sda"
+has "names it" "$WORK/out" "/dev/sdc(stormblock slabs)"
+has "rescue" "$WORK/out" "RESCUE"
+check "nothing laid" "no" "$([ -e "$WORK/lay.args" ] && echo yes || echo no)"
+
+echo "the lay: an ordinary boot over a foreign table lays nothing"
+reset
+echo "gpt (other)" > "$WORK/sig.sdb"
+lay "$D4" 'INSTALL_FRESH=""'
+has "names it" "$WORK/out" "/dev/sdb(gpt (other))"
+check "nothing laid" "no" "$([ -e "$WORK/lay.args" ] && echo yes || echo no)"
+
+echo "the lay: drives this boot formatted are blank"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sdc"
+lay "$D4" 'INSTALL_KEEP=1 INSTALL_FRESH="" STORAGE_FORMATTED="/dev/sdc"'
+has "laid" "$WORK/lay.args" "^/dev/sdc$"
+hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the lay: the wipe word lays over a node's data"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sda"
+lay "$D4" 'INSTALL_KEEP=1 INSTALL_FRESH="" STORAGE_FORCE=1'
+has "laid" "$WORK/lay.args" "^/dev/sda$"
+hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the lay: a lay or a create that fails is fatal"
+reset
+touch "$WORK/lay.rc"
+lay "$D4"
+has "the engine's words" "$WORK/out" "FATAL: laying the drives failed: error: laying /dev/sdb: short write"
+check "no set" "no" "$([ -e "$WORK/raid.args" ] && echo yes || echo no)"
+reset
+echo 1 > "$WORK/raid.rc"
+lay "$D4"
+has "create failed" "$WORK/out" "FATAL: stormraid create failed: stormraid: created node-data"
+check "not served" "no" "$([ -e "$WORK/serve.args" ] && echo yes || echo no)"
+
+echo "the lay: no stormraid in the initramfs is fatal"
+reset
+lay "$D4" "STORM_STORMRAID=$WORK/none"
+has "names the build" "$WORK/out" "stormcentral#1335"
+check "not created" "no" "$([ -e "$WORK/raid.args" ] && echo yes || echo no)"
+
+echo "the lay: no storage: lays nothing"
+reset
+lay "STORAGE_DRIVES=''"
+check "nothing laid" "no" "$([ -e "$WORK/lay.args" ] && echo yes || echo no)"
+check "the local disk stands" "/dev/sda4" "$(val LOCAL_DISK)"
+check "the system disk stands" "/dev/sdb" "$(val SYSTEM_DISK)"
 
 if [ "$fail" = 0 ]; then
     echo "initramfs-storage: all ok"
