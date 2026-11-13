@@ -52,6 +52,12 @@ Verification on forge1 needs stormcentral#1335 (the tools in the image).
   the engine's ublkb0: **stormraid#76**); LOCAL_DISK = the set, SYSTEM_DISK =
   the first leg, so boot-local's split path lays them. Shell tests. Fix
   8c0bd7de: bay 0 sorted as no bay.
+- [x] Watching the format (owner, #573 17:33Z): cbe461bc. Per-drive lines
+  live (a shell loop, not sed), a minute beat (console, `local-disk.json`
+  `formatting`, `stormblock install-report --stage formatting`), the
+  appliance's `install` record `state: formatting` (`InstallStep`), the
+  sense quoted in FATAL. stormcentral#1381: hold `laid_secs` while
+  `formatting` reports come in, show it as the stage.
 - [ ] E next: the other legs' system slabs, system volumes `mirror:N`.
 - [ ] F: held behind stormraid#76 (assemble --id). Without F a node laid this
   way cannot boot from its disks again: no forge1 verification before F.
