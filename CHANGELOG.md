@@ -29,6 +29,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.4.1] — 2026-11-13
+
+### Fixed
+- #592: the initramfs storage inventory waits for every drive of a SAS HBA, not the first one: a SAS/RAID controller's drive count must hold for `STORM_STORAGE_SETTLE` (5 s) within `STORM_STORAGE_WAIT` (30 s), and a drive the SAS layer already found waits up to `STORM_STORAGE_PENDING_WAIT` (60 s). `storage: 1 -> 4 drives on <pci> after Ns` is said; a found drive that never became a disk is a WARNING. forge1 saw 1 of 4.
+
 ## [v24.4.0] — 2026-11-13
 
 ### Added
