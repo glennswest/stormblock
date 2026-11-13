@@ -11,7 +11,7 @@ forge1's mpt3sas showed sda only; the wait ended at the first drive, so the
 (end device without target, type-0 SCSI device under an end device without
 a block device) extend the wait to `STORM_STORAGE_PENDING_WAIT` (60 s).
 - [x] code + `tests/initramfs-storage-inventory.sh` (forge1 cases)
-- [ ] `sc-build 'sh check.sh'`, image, shipped with a console proof
+- [x] `sc-build 'sh check.sh'` green on 2c59604c; v24.4.1 (b68675c7), stage a180e5120b8e requested, `shipped` (proof: health version >= 24.4.1). On metal: forge1's next install should say `mpt3sas, 4 drive(s)`.
 
 ## #573 — every selected drive laid alike: ESP, pallets, mirrored system, data on a stormraid set (2026-11-13, P0)
 
