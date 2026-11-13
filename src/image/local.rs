@@ -1408,7 +1408,7 @@ mod tests {
 
     #[test]
     fn storage_regions_refuse_what_does_not_fit() {
-        assert!(storage_regions(16 << 30, 0).is_err(), "a 16 GiB drive under a 32 GiB system region");
+        assert!(storage_regions(16 << 30, 32 << 30).is_err(), "a 16 GiB drive under a 32 GiB system region");
         assert!(storage_regions(512 << 30, 1 << 20).is_err(), "a system region smaller than a system slab");
         let r = storage_regions(10_000_000_000_000, 100 << 30).unwrap();
         assert_eq!(r.system_bytes, 100 << 30, "the size given");
