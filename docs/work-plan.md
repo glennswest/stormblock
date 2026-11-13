@@ -2,6 +2,42 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #573 — every selected drive laid alike: ESP, pallets, mirrored system, data on a stormraid set (2026-11-13, P0)
+
+Owner's stormcos#902 / STORAGE-LAYOUT.md; forge1 (4 × 10 TB SAS, HBA330) is
+down until it lands: 4K on every drive, system on all four, one set 3+1,
+formats in parallel. Option A (master): only with a `storage:` section in the
+install-config; without one, #478/#350/#402 unchanged.
+
+Increments (each committed, pushed, checked):
+- **A. tools in the initramfs**: `STORMBLOCK_INITRAMFS_TOOLS="stormraid=/p
+  stormdrive=/p"` → `/usr/sbin/<name>`, refused unless a static ELF of the
+  image's arch; without them `/init` says the layout cannot run
+  (stormcentral#1335 passes them). Shell test.
+- **B. `/init`: `storage:` read** (`install_config_read`), drives chosen
+  (`all` = own shelves; external only by serial/bay; `system_drive:` with
+  `storage:` refused by name; a foreign or other node's drive refused), then
+  `stormdrive format` on every drive in parallel (exit 4 = already there),
+  progress per drive on the console.
+- **C. `stormblock storage-lay`**: per drive a GPT: boot area, system slab
+  (`system_size`), a raw data region (own type GUID), the region one size on
+  every drive (the smallest's, the difference said); JSON out; `--check` says
+  whether the drives already hold that layout (keep-data, refusal on change).
+- **D. `/init`**: re-read tables, `stormraid create --role node-data
+  --parity P --pi auto --force <regions>`, `stormraid assemble --role
+  node-data` → `/dev/ublkbN`, data slab laid there; one drive or `data_raid:
+  none` → the plain region. `boot-local --system-mirror <drive>` repeatable.
+- **E. engine**: the other drives' system slabs registered; system volumes
+  `mirror:N` at `drive` (pair.rs generalised, role-filtered placement keeps
+  legs on system slabs); mended at each start, a missing leg said.
+- **F.** assemble on every boot before the local-slab probe.
+- **G.** ESP + pallets on every drive (`run_local_boot` per drive; the
+  handover record carries the list).
+- **H.** `GET /api/v1/storage/layout` (shape per stormcentral#1318), a summary
+  in health; named on #573 and stormcentral#1318.
+
+Verification on forge1 needs stormcentral#1335 (the tools in the image).
+
 ## #584 — clippy `--all-targets -D warnings` clean, and in check.sh (2026-11-12)
 
 clippy 1.95 at 73239000: ~200 errors (needless_borrow in cli.rs, MSRV
