@@ -28,6 +28,7 @@ pub mod build;
 pub mod local;
 pub mod local_boot;
 pub mod stage;
+pub mod storage;
 pub mod install;
 pub mod partner;
 pub mod decode;

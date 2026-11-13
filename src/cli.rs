@@ -828,6 +828,24 @@ enum ImageAction {
         #[arg(long = "from", required = true)]
         from: Vec<String>,
     },
+    /// Read the install-config's `storage:` section against the drives the
+    /// initramfs saw and print the plan as shell assignments (#573). Prints
+    /// `STORAGE_NONE=1` when the config has no `storage:` section, and
+    /// `STORAGE_STOP='<why>'` when it is refused. The config is read for
+    /// `storage:` and `system_drive:` only, never printed.
+    StoragePlan {
+        /// The install-config (YAML)
+        #[arg(long)]
+        config: String,
+        /// A drive: `dev=/dev/sda;serial=..;wwn=..;model=..;shelf=..;
+        /// position=internal|front|rear|external;bay=..;bytes=N;removable=0|1;
+        /// usb=0|1;carries=<what>;running=0|1` (repeat for each)
+        #[arg(long = "drive")]
+        drive: Vec<String>,
+        /// The wipe word: take drives that carry something under `drives: all`
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -2604,6 +2622,20 @@ pub async fn run() -> anyhow::Result<()> {
             }
             ImageAction::LocalBoot { disk, from } => {
                 run_local_boot(disk, from).await?;
+            }
+            ImageAction::StoragePlan { config, drive, force } => {
+                let doc = std::fs::read_to_string(config)
+                    .map_err(|e| anyhow::anyhow!("cannot read the install-config {config}: {e}"))?;
+                let seen = drive
+                    .iter()
+                    .map(|d| crate::image::storage::SeenDrive::parse(d))
+                    .collect::<Result<Vec<_>, _>>();
+                let out = seen.and_then(|seen| crate::image::storage::plan_from_config(&doc, &seen, *force));
+                match out {
+                    Ok(None) => println!("STORAGE_NONE=1"),
+                    Ok(Some(sh)) => print!("STORAGE_NONE=0\n{sh}"),
+                    Err(e) => println!("STORAGE_NONE=0\nSTORAGE_STOP={}", crate::image::storage::sh_quote(&e)),
+                }
             }
             ImageAction::Build { spec, out, format, keep_raw, engine } => {
                 let format = resolve(out, format)?;
