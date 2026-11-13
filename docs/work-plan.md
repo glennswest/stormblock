@@ -59,8 +59,12 @@ Verification on forge1 needs stormcentral#1335 (the tools in the image).
   sense quoted in FATAL. stormcentral#1381: hold `laid_secs` while
   `formatting` reports come in, show it as the stage.
 - [ ] E next: the other legs' system slabs, system volumes `mirror:N`.
-- [ ] F: held behind stormraid#76 (assemble --id). Without F a node laid this
-  way cannot boot from its disks again: no forge1 verification before F.
+- [x] F: cd2cec7f. Not behind stormraid#76 after all: `stormraid serve --id
+  64 <members>` opens the set from the members given (degraded when one is
+  missing). The `storage serve` block, before the probe, serves every
+  `stormblock-raid` partition carrying `STORMRD1`; `slab partner --also
+  /dev/ublkb64` finds the data half on it; the format and lay let go first.
+  tests/initramfs-storage-serve.sh.
 - Open: a keep reinstall over a node already laid by storage: — every drive
   carries this node, not only INSTALL_OVER's; the plan's `carries` must say
   "this node" for all of them (D/F, with `--check`).
