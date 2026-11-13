@@ -445,6 +445,19 @@ enum SubCommand {
         #[arg(long, default_value_t = 2000)]
         wait_ms: u64,
     },
+    /// Tell the appliance which long step the install under way is in, and
+    /// how far it got (#573): `/init` says `formatting` once a minute while
+    /// the drives format, so the install's record shows it. One try with a
+    /// 10 s limit, never fatal: exit 0 said, 1 not (a line on stderr says
+    /// why), 3 no install ticket (no install the appliance asked for).
+    InstallReport {
+        /// The step: `formatting`.
+        #[arg(long)]
+        stage: String,
+        /// Its progress, one line.
+        #[arg(long, default_value = "")]
+        detail: String,
+    },
     BootClaim {
         /// The appliance, e.g. http://192.168.31.202:9090
         #[arg(long, required = true)]
@@ -1295,6 +1308,9 @@ pub async fn run() -> anyhow::Result<()> {
                     println!("{}", a.url);
                 }
                 std::process::exit(if got.is_empty() { 1 } else { 0 });
+            }
+            SubCommand::InstallReport { stage, detail } => {
+                std::process::exit(handle_install_report(stage, detail).await);
             }
             SubCommand::BootClaim { boothost, tag, namespace, timeout_secs, token } => {
                 return handle_boot_claim(boothost, tag, namespace, *timeout_secs, token.as_deref()).await;
@@ -9968,6 +9984,50 @@ pub(crate) const INSTALL_CONFIG_SOURCE: &str = "/run/stormblock/install-config.s
 
 pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTicket, stage: &str) -> ReportOutcome {
     report_install_stage(ticket, stage, None).await
+}
+
+/// `stormblock install-report` (#573): one report of a long install step.
+async fn handle_install_report(stage: &str, detail: &str) -> i32 {
+    use crate::drive::handover::{InstallTicket, INSTALL_TICKET_PATH};
+    let path = std::env::var("STORM_INSTALL_TICKET").unwrap_or_else(|_| INSTALL_TICKET_PATH.to_string());
+    let Some(ticket) = InstallTicket::read(std::path::Path::new(&path)) else {
+        return 3;
+    };
+    match report_install_once(&ticket, stage, Some(detail)).await {
+        Ok(()) => 0,
+        Err(why) => {
+            eprintln!("install-report: {why}");
+            1
+        }
+    }
+}
+
+/// One report to the appliance, no retry: for a step said every minute.
+async fn report_install_once(
+    ticket: &crate::drive::handover::InstallTicket,
+    stage: &str,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/api/v1/synonyms/boothost/{}/installed",
+        ticket.boothost.trim_end_matches('/'),
+        ticket.host
+    );
+    let client = crate::http::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("{url}: {e}"))?;
+    let source = std::fs::read_to_string(INSTALL_CONFIG_SOURCE).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let body = serde_json::json!({ "volume": ticket.volume, "stage": stage, "install_config": source, "reason": reason });
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(format!("{url} answered {status}: {}", body.trim()))
+        }
+        Err(e) => Err(format!("{url}: {e}")),
+    }
 }
 
 /// [`report_installed`] with a reason: `failed` (#574) says why the install

@@ -2206,7 +2206,21 @@ async fn installed(
                 Err(e) => err(e),
             };
         }
-        Some(other) => return ApiError::bad_request(format!("stage {other:?} is laid, booted or failed")),
+        Some(step) if crate::volume::synonym::INSTALL_STEPS.contains(&step) => {
+            // A long step under way (#573): said, the intent left alone.
+            let detail = req.reason.as_deref().map(str::trim).unwrap_or("");
+            let r = state.synonyms.write().await.install_step(&name, clone, step, detail);
+            return match r {
+                Ok((h, _)) => {
+                    tracing::info!(host = %h.name, volume = %clone.0, "install {step}: {detail}");
+                    let mut v = intent_body(&h, &name);
+                    v["reset"] = json!(false);
+                    Json(v).into_response()
+                }
+                Err(e) => err(e),
+            };
+        }
+        Some(other) => return ApiError::bad_request(format!("stage {other:?} is laid, booted, failed or formatting")),
     }
     let done = {
         let mut store = state.synonyms.write().await;

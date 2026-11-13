@@ -420,7 +420,7 @@ PUT  /api/v1/synonyms/boothost/<name>/install-config   the YAML (#459)       adm
 PUT  /api/v1/volumes/{id}/secret        {"secret": true} (#74, one way)        admin token
 GET  /api/v1/synonyms/boothost/<name>/install-config   the YAML              admin token (it carries secrets)
 DELETE /api/v1/synonyms/boothost/<name>/install-config                       admin token
-POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>, "stage": "laid"|"booted"|"failed", "reason"?}  open
+POST /api/v1/synonyms/boothost/<name>/installed   {"volume": <boot clone id>, "stage": "laid"|"booted"|"failed"|"formatting", "reason"?}  open
 GET  /api/v1/synonyms/boothost/<name>/command     → the pending command, or 404 {next_id, last_done}   open
 PUT  /api/v1/synonyms/boothost/<name>/command     {"command", "args", "id"?, "issued"?, "by"?, "host"?, "sig"?}  admin token
 POST /api/v1/synonyms/boothost/<name>/command/done   {"id", "result"}   open

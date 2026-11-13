@@ -80,6 +80,10 @@ case "$1 $2" in
 "slab list")
     cat "$W/slabs.${3##*/}" 2>/dev/null
     exit 0 ;;
+"install-report --stage")
+    shift
+    for a in "$@"; do printf '%s\n' "$a"; done >> "$W/report.args"
+    exit 0 ;;
 "image storage-lay")
     shift 2
     for a in "$@"; do printf '%s\n' "$a"; done > "$W/lay.args"
@@ -124,9 +128,12 @@ if [ "$meth" = none ]; then
 fi
 echo "start $n $prot" >> "$W/format.log"
 echo "formatting $n" >&2
-sleep 1
+echo "$dev: formatting (fast) 40%, about 1 min left, 1 min so far" >&2
+sleep "$(cat "$W/slow.$n" 2>/dev/null || echo 1)"
+rc=$(cat "$W/rc.$n.$prot" 2>/dev/null || echo 0)
+[ "$rc" = 1 ] && echo "$dev: full format: sense 03/31/00 medium format corrupted" >&2
 echo "end $n $prot" >> "$W/format.log"
-exit "$(cat "$W/rc.$n.$prot" 2>/dev/null || echo 0)"
+exit "$rc"
 EOF
 chmod +x "$WORK/stormdrive"
 
@@ -178,7 +185,7 @@ reset() {
     rm -rf "$WORK/run" "$WORK"/plan.* "$WORK"/slabs.* "$WORK"/at.* "$WORK"/rc.* \
            "$WORK"/sig.* "$WORK/format.log" "$WORK/skips" "$WORK/ldwrite" "$WORK/out" \
            "$WORK/install-config.yaml" "$WORK/dev" "$WORK"/lay.args "$WORK"/lay.rc \
-           "$WORK"/raid.* "$WORK/serve.args"
+           "$WORK"/raid.* "$WORK/serve.args" "$WORK"/slow.* "$WORK/report.args"
 }
 
 layout() { # vars... -> runs the layout block, prints its variables to out
@@ -320,6 +327,17 @@ has "progress named by drive" "$WORK/out" "  sdc: formatting sdc"
 has "the loss said" "$WORK/out" "every byte on them is lost"
 hasnt "no rescue" "$WORK/out" "RESCUE"
 
+echo "the format: a beat while drives format"
+reset
+echo 4 > "$WORK/slow.sdb"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'STORAGE_BEAT_SECS=2'
+check "both formatted" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+has "the beat names each drive" "$WORK/out" "FORMAT: 0 min so far - sda: ended; sdb: formatting (fast) 40%"
+has "the state is formatting" "$WORK/ldwrite" "ldwrite formatting /dev/sda4 storage: formatting, 0 min so far - "
+has "the appliance told" "$WORK/report.args" "^formatting$"
+has "with the progress" "$WORK/report.args" "sdb: formatting (fast) 40%"
+check "the beat ended with the formats" "" "$(sed -n '/=FORMATTED=/,$p' "$WORK/out" | grep 'FORMAT: ' || true)"
+
 echo "the format: a drive at the format already is left"
 reset
 touch "$WORK/at.sda" "$WORK/at.sdb"
@@ -349,7 +367,7 @@ reset
 echo 1 > "$WORK/rc.sdc.type1"
 format "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc'"
 has "rescue" "$WORK/out" "RESCUE"
-has "names the drive" "$WORK/out" "FATAL: the format failed on /dev/sdc(exit 1)"
+has "names the drive and its sense" "$WORK/out" "FATAL: the format failed on /dev/sdc(exit 1: .*sense 03/31/00 medium format corrupted)"
 has "the install result says failed" "$WORK/ldwrite" "ldwrite failed /dev/sda4 storage:"
 hasnt "never reaches the end" "$WORK/out" "=FORMATTED="
 

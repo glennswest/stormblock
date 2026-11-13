@@ -5083,30 +5083,75 @@ $1|$_svp|$3"
                 storage_fail "a layout change over what the drives hold, without the wipe word:$_st_full"
             fi
         fi
+        # Each drive's lines reach the console as they come (a shell echo,
+        # not sed, which may hold them in a buffer for hours), and its log
+        # keeps them: the heartbeat says the last, a failure quotes it.
         storage_format() { # dev protection -> its exit code in $_st_dir/<name>.rc
             _sfn="${1##*/}"
+            : > "$_st_dir/$_sfn.log"
             {
                 "$_st_tool" format --device "$1" --block-size "$STORAGE_BLOCK_SIZE" \
-                    --protection "$2" --method "$STORAGE_METHOD" --poll-secs 60 2>&1
+                    --protection "$2" --method "$STORAGE_METHOD" --poll-secs "${STORAGE_POLL_SECS:-60}" 2>&1
                 echo $? > "$_st_dir/$_sfn.rc"
-            } | sed "s|^|  $_sfn: |"
+            } | while IFS= read -r _l; do
+                echo "  $_sfn: $_l"
+                printf '%s\n' "$_l" >> "$_st_dir/$_sfn.log"
+            done
+        }
+        # Once a minute while drives format (owner: "i need to be able watch
+        # progress"): each drive's last line and the time so far on the
+        # console, local-disk.json in state formatting, and the install's
+        # record on the appliance (`install-report`, one try, never fatal) -
+        # a full FORMAT UNIT is ~19 h and must read as the install's stage,
+        # not a hang. A drive whose format blocks (IMMED refused) says
+        # nothing itself; this line still does.
+        storage_beat() { # drives start -> until $_st_dir/beat.stop
+            while :; do
+                _bi=0
+                while [ "$_bi" -lt "${STORAGE_BEAT_SECS:-60}" ]; do
+                    sleep 1
+                    [ -e "$_st_dir/beat.stop" ] && return 0
+                    _bi=$((_bi + 1))
+                done
+                _bt=$(( ($(date +%s) - $2) / 60 ))
+                _bs=""
+                for _bd in $1; do
+                    _bn="${_bd##*/}"
+                    if [ -e "$_st_dir/$_bn.rc" ]; then _bl="ended"
+                    else _bl=$(tail -n 1 "$_st_dir/$_bn.log" 2>/dev/null); _bl="${_bl#"$_bd": }"; fi
+                    _bs="$_bs $_bn: ${_bl:-started};"
+                done
+                _bs="${_bs# }"
+                echo "  FORMAT: ${_bt} min so far - ${_bs%;}"
+                ld_write formatting "${LOCAL_DISK:-}" "storage: formatting, ${_bt} min so far - ${_bs%;}"
+                "$SURVEY_SB" install-report --stage formatting --detail "${_bt} min so far - ${_bs%;}" >/dev/null 2>&1 &
+            done
+        }
+        storage_said() { # dev -> its last lines, the sense among them
+            tail -n 3 "$_st_dir/${1##*/}.log" 2>/dev/null | sed "s|^$1: ||" | tr '\n' ' ' | sed 's/ *$//'
         }
         _st_round=1
         _st_prot="$STORAGE_PROTECTION"
         while [ -n "$_st_todo" ]; do
             echo "  FORMAT: $_st_todo to $STORAGE_BLOCK_SIZE + PI $_st_prot ($STORAGE_METHOD), all at once - every byte on them is lost"
-            for _dev in $_st_todo; do storage_format "$_dev" "$_st_prot" & done
-            wait
+            rm -f "$_st_dir"/*.rc "$_st_dir/beat.stop"
+            _st_pids=""
+            for _dev in $_st_todo; do storage_format "$_dev" "$_st_prot" & _st_pids="$_st_pids $!"; done
+            storage_beat "$_st_todo" "$(date +%s)" &
+            _st_beat=$!
+            for _p in $_st_pids; do wait "$_p"; done
+            # The beat ends within a second (no sleep left holding the console).
+            touch "$_st_dir/beat.stop"; wait "$_st_beat"
             _st_again=""; _st_bad=""
             for _dev in $_st_todo; do
                 _rc=$(cat "$_st_dir/${_dev##*/}.rc" 2>/dev/null || echo 1)
                 case "$_rc" in
                 0|4) STORAGE_FORMATTED="$STORAGE_FORMATTED $_dev" ;;
-                3) if [ "$_st_prot" = type1 ] && [ "$_st_round" = 1 ]; then _st_again="$_st_again $_dev"; else _st_bad="$_st_bad $_dev(refused)"; fi ;;
-                *) _st_bad="$_st_bad $_dev(exit $_rc)" ;;
+                3) if [ "$_st_prot" = type1 ] && [ "$_st_round" = 1 ]; then _st_again="$_st_again $_dev"; else _st_bad="$_st_bad $_dev(refused: $(storage_said "$_dev"))"; fi ;;
+                *) _st_bad="$_st_bad $_dev(exit $_rc: $(storage_said "$_dev"))" ;;
                 esac
             done
-            [ -n "$_st_bad" ] && storage_fail "the format failed on${_st_bad}: see the lines above; nothing is laid"
+            [ -n "$_st_bad" ] && storage_fail "the format failed on${_st_bad}; nothing is laid"
             _st_todo="${_st_again# }"
             if [ -n "$_st_todo" ]; then
                 # The HBA does not pass PI to the drive (STORAGE-LAYOUT.md:

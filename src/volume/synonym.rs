@@ -249,6 +249,13 @@ pub struct Host {
     /// `laid` report clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_failure: Option<InstallFailure>,
+    /// What the install under way is doing now, when it is a long step the
+    /// installer reports as it goes (#573: a drive format, hours on a 10 TB
+    /// SAS drive): the step, its last progress line, when it was said. The
+    /// intent stays `install`; `laid`, `failed` or a new request clears it.
+    /// Apart from `install` for the same reason as `install_failure`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_step: Option<InstallStep>,
     /// SHA-256 (hex) of this machine's host secret (#247): minted at every
     /// boot claim of this host and handed to the machine in the reply, the
     /// last one replacing the one before. It authorises this host's own
@@ -504,9 +511,28 @@ pub struct InstallFailure {
     pub reason: String,
 }
 
+/// A long step of the install under way, as the node last said it (#573).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallStep {
+    /// The boot clone the install was booted from.
+    pub clone: VolumeId,
+    /// The step: `formatting`.
+    pub stage: String,
+    /// Its last progress line ("sda 41.2%, about 11h left; sdb …").
+    pub detail: String,
+    /// When the step began (its first report).
+    pub since: u64,
+    /// When the node last said it.
+    pub at: u64,
+}
+
+/// The steps an installer may report as it goes (#573).
+pub const INSTALL_STEPS: &[&str] = &["formatting"];
+
 impl Host {
-    /// How far the last install got, as the API says it (#220, #574): a
-    /// failure of the install under way, else its progress.
+    /// How far the last install got, as the API says it (#220, #574, #573):
+    /// a failure of the install under way, else the long step it is in, else
+    /// its progress.
     pub fn install_json(&self) -> Option<serde_json::Value> {
         match (&self.install_failure, &self.install) {
             (Some(f), _) => Some(serde_json::json!({
@@ -515,6 +541,15 @@ impl Host {
                 "failed_at": f.failed_at,
                 "reason": f.reason,
             })),
+            (None, _) if self.install_step.is_some() => self.install_step.as_ref().map(|st| {
+                serde_json::json!({
+                    "state": st.stage,
+                    "clone": st.clone.0,
+                    "detail": st.detail,
+                    "since": st.since,
+                    "at": st.at,
+                })
+            }),
             (None, Some(p)) => Some(p.json()),
             (None, None) => None,
         }
@@ -1124,6 +1159,7 @@ impl SynonymStore {
         if intent == BootIntent::Install {
             h.install = None;
             h.install_failure = None;
+            h.install_step = None;
         }
         h.updated_at = t;
         let out = h.clone();
@@ -1256,6 +1292,7 @@ impl SynonymStore {
         // Laid, not proven: the first boot off the disk says so (#220).
         h.install = Some(InstallProgress { state: InstallStage::Laid, clone, laid_at: t, booted_at: None, install_config: None });
         h.install_failure = None;
+        h.install_step = None;
         h.updated_at = t;
         let out = h.clone();
         self.persist();
@@ -1284,6 +1321,34 @@ impl SynonymStore {
         // Bounded: the report is open, like the claim.
         let reason: String = reason.chars().take(1024).collect();
         h.install_failure = Some(InstallFailure { clone, failed_at: t, reason });
+        h.install_step = None;
+        h.updated_at = t;
+        let out = h.clone();
+        self.persist();
+        Ok((out, InstallDone::Reset))
+    }
+
+    /// The install under way says which long step it is in and how far it
+    /// got (#573). Only for the install requested (the claim's clone); the
+    /// intent stays `install`. `NotRequested` when no install is asked.
+    pub fn install_step(&mut self, name: &str, clone: VolumeId, stage: &str, detail: &str) -> Result<(Host, InstallDone), SynonymError> {
+        let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
+        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent == BootIntent::Install) else {
+            let h = self.host(&host).unwrap_or_default();
+            return Ok((h, InstallDone::NotRequested));
+        };
+        if h.install_claim != Some(clone) {
+            let why = match h.install_claim {
+                Some(c) => format!("the install requested for {host} is the one booted from {}, not {}", c.0, clone.0),
+                None => format!("no claim of {host} has been made since its install was requested"),
+            };
+            return Err(SynonymError::Conflict(why));
+        }
+        let t = now();
+        // Bounded: the report is open, like the claim.
+        let detail: String = detail.chars().take(1024).collect();
+        let since = h.install_step.as_ref().filter(|s| s.stage == stage && s.clone == clone).map_or(t, |s| s.since);
+        h.install_step = Some(InstallStep { clone, stage: stage.to_string(), detail, since, at: t });
         h.updated_at = t;
         let out = h.clone();
         self.persist();
@@ -1765,6 +1830,36 @@ mod tests {
         s.install_failed("server1", other, "y").unwrap();
         s.set_intent("server1", BootIntent::Install).unwrap();
         assert!(s.host("server1").unwrap().install_json().is_none());
+    }
+
+    /// #573: a long step of the install (a drive format) is said as it
+    /// goes; the intent stays install, the step keeps when it began, and a
+    /// laid or failed report ends it.
+    #[test]
+    fn a_format_under_way_is_the_install_state_until_it_is_laid_or_failed() {
+        let mut s = SynonymStore::in_memory();
+        s.create(BOOTHOST_NS, "forge1", Target::Volume { id: vol() }, None, None).unwrap();
+        let (clone, other) = (vol(), vol());
+        assert_eq!(s.install_step("forge1", clone, "formatting", "sda 1%").unwrap().1, InstallDone::NotRequested);
+        s.set_intent("forge1", BootIntent::Install).unwrap();
+        s.note_install_claim("forge1", clone);
+        assert!(matches!(s.install_step("forge1", other, "formatting", "x"), Err(SynonymError::Conflict(_))));
+        let (h, _) = s.install_step("forge1", clone, "formatting", "sda 1.0%, 2m 00s so far").unwrap();
+        assert_eq!(h.intent, BootIntent::Install);
+        let j = h.install_json().unwrap();
+        assert_eq!((j["state"].as_str(), j["detail"].as_str()), (Some("formatting"), Some("sda 1.0%, 2m 00s so far")));
+        let since = j["since"].as_u64().unwrap();
+        let (h, _) = s.install_step("forge1", clone, "formatting", "sda 2.0%").unwrap();
+        assert_eq!(h.install_json().unwrap()["since"].as_u64(), Some(since), "the step keeps when it began");
+        let (h, _) = s.install_done("forge1", clone).unwrap();
+        assert_eq!(h.install_json().unwrap()["state"], "laid");
+        assert!(h.install_step.is_none());
+        s.set_intent("forge1", BootIntent::Install).unwrap();
+        s.note_install_claim("forge1", other);
+        s.install_step("forge1", other, "formatting", "sdb").unwrap();
+        let (h, _) = s.install_failed("forge1", other, "sdb: the format failed").unwrap();
+        assert_eq!(h.install_json().unwrap()["state"], "failed");
+        assert!(h.install_step.is_none());
     }
 
     #[test]
