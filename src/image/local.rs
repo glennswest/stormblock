@@ -921,6 +921,179 @@ pub fn update_room_needed(release_bytes: u64) -> u64 {
     release_bytes.saturating_mul(2).saturating_add(release_bytes / 20)
 }
 
+/// The data region's partition name under `storage:` (#573): one member of
+/// the node's stormraid set, typed [`type_guid::STORAGE_MEMBER`].
+pub const STORAGE_MEMBER_PARTITION: &str = "stormblock-raid";
+
+/// The regions every drive of a `storage:` layout carries, at the same
+/// offsets and sizes on each (#573, STORAGE-LAYOUT.md): a boot area for the
+/// ESP and the boot pallets, the system region (a system leg on the first
+/// `system_mirror` drives, free space of the same size on the rest), and the
+/// data region, one member of the node's stormraid set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageRegions {
+    pub boot_bytes: u64,
+    pub system_bytes: u64,
+    pub member_bytes: u64,
+}
+
+/// What a `storage:` data region leaves unused at the end of the smallest
+/// drive: a thousandth of it, at least 64 MiB — the backup table, and slack
+/// for a replacement drive a little smaller than the one it replaces.
+pub fn storage_margin(capacity: u64) -> u64 {
+    (capacity / 1000).max(64 * ALIGN) / ALIGN * ALIGN
+}
+
+/// The regions a `storage:` layout lays, from the **smallest** selected
+/// drive (#573): the boot area of a drive that size, the system region
+/// (`system_bytes`, or 0 for a release-sized one, which is what
+/// [`LocalLayout::for_drive`] gives that drive), and the data region the
+/// rest, less [`storage_margin`]. A larger drive's surplus stays free.
+pub fn storage_regions(smallest: u64, system_bytes: u64) -> Result<StorageRegions> {
+    let boot_bytes = align_down(boot_area_for(smallest), ALIGN);
+    let system_bytes =
+        align_down(if system_bytes == 0 { LocalLayout::for_drive(smallest).system_bytes } else { system_bytes }, ALIGN);
+    if system_bytes < SYSTEM_SLAB_MIN {
+        return Err(ImageError::Spec(format!("a {system_bytes} byte system region is too small for a system slab")));
+    }
+    let member_bytes = align_down(
+        smallest
+            .saturating_sub(GPT_OVERHEAD)
+            .saturating_sub(boot_bytes)
+            .saturating_sub(system_bytes)
+            .saturating_sub(storage_margin(smallest)),
+        ALIGN,
+    );
+    if member_bytes < 64 * ALIGN {
+        return Err(ImageError::Spec(format!(
+            "a {smallest} byte drive leaves {member_bytes} bytes for the data region after a {system_bytes} byte system region"
+        )));
+    }
+    Ok(StorageRegions { boot_bytes, system_bytes, member_bytes })
+}
+
+/// What [`lay_storage_drive`] laid on one drive.
+pub struct StorageDrive {
+    /// The system slab, on a system leg.
+    pub system: Option<Slab>,
+    /// The data region's partition number (1-based, as the kernel names it).
+    pub member_partition: u32,
+    /// Where the data region starts, in bytes.
+    pub member_start: u64,
+    pub member_bytes: u64,
+    pub lba: u32,
+}
+
+/// Lay one drive of a `storage:` layout (#573): a fresh table with the boot
+/// area free at the front, the system region (a system slab on a leg, free
+/// space on the rest) and the data region as a raw partition for stormraid.
+/// The same regions on every drive land at the same offsets, and the data
+/// region is the same partition number on each. **Destroys whatever is on
+/// the drive**: the caller has planned it (`image storage-plan`).
+pub async fn lay_storage_drive(
+    device: Arc<dyn BlockDevice>,
+    regions: StorageRegions,
+    leg: bool,
+    slot_size: u64,
+    tier: StorageTier,
+) -> Result<StorageDrive> {
+    let capacity = device.capacity_bytes();
+    let lba = device.block_size();
+    let need = GPT_OVERHEAD + regions.boot_bytes + regions.system_bytes + regions.member_bytes;
+    if capacity < need {
+        return Err(ImageError::Spec(format!("a {capacity} byte drive cannot hold the {need} bytes of the layout")));
+    }
+    wipe_drive(&device, capacity).await?;
+    let mut gpt = Gpt::create_with_lba(&device, lba);
+    let e = |what: &str, err: crate::pallet::PalletError| ImageError::Other(format!("{what}: {err}"));
+    let hold = if regions.boot_bytes > 0 {
+        Some(gpt.allocate("boot-area", type_guid::BASIC, regions.boot_bytes, 0).map_err(|x| e("reserving the boot area", x))?)
+    } else {
+        None
+    };
+    let (name, guid) = if leg { ("stormblock", type_guid::SLAB) } else { ("system-area", type_guid::BASIC) };
+    let sys = gpt.allocate(name, guid, regions.system_bytes, 0).map_err(|x| e("allocating the system region", x))?;
+    let member = gpt
+        .allocate(STORAGE_MEMBER_PARTITION, type_guid::STORAGE_MEMBER, regions.member_bytes, 0)
+        .map_err(|x| e("allocating the data region", x))?;
+    if let Some(i) = hold {
+        gpt.remove(i).map_err(|x| e("gpt", x))?;
+    }
+    if !leg {
+        gpt.remove(sys).map_err(|x| e("gpt", x))?;
+    }
+    gpt.write(&device).await.map_err(|x| e("gpt", x))?;
+
+    let system = if leg {
+        let start = gpt.entries[sys].start_bytes(lba);
+        let len = gpt.entries[sys].size_bytes(lba);
+        let part = Arc::new(
+            PartitionDevice::new(device.clone(), start, len)
+                .map_err(|err| ImageError::Other(format!("the system partition: {err}")))?,
+        );
+        let meta = auto_metadata_bytes(len, slot_size);
+        Some(
+            Slab::format_with(part, SlabFormat::new(slot_size, tier).with_metadata(meta).with_role(SlabRole::System))
+                .await
+                .map_err(|err| ImageError::Other(format!("formatting the system slab: {err}")))?,
+        )
+    } else {
+        None
+    };
+    // The data region's first and last megabyte zeroed: whatever an old
+    // layout left there is no superblock stormraid or anything else reads.
+    let mstart = gpt.entries[member].start_bytes(lba);
+    let mlen = gpt.entries[member].size_bytes(lba);
+    let zeros = vec![0u8; ALIGN as usize];
+    for off in [mstart, mstart + mlen - ALIGN] {
+        device
+            .write(off, &zeros)
+            .await
+            .map_err(|err| ImageError::Other(format!("clearing the data region: {err}")))?;
+    }
+    device.flush().await.map_err(|err| ImageError::Other(format!("flushing the data region: {err}")))?;
+    Ok(StorageDrive {
+        system,
+        member_partition: member as u32 + 1,
+        member_start: mstart,
+        member_bytes: mlen,
+        lba,
+    })
+}
+
+/// The kernel's name for partition `n` of `disk`: `p` between them when the
+/// disk's name ends in a digit (`/dev/nvme0n1p3`, `/dev/loop0p3`), not
+/// otherwise (`/dev/sda3`).
+pub fn partition_path(disk: &str, n: u32) -> String {
+    if disk.ends_with(|c: char| c.is_ascii_digit()) {
+        format!("{disk}p{n}")
+    } else {
+        format!("{disk}{n}")
+    }
+}
+
+/// Ask the kernel to read a drive's partition table again (BLKRRPART), so a
+/// table just written has its `/dev` nodes: stormraid finds its members by
+/// scanning `/sys/block` and its partitions.
+#[cfg(target_os = "linux")]
+pub fn reread_partitions(disk: &str) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    const BLKRRPART: u64 = 0x125f;
+    let f = std::fs::File::open(disk)?;
+    // SAFETY: BLKRRPART takes no argument; the fd is open for the call.
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), BLKRRPART as libc::Ioctl, 0) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Not on this OS: nothing names partitions for us here.
+#[cfg(not(target_os = "linux"))]
+pub fn reread_partitions(_disk: &str) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// What [`retire_system_half`] took off a drive.
 #[derive(Debug, Default)]
 pub struct Retired {
@@ -1195,6 +1368,57 @@ mod tests {
         assert!(halves_on(&hdd).await.0.is_some());
         assert_eq!(data_half_present(&hdd).await.unwrap(), Some(true));
         assert_eq!(data_half_present(&ssd).await.unwrap(), None);
+    }
+
+    /// #573: every drive of a `storage:` layout carries the same regions at
+    /// the same offsets, sized by the smallest drive; the data region is the
+    /// same partition number on each, and only a leg has a system slab.
+    #[tokio::test]
+    async fn storage_drives_are_laid_alike_by_the_smallest() {
+        const GIB: u64 = 1 << 30;
+        let a = crate::drive::open_path(&format!("emulated://sa-{}?size=512G", uuid::Uuid::new_v4().simple()), false)
+            .await
+            .unwrap();
+        let b = crate::drive::open_path(&format!("emulated://sb-{}?size=600G", uuid::Uuid::new_v4().simple()), false)
+            .await
+            .unwrap();
+        let smallest = a.capacity_bytes().min(b.capacity_bytes());
+        let r = storage_regions(smallest, 0).unwrap();
+        assert_eq!(r.boot_bytes, 4 * GIB);
+        assert_eq!(r.system_bytes, 32 * GIB, "release-sized: a sixteenth of 512G");
+        assert_eq!(
+            r.member_bytes,
+            align_down(smallest - GPT_OVERHEAD - r.boot_bytes - r.system_bytes - storage_margin(smallest), ALIGN)
+        );
+        let la = lay_storage_drive(a.clone(), r, true, 1 << 20, StorageTier::Hot).await.unwrap();
+        let lb = lay_storage_drive(b.clone(), r, false, 1 << 20, StorageTier::Hot).await.unwrap();
+        assert!(la.system.is_some() && lb.system.is_none(), "a slab on the leg alone");
+        assert_eq!(la.member_partition, 3);
+        assert_eq!(lb.member_partition, 3, "the same partition number on each");
+        assert_eq!((la.member_start, la.member_bytes), (lb.member_start, lb.member_bytes));
+        assert_eq!(la.member_start, ALIGN + r.boot_bytes + r.system_bytes, "behind the boot area and the system region");
+        assert_eq!(halves_on(&a).await, (None, Some(1)), "the leg carries the system half alone");
+        assert_eq!(halves_on(&b).await, (None, None), "a non-leg carries no half");
+        assert!(has_boot_area(&a, r.boot_bytes).await, "the leg keeps the boot area in front");
+        let gpt = Gpt::read(&b).await.unwrap();
+        assert_eq!(gpt.entries[2].type_guid, type_guid::STORAGE_MEMBER);
+        assert_eq!(gpt.entries[2].name, STORAGE_MEMBER_PARTITION);
+        assert!(gpt.entries[0].is_empty() && gpt.entries[1].is_empty(), "the boot area and system region free");
+    }
+
+    #[test]
+    fn storage_regions_refuse_what_does_not_fit() {
+        assert!(storage_regions(16 << 30, 0).is_err(), "a 16 GiB drive under a 32 GiB system region");
+        assert!(storage_regions(512 << 30, 1 << 20).is_err(), "a system region smaller than a system slab");
+        let r = storage_regions(10_000_000_000_000, 100 << 30).unwrap();
+        assert_eq!(r.system_bytes, 100 << 30, "the size given");
+    }
+
+    #[test]
+    fn partition_names_follow_the_kernel() {
+        assert_eq!(partition_path("/dev/sda", 3), "/dev/sda3");
+        assert_eq!(partition_path("/dev/nvme0n1", 3), "/dev/nvme0n1p3");
+        assert_eq!(partition_path("/dev/loop0", 3), "/dev/loop0p3");
     }
 
     /// #402: retiring the system half of a node's drive takes the system

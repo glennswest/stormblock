@@ -370,6 +370,15 @@ pub mod type_guid {
         0x38,
     ];
 
+    /// A drive's **data region** under `storage:` (#573) —
+    /// `8F3C2D71-4A96-4E0B-B7C5-1D6E9A2F4B83`: one member of the node's
+    /// stormraid set, raw. Its own type, so that neither a slab scan nor the
+    /// "may this be reformatted" question (#88) takes it for a slab.
+    pub const STORAGE_MEMBER: [u8; 16] = [
+        0x71, 0x2D, 0x3C, 0x8F, 0x96, 0x4A, 0x0B, 0x4E, 0xB7, 0xC5, 0x1D, 0x6E, 0x9A, 0x2F, 0x4B,
+        0x83,
+    ];
+
     /// Resolve a name or an explicit GUID from a spec.
     pub fn parse(s: &str) -> Option<[u8; 16]> {
         match s.to_ascii_lowercase().as_str() {
@@ -380,6 +389,7 @@ pub mod type_guid {
             "slab" | "stormblock" => Some(SLAB),
             "data-slab" | "slab-data" | "stormblock-data" => Some(SLAB_DATA),
             "pallet" => Some(crate::pallet::PALLET_TYPE_GUID),
+            "storage-member" | "stormblock-raid" => Some(STORAGE_MEMBER),
             other => uuid::Uuid::parse_str(other).ok().map(|u| u.to_bytes_le()),
         }
     }

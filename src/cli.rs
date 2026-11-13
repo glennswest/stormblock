@@ -846,6 +846,22 @@ enum ImageAction {
         #[arg(long)]
         force: bool,
     },
+    /// Lay every drive of a planned `storage:` layout at once (#573): the
+    /// same table on each — boot area, system region, data region — sized by
+    /// the smallest. **Destroys what is on every drive named.** Prints
+    /// `STORAGE_MEMBERS` (the data regions, for stormraid), `STORAGE_REGION`
+    /// and `STORAGE_SYSTEM_REGION` as shell assignments.
+    StorageLay {
+        /// The system region in bytes; 0 sizes it for a release
+        #[arg(long, default_value_t = 0)]
+        system_bytes: u64,
+        /// A drive that carries a system leg (repeat; each also a DRIVE)
+        #[arg(long = "leg")]
+        leg: Vec<String>,
+        /// The drives to lay
+        #[arg(required = true)]
+        drives: Vec<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -2637,6 +2653,9 @@ pub async fn run() -> anyhow::Result<()> {
                     Err(e) => println!("STORAGE_NONE=0\nSTORAGE_STOP={}", crate::image::storage::sh_quote(&e)),
                 }
             }
+            ImageAction::StorageLay { system_bytes, leg, drives } => {
+                run_storage_lay(*system_bytes, leg, drives).await?;
+            }
             ImageAction::Build { spec, out, format, keep_raw, engine } => {
                 let format = resolve(out, format)?;
                 let spec_dir = Path::new(spec).parent().map(PathBuf::from);
@@ -3472,7 +3491,56 @@ pub async fn run() -> anyhow::Result<()> {
     /// and the boot pallets, into the boot area of the node layout. Read-only on
     /// every source.
     /// Answers whether the disk now boots on its own.
-    async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> {
+    /// `image storage-lay` (#573): every drive opened, the regions sized by the
+/// smallest, and every drive laid at once; then the kernel told of the new
+/// tables, so stormraid finds the data regions.
+async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) -> anyhow::Result<()> {
+    use crate::image::{local, storage::sh_quote};
+    if let Some(l) = legs.iter().find(|l| !drives.contains(l)) {
+        anyhow::bail!("{l} is a leg but not one of the drives laid");
+    }
+    let mut devs = Vec::new();
+    for d in drives {
+        let dev = crate::drive::open_path(d, false)
+            .await
+            .map_err(|e| anyhow::anyhow!("cannot open {d}: {e}"))?;
+        devs.push(dev);
+    }
+    let smallest = devs.iter().map(|d| d.capacity_bytes()).min().unwrap_or(0);
+    let regions = local::storage_regions(smallest, system_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let t = std::time::Instant::now();
+    let laid = futures_util::future::join_all(devs.into_iter().zip(drives).map(|(dev, d)| {
+        let leg = legs.contains(d);
+        async move {
+            local::lay_storage_drive(dev, regions, leg, crate::drive::slab::DEFAULT_SLOT_SIZE, StorageTier::Hot)
+                .await
+                .map_err(|e| anyhow::anyhow!("laying {d}: {e}"))
+        }
+    }))
+    .await;
+    let mut members = Vec::new();
+    for (r, d) in laid.into_iter().zip(drives) {
+        let r = r?;
+        eprintln!(
+            "Storage: {d} laid in {} ms — {}, data region partition {} ({} bytes)",
+            t.elapsed().as_millis(),
+            if r.system.is_some() { "a system leg" } else { "no system leg" },
+            r.member_partition,
+            r.member_bytes
+        );
+        if let Err(e) = local::reread_partitions(d) {
+            eprintln!("Storage: {d}: the kernel did not re-read its table ({e})");
+        }
+        members.push(local::partition_path(d, r.member_partition));
+    }
+    println!("STORAGE_MEMBERS={}", sh_quote(&members.join(" ")));
+    println!("STORAGE_REGION={}", regions.member_bytes);
+    println!("STORAGE_SYSTEM_REGION={}", regions.system_bytes);
+    println!("STORAGE_BOOT_AREA={}", regions.boot_bytes);
+    Ok(())
+}
+
+async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> {
         use crate::image::local_boot::{lay_local_boot, EspOutcome};
 
         let mut opened: Vec<(String, Arc<dyn BlockDevice>)> = Vec::new();
