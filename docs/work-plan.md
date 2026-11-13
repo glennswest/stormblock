@@ -38,6 +38,16 @@ Increments (each committed, pushed, checked):
 
 Verification on forge1 needs stormcentral#1335 (the tools in the image).
 
+- [x] A: e52171be (tools in the initramfs, `tests/initramfs-tools.sh`).
+- [x] B (plan): 1cb48235 `image storage-plan` (`src/image/storage.rs`); clippy fix after.
+- [x] B (/init): `storage layout` + `storage format` blocks,
+  `tests/initramfs-storage.sh`. Rule: format on fresh / blank drives / wipe
+  word only; keep-data or a held drive → STOP, nothing written.
+- [ ] C next: `image storage-lay`, per-drive GPT.
+- Open: a keep reinstall over a node already laid by storage: — every drive
+  carries this node, not only INSTALL_OVER's; the plan's `carries` must say
+  "this node" for all of them (D/F, with `--check`).
+
 ## #584 — clippy `--all-targets -D warnings` clean, and in check.sh (2026-11-12)
 
 clippy 1.95 at 73239000: ~200 errors (needless_borrow in cli.rs, MSRV

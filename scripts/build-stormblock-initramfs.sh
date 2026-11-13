@@ -4159,6 +4159,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     chosen_how() { # -> how the chosen drive was chosen, for the console
         case "${CHOSEN_BY:-named}" in
         system_drive) echo "the drive system_drive names" ;;
+        storage) echo "the first drive storage: lays" ;;
         first) echo "this machine's first drive" ;;
         node) echo "the drive holding this node" ;;
         *) echo "the drive rd.stormblock.slab= names" ;;
@@ -4312,7 +4313,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     SD_SPEC=""
     SD_CHOSEN=""        # the drive system_drive names
     SD_PAIR=""          # the second drive, when system_drive is a pair (#350)
-    CHOSEN_BY=""        # system_drive | named | node | first
+    CHOSEN_BY=""        # system_drive | storage | named | node | first
     for _icf in "${INSTALL_CONFIG_STAGED:-}" "${INSTALL_CONFIG_FORGE:-${STORM_RUN:-/run/stormblock}/install-config.forge.yaml}"; do
         [ -n "$_icf" ] && [ -f "$_icf" ] || continue
         # Only this one key is read and said: the file carries secrets (#275).
@@ -4406,6 +4407,83 @@ if [ "$BOOT_MODE" = "local" ]; then
         CHOSEN_BY=named
     fi
     # --- END drive choice
+    # --- BEGIN storage layout (covered by tests/initramfs-storage.sh)
+    # The install-config's `storage:` (#573; stormcos docs/STORAGE-LAYOUT.md):
+    # every drive it takes laid alike - formatted, an ESP, the boot pallets, a
+    # system leg, a data region. Read only when the config has the section
+    # (option A on #573): without it, the rules above stand unchanged. The
+    # plan is the engine's (`image storage-plan`); this block tells it what
+    # each drive is and does what it prints. Only `storage:` and
+    # `system_drive:` are read from the file, never printed (#275).
+    STORAGE_FROM=""; STORAGE_DRIVES=""; STORAGE_SYSTEM=""; STORAGE_STOP=""; STORAGE_SAID=""
+    STORAGE_FORCE=""
+    for _icf in "${INSTALL_CONFIG_STAGED:-}" "${INSTALL_CONFIG_FORGE:-${STORM_RUN:-/run/stormblock}/install-config.forge.yaml}"; do
+        [ -n "$_icf" ] && [ -f "$_icf" ] || continue
+        if grep -q '^storage:' "$_icf"; then STORAGE_FROM="$_icf"; break; fi
+    done
+    storage_plan() { # -> the engine's plan, as shell; the drives are its arguments
+        # Its own positional parameters: /init's are not touched.
+        set --
+        [ -n "$STORAGE_FORCE" ] && set -- --force
+        _st_over=""
+        [ -n "${INSTALL_OVER:-}" ] && _st_over=$(disk_of "$INSTALL_OVER")
+        for _d in $(sd_drives); do
+            _dev="/dev/${_d##*/}"
+            _s=$(shelf_of "$_d"); _sid=${_s%%|*}; _s=${_s#*|}; _spos=${_s%%|*}; _s=${_s#*|}; _sbay=${_s%%|*}
+            _p=$(readlink -f "$_d" 2>/dev/null); _usb=0
+            case "$_p" in */usb*) _usb=1 ;; esac
+            _rm=$(cat "$_d/removable" 2>/dev/null || echo 0)
+            # What it carries, said by name when it is refused: this node's
+            # own drive carries this node, which is no refusal.
+            _car=""
+            if [ "$_dev" != "$_st_over" ]; then
+                if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
+                    _car="stormblock slabs (an install)"
+                else
+                    _car=$(drive_signature "$_dev" "$_d")
+                fi
+            fi
+            set -- "$@" --drive "dev=$_dev;serial=$(drive_serial "$_d");wwn=$(drive_wwn "$_d");model=$(drive_model "$_d");shelf=$_sid;position=$_spos;bay=$_sbay;bytes=$(( $(cat "$_d/size" 2>/dev/null || echo 0) * 512 ));removable=${_rm:-0};usb=$_usb;carries=$_car;running=0"
+        done
+        "$SURVEY_SB" image storage-plan --config "$STORAGE_FROM" "$@"
+    }
+    case "${SLAB:-}" in /dev/*) _st_local=1 ;; *) _st_local="" ;; esac
+    if [ -n "$STORAGE_FROM" ] && [ -n "$_st_local" ]; then
+        echo "  storage: in ${STORAGE_FROM##*/} - this boot runs from $SLAB, nothing is laid (#573)"
+        STORAGE_FROM=""
+    fi
+    if [ -n "$STORAGE_FROM" ] && [ "$OVERRIDE" != recovery ] && [ "${ASSIMILATE:-}" != off ] \
+       && [ "${ASSIMILATE:-}" != ambiguous ]; then
+        # The wipe word, as asked now: ASSIMILATE is rewritten below (#311).
+        [ "${ASSIMILATE:-}" = force ] && STORAGE_FORCE=1
+        if _st_out=$(storage_plan 2>&1); then
+            eval "$_st_out"
+        else
+            STORAGE_STOP="the engine could not plan storage: ($(printf '%s\n' "$_st_out" | tail -n 1))"
+        fi
+        if [ -n "$STORAGE_STOP" ]; then
+            echo "  STOP: storage: in ${STORAGE_FROM##*/}: $STORAGE_STOP (#573). No drive is taken. The drives:"
+            sd_list
+            SV_WHY="$STORAGE_STOP"
+            for _d in $(sd_drives); do ld_skip "/dev/${_d##*/}" "storage: in ${STORAGE_FROM##*/} is refused (#573)"; done
+            ASSIMILATE=ambiguous
+            STORAGE_DRIVES=""
+            NAMED_DISK=""
+        elif [ -n "$STORAGE_DRIVES" ]; then
+            printf '%s\n' "$STORAGE_SAID" | sed 's/^/  /'
+            _st_first=${STORAGE_SYSTEM%% *}
+            if [ -n "$NAMED_DISK" ] && [ "/dev/$NAMED_DISK" != "$_st_first" ]; then
+                echo "  rd.stormblock.slab= names /dev/$NAMED_DISK; storage: lays every drive, $_st_first first (#573)"
+            fi
+            NAMED_DISK="${_st_first##*/}"
+            CHOSEN_BY=storage
+            if [ -n "${INSTALL_OVER:-}" ] && ! printf ' %s ' "$STORAGE_DRIVES" | grep -q " $(disk_of "$INSTALL_OVER") "; then
+                echo "  this node is on $INSTALL_OVER now; storage: does not take it"
+                INSTALL_OVER=""
+            fi
+        fi
+    fi
+    # --- END storage layout
     # The drive that already holds this node's data half (#351, rule 1),
     # found once: the named drive's, else one on the machine's own shelves,
     # else (no own drive carries one) an external shelf's. Two of them at
@@ -4624,7 +4702,7 @@ $1|$_svp|$3"
             # slabs only, no identity" is true of the SSD and its partner holds
             # the identity. An install of such a node takes its data drive
             # above and finds the system drive by the pairing.
-            if [ "$CHOSEN_BY" != system_drive ] && _sv_pp=$(partner_of "$dev"); then
+            if [ "$CHOSEN_BY" != system_drive ] && [ "$CHOSEN_BY" != storage ] && _sv_pp=$(partner_of "$dev"); then
                 echo "  $dev holds one half of this node, $_sv_pp the other - not taken by the scan (#402)"
                 ld_skip "$dev" "one half of this node on two drives, with $_sv_pp (#402)"
                 continue
@@ -4707,7 +4785,7 @@ $1|$_svp|$3"
                     # outright (rd.stormblock.slab=, system_drive), never on
                     # the first drive or the node's by default (#478).
                     elif [ -n "$sig" ] && ! { [ "$ASSIMILATE" = force ] && [ "${d##*/}" = "$NAMED_DISK" ] \
-                            && { [ "$CHOSEN_BY" = named ] || [ "$CHOSEN_BY" = system_drive ]; }; }; then
+                            && { [ "$CHOSEN_BY" = named ] || [ "$CHOSEN_BY" = system_drive ] || [ "$CHOSEN_BY" = storage ]; }; }; then
                         echo "  $dev carries $sig - not ours and not blank, leaving it (#273)"
                         ld_skip "$dev" "carries $sig, not ours and not blank (#273)"
                         if [ -z "$LD_ODRIVE" ]; then
@@ -4788,6 +4866,7 @@ $1|$_svp|$3"
         # Why this drive (#478: shown back by the app and in health).
         case "$CHOSEN_BY" in
             system_drive) _ldw="system_drive (${_sd_said:-}) in ${SD_FROM##*/}" ;;
+            storage) _ldw="storage: in ${STORAGE_FROM##*/} lays $STORAGE_DRIVES, this one first" ;;
             named) _ldw="rd.stormblock.slab= names it" ;;
             node) _ldw="it carries this node" ;;
             first) _ldw="this machine's first drive (no system_drive set)" ;;
@@ -4888,7 +4967,7 @@ $1|$_svp|$3"
     PAIR_DISK=""
     if [ -n "$LOCAL_DISK" ] && [ -n "${SD_PAIR:-}" ]; then
         PAIR_DISK="$SD_PAIR"
-    elif [ -n "$LOCAL_DISK" ] && [ "${CHOSEN_BY:-}" != system_drive ] \
+    elif [ -n "$LOCAL_DISK" ] && [ "${CHOSEN_BY:-}" != system_drive ] && [ "${CHOSEN_BY:-}" != storage ] \
        && _pd2=$(partner_of "$LOCAL_DISK") && carries_system_half "$_pd2" && has_data_slab "$_pd2"; then
         PAIR_DISK="$_pd2"
         echo "  SYSTEM PAIR: $LOCAL_DISK and $PAIR_DISK hold this node, each a whole node disk (#350)"
@@ -4898,9 +4977,10 @@ $1|$_svp|$3"
         if [ -n "${FORCE_LOCAL:-}" ] && has_data_slab "$LOCAL_DISK"; then
             FORCE_LOCAL=""
         fi
-    elif [ -n "$LOCAL_DISK" ] && [ "${CHOSEN_BY:-}" = system_drive ]; then
+    elif [ -n "$LOCAL_DISK" ] && { [ "${CHOSEN_BY:-}" = system_drive ] || [ "${CHOSEN_BY:-}" = storage ]; }; then
         # system_drive names the only drive taken (#478): both halves on it,
-        # whatever stormdrive designated or a partner holds.
+        # whatever stormdrive designated or a partner holds. storage: (#573)
+        # the same, until its system legs and set land (increments C-H).
         :
     elif [ -n "$LOCAL_DISK" ]; then
         _sd_from=""
@@ -4953,6 +5033,100 @@ $1|$_svp|$3"
         echo "  $PAIR_DISK is $(drive_desc "$SURVEY_SYS/${PAIR_DISK##*/}" "$PAIR_DISK" | cut -d: -f2-)"
     fi
     # --- END system drive
+
+    # --- BEGIN storage format (covered by tests/initramfs-storage.sh)
+    # Every drive storage: takes, formatted to its block size and protection
+    # at once (#573; owner: "why not get them done in parallel" - a full
+    # FORMAT UNIT on a 10 TB drive is hours, four in a row a day). A drive
+    # already at the format is left. A format is destructive: it runs on a
+    # fresh install, or with the wipe word over a node's data - never on a
+    # keep-data reinstall, which stops here naming the drives and writes
+    # nothing (STORAGE-LAYOUT.md: a layout change is never automatic).
+    STORAGE_FORMATTED=""
+    storage_fail() { # why
+        echo "FATAL: $1 (#573)"
+        ld_write failed "${LOCAL_DISK:-}" "storage: $1"
+        rescue_shell
+    }
+    if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ]; then
+        _st_tool="${STORM_STORMDRIVE:-/usr/sbin/stormdrive}"
+        [ -x "$_st_tool" ] || storage_fail "storage: in ${STORAGE_FROM##*/} formats every drive, and this initramfs has no stormdrive ($_st_tool): it is built with STORMDRIVE_BIN (stormcentral#1335)"
+        _st_dir="${STORM_RUN:-/run/stormblock}/storage-format"
+        rm -rf "$_st_dir"; mkdir -p "$_st_dir"
+        _st_todo=""
+        for _dev in $STORAGE_DRIVES; do
+            "$_st_tool" format --device "$_dev" --block-size "$STORAGE_BLOCK_SIZE" \
+                --protection "$STORAGE_PROTECTION" --method none >/dev/null 2>&1
+            case $? in
+            4) echo "  $_dev is at $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION already - not formatted" ;;
+            *) _st_todo="$_st_todo $_dev" ;;
+            esac
+        done
+        _st_todo="${_st_todo# }"
+        # The go-ahead: the wipe word, or a fresh install that keeps nothing.
+        # Any other boot formats only drives that carry nothing at all.
+        if [ -n "$_st_todo" ] && [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ]; }; then
+            _st_full=""
+            for _dev in $_st_todo; do
+                if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
+                    _st_full="$_st_full $_dev(stormblock slabs)"
+                else
+                    _st_sig=$(drive_signature "$_dev" "$SURVEY_SYS/${_dev##*/}")
+                    [ -n "$_st_sig" ] && _st_full="$_st_full $_dev($_st_sig)"
+                fi
+            done
+            if [ -n "$_st_full" ]; then
+                echo "  STOP: storage: in ${STORAGE_FROM##*/} formats $_st_todo to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION,"
+                echo "  and what they hold is not to be lost:$_st_full. A layout change is never made on"
+                echo "  a keep-data reinstall or an ordinary boot. Nothing was written. Install with"
+                echo "  rd.stormblock.assimilate=force (what they hold is lost), or leave storage: out."
+                storage_fail "a layout change over what the drives hold, without the wipe word:$_st_full"
+            fi
+        fi
+        storage_format() { # dev protection -> its exit code in $_st_dir/<name>.rc
+            _sfn="${1##*/}"
+            {
+                "$_st_tool" format --device "$1" --block-size "$STORAGE_BLOCK_SIZE" \
+                    --protection "$2" --method "$STORAGE_METHOD" --poll-secs 60 2>&1
+                echo $? > "$_st_dir/$_sfn.rc"
+            } | sed "s|^|  $_sfn: |"
+        }
+        _st_round=1
+        _st_prot="$STORAGE_PROTECTION"
+        while [ -n "$_st_todo" ]; do
+            echo "  FORMAT: $_st_todo to $STORAGE_BLOCK_SIZE + PI $_st_prot ($STORAGE_METHOD), all at once - every byte on them is lost"
+            for _dev in $_st_todo; do storage_format "$_dev" "$_st_prot" & done
+            wait
+            _st_again=""; _st_bad=""
+            for _dev in $_st_todo; do
+                _rc=$(cat "$_st_dir/${_dev##*/}.rc" 2>/dev/null || echo 1)
+                case "$_rc" in
+                0|4) STORAGE_FORMATTED="$STORAGE_FORMATTED $_dev" ;;
+                3) if [ "$_st_prot" = type1 ] && [ "$_st_round" = 1 ]; then _st_again="$_st_again $_dev"; else _st_bad="$_st_bad $_dev(refused)"; fi ;;
+                *) _st_bad="$_st_bad $_dev(exit $_rc)" ;;
+                esac
+            done
+            [ -n "$_st_bad" ] && storage_fail "the format failed on${_st_bad}: see the lines above; nothing is laid"
+            _st_todo="${_st_again# }"
+            if [ -n "$_st_todo" ]; then
+                # The HBA does not pass PI to the drive (STORAGE-LAYOUT.md:
+                # type1 where the path carries it, none otherwise).
+                echo "  $_st_todo refused PI type 1 - formatted with none instead"
+                _st_prot=none
+                _st_round=2
+            fi
+        done
+        STORAGE_FORMATTED="${STORAGE_FORMATTED# }"
+        if [ -n "$STORAGE_FORMATTED" ]; then
+            # The drives are blank now: what the survey saw on them is gone.
+            INSTALL_KEEP=""
+            FORCE_LOCAL=1
+        fi
+        # Increments C-H of #573 (docs/work-plan.md): until they land, the
+        # system and data are laid on the first drive as before, and the
+        # other drives are left formatted and blank.
+    fi
+    # --- END storage format
 
     # --- BEGIN diskless refused (covered by tests/initramfs-diskless.sh)
     # A node never runs diskless by default (#427; owner, #344: the
