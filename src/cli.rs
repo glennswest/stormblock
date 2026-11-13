@@ -551,6 +551,14 @@ enum SubCommand {
         /// Who --pair-disk must be (#351), as --local-disk-id.
         #[arg(long)]
         pair_disk_id: Option<String>,
+        /// Another system leg of a `storage:` layout (#573), one per flag: a
+        /// drive `image storage-lay` gave a System slab and no data half.
+        /// Opened beside the system drive, never a flow-over source, and
+        /// every system volume mirrored onto each, so the node keeps its
+        /// system half with a drive gone. A drive that is not so is said and
+        /// left alone.
+        #[arg(long = "system-leg")]
+        system_leg: Vec<String>,
         /// Validate the artifact and resolve the boot volume, then exit
         /// without exporting (no ublk needed)
         #[arg(long)]
@@ -1321,7 +1329,8 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubCommand::BootLocal {
                 slab, meta, volume, boot_config, image_store, writable, local_disk, local_tier,
-                local_disk_force, system_disk, local_disk_id, system_disk_id, pair_disk, pair_disk_id, check,
+                local_disk_force, system_disk, local_disk_id, system_disk_id, pair_disk, pair_disk_id, system_leg,
+                check,
             } => {
                 return handle_boot_local(
                     slab,
@@ -1336,6 +1345,7 @@ pub async fn run() -> anyhow::Result<()> {
                     system_disk.as_deref(),
                     (local_disk_id.as_deref(), system_disk_id.as_deref()),
                     (pair_disk.as_deref(), pair_disk_id.as_deref()),
+                    system_leg,
                     *check,
                 ).await;
             }
@@ -5889,6 +5899,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 data_flow: true,
                 data_disk: None,
                 twin: None,
+                legs: Vec::new(),
             };
             println!(
                 "Flow-over: {disk} is laid out and handed to the engine that adopts this boot"
@@ -5995,6 +6006,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             data_flow: false,
             data_disk: None,
             twin: None,
+            legs: Vec::new(),
         };
         {
             let mut reg = mgr.registry().write().await;
@@ -6651,6 +6663,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 data_flow: true,
                 data_disk: Some(data_disk.to_string()),
                 twin: None,
+                legs: Vec::new(),
             }),
             report,
         ))
@@ -8590,6 +8603,14 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                         }
                     }
                 }
+                // A `storage:` layout's system legs (#573): every system
+                // volume mirrored onto each, so any leg keeps the system half.
+                if !flow.legs.is_empty() {
+                    if let Some(st) = state_for_persist.upgrade() {
+                        let r = crate::pair::legs_up_unlocked(&st.volume_manager, flow.legs.len() + 1).await;
+                        say_legs(&r);
+                    }
+                }
                 local_boot(then_local_boot).await;
                 retire_sources(retire).await;
             } else {
@@ -8610,6 +8631,21 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
     }
 
     /// What making a pair did, on the console (#350).
+    fn say_legs(r: &crate::pair::PairReport) {
+        println!(
+            "System legs: {} system volume(s) mirrored across the legs ({} leg(s) added, {} written); \
+             {} golden(s) compared ({} extent(s)) (#573)",
+            r.volumes,
+            r.legs_added,
+            crate::mgmt::config::human_size(r.bytes_copied),
+            r.sealed_checked,
+            r.extents_compared,
+        );
+        for p in r.problems.iter().take(20) {
+            println!("WARNING: system legs: {p}");
+        }
+    }
+
     fn say_pair(disk: &str, r: &crate::pair::PairReport) {
         println!(
             "Pair: {} volume(s) mirrored onto {disk} ({} leg(s), {} written); {} golden(s) compared on both drives \
@@ -9587,6 +9623,22 @@ async fn handle_adopt_ublk(
                     }
                 }));
             }
+            // A `storage:` layout's system legs (#573): mirrored again onto
+            // a leg that came back; degraded said when one is missing.
+            let legs = record.as_ref().map(|r| r.system_legs.len()).unwrap_or(0);
+            if legs > 0 {
+                let st = state.clone();
+                tokio::spawn(crate::lockwatch::named("the legs mend", async move {
+                    let grace = flow_boot_grace_for(false);
+                    if !grace.is_zero() {
+                        wait_for_boot_quiet(grace, FLOW_BOOT_QUIET).await;
+                    }
+                    let r = crate::pair::legs_up_unlocked(&st.volume_manager, legs + 1).await;
+                    if r.legs_added > 0 || !r.is_whole() {
+                        say_legs(&r);
+                    }
+                }));
+            }
             if let Some((disk, sources)) = local_boot {
                 tokio::spawn(async move {
                     if let Err(e) = run_local_boot(&disk, &sources).await {
@@ -10242,6 +10294,45 @@ fn prove_chosen(
     Ok(())
 }
 
+/// The system legs named to boot-local (#573) that are so: each drive read
+/// for its slabs, and taken only when it has at least one and every one is a
+/// System slab (what `image storage-lay` lays on a leg). Anything else, or a
+/// drive named already, is said and left out; nothing is written either way.
+async fn system_legs_checked(
+    legs: &[String],
+    named: &[&str],
+) -> Vec<(String, Vec<crate::drive::slab::SlabId>)> {
+    let mut out: Vec<(String, Vec<crate::drive::slab::SlabId>)> = Vec::new();
+    for leg in legs {
+        if named.contains(&leg.as_str()) || out.iter().any(|(p, _)| p == leg) {
+            println!("System leg {leg}: named already, not opened twice (#573)");
+            continue;
+        }
+        let dev = match open_storage(leg).await {
+            Ok(d) => d,
+            Err(e) => {
+                println!("WARNING: system leg {leg}: not opened ({e}); the system half runs without it (#573)");
+                continue;
+            }
+        };
+        let (found, why) = crate::drive::discover::slabs_in_partitions_why(&dev).await;
+        let roles: Vec<crate::drive::slab::SlabRole> = found.iter().map(|f| f.slab.role()).collect();
+        if found.is_empty() || roles.iter().any(|r| *r != crate::drive::slab::SlabRole::System) {
+            let what = if found.is_empty() {
+                format!("no slab on it ({})", why.join("; "))
+            } else {
+                format!("its slabs are {roles:?}, not a System slab alone")
+            };
+            println!("WARNING: system leg {leg}: {what}; left alone, the system half runs without it (#573)");
+            continue;
+        }
+        let ids: Vec<crate::drive::slab::SlabId> = found.iter().map(|f| f.slab.slab_id()).collect();
+        println!("System leg {leg}: {} System slab(s), opened beside the system drive (#573)", ids.len());
+        out.push((leg.clone(), ids));
+    }
+    out
+}
+
 async fn handle_boot_local(
     slab_paths: &[String],
     meta: Option<&str>,
@@ -10255,6 +10346,7 @@ async fn handle_boot_local(
     system_disk: Option<&str>,
     disk_ids: (Option<&str>, Option<&str>),
     (pair_disk, pair_disk_id): (Option<&str>, Option<&str>),
+    system_legs: &[String],
     check: bool,
 ) -> anyhow::Result<()> {
     // A node disk's data half takes any space the drive has gained, before
@@ -10277,7 +10369,19 @@ async fn handle_boot_local(
         }
     }
 
-    let (mut mgr, resumed) = open_slabs_resuming(slab_paths, meta, true).await?;
+    // A `storage:` layout's other system legs (#573), opened beside the
+    // rest: only a drive whose slabs are System slabs alone, never one named
+    // already.
+    let named: Vec<&str> = slab_paths
+        .iter()
+        .map(String::as_str)
+        .chain(local_disk)
+        .chain(system_disk)
+        .chain(pair_disk)
+        .collect();
+    let legs = system_legs_checked(system_legs, &named).await;
+    let open_paths: Vec<String> = slab_paths.iter().cloned().chain(legs.iter().map(|(p, _)| p.clone())).collect();
+    let (mut mgr, resumed) = open_slabs_resuming(&open_paths, meta, true).await?;
     // Everything in the release image this boot claimed is the release's
     // (#349), whatever the engine that composed it recorded: an install drops
     // what the next release no longer names, and carries what the node made.
@@ -10481,9 +10585,21 @@ async fn handle_boot_local(
                         data_flow: true,
                         data_disk: None,
                         twin: None,
+                        legs: Vec::new(),
                     });
                 }
             }
+        }
+        // The system legs (#573): opened by the successor too, never a
+        // source, every system volume mirrored onto them once the flow-over
+        // is proved (or at its start, on a boot with none).
+        for (p, _) in &legs {
+            if !slabs.contains(p) {
+                slabs.push(p.clone());
+            }
+        }
+        if let Some(f) = laid_flow_over.as_mut() {
+            f.legs = legs.iter().flat_map(|(_, ids)| ids.iter().map(|i| i.0.to_string())).collect();
         }
         // From here the appliance's system slabs are on their way out: a
         // write to an extent still on one lands on the local disk (#239).
@@ -10525,6 +10641,7 @@ async fn handle_boot_local(
             local_boot: local_boot_disk.clone(),
             installed: installed.clone(),
             engine_version: Some(crate::drive::handover::ENGINE_VERSION.to_string()),
+            system_legs: legs.iter().map(|(p, _)| p.clone()).collect(),
             // An install the appliance asked for is done when this disk is
             // (#148) — only when there is a flow-over to finish. With none,
             // the intent stays `install` and the next boot tries again.

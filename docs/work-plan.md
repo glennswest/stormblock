@@ -58,7 +58,7 @@ Verification on forge1 needs stormcentral#1335 (the tools in the image).
   appliance's `install` record `state: formatting` (`InstallStep`), the
   sense quoted in FATAL. stormcentral#1381: hold `laid_secs` while
   `formatting` reports come in, show it as the stage.
-- [ ] E (in progress): the other legs' system slabs, system volumes `mirror:N`.
+- [x] E (code; check.sh pending): the other legs' system slabs, system volumes `mirror:N`.
   Plan: boot-local `--system-leg DEV` (repeatable, the other legs). Install:
   each leg must carry a SLAB system partition and no data half, else refused
   with nothing written; reformat it and register it (role System). Every

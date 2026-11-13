@@ -75,6 +75,39 @@ slabs or a foreign table stops, names the drives and what they hold, and
 writes nothing (STORAGE-LAYOUT.md: a layout change is a destructive verb,
 never automatic).
 
-Until the per-drive layout lands (increments C–H in the work plan), the
-system and data are laid on the first drive as before, and the other drives
-are left formatted and blank.
+## The lay: `image storage-lay`
+
+After the format, every drive taken gets a fresh GPT: a boot area, a
+`stormblock` system partition on each system leg, and a `stormblock-raid`
+data region, every region one size on every drive (the smallest drive's).
+With more than one drive the data regions become one stormraid set
+(`stormraid create --role node-data --parity P --force`), served at
+`/dev/ublkb64`; the node's data half is laid on it, and its system half on
+the first leg. Same rule as the format: only over drives this boot formatted,
+with the wipe word, on a fresh install, or over drives that carry nothing.
+
+## Every boot: the set served
+
+Before the probe looks for the node's halves, `/init` serves every
+`stormblock-raid` partition carrying a stormraid superblock as the set at
+`/dev/ublkb64` (`stormraid serve --id 64`). A member missing opens it
+degraded (`NODE-DATA SET DEGRADED`, the slot named); a set that does not open
+is said and the boot goes on without it.
+
+## The system half on every leg
+
+Each of the first `system_mirror` drives carries a full copy of the system
+volumes. `/init` names the legs other than the one the node boots from to
+`boot-local` as `--system-leg DEV` (on the install, the rest of
+`STORAGE_SYSTEM`; on every later boot, each served member's drive that
+carries a system slab). `boot-local` opens a leg's slabs beside the system
+half's, only when every slab on it is a system slab (anything else is said
+and left alone), keeps them out of the flow-over's quarantine, and records
+them in the handover record (`system_legs`). After the flow-over, and at each
+start of a node whose record names legs, every system volume is set to
+`mirror:N` at `drive` across the legs and resynced
+(`pair::legs_up_unlocked`). A leg missing is said:
+`WARNING: SYSTEM LEGS DEGRADED`, and the system runs on the legs it has.
+
+Not yet: the ESP and the boot pallets on every leg (G), and the layout on
+the API (H).

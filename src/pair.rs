@@ -14,6 +14,11 @@
 //! that is missing is a degraded mirror (named in health), and the pair is
 //! made whole again by [`pair_up`] at the next start once it is back or
 //! replaced.
+//!
+//! A `storage:` layout (#573) uses the same mechanism for its system legs:
+//! every System-role volume `mirror:n` at `drive`, `n` the drives here that
+//! carry a System slab ([`legs_up_unlocked`]); its data half is on the
+//! node-data stormraid set instead, redundant below the slab.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -50,17 +55,6 @@ impl PairReport {
     }
 }
 
-/// The policy a pair gives a volume, when it has less: `mirror:2` at
-/// [`PAIR_RUNG`]. A parity volume (already redundant across drives) and one
-/// with more copies keep theirs.
-fn pair_policy(current: &RedundancyPolicy) -> Option<RedundancyPolicy> {
-    match current.scheme {
-        Redundancy::None => Some(RedundancyPolicy::mirror(2).at(PAIR_RUNG)),
-        Redundancy::Mirror { copies } if copies < 2 => Some(RedundancyPolicy::mirror(2).at(PAIR_RUNG)),
-        _ => None,
-    }
-}
-
 /// The local data slabs that name each other (#350): `(ours, partner)` for
 /// each data slab registered whose header names a partner. A partner that is
 /// not registered is a missing drive.
@@ -84,17 +78,79 @@ pub async fn is_pair(mgr: &VolumeManager) -> bool {
 /// other drive; the sealed ones' two legs compared. Safe on a live node: a
 /// resync takes each extent's lock as I/O does (#146).
 pub async fn pair_up_unlocked(vm: &TrackedMutex<VolumeManager>) -> PairReport {
+    mirror_up_unlocked(vm, None, 2).await
+}
+
+/// The policy a pair (`n` = 2) or a `storage:` layout's legs (#573) give a
+/// volume, when it has fewer copies: `mirror:n` at [`PAIR_RUNG`], a copy on
+/// each drive. A parity volume (already redundant across drives) and one with
+/// more copies keep theirs.
+fn mirror_policy(current: &RedundancyPolicy, n: u8) -> Option<RedundancyPolicy> {
+    match current.scheme {
+        Redundancy::None => Some(RedundancyPolicy::mirror(n).at(PAIR_RUNG)),
+        Redundancy::Mirror { copies } if copies < n => Some(RedundancyPolicy::mirror(n).at(PAIR_RUNG)),
+        _ => None,
+    }
+}
+
+/// The drives that carry a System slab here (#573): distinct at [`PAIR_RUNG`],
+/// quarantined slabs (an appliance's, on their way out) not counted.
+pub async fn system_legs_here(mgr: &VolumeManager) -> usize {
+    let reg = mgr.registry().read().await;
+    let mut seen: Vec<crate::placement::domain::FailureDomain> = Vec::new();
+    for (id, s) in reg.iter() {
+        if s.role() != SlabRole::System || reg.is_quarantined(id) {
+            continue;
+        }
+        let d = reg.domain_of(id);
+        if !seen.iter().any(|x| x.same_at(&d, PAIR_RUNG)) {
+            seen.push(d);
+        }
+    }
+    seen.len()
+}
+
+/// A `storage:` layout's system half on every leg (#573): every System-role
+/// volume `mirror:n`, `n` the drives here with a System slab, resynced onto
+/// each; the data half (on the node-data set, redundant already) untouched.
+/// One leg here is nothing to mirror onto: said, and nothing changes. The
+/// number of legs expected is said beside the number here, so a leg missing
+/// is never silent.
+pub async fn legs_up_unlocked(vm: &TrackedMutex<VolumeManager>, expected: usize) -> PairReport {
+    let here = system_legs_here(&*vm.lock().await).await;
+    if here < expected {
+        println!(
+            "WARNING: SYSTEM LEGS DEGRADED: {here} of {expected} drive(s) with the system half are here; \
+             the system volumes run on {here} copy(ies) until the rest are back or replaced (#573)"
+        );
+        tracing::warn!("system legs degraded: {here} of {expected} here");
+    }
+    if here < 2 {
+        return PairReport::default();
+    }
+    let n = u8::try_from(here).unwrap_or(u8::MAX);
+    mirror_up_unlocked(vm, Some(SlabRole::System), n).await
+}
+
+/// Every volume (of `role`, when one is named) given `copies` copies at
+/// [`PAIR_RUNG`] and resynced, holding the manager only to read what it needs
+/// and to write the records (#364); the sealed ones' legs compared when any
+/// were written.
+async fn mirror_up_unlocked(vm: &TrackedMutex<VolumeManager>, role: Option<SlabRole>, copies: u8) -> PairReport {
     let mut report = PairReport::default();
     let (handles, sealed, gem, registry) = {
         let m = vm.lock().await;
         let ids = m.volume_ids();
-        let handles: Vec<(VolumeId, Arc<crate::volume::thin::ThinVolumeHandle>)> =
-            ids.iter().filter_map(|id| m.get_volume_handle(id).map(|h| (*id, h))).collect();
+        let handles: Vec<(VolumeId, Arc<crate::volume::thin::ThinVolumeHandle>)> = ids
+            .iter()
+            .filter_map(|id| m.get_volume_handle(id).map(|h| (*id, h)))
+            .filter(|(_, h)| role.is_none_or(|r| h.placement_role() == r))
+            .collect();
         let sealed: HashSet<VolumeId> = ids.iter().filter(|id| m.is_sealed(id)).copied().collect();
         (handles, sealed, m.gem().clone(), m.registry().clone())
     };
     for (id, h) in &handles {
-        if let Some(p) = pair_policy(&h.redundancy()) {
+        if let Some(p) = mirror_policy(&h.redundancy(), copies) {
             match h.set_redundancy(p) {
                 Ok(()) => report.policies_set += 1,
                 Err(e) => report.problems.push(format!("{}: {e}", id.0)),
@@ -280,4 +336,85 @@ pub fn move_end(r: Result<MoveReport, String>) {
         Ok(rep) => MoveStatus { state: "done", from: Some(rep.from.clone()), to: Some(rep.to.clone()), report: Some(rep), error: None },
         Err(e) => MoveStatus { state: "failed", from: prev.from, to: prev.to, report: None, error: Some(e) },
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::slab::Slab;
+    use crate::placement::StorageTier;
+
+    #[test]
+    fn a_volume_short_of_copies_is_raised_and_no_other() {
+        let none = RedundancyPolicy::default();
+        assert_eq!(mirror_policy(&none, 3).map(|p| p.scheme), Some(Redundancy::Mirror { copies: 3 }));
+        assert_eq!(mirror_policy(&RedundancyPolicy::mirror(2), 3).map(|p| p.scheme), Some(Redundancy::Mirror { copies: 3 }));
+        assert!(mirror_policy(&RedundancyPolicy::mirror(3), 3).is_none(), "as many copies: kept");
+        assert!(mirror_policy(&RedundancyPolicy::mirror(4), 3).is_none(), "more copies: kept");
+    }
+
+    /// Three drives each with a System slab (#573): a system volume ends
+    /// `mirror:3`, a copy of every extent on each drive; a data volume is
+    /// left alone; a fourth leg expected and missing is degraded, not a
+    /// failure.
+    #[tokio::test]
+    async fn the_system_half_is_mirrored_onto_every_leg() {
+        let dir = tempfile::tempdir().unwrap();
+        let slot = 64 * 1024;
+        let mut mgr = VolumeManager::new(slot);
+        let mut drives = Vec::new();
+        for n in ["a", "b", "c"] {
+            let p = dir.path().join(format!("leg-{n}.raw")).display().to_string();
+            let dev = crate::drive::filedev::FileDevice::open_with_capacity(&p, 16 * 1024 * 1024).await.unwrap();
+            let slab = Slab::format(Arc::new(dev), slot, StorageTier::Hot).await.unwrap();
+            assert_eq!(slab.role(), SlabRole::System);
+            drives.push(slab.slab_id());
+            mgr.add_slab(slab).await;
+        }
+        assert_eq!(system_legs_here(&mgr).await, 3);
+        let sys = mgr.create_volume_with("sys", 1 << 20, crate::volume::CreateOptions::default()).await.unwrap();
+        {
+            let v = mgr.get_volume(&sys).unwrap();
+            v.write(0, &vec![0x5au8; 4 * slot as usize]).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        let vm = TrackedMutex::new(mgr);
+        let r = legs_up_unlocked(&vm, 4).await;
+        assert!(r.is_whole(), "{r:?}");
+        assert_eq!(r.policies_set, 1, "{r:?}");
+        assert!(r.legs_added >= 8, "two more legs of each of four extents: {r:?}");
+        let m = vm.lock().await;
+        assert_eq!(m.get_volume_handle(&sys).unwrap().redundancy().scheme, Redundancy::Mirror { copies: 3 });
+        let _pin = crate::volume::gem::pin_resident(m.gem()).await.unwrap();
+        let g = m.gem().read().await;
+        let map = g.get_volume_map(&sys).unwrap();
+        let mut n = 0;
+        for (v, loc) in map.extents.iter() {
+            let legs: HashSet<SlabId> = loc.legs().map(|l| l.slab_id).collect();
+            assert_eq!(legs, drives.iter().copied().collect(), "extent {v}: a leg on every drive");
+            n += 1;
+        }
+        assert_eq!(n, 4);
+        drop(g);
+        drop(m);
+        // Whole already: a second pass writes nothing.
+        let again = legs_up_unlocked(&vm, 3).await;
+        assert!(again.is_whole() && again.legs_added == 0 && again.policies_set == 0, "{again:?}");
+    }
+
+    /// One leg here: nothing to mirror onto, nothing changed.
+    #[tokio::test]
+    async fn one_leg_alone_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let slot = 64 * 1024;
+        let mut mgr = VolumeManager::new(slot);
+        let p = dir.path().join("only.raw").display().to_string();
+        let dev = crate::drive::filedev::FileDevice::open_with_capacity(&p, 16 * 1024 * 1024).await.unwrap();
+        mgr.add_slab(Slab::format(Arc::new(dev), slot, StorageTier::Hot).await.unwrap()).await;
+        let sys = mgr.create_volume_with("sys", 1 << 20, crate::volume::CreateOptions::default()).await.unwrap();
+        let vm = TrackedMutex::new(mgr);
+        let r = legs_up_unlocked(&vm, 3).await;
+        assert_eq!(r.policies_set, 0);
+        assert_eq!(vm.lock().await.get_volume_handle(&sys).unwrap().redundancy().scheme, Redundancy::None);
+    }
 }

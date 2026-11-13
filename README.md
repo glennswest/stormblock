@@ -2586,6 +2586,11 @@ stormraid superblock) before the probe runs, and `slab partner … --also
 member missing opens the set degraded and the console says
 `NODE-DATA SET DEGRADED`; a set that does not open is said, and the boot goes
 on as if there were none.
+Every system leg (the first `system_mirror` drives) carries a full copy of
+the system volumes: `/init` names the other legs to `boot-local` as
+`--system-leg DEV`, the handover record keeps them, and after the flow-over
+and at each start every system volume is mirrored `mirror:N` across them; a
+leg missing says `WARNING: SYSTEM LEGS DEGRADED` (`docs/storage-layout.md`).
 
 `ci-split-verify.sh` boots the shipped initramfs in QEMU from the two drives
 the split install test leaves: either drive named, and the data drive alone.

@@ -50,9 +50,14 @@ sleep 30
 EOF
 chmod +x "$WORK/stormraid"
 
-# stormblock: `slab partner` keeps its arguments.
+# stormblock: `slab list D` says role=system for a drive in system.drives;
+# `slab partner` keeps its arguments.
 cat > "$WORK/stormblock" <<EOF
 #!/bin/sh
+if [ "\$2" = list ]; then
+    grep -qx "\$3" "$WORK/system.drives" 2>/dev/null && echo "slab x role=system"
+    exit 0
+fi
 printf '%s\n' "\$@" > "$WORK/partner.args"
 echo "/dev/ublkb64"
 EOF
@@ -68,7 +73,7 @@ member() { # disk part partname magic|-
     fi
 }
 reset() {
-    rm -rf "$WORK/sys" "$WORK/dev" "$WORK/run" "$WORK"/serve.* "$WORK/partner.args" "$WORK/out"
+    rm -rf "$WORK/sys" "$WORK/dev" "$WORK/run" "$WORK"/serve.* "$WORK/partner.args" "$WORK/out" "$WORK/system.drives"
     mkdir -p "$WORK/sys" "$WORK/dev"
 }
 run() { # vars...
@@ -81,6 +86,8 @@ run() { # vars...
 storage_serve
 echo "=SERVED=$STORAGE_SERVED"
 [ -n "$STORAGE_SERVED" ] && partner_of /dev/sda >/dev/null
+system_legs
+echo "=LEGS=$LEG_ARGS"
 storage_unserve >/dev/null
 echo "=AFTER=$STORAGE_SERVED"
 EOF
@@ -101,6 +108,26 @@ has "the set named to partner" "$WORK/partner.args" "^--also$"
 has "as the served device" "$WORK/partner.args" "^$WORK/dev/ublkb64$"
 hasnt "not degraded" "$WORK/out" "DEGRADED"
 check "let go of" "" "$(val AFTER)"
+
+echo "the other system legs: every other member drive with a system slab"
+reset
+for d in sda sdb sdc sdd; do member "$d" "${d}3" stormblock-raid STORMRD1; done
+for d in sda sdb sdc; do echo "$WORK/dev/$d"; done > "$WORK/system.drives"
+run "SLAB=$WORK/dev/sda"
+check "legs" "--system-leg $WORK/dev/sdb --system-leg $WORK/dev/sdc" "$(val LEGS)"
+has "said" "$WORK/out" "the other system legs"
+
+echo "an install's laid legs: the rest of the system list, the first left out"
+reset
+member sda sda3 stormblock-raid STORMRD1
+run "SLAB=http://forge/x" "SYSTEM_DISK=/dev/sda" "STORAGE_LAID_LEGS='/dev/sda /dev/sdb /dev/sdc'"
+check "legs" "--system-leg /dev/sdb --system-leg /dev/sdc" "$(val LEGS)"
+
+echo "no storage: layout: no legs"
+reset
+member sda sda1 EFI -
+run "SLAB=$WORK/dev/sda"
+check "none" "" "$(val LEGS)"
 
 echo "a member missing: served, and said loudly"
 reset

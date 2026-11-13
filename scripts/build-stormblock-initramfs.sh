@@ -1200,6 +1200,7 @@ SLAB_NAMED="$SLAB"
 # stops saying why).
 STORAGE_SERVED=""
 STORAGE_SERVE_PID=""
+STORAGE_MEMBER_DISKS=""
 storage_serve() {
     _ss_sys="${STORM_SYS_BLOCK:-/sys/block}"
     _ss_dev="${STORAGE_DEV:-/dev}"
@@ -1214,6 +1215,8 @@ storage_serve() {
         [ "$_ss_mg" = STORMRD1 ] || _ss_mg=$(dd if="$_ss_p" bs=4096 skip=1 count=1 2>/dev/null | head -c 8)
         if [ "$_ss_mg" = STORMRD1 ]; then
             _ss_m="$_ss_m $_ss_p"
+            _ss_d="${_ss_ev%/*/uevent}"
+            STORAGE_MEMBER_DISKS="$STORAGE_MEMBER_DISKS $_ss_dev/${_ss_d##*/}"
         else
             echo "storage: $_ss_p is named stormblock-raid and carries no stormraid superblock - left out"
         fi
@@ -1251,6 +1254,7 @@ storage_serve() {
         echo "  Booting on what is left; one more drive lost loses the node's data (#573)."
     fi
     STORAGE_SERVED="$_ss_dev/ublkb$_ss_id"
+    STORAGE_MEMBER_DISKS="${STORAGE_MEMBER_DISKS# }"
 }
 # Before a format or a lay over the same drives: the set is let go first.
 storage_unserve() {
@@ -1259,7 +1263,35 @@ storage_unserve() {
     kill "$STORAGE_SERVE_PID" 2>/dev/null
     _ss_w=0
     while kill -0 "$STORAGE_SERVE_PID" 2>/dev/null && [ "$_ss_w" -lt 10 ]; do sleep 1; _ss_w=$((_ss_w + 1)); done
-    STORAGE_SERVE_PID=""; STORAGE_SERVED=""
+    STORAGE_SERVE_PID=""; STORAGE_SERVED=""; STORAGE_MEMBER_DISKS=""
+}
+# The other system legs of a storage: layout (#573), as `--system-leg` words
+# for boot-local in LEG_ARGS: the legs this install laid after the first
+# (STORAGE_LAID_LEGS), or, on a boot from a leg, every other drive of the
+# served set that carries a system slab. Never the drive the boot's own
+# slab, system or data half is on; boot-local checks each again.
+system_legs() {
+    LEG_ARGS=""
+    if [ -n "${STORAGE_LAID_LEGS:-}" ]; then
+        _sl_c="$STORAGE_LAID_LEGS"
+    elif [ -n "$STORAGE_SERVED" ]; then
+        _sl_c=""
+        for _sl_d in $STORAGE_MEMBER_DISKS; do
+            carries_system_half "$_sl_d" && _sl_c="$_sl_c $_sl_d"
+        done
+    else
+        return 0
+    fi
+    _sl_own=""
+    case "${SLAB:-}" in ""|*://*) ;; *) _sl_own=$(disk_of "$SLAB") ;; esac
+    for _sl_d in $_sl_c; do
+        case " $_sl_own ${SYSTEM_DISK:-} ${LOCAL_DISK:-} ${PAIR_DISK:-} " in *" $_sl_d "*) continue ;; esac
+        case " $LEG_ARGS " in *" $_sl_d "*) continue ;; esac
+        LEG_ARGS="$LEG_ARGS --system-leg $_sl_d"
+    done
+    LEG_ARGS="${LEG_ARGS# }"
+    [ -n "$LEG_ARGS" ] && echo "storage: the other system legs: $(printf '%s\n' "$LEG_ARGS" | sed 's/--system-leg //g') (#573)"
+    return 0
 }
 # --- END storage serve
 
@@ -5340,6 +5372,8 @@ $1|$_svp|$3"
         fi
         LOCAL_DISK_ID=""
         SYSTEM_DISK=${STORAGE_SYSTEM%% *}
+        STORAGE_LAID_LEGS=""
+        case "$STORAGE_SYSTEM" in *" "*) STORAGE_LAID_LEGS=${STORAGE_SYSTEM#* } ;; esac
         SYSTEM_DISK_ID=""
         [ -n "$SYSTEM_DISK" ] && SYSTEM_DISK_ID=$(drive_ident "$SURVEY_SYS/${SYSTEM_DISK##*/}")
         PAIR_DISK=""; PAIR_DISK_ID=""
@@ -5394,6 +5428,8 @@ $1|$_svp|$3"
     # pipe, which its own messages panic on.
     mkdir -p /run/stormblock
     : > "$ENGINE_LOG"
+    system_legs
+    # shellcheck disable=SC2086
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \
         ${BOOT_PARTNER:+--slab "$BOOT_PARTNER"} \
@@ -5407,6 +5443,7 @@ $1|$_svp|$3"
         ${META:+--meta "$META"} \
         ${IMAGE_STORE:+--image-store "$IMAGE_STORE"} \
         ${VOLUME:+--volume "$VOLUME"} \
+        $LEG_ARGS \
         $WR_ARGS >> "$ENGINE_LOG" 2>&1 &
     ROOTDEV=/dev/ublkb0
     }
