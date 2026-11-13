@@ -40,8 +40,12 @@ Increments (each committed, pushed, checked):
 - **Keep-reinstall. Done:** drives that are the served set's members at the
   asked block size are kept on a keep-data reinstall (`KEEP:`), never
   relaid; anything else stops unless the wipe word is given.
-- **Next:** check.sh green on the head, v24.4.0, image requested; forge1
-  verification after stormcentral#1335 and #1381.
+- **Released v24.4.0** (9b74751b, 2026-11-13): check.sh green on 2d6373b8
+  and 6a7be7bc, the locked musl release build green on 9b74751b; the stage
+  requested. The item waits behind stormcentral#1335 (the tools in the
+  initramfs); then forge1 is installed with `storage:` defaults and #573 is
+  shipped with a console proof (`KEEP:|System legs:` lines, the layout
+  report `state` ok).
 
 Verification on forge1 needs stormcentral#1335 (the tools in the image).
 
