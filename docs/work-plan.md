@@ -43,7 +43,18 @@ Verification on forge1 needs stormcentral#1335 (the tools in the image).
 - [x] B (/init): `storage layout` + `storage format` blocks,
   `tests/initramfs-storage.sh`. Rule: format on fresh / blank drives / wipe
   word only; keep-data or a held drive → STOP, nothing written.
-- [ ] C next: `image storage-lay`, per-drive GPT.
+- [x] C: c642b80f `image storage-lay` / `lay_storage_drive`: per drive a GPT
+  (boot area; a `stormblock` SLAB system partition on a leg; a
+  `stormblock-raid` member, its first and last MiB zeroed), one size on
+  every drive. `--check` not done (with F).
+- [x] D: bccadbce `storage lay` block in `/init`: lays, `stormraid create
+  --force`, `stormraid serve --id 64` (assemble picks the first free id =
+  the engine's ublkb0: **stormraid#76**); LOCAL_DISK = the set, SYSTEM_DISK =
+  the first leg, so boot-local's split path lays them. Shell tests. Fix
+  8c0bd7de: bay 0 sorted as no bay.
+- [ ] E next: the other legs' system slabs, system volumes `mirror:N`.
+- [ ] F: held behind stormraid#76 (assemble --id). Without F a node laid this
+  way cannot boot from its disks again: no forge1 verification before F.
 - Open: a keep reinstall over a node already laid by storage: — every drive
   carries this node, not only INSTALL_OVER's; the plan's `carries` must say
   "this node" for all of them (D/F, with `--check`).
