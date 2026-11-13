@@ -1201,6 +1201,8 @@ SLAB_NAMED="$SLAB"
 STORAGE_SERVED=""
 STORAGE_SERVE_PID=""
 STORAGE_MEMBER_DISKS=""
+STORAGE_SERVE_MEMBERS=""
+STORAGE_SET_STATE=""
 storage_serve() {
     _ss_sys="${STORM_SYS_BLOCK:-/sys/block}"
     _ss_dev="${STORAGE_DEV:-/dev}"
@@ -1223,6 +1225,9 @@ storage_serve() {
     done
     _ss_m="${_ss_m# }"
     [ -n "$_ss_m" ] || return 0
+    STORAGE_SERVE_MEMBERS="$_ss_m"
+    STORAGE_MEMBER_DISKS="${STORAGE_MEMBER_DISKS# }"
+    STORAGE_SET_STATE="not-served"
     _ss_sr="${STORM_STORMRAID:-/usr/sbin/stormraid}"
     if [ ! -x "$_ss_sr" ]; then
         echo "WARNING: this node's data is on a stormraid set ($_ss_m), and this initramfs"
@@ -1231,6 +1236,10 @@ storage_serve() {
     fi
     _ss_log="${STORM_RUN:-/run/stormblock}/stormraid.log"
     mkdir -p "${_ss_log%/*}"
+    # The set's shape (parity, slots, spares) for the layout report, read
+    # from the superblocks before the set is opened.
+    # shellcheck disable=SC2086
+    "$_ss_sr" status $_ss_m > "${_ss_log%/*}/stormraid-status.txt" 2>&1 || true
     echo "storage: serving the node-data set over $_ss_m at $_ss_dev/ublkb$_ss_id (#573)"
     # shellcheck disable=SC2086
     "$_ss_sr" serve --id "$_ss_id" $_ss_m > "$_ss_log" 2>&1 &
@@ -1254,7 +1263,9 @@ storage_serve() {
         echo "  Booting on what is left; one more drive lost loses the node's data (#573)."
     fi
     STORAGE_SERVED="$_ss_dev/ublkb$_ss_id"
-    STORAGE_MEMBER_DISKS="${STORAGE_MEMBER_DISKS# }"
+    STORAGE_SET_STATE=optimal
+    grep -q 'is missing' "$_ss_log" && STORAGE_SET_STATE=degraded
+    return 0
 }
 # Before a format or a lay over the same drives: the set is let go first.
 storage_unserve() {
@@ -1263,7 +1274,7 @@ storage_unserve() {
     kill "$STORAGE_SERVE_PID" 2>/dev/null
     _ss_w=0
     while kill -0 "$STORAGE_SERVE_PID" 2>/dev/null && [ "$_ss_w" -lt 10 ]; do sleep 1; _ss_w=$((_ss_w + 1)); done
-    STORAGE_SERVE_PID=""; STORAGE_SERVED=""; STORAGE_MEMBER_DISKS=""
+    STORAGE_SERVE_PID=""; STORAGE_SERVED=""; STORAGE_MEMBER_DISKS=""; STORAGE_SERVE_MEMBERS=""; STORAGE_SET_STATE=""
 }
 # The other system legs of a storage: layout (#573), as `--system-leg` words
 # for boot-local in LEG_ARGS: the legs this install laid after the first
@@ -1291,6 +1302,93 @@ system_legs() {
     done
     LEG_ARGS="${LEG_ARGS# }"
     [ -n "$LEG_ARGS" ] && echo "storage: the other system legs: $(printf '%s\n' "$LEG_ARGS" | sed 's/--system-leg //g') (#573)"
+    return 0
+}
+# The layout, reported (#573, STORAGE-LAYOUT.md step 8: "drives, format
+# used, mirror legs, set state"): $STORM_RUN/storage-layout.json, which the
+# engine serves at /api/v1/storage/layout with each drive's block size and
+# protection as the kernel has them now, and which the boot's record in
+# system-data keeps (an install's record is the install's result). Written
+# by the boot that laid the drives and by every boot that serves the set;
+# a boot with neither leaves none.
+storage_json_list() { # words -> a JSON array of strings
+    _sj=""
+    for _sj_w in "$@"; do _sj="$_sj,\"$(printf '%s' "$_sj_w" | sed 's/\\/\\\\/g; s/"/\\"/g')\""; done
+    printf '[%s]' "${_sj#,}"
+}
+storage_json_num() { # text -> it, if a number, else null
+    case "$1" in ''|*[!0-9]*) printf null ;; *) printf '%s' "$1" ;; esac
+}
+storage_report() {
+    _sr_run="${STORM_RUN:-/run/stormblock}"
+    _sr_out="$_sr_run/storage-layout.json"
+    _sr_asked=""; _sr_regions=""
+    if [ -n "${STORAGE_MEMBERS:-}" ]; then
+        # This boot laid the drives.
+        _sr_from=install
+        _sr_drives="$STORAGE_DRIVES"; _sr_members="$STORAGE_MEMBERS"
+        _sr_set="${STORAGE_SET:-}"; _sr_legs="${STORAGE_SYSTEM:-}"
+        _sr_state=""; [ -n "$_sr_set" ] && _sr_state=optimal
+        _sr_asked=$(printf '{"block_size": %s, "protection": "%s", "method": "%s"}' \
+            "$(storage_json_num "${STORAGE_BLOCK_SIZE:-}")" "${STORAGE_PROTECTION:-}" "${STORAGE_METHOD:-}")
+        _sr_regions=$(printf '{"boot_area": %s, "system": %s, "data": %s}' \
+            "$(storage_json_num "${STORAGE_BOOT_AREA:-}")" "$(storage_json_num "${STORAGE_SYSTEM_REGION:-}")" "$(storage_json_num "${STORAGE_REGION:-}")")
+    elif [ -n "$STORAGE_SERVE_MEMBERS" ]; then
+        _sr_from=boot
+        _sr_drives="$STORAGE_MEMBER_DISKS"; _sr_members="$STORAGE_SERVE_MEMBERS"
+        _sr_set="$STORAGE_SERVED"; _sr_state="$STORAGE_SET_STATE"
+        # The boot's own system drive, then the others it mirrors to.
+        _sr_legs=""
+        case "${SLAB:-}" in ""|*://*) ;; *) _sr_legs=$(disk_of "$SLAB") ;; esac
+        [ -n "$_sr_legs" ] || _sr_legs="${SYSTEM_DISK:-}"
+        for _sr_l in $(printf '%s\n' "${LEG_ARGS:-}" | sed 's/--system-leg //g'); do
+            case " $_sr_legs " in *" $_sr_l "*) ;; *) _sr_legs="$_sr_legs $_sr_l" ;; esac
+        done
+    else
+        rm -f "$_sr_out" 2>/dev/null
+        return 0
+    fi
+    mkdir -p "$_sr_run" 2>/dev/null
+    _sr_st="$_sr_run/stormraid-status.txt"
+    _sr_parity=$(sed -n 's/^set [^:]*: [0-9]* slots, parity \([0-9]*\),.*/\1/p' "$_sr_st" 2>/dev/null | head -1)
+    [ -n "$_sr_parity" ] || { [ "$_sr_from" = install ] && _sr_parity="${STORAGE_PARITY:-}"; }
+    _sr_slots=$(sed -n 's/^set [^:]*: \([0-9]*\) slots,.*/\1/p' "$_sr_st" 2>/dev/null | head -1)
+    _sr_spares=$(grep -c '^  spare ' "$_sr_st" 2>/dev/null || true)
+    # The members the set opened without, one string per line said.
+    _sr_miss=""
+    if [ -s "$_sr_run/stormraid.log" ]; then
+        _sr_miss=$(sed -n 's/^stormraid: \(.*is missing\).*/\1/p' "$_sr_run/stormraid.log" \
+            | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }')
+    fi
+    {
+        printf '{"from": "%s",\n "drives": [' "$_sr_from"
+        _sr_c=""
+        for _sr_d in $_sr_drives; do
+            _sr_f=$(cat "$_sr_run/storage-format/${_sr_d##*/}.fmt" 2>/dev/null)
+            # shellcheck disable=SC2086
+            set -- $_sr_f
+            printf '%s{"device": "%s", "format": %s, "protection": %s, "method": %s}' "$_sr_c" "$_sr_d" \
+                "$([ -n "${1:-}" ] && printf '"%s"' "$1" || printf null)" \
+                "$([ -n "${2:-}" ] && printf '"%s"' "$2" || printf null)" \
+                "$([ -n "${3:-}" ] && printf '"%s"' "$3" || printf null)"
+            _sr_c=", "
+        done
+        printf '],\n'
+        [ -n "$_sr_asked" ] && printf ' "asked": %s,\n' "$_sr_asked"
+        [ -n "$_sr_regions" ] && printf ' "regions": %s,\n' "$_sr_regions"
+        # shellcheck disable=SC2086
+        printf ' "system_legs": %s,\n' "$(storage_json_list $_sr_legs)"
+        if [ -n "$_sr_set" ] || [ -n "$_sr_state" ]; then
+            # shellcheck disable=SC2086
+            printf ' "set": {"device": %s, "state": "%s", "parity": %s, "slots": %s, "spares": %s, "members": %s, "missing": %s}}\n' \
+                "$([ -n "$_sr_set" ] && printf '"%s"' "$_sr_set" || printf null)" "${_sr_state:-unknown}" \
+                "$(storage_json_num "$_sr_parity")" "$(storage_json_num "$_sr_slots")" "$(storage_json_num "$_sr_spares")" \
+                "$(storage_json_list $_sr_members)" "[$_sr_miss]"
+        else
+            # shellcheck disable=SC2086
+            printf ' "set": null, "members": %s}\n' "$(storage_json_list $_sr_members)"
+        fi
+    } > "$_sr_out.tmp" && mv "$_sr_out.tmp" "$_sr_out"
     return 0
 }
 # --- END storage serve
@@ -5168,7 +5266,8 @@ $1|$_svp|$3"
             "$_st_tool" format --device "$_dev" --block-size "$STORAGE_BLOCK_SIZE" \
                 --protection "$STORAGE_PROTECTION" --method none >/dev/null 2>&1
             case $? in
-            4) echo "  $_dev is at $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION already - not formatted" ;;
+            4) echo "  $_dev is at $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION already - not formatted"
+               echo "already $STORAGE_PROTECTION" > "$_st_dir/${_dev##*/}.fmt" ;;
             *) _st_todo="$_st_todo $_dev" ;;
             esac
         done
@@ -5256,7 +5355,11 @@ $1|$_svp|$3"
             for _dev in $_st_todo; do
                 _rc=$(cat "$_st_dir/${_dev##*/}.rc" 2>/dev/null || echo 1)
                 case "$_rc" in
-                0|4) STORAGE_FORMATTED="$STORAGE_FORMATTED $_dev" ;;
+                # What each drive got, for the layout report (#573 step 8).
+                0) STORAGE_FORMATTED="$STORAGE_FORMATTED $_dev"
+                   echo "formatted $_st_prot $STORAGE_METHOD" > "$_st_dir/${_dev##*/}.fmt" ;;
+                4) STORAGE_FORMATTED="$STORAGE_FORMATTED $_dev"
+                   echo "already $_st_prot" > "$_st_dir/${_dev##*/}.fmt" ;;
                 3) if [ "$_st_prot" = type1 ] && [ "$_st_round" = 1 ]; then _st_again="$_st_again $_dev"; else _st_bad="$_st_bad $_dev(refused: $(storage_said "$_dev"))"; fi ;;
                 *) _st_bad="$_st_bad $_dev(exit $_rc: $(storage_said "$_dev"))" ;;
                 esac
@@ -5352,6 +5455,9 @@ $1|$_svp|$3"
                 storage_fail "stormraid create failed: $(tail -n 1 "$_st_dir/raid-create.log")"
             fi
             sed 's/^/  /' "$_st_dir/raid-create.log"
+            # The set's shape for the layout report (#573 step 8).
+            # shellcheck disable=SC2086
+            "$_sr" status $STORAGE_MEMBERS > "${STORM_RUN:-/run/stormblock}/stormraid-status.txt" 2>&1 || true
             # Served at a fixed id (stormraid assemble picks the first free
             # one, the engine's /dev/ublkb0: stormraid#76). This process
             # serves it until the node's stormraid daemon takes it over.
@@ -5429,6 +5535,7 @@ $1|$_svp|$3"
     mkdir -p /run/stormblock
     : > "$ENGINE_LOG"
     system_legs
+    storage_report
     # shellcheck disable=SC2086
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \
@@ -6001,6 +6108,8 @@ if [ -s "$SD_DEV_FILE" ]; then
             printf '{"at": "%s", "release": %s, "tag": %s, "hostname": %s, "cmdline": %s,\n' \
                 "$sd_at" "$(sd_str "$sd_release")" "$(sd_str "${BOOTTAG:-}")" "$(sd_str "$sd_name")" "$(sd_str "$(cat "$SD_CMDLINE" 2>/dev/null)")"
             printf ' "local_disk": %s,\n' "$(sd_json "$SD_RUN/local-disk.json")"
+            # The drives' layout (#573 step 8): an install's record is its result.
+            printf ' "storage_layout": %s,\n' "$(sd_json "$SD_RUN/storage-layout.json")"
             # Which install-config this boot takes (#459), never its bytes.
             printf ' "install_config": %s,\n' "$(sd_str "$(install_config_source 2>/dev/null || echo none)")"
             printf ' "handover": %s}\n' "$(sd_json "$SD_RUN/handover.json")"

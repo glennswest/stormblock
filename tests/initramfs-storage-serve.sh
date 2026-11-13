@@ -40,6 +40,14 @@ cat > "$WORK/stormraid" <<EOF
 W="$WORK"
 EOF
 cat >> "$WORK/stormraid" <<'EOF'
+if [ "$1" = status ]; then
+    shift
+    for a in "$@"; do echo "$a: set 1111 drive 2222 generation 3"; done
+    echo "set 1111: $# slots, parity 1, chunk 256 KiB, 100 stripes, 1000 bytes usable, journal 64 MiB/drive"
+    i=0; for a in "$@"; do echo "  $i        active     u$i $a"; i=$((i + 1)); done
+    [ -e "$W/status.spare" ] && echo "  spare    active     us /dev/sde3"
+    exit 0
+fi
 [ "$1" = serve ] || exit 2
 shift
 for a in "$@"; do printf '%s\n' "$a"; done > "$W/serve.args"
@@ -73,7 +81,7 @@ member() { # disk part partname magic|-
     fi
 }
 reset() {
-    rm -rf "$WORK/sys" "$WORK/dev" "$WORK/run" "$WORK"/serve.* "$WORK/partner.args" "$WORK/out" "$WORK/system.drives"
+    rm -rf "$WORK/sys" "$WORK/dev" "$WORK/run" "$WORK"/serve.* "$WORK"/status.* "$WORK/partner.args" "$WORK/out" "$WORK/system.drives" "$WORK/layout.json"
     mkdir -p "$WORK/sys" "$WORK/dev"
 }
 run() { # vars...
@@ -88,6 +96,8 @@ echo "=SERVED=$STORAGE_SERVED"
 [ -n "$STORAGE_SERVED" ] && partner_of /dev/sda >/dev/null
 system_legs
 echo "=LEGS=$LEG_ARGS"
+storage_report
+cp "$STORM_RUN/storage-layout.json" "$STORM_RUN/../layout.json" 2>/dev/null || true
 storage_unserve >/dev/null
 echo "=AFTER=$STORAGE_SERVED"
 EOF
@@ -95,6 +105,9 @@ EOF
     sh "$WORK/run.sh" > "$WORK/out" 2>&1 || echo "EXIT $?" >> "$WORK/out"
 }
 val() { sed -n "s/^=$1=//p" "$WORK/out"; }
+lay() { # python expression over the report as L -> its value
+    python3 -c "import json,sys; L=json.load(open(sys.argv[1])); print($1)" "$WORK/layout.json" 2>&1
+}
 
 echo "every drive's member: served at id 64, the partner looked for on it"
 reset
@@ -117,6 +130,38 @@ run "SLAB=$WORK/dev/sda"
 check "legs" "--system-leg $WORK/dev/sdb --system-leg $WORK/dev/sdc" "$(val LEGS)"
 has "said" "$WORK/out" "the other system legs"
 
+echo "the layout reported on a boot (#573 step 8): drives, legs, the set's state"
+check "from" "boot" "$(lay 'L["from"]')"
+check "drives" "4" "$(lay 'len(L["drives"])')"
+check "no format on a later boot" "None" "$(lay 'L["drives"][0]["format"]')"
+check "legs" "['$WORK/dev/sda', '$WORK/dev/sdb', '$WORK/dev/sdc']" "$(lay 'L["system_legs"]')"
+check "set device" "$WORK/dev/ublkb64" "$(lay 'L["set"]["device"]')"
+check "set state" "optimal" "$(lay 'L["set"]["state"]')"
+check "parity" "1" "$(lay 'L["set"]["parity"]')"
+check "slots" "4" "$(lay 'L["set"]["slots"]')"
+check "spares" "0" "$(lay 'L["set"]["spares"]')"
+check "members" "4" "$(lay 'len(L["set"]["members"])')"
+check "none missing" "[]" "$(lay 'L["set"]["missing"]')"
+
+echo "the layout reported on the boot that laid the drives: the format each got"
+reset
+for d in sda sdb sdc sdd; do member "$d" "${d}3" stormblock-raid STORMRD1; done
+mkdir -p "$WORK/run/storage-format"
+echo "formatted none auto" > "$WORK/run/storage-format/sda.fmt"
+echo "already type1" > "$WORK/run/storage-format/sdb.fmt"
+touch "$WORK/status.spare"
+run "SLAB=http://forge/x" "SYSTEM_DISK=/dev/sda" "STORAGE_DRIVES='/dev/sda /dev/sdb'" \
+    "STORAGE_MEMBERS='/dev/sda3 /dev/sdb3'" "STORAGE_SET=/dev/ublkb64" "STORAGE_SYSTEM='/dev/sda /dev/sdb'" \
+    "STORAGE_BLOCK_SIZE=4096" "STORAGE_PROTECTION=type1" "STORAGE_METHOD=auto" "STORAGE_PARITY=1" \
+    "STORAGE_BOOT_AREA=1073741824" "STORAGE_SYSTEM_REGION=34359738368" "STORAGE_REGION=9000000000000"
+check "from" "install" "$(lay 'L["from"]')"
+check "formatted" "formatted none auto" "$(lay '" ".join(L["drives"][0][k] for k in ("format","protection","method"))')"
+check "already" "already type1 None" "$(lay '" ".join(str(L["drives"][1][k]) for k in ("format","protection","method"))')"
+check "asked" "4096 type1 auto" "$(lay '" ".join(str(L["asked"][k]) for k in ("block_size","protection","method"))')"
+check "regions" "34359738368" "$(lay 'L["regions"]["system"]')"
+check "legs" "['/dev/sda', '/dev/sdb']" "$(lay 'L["system_legs"]')"
+check "set" "/dev/ublkb64 optimal 1" "$(lay '" ".join(str(L["set"][k]) for k in ("device","state","parity"))')"
+
 echo "an install's laid legs: the rest of the system list, the first left out"
 reset
 member sda sda3 stormblock-raid STORMRD1
@@ -137,6 +182,8 @@ run
 check "served" "$WORK/dev/ublkb64" "$(val SERVED)"
 has "DEGRADED" "$WORK/out" "NODE-DATA SET DEGRADED"
 has "names the slot" "$WORK/out" "slot 3 (abcd) is missing"
+check "reported degraded" "degraded" "$(lay 'L["set"]["state"]')"
+check "the missing slot reported" "['slot 3 (abcd) is missing']" "$(lay 'L["set"]["missing"]')"
 
 echo "a partition named so with no superblock is left out"
 reset
@@ -159,6 +206,7 @@ member sda sda1 EFI -
 run
 check "nothing served" "" "$(val SERVED)"
 check "stormraid not run" "no" "$([ -e "$WORK/serve.args" ] && echo yes || echo no)"
+check "no layout reported" "no" "$([ -e "$WORK/layout.json" ] && echo yes || echo no)"
 
 echo "a set that does not open: said, the boot goes on without it"
 reset
@@ -168,6 +216,7 @@ run
 check "nothing served" "" "$(val SERVED)"
 has "said" "$WORK/out" "did not come up"
 has "the reason" "$WORK/out" "belongs to another set"
+check "reported not served" "None not-served" "$(lay 'str(L["set"]["device"]) + " " + L["set"]["state"]')"
 hasnt "no exit" "$WORK/out" "^EXIT"
 
 echo "no stormraid in the initramfs: said, nothing served"
