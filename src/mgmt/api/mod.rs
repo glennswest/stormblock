@@ -150,6 +150,13 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// `state` says `degraded`.
         #[serde(skip_serializing_if = "Option::is_none")]
         storage_layout: Option<serde_json::Value>,
+        /// Whether the volume record is kept (#587), as
+        /// `/api/v1/slabs/durability` says it: `ok`, the slabs whose own
+        /// region is `stale` (the data directory holds the record) and those
+        /// `short` of room. Read without waiting on the volume manager; while
+        /// it is busy, the last reading.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata: Option<crate::mgmt::api::slabs::DurabilitySummary>,
         /// Requests a ublk device was handed and has not answered for 30 s
         /// or more, oldest first: device (`volume:<id>`), `/dev/ublkbN`,
         /// queue, tag, op, seconds (#337). A FLUSH here is a consumer's
@@ -260,6 +267,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     let lost_status: Option<&'static str> = None;
     let slabs = super::slab_report::for_health(&state);
     let storage_layout = super::storage_layout::report(slabs.as_ref());
+    let metadata = crate::mgmt::api::slabs::summary_for_health(&state).await;
     let boot_mounts = crate::mgmt::boot_mounts::read();
     let mounts_failed = boot_mounts.as_ref().is_some_and(|m| !m.failed.is_empty());
     Json(Health {
@@ -283,6 +291,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         slabs,
         storage_layout,
+        metadata,
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
         #[cfg(target_os = "linux")]
         ublk_lost: lost_devices.clone(),

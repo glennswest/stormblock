@@ -248,6 +248,10 @@ call is logged as one `enforce` (the default) would refuse.
 * `/serve/v1/health`, `/serve/v1/ready` — supervisor probes, and the same two
   under the deprecated `/mk/v1` prefix. `health` says the node's
   `[serve] allow_any_host` (#212): a policy, nothing about a volume.
+* `GET /api/v1/health` also carries `metadata` (#587): whether the volume
+  record is kept (`ok`) and which slabs are `stale` or `short`, by slab id.
+  The state of the node's bookkeeping, nothing about a volume; the full
+  report, `/api/v1/slabs/durability`, needs a token.
 * `GET /debug/stalls`, `/debug/tasks`, `/debug/threads`, `/debug/locks` —
   what the engine is doing when its API stops answering (#269). Read-only,
   no volume data; a node has no ssh and the supervisor asking holds no node

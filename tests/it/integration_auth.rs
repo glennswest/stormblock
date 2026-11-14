@@ -115,6 +115,22 @@ async fn probes_stay_public_and_health_reports_the_mode() {
     assert_eq!(body["slabs"]["diskless"], false, "{body}");
     assert_eq!(body["slabs"]["system"], "local", "{body}");
     assert!(body["slabs"]["items"].as_array().is_some_and(|i| !i.is_empty() && i.iter().all(|i| i["source"] == "local")), "{body}");
+    // #587: whether the volume record is kept, open, as the token-guarded
+    // /slabs/durability says it.
+    assert_eq!(body["metadata"]["ok"], true, "{body}");
+    assert_eq!(body["metadata"]["stale"], serde_json::json!([]), "{body}");
+    assert_eq!(body["metadata"]["short"], serde_json::json!([]), "{body}");
+    assert_eq!(c.get(format!("{base}/api/v1/slabs/durability")).send().await.unwrap().status().as_u16(), 401);
+    let d: serde_json::Value = c
+        .get(format!("{base}/api/v1/slabs/durability"))
+        .bearer_auth("sekrit")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(d["ok"], body["metadata"]["ok"], "{d}");
 
     server.abort();
 }

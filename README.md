@@ -697,6 +697,12 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     missing) and the node-data set's state; `state` `ok` or `degraded`. Also
     `GET /api/v1/storage/layout` (token; 404 on a node with no layout).
     Shape: [docs/storage-layout.md](docs/storage-layout.md#the-layout-reported-step-8).
+  - `metadata` (#587): whether the volume record is kept, as
+    `GET /api/v1/slabs/durability` (token) says it: `ok`, `stale` (slabs whose
+    own region is full while the data directory's `metadata.v2` holds the
+    record; not counted against `ok`) and `short` (slabs whose region cannot
+    hold it). Read without waiting on the volume manager; while it is busy,
+    the last reading.
   And `"ublk_stuck"` (#337): every request a ublk device was handed and has
   not answered for 30 s or more, oldest first, with `device`
   (`volume:<id>`), `ublk` (`/dev/ublkbN`), `queue`, `tag`, `op` (`flush`,

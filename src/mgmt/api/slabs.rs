@@ -620,16 +620,12 @@ pub async fn durability(State(state): State<Arc<AppState>>) -> Response {
     let fault = mgr.durability_fault();
     let slabs = mgr.metadata_pressure().await;
     drop(mgr);
-
-    // A stale slab (#583) does not count against `ok` (#587): its own copy is
-    // behind, but `metadata.v2` in the data directory holds the record and
-    // restore reads it first. Counted, a node whose every write is durable
-    // read as broken for as long as the region stayed full.
-    let short: Vec<&crate::volume::MetadataPressure> =
-        slabs.iter().filter(|s| !s.fits && !s.stale).collect();
-    let stale: Vec<&str> = slabs.iter().filter(|s| s.stale).map(|s| s.slab_id.as_str()).collect();
+    let sum = summarize(fault.as_deref(), &slabs);
+    remember(&sum);
+    let short = &sum.short;
+    let stale = &sum.stale;
     Json(serde_json::json!({
-        "ok": fault.is_none() && short.is_empty(),
+        "ok": sum.ok,
         "fault": fault,
         "slabs": slabs,
         "stale": if stale.is_empty() { serde_json::Value::Null } else {
@@ -650,6 +646,49 @@ pub async fn durability(State(state): State<Arc<AppState>>) -> Response {
         },
     }))
     .into_response()
+}
+
+/// Whether the volume record is being kept, in short (#587): what
+/// `/api/v1/slabs/durability` says in `ok`, and the open health's `metadata`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DurabilitySummary {
+    pub ok: bool,
+    /// Slabs whose own region filled while `metadata.v2` holds the record.
+    pub stale: Vec<String>,
+    /// Slabs whose region cannot hold the record, and that are not stale.
+    pub short: Vec<String>,
+}
+
+/// The rule, in one place. A stale slab (#583) does not count against `ok`
+/// (#587): its own copy is behind, but `metadata.v2` in the data directory
+/// holds the record and restore reads it first. Counted, a node whose every
+/// write is durable read as broken for as long as the region stayed full.
+pub fn summarize(fault: Option<&str>, slabs: &[crate::volume::MetadataPressure]) -> DurabilitySummary {
+    let short: Vec<String> = slabs.iter().filter(|s| !s.fits && !s.stale).map(|s| s.slab_id.clone()).collect();
+    let stale: Vec<String> = slabs.iter().filter(|s| s.stale).map(|s| s.slab_id.clone()).collect();
+    DurabilitySummary { ok: fault.is_none() && short.is_empty(), stale, short }
+}
+
+static LAST_SUMMARY: std::sync::Mutex<Option<DurabilitySummary>> = std::sync::Mutex::new(None);
+
+fn remember(s: &DurabilitySummary) {
+    *LAST_SUMMARY.lock().unwrap_or_else(|e| e.into_inner()) = Some(s.clone());
+}
+
+/// For the open health (#587): read without waiting on the volume manager
+/// (#571); while it is busy, the last reading, or nothing before the first.
+pub async fn summary_for_health(state: &AppState) -> Option<DurabilitySummary> {
+    match state.volume_manager.try_lock() {
+        Ok(mgr) => {
+            let fault = mgr.durability_fault();
+            let slabs = mgr.metadata_pressure().await;
+            drop(mgr);
+            let s = summarize(fault.as_deref(), &slabs);
+            remember(&s);
+            Some(s)
+        }
+        Err(_) => LAST_SUMMARY.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+    }
 }
 
 /// `POST /api/v1/slabs/{id}/upgrade` (#158): migrate a metadata slab to
@@ -783,4 +822,30 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/slots", get(list_slots))
         .route("/{id}/upgrade", axum::routing::post(upgrade_slab))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod durability_summary_tests {
+    use super::*;
+    use crate::volume::MetadataPressure;
+
+    fn slab(id: &str, fits: bool, stale: bool) -> MetadataPressure {
+        MetadataPressure { slab_id: id.into(), volumes: 1, needed_bytes: 10, capacity_bytes: 10, fits, stale }
+    }
+
+    #[test]
+    fn a_stale_slab_is_named_and_not_counted_against_ok() {
+        let s = summarize(None, &[slab("a", true, false), slab("b", false, true)]);
+        assert!(s.ok);
+        assert_eq!(s.stale, ["b"]);
+        assert!(s.short.is_empty());
+    }
+
+    #[test]
+    fn a_slab_short_of_room_or_a_fault_is_not_ok() {
+        let s = summarize(None, &[slab("a", false, false)]);
+        assert!(!s.ok);
+        assert_eq!(s.short, ["a"]);
+        assert!(!summarize(Some("persist failed"), &[slab("a", true, false)]).ok);
+    }
 }
