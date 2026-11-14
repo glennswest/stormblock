@@ -11,7 +11,8 @@ v24.3.0. Plan: the open `/api/v1/health` gains `metadata`: `{"ok", "stale":
 (one function for both), read with `try_lock` (never waiting on the volume
 manager, #571), else the last reading. New proof:
 `get:http://{node}:9090/api/v1/health ~ "metadata":\{"ok":true`.
-- [ ] code + tests, docs, release, stage, shipped.
+- [x] code + tests (cf2497d6): `summarize`/`summary_for_health` in `src/mgmt/api/slabs.rs`, health `metadata`; README, docs/auth.md. check.sh green (1427 tests); v24.6.0 (8d9d0bbf), musl release build prints 24.6.0; stage requested (build e03f24727a44).
+- [ ] waits `--after-install stormblock>=8d9d0bbf` (not `shipped`: stormcentral#1344 checks a reship against b8dbed62). Then read `http://<node>:9090/api/v1/health` `"metadata":{"ok":true`, and on forge too if it runs it; ship/close.
 
 ## #598 — a node laid by storage: cannot reboot (2026-11-14, P0)
 
