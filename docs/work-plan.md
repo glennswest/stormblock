@@ -10,11 +10,11 @@ Cause: `storage_plan` in /init lists drives with `sd_drives` (`sd*`,
 console: `/init: eval: … not found` (the plan's stderr, the engine's log
 lines, merged into what is eval'd) and `sda: sda: formatted` (both /init and
 stormdrive prefix the drive).
-- [ ] `storage_disks`: every whole disk the inventory lists (its exclusions),
+- [x] `storage_disks`: every whole disk the inventory lists (its exclusions),
   given to the plan; virtio serial from `/sys/block/vdX/serial`.
-- [ ] plan: a removable, USB or 0-byte drive left out under `all` is named.
-- [ ] the plan's stderr kept apart from what is eval'd (layout block and #593's arrivals).
-- [ ] one prefix on a format line.
+- [x] plan: a removable, USB or 0-byte drive left out under `all` is named.
+- [x] the plan's stderr kept apart (layout block; #593's arrivals block on wip/ still to change).
+- [x] one prefix on a format line (2c2f870c). The doubled `format:` in the install log is stormcentral#1400.
 - [ ] check.sh, release, stage, shipped (proof: pvetest3's `disk laid`: 4 legs, set of 4).
 
 ## #593 — drives that arrive after the inventory: installer and running node act on hot plug (2026-11-13, P1)
