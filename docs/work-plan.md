@@ -11,6 +11,9 @@ Plan: serve the set at a fixed id far above any the engine numbers
 (65535; the kernel allows ids below 1<<20) in both /init places (lay, plain-boot
 serve); boot-local refuses to start when an id it would create is already live,
 naming it (a collision is a failed boot said plainly, never a shared device).
+- [x] 796a19cb: both /init defaults 65535, boot-local's live-id guard (`ublk::clashes`), docs; c54b3ddd: the shell tests' id assertions. `sh check.sh` ALL PASS on c54b3ddd (sc-build, 973 s).
+- [x] v24.7.1 (e09a0afe, tagged); stage requested (`component build stormblock --no-wait`).
+- [ ] shipped, proof `console:the node-data set is /dev/ublkb65535` on a multi-drive install (pvetest3).
 
 ## #603 — C2NR0Q2 cannot boot its own disk (2026-11-14, P1)
 
