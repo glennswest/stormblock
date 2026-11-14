@@ -324,10 +324,10 @@ impl Tracker {
     /// What changed since the drives were last known, read from sysfs: for
     /// when uevents were lost (the socket's buffer overran, ENOBUFS).
     pub fn rescan(&mut self) -> Vec<DriveEvent> {
-        let now = self.sys.present();
+        let there = self.sys.present();
         let mut out = Vec::new();
         let gone: Vec<String> =
-            self.known.keys().filter(|k| !now.iter().any(|d| &d.device == *k)).cloned().collect();
+            self.known.keys().filter(|k| !there.iter().any(|d| &d.device == *k)).cloned().collect();
         for g in gone {
             if let Some(mut d) = self.known.remove(&g) {
                 d.action = Action::Remove;
@@ -335,7 +335,7 @@ impl Tracker {
                 out.push(d);
             }
         }
-        for d in now {
+        for d in there {
             let was = self.known.get(&d.device);
             if was.is_none() || (was.is_some_and(|w| !w.ready) && d.ready) {
                 out.push(d.clone());
