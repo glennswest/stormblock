@@ -19,8 +19,10 @@ pvetest3 12.81, the power-cut reboot (console 03:33Z): two faults.
   install-config), the rule switch_root uses for the install-config; said
   otherwise. On an install a drive of the served set or with this node's
   plain data region is this node's (`carries=` empty).
-- [ ] code + tests (initramfs-storage-serve.sh, initramfs-storage.sh)
-- [ ] check.sh, release, stage; proof needs pvetest3 install + power cut + reboot.
+- [x] code + tests (initramfs-storage-serve.sh, initramfs-storage.sh), 381ea9f4; docs/storage-layout.md, README.
+- [x] `sc-build 'sh check.sh'` green on 381ea9f4; v24.5.2 (12e925e6), locked musl release build green; stage requested (build 473abf8ab771).
+- [ ] waits `--after-install stormblock>=12e925e6@pvetest3`: its install, then the power-cut reboot, must say `storage: … this boot is no install` and boot its own drives (with #597: 4 legs, the set served); then close #598.
+- Not done: a keep-data reinstall over a no-set layout (no `KEEP:` path without a set); the #593 wip arrivals block still uses `2>&1` around the plan.
 
 ## #597 — storage: drives=all took sda only: the virtio drives never reached the plan (2026-11-14, P0)
 
