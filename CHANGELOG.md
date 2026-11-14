@@ -33,6 +33,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.5.1] — 2026-11-14
+
+### Fixed
+- #597: `storage: drives: all` takes every drive the inventory lists: the virtio disks (vda, vdb, vdc on pvetest3) reached the plan neither as taken nor as refused, so the install laid one drive with no mirror and no set. Every whole disk now reaches the engine's plan, a virtio disk's serial is read, and a drive left out under `all` is named with why (USB, removable, 0 bytes). The plan's log lines are no longer eval'd with it, and a format line names its drive once.
+
 ## [v24.5.0] — 2026-11-13
 
 ### Fixed
