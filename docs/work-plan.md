@@ -24,7 +24,7 @@ Owner: "You need to watch for hot plug even after boot." Plan:
   offered as `replacement` (the set misses a member: first), `spare`, and
   `system_leg`; shown in `GET /api/v1/storage/layout` `candidates` and in
   health. Policy `[storage] hotplug = "offer"` (default) from settings.
-- [x] A: e5d27dd7 on main (`src/drive/uevent.rs`, `hotplug watch`); its sc-build (clippy + `--lib uevent`) was queued when paused.
+- [x] A: e5d27dd7 on main (`src/drive/uevent.rs`, `hotplug watch`); compile fix be9b405d; clippy `--all-targets -D warnings` + 10 uevent tests green on be9b405d. `wip/593-hotplug` rebased on it.
 - [x] B (code + tests, not yet through check.sh): on **`wip/593-hotplug`** —
   `storage watch` block after the inventory (`HOTPLUG_LOG`, `hotplug_stop`
   before switch_root), `storage arrivals` block before the lay, the report's
