@@ -2,6 +2,17 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #587 (reopened) — durability readable without a token, for the ship proof (2026-11-14)
+
+Reopened by stormcentral (#1275): the proof `get:…/api/v1/slabs/durability ~
+"ok":true` got 401 (the endpoint needs a bearer). The fix itself is in
+v24.3.0. Plan: the open `/api/v1/health` gains `metadata`: `{"ok", "stale":
+[slab ids], "short": [slab ids]}`, the same rule as `/slabs/durability`
+(one function for both), read with `try_lock` (never waiting on the volume
+manager, #571), else the last reading. New proof:
+`get:http://{node}:9090/api/v1/health ~ "metadata":\{"ok":true`.
+- [ ] code + tests, docs, release, stage, shipped.
+
 ## #598 — a node laid by storage: cannot reboot (2026-11-14, P0)
 
 pvetest3 12.81, the power-cut reboot (console 03:33Z): two faults.
