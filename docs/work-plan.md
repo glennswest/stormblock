@@ -2,6 +2,15 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #603 — C2NR0Q2 cannot boot its own disk (2026-11-14, P1)
+
+Read from the 35 C2NR0Q2 consoles in `/var/lib/stormcentral/console/` (2026-09-24 → 11-14):
+- Every boot that worked chose a pallet on the **network clone** (`device 4: 12582912 blocks of 4096 … this loader's disk`, a new `stormuefi.disk=` GUID on each boot). That includes the 12.74 install's "local boot" and "reboot from its own disk". The local disk (PERC slot 2, 512 B) has never booted a pallet.
+- The only two boots with just the local disk (2026-10-03 stormuefi 0.6.0, kernel 6.17, pallet v74; 2026-11-14 0.12.5, v39/v38) fail alike: VERIFIED, then `no kernel inside the kernel member`. So the cause is not the hard-offs and not stormblock's writer. It is the firmware read: stormuefi reads a raw member in one `BlockIO::read_blocks` of ~19 MB into an unaligned Vec (`ByteReader::read_bytes`). The small manifest reads succeed. Filed with the fix (cap at 1 MiB, IoAlign, say the EFI status): stormuefi#76.
+- The install stage that should have caught it boots the clone: stormcentral#1407 (boot the local disk, cold power-on, check `stormuefi.disk=` is a laid disk).
+- [x] evidence on stormuefi#76; stormcentral#1407 filed; #603 moved `--after` stormuefi#76.
+- [ ] once stormuefi#76 ships in an esp golden: C2NR0Q2 fresh install, BMC hard-off, power-on from the local disk only; SELECTED from device 1. Then close.
+
 ## #587 (reopened) — durability readable without a token, for the ship proof (2026-11-14)
 
 Reopened by stormcentral (#1275): the proof `get:…/api/v1/slabs/durability ~
