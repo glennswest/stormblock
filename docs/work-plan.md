@@ -23,8 +23,10 @@ never 4096 without PI; a refusal fails the install loudly with the sense.
   "already"; no type1 -> none fallback; after it the kernel must read the
   drive at the block size with `protection_type` = the PI asked
   (READ CAPACITY 16), said per drive, else FATAL.
-- [ ] code + tests/initramfs-storage.sh, storage.rs tests
-- [ ] check.sh green, release, image, shipped with a forge1 console proof
+- [x] code + tests/initramfs-storage.sh, initramfs-storage-inventory.sh, storage.rs tests (1dede3e8)
+- [x] `sc-build 'sh check.sh'` green on 1dede3e8; v24.5.0 (7cdb6d5e), locked musl release build green; stage ad6a6b26776e requested; `shipped` (proof: health version >= 24.5).
+  On metal: forge1's next install should print `FORMATTED: … PROT_EN=1 P_TYPE 1` for all 4 and lay 4.
+- Open elsewhere: stormdrive#142 (format gives up on a NOT READY sense other than 31/00); PI type 2 not formatted by stormdrive (forge1 asks type1).
 
 ## #592 — the storage inventory waits for every SAS drive (2026-11-13, P0)
 
