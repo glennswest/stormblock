@@ -86,6 +86,21 @@ Owner: "You need to watch for hot plug even after boot." Plan:
   stormraid daemon (it owns the set after the initramfs, changes by its
   RaidSet object under `--kube`): assessed after C, filed where it belongs.
 
+- 2026-11-14, resumed: B rebased on main (#597/#598), its plan call no
+  longer evals stderr; `check.sh` green on f078ad3b.
+- [x] C (35497871, e9820595): `src/mgmt/hotplug.rs`, a thread from
+  `start_management_server` (`STORMBLOCK_NO_HOTPLUG` off): every add/remove
+  WARN with serial, WWID, controller, bay; candidates on a node laid by
+  `storage:` (blank or not-ready, not in the layout, no slab open) offered
+  `replacement` (set missing a member) | `spare`, and `system_leg`; in the
+  layout report (`drive_events`, `candidates`, `drives_watched`). docs/storage-layout.md
+  "Drives that arrive later". `check.sh` green on e9820595 (1435 tests).
+- D (the join) filed as #599: format + lay + RaidSpares (needs stormcos RBAC for
+  stormblock to write raidspares) + system leg; `[storage] hotplug` policy there.
+- [ ] merge to main, v24.7.0, stage; proof on pvetest3 (laid by storage:):
+  health `storage_layout` `"drives_watched":"uevents"`, the install's
+  `arrived`/`not_laid`.
+
 ## #595 — every drive storage: takes formatted 4096 + PI, NOT READY ones included (2026-11-13, P0)
 
 forge1's three SAS drives were left unformatted by the Nov 7 format (refused
