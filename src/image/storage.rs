@@ -702,7 +702,17 @@ pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<Stora
         DriveSel::All => {
             let mut refused = Vec::new();
             for d in seen {
-                if d.removable || d.usb || (d.bytes == 0 && !d.unready) {
+                // Never silent (#597): a drive left out is said with why.
+                if d.usb {
+                    said.push(format!("{} is a USB drive: not taken unless storage.drives lists it", d.said()));
+                    continue;
+                }
+                if d.removable {
+                    said.push(format!("{} is removable: not taken unless storage.drives lists it", d.said()));
+                    continue;
+                }
+                if d.bytes == 0 && !d.unready {
+                    said.push(format!("{} reads 0 bytes (no media): not taken", d.said()));
                     continue;
                 }
                 if d.external() {
@@ -987,6 +997,36 @@ mod tests {
         assert!(sh.contains("STORAGE_RAID=yes\nSTORAGE_PARITY=1\n"));
         assert!(sh.contains("3 data + 1 parity"), "{sh}");
         assert!(sh.contains("STORAGE_STOP=\n"));
+    }
+
+    /// pvetest3, 12.81 (#597): one SCSI disk and three virtio disks, none
+    /// with a serial, from the --drive words /init passes, under the
+    /// install-config line the appliance wrote.
+    #[test]
+    fn pvetest3_four_disks_at_512_all_taken() {
+        let doc = "hostname: pvetest3\nstorage: {\"data_raid\":{\"parity\":1},\"drives\":\"all\",\"format\":{\"block_size\":512,\"protection\":\"none\"},\"system_mirror\":\"all\"}\n";
+        let w = |dev: &str| format!("dev={dev};serial=;wwn=;model=;shelf=-;position=internal;bay=;bytes=68719476736;removable=0;usb=0;carries=;running=0");
+        let seen: Vec<SeenDrive> =
+            ["/dev/sda", "/dev/vda", "/dev/vdb", "/dev/vdc"].iter().map(|d| SeenDrive::parse(&w(d)).unwrap()).collect();
+        let sh = plan_from_config(doc, &seen, true).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_DRIVES='/dev/sda /dev/vda /dev/vdb /dev/vdc'\n"), "{sh}");
+        assert!(sh.contains("STORAGE_SYSTEM='/dev/sda /dev/vda /dev/vdb /dev/vdc'\n"), "{sh}");
+        assert!(sh.contains("STORAGE_RAID=yes\nSTORAGE_PARITY=1\n"), "{sh}");
+        assert!(sh.contains("STORAGE_BLOCK_SIZE=512\n") && sh.contains("STORAGE_PROTECTION=none\n"), "{sh}");
+        assert!(sh.contains("3 data + 1 parity"), "{sh}");
+    }
+
+    #[test]
+    fn all_names_every_drive_it_leaves_out() {
+        let mut d = forge1();
+        d.push(SeenDrive { usb: true, ..drive("/dev/sde", "", "U1", 1) });
+        d.push(SeenDrive { removable: true, ..drive("/dev/sdf", "", "R1", 1) });
+        d.push(SeenDrive { bytes: 0, ..drive("/dev/sdg", "", "Z1", 1) });
+        let p = plan(&StorageSpec::default(), &d, false).unwrap();
+        assert_eq!(p.drives.len(), 4);
+        for (dev, why) in [("/dev/sde", "USB"), ("/dev/sdf", "removable"), ("/dev/sdg", "0 bytes")] {
+            assert!(p.said.iter().any(|s| s.contains(dev) && s.contains(why)), "{dev}: {:?}", p.said);
+        }
     }
 
     #[test]

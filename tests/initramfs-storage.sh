@@ -82,6 +82,7 @@ case "$1 $2" in
     shift 2
     [ -e "$W/plan.args" ] && cp "$W/plan.args" "$W/plan.args1"
     for a in "$@"; do printf '%s\n' "$a"; done > "$W/plan.args"
+    cat "$W/plan.stderr" >&2 2>/dev/null
     if [ -e "$W/plan.n" ] && [ -e "$W/plan.out2" ]; then cat "$W/plan.out2"; else cat "$W/plan.out" 2>/dev/null; fi
     touch "$W/plan.n"
     exit "$(cat "$W/plan.rc" 2>/dev/null || echo 0)" ;;
@@ -206,7 +207,8 @@ reset() {
            "$WORK"/sig.* "$WORK/format.log" "$WORK/skips" "$WORK/ldwrite" "$WORK/out" \
            "$WORK/install-config.yaml" "$WORK/dev" "$WORK"/lay.args "$WORK"/lay.rc \
            "$WORK"/raid.* "$WORK/serve.args" "$WORK"/slow.* "$WORK/report.args" \
-           "$WORK"/pt.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg"
+           "$WORK"/pt.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" \
+           "${WORK:?}/plan.stderr" "${WORK:?}/sys/vda" "${WORK:?}/sys/vdb" "${WORK:?}/sys/ublkb64" "${WORK:?}/sys/loop0"
     for d in sda sdb sdc sdd; do mkdisk "$d"; done
 }
 
@@ -301,6 +303,24 @@ has "a drive's bytes" "$WORK/plan.args" "dev=/dev/sdb;.*bytes=10000831348736;"
 has "a foreign table said by name" "$WORK/plan.args" "dev=/dev/sdc;.*carries=gpt (other);"
 has "this node's own drive carries nothing" "$WORK/plan.args" "dev=/dev/sda;.*carries=;"
 hasnt "no wipe word, no --force" "$WORK/plan.args" "^--force$"
+
+echo "the layout: every drive the inventory lists reaches the plan, virtio too (#597)"
+reset
+for d in vda vdb; do mkdisk "$d"; echo "VSER-$d" > "$SYS/$d/serial"; done
+mkdisk ublkb64
+mkdir -p "$SYS/loop0"; echo 100 > "$SYS/loop0/size"
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+printf "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/vda /dev/vdb'\nSTORAGE_SYSTEM='/dev/sda'\n" > "$WORK/plan.out"
+printf '\033[2m2026-11-14T03:29:54.283310Z\033[0m INFO stormblock::mgmt::config: Config file not found\n' > "$WORK/plan.stderr"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml"
+has "vda told to the engine" "$WORK/plan.args" "^dev=/dev/vda;"
+has "vdb too" "$WORK/plan.args" "^dev=/dev/vdb;"
+has "sda still" "$WORK/plan.args" "^dev=/dev/sda;"
+hasnt "never the engine's own ublk device" "$WORK/plan.args" "ublkb64"
+hasnt "never a loop device" "$WORK/plan.args" "loop0"
+has "each with its serial" "$WORK/plan.args" "dev=/dev/vda;serial=SER-vda;"
+check "six drives laid" "/dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/vda /dev/vdb" "$(val STORAGE_DRIVES)"
+hasnt "the engine's log lines are not run as shell" "$WORK/out" "not found"
 
 echo "the layout: the drives of the set this boot serves are this node's"
 reset

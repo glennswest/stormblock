@@ -4524,8 +4524,9 @@ if [ "$BOOT_MODE" = "local" ]; then
         # counts in the choice below.
         return 0
     }
-    drive_serial() { # /sys/block/X -> its serial (device/serial, else VPD page 0x80)
+    drive_serial() { # /sys/block/X -> its serial (device/serial, a virtio disk's serial, else VPD page 0x80)
         _dsr=$(cat "$1/device/serial" 2>/dev/null)
+        [ -n "$_dsr" ] || _dsr=$(cat "$1/serial" 2>/dev/null)
         if [ -z "$_dsr" ] && [ -r "$1/device/vpd_pg80" ]; then
             _dsr=$(tail -c +5 "$1/device/vpd_pg80" 2>/dev/null)
         fi
@@ -4824,7 +4825,8 @@ if [ "$BOOT_MODE" = "local" ]; then
             fi
             echo "$_sfrc" > "$_st_dir/$_sfn.rc"
         } | while IFS= read -r _l; do
-            echo "  $_sfn: $_l"
+            # stormdrive names the drive itself on most lines: one name (#597).
+            case "$_l" in "$_sfn: "*|"$1: "*) echo "  $_l" ;; *) echo "  $_sfn: $_l" ;; esac
             printf '%s\n' "$_l" >> "$_st_dir/$_sfn.log"
         done
     }
@@ -4933,13 +4935,25 @@ if [ "$BOOT_MODE" = "local" ]; then
         [ -n "$_icf" ] && [ -f "$_icf" ] || continue
         if grep -q '^storage:' "$_icf"; then STORAGE_FROM="$_icf"; break; fi
     done
+    storage_disks() { # every whole disk with media, as the inventory lists them (#597)
+        # Not sd_drives (sd and nvme only): `drives: all` is every drive the
+        # survey found - virtio (vd*), xvd, mmcblk as well - and the engine's
+        # plan says of each why it is taken or not.
+        for _d in "$SURVEY_SYS"/*; do
+            _n=${_d##*/}
+            case "$_n" in loop*|ram*|zram*|ublkb*|ublkc*|nbd*|dm-*|md*|sr*|fd*) continue ;; esac
+            [ -e "$_d/device" ] || continue
+            [ "$(cat "$_d/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
+            echo "$_d"
+        done
+    }
     storage_plan() { # -> the engine's plan, as shell; the drives are its arguments
         # Its own positional parameters: /init's are not touched.
         set --
         [ -n "$STORAGE_FORCE" ] && set -- --force
         _st_over=""
         [ -n "${INSTALL_OVER:-}" ] && _st_over=$(disk_of "$INSTALL_OVER")
-        for _d in $(sd_drives); do
+        for _d in $(storage_disks); do
             _dev="/dev/${_d##*/}"
             _s=$(shelf_of "$_d"); _sid=${_s%%|*}; _s=${_s#*|}; _spos=${_s%%|*}; _s=${_s#*|}; _sbay=${_s%%|*}
             _p=$(readlink -f "$_d" 2>/dev/null); _usb=0
@@ -4992,10 +5006,13 @@ STEOF
         _st_pass=1
         while :; do
             STORAGE_UNREADY=""
-            if _st_out=$(storage_plan 2>&1); then
+            # Only its stdout is shell: the engine's log lines (stderr) are
+            # kept apart, never eval'd (#597: "/init: eval: … not found").
+            mkdir -p "$_st_dir"
+            if _st_out=$(storage_plan 2>"$_st_dir/plan.err"); then
                 eval "$_st_out"
             else
-                STORAGE_STOP="the engine could not plan storage: ($(printf '%s\n' "$_st_out" | tail -n 1))"
+                STORAGE_STOP="the engine could not plan storage: ($( { printf '%s\n' "$_st_out"; cat "$_st_dir/plan.err"; } | grep . | tail -n 1))"
             fi
             [ -z "$STORAGE_STOP" ] && [ -n "$STORAGE_UNREADY" ] || break
             if [ "$_st_pass" != 1 ]; then
