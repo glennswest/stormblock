@@ -97,7 +97,8 @@ Owner: "You need to watch for hot plug even after boot." Plan:
   "Drives that arrive later". `check.sh` green on e9820595 (1435 tests).
 - D (the join) filed as #599: format + lay + RaidSpares (needs stormcos RBAC for
   stormblock to write raidspares) + system leg; `[storage] hotplug` policy there.
-- [ ] merge to main, v24.7.0, stage; proof on pvetest3 (laid by storage:):
+- [x] merged (ff946f1c), v24.7.0 (182915f8), musl release build prints 24.7.0, stage requested (build 0980fcd98452).
+- [ ] waits `--after-install stormblock>=182915f8@pvetest3`; proof on pvetest3 (laid by storage:):
   health `storage_layout` `"drives_watched":"uevents"`, the install's
   `arrived`/`not_laid`.
 
