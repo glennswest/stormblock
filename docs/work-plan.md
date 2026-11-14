@@ -3831,7 +3831,7 @@ MicroCloud blades on `boothost/S11075924402016` (#249). Asked on #202
 (needs-owner): A as proposed, B #204's rule (an operator-set alias only;
 recommended), C a named host only while it has no MAC alias. Nothing built.
 
-### /serve/v1 exports bound to one host (2026-10-08, #212) — FLIPPED 2026-11-07 (owner: A, 2026-10-09); reopened 2026-11-10 for an observable proof — DONE (v24.2.0); waits on 24.2.0 on a test machine (stormcentral#1344)
+### /serve/v1 exports bound to one host (2026-10-08, #212) — FLIPPED 2026-11-07 (owner: A, 2026-10-09); reopened 2026-11-10 for an observable proof — DONE (v24.2.0); CLOSED 2026-11-14: pvetest1/2 on 24.5.0 (114e44c) answer `"allow_any_host":false` on `/serve/v1/health`, no #212 WARN in their install consoles; shipped with that proof
 
 Each serve export is its own subsystem on its own portal, `HostAccess::Any`.
 The one caller left is stormblock-registry (golden builds, media clones); it
