@@ -2,6 +2,16 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #605 — the node-data set's ublk id collides with the engine's (2026-11-14, P0)
+
+12.84 on pvetest3: the set is served at /dev/ublkb64 (STORAGE_UBLK_ID default),
+and boot-local numbers the release's ~81 volumes 0..80, so stormcluster got 64
+too. /init's MOUNT_MAP is positional, so the engine cannot skip ids.
+Plan: serve the set at a fixed id far above any the engine numbers
+(65535; the kernel allows ids below 1<<20) in both /init places (lay, plain-boot
+serve); boot-local refuses to start when an id it would create is already live,
+naming it (a collision is a failed boot said plainly, never a shared device).
+
 ## #603 — C2NR0Q2 cannot boot its own disk (2026-11-14, P1)
 
 Read from the 35 C2NR0Q2 consoles in `/var/lib/stormcentral/console/` (2026-09-24 → 11-14):
