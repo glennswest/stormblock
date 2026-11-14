@@ -36,6 +36,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.6.0] — 2026-11-14
+
+### Added
+- #587: the open `GET /api/v1/health` carries `metadata`: `{"ok", "stale", "short"}`, whether the volume record is kept, by the same rule as the token-guarded `/api/v1/slabs/durability` (a stale slab is named and not counted against `ok`). Read without waiting on the volume manager, else the last reading.
+
 ## [v24.5.2] — 2026-11-14
 
 ### Fixed
