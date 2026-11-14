@@ -110,12 +110,12 @@ lay() { # python expression over the report as L -> its value
     python3 -c "import json,sys; L=json.load(open(sys.argv[1])); print($1)" "$WORK/layout.json" 2>&1
 }
 
-echo "every drive's member: served at id 64, the partner looked for on it"
+echo "every drive's member: served at id 65535, the partner looked for on it"
 reset
 for d in sda sdb sdc sdd; do member "$d" "${d}3" stormblock-raid STORMRD1; member "$d" "${d}2" stormblock-system -; done
 run
 check "served" "$WORK/dev/ublkb65535" "$(val SERVED)"
-has "at id 64" "$WORK/serve.args" "^64$"
+has "at id 65535" "$WORK/serve.args" "^65535$"
 check "four members" "4" "$(grep -c "^$WORK/dev/sd.3$" "$WORK/serve.args")"
 hasnt "no system region" "$WORK/serve.args" "sda2"
 has "the set named to partner" "$WORK/partner.args" "^--also$"
