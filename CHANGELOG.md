@@ -37,6 +37,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.7.0] — 2026-11-14
+
+### Added
+- #593: drives that arrive after the storage inventory. The kernel's uevents are read directly (no udev): `stormblock hotplug watch` gives a line per whole drive added or removed, with serial, WWID, controller and bay. `/init` runs it from the inventory to switch_root, says each on the console, and plans again over arrivals just before the lay: a drive the new plan takes is formatted and laid with the rest, one it cannot take is said with why; the install's report has `arrived` and `not_laid`. The running engine logs every add and remove at WARN and, on a node laid by `storage:`, offers a blank or not-ready drive outside the layout as `replacement`, `spare` or `system_leg` (`candidates`, `drive_events`, `drives_watched` in `/api/v1/storage/layout` and health). Joining one is #599.
+
 ## [v24.6.0] — 2026-11-14
 
 ### Added
