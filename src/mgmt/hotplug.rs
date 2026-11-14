@@ -32,7 +32,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::drive::uevent::{Action, DriveEvent};
+use crate::drive::uevent::DriveEvent;
 
 /// How many drive events are kept.
 pub const KEEP: usize = 64;
@@ -267,6 +267,7 @@ pub fn spawn(_state: std::sync::Arc<crate::mgmt::AppState>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drive::uevent::Action;
     use serde_json::json;
 
     fn drive(dev: &str, ready: bool) -> DriveEvent {
