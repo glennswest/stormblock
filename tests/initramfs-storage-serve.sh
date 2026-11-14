@@ -2,7 +2,7 @@
 # The node-data set served on every boot (#573): a node laid by storage:
 # keeps its data half on a stormraid set over every drive's `stormblock-raid`
 # partition, and /init serves it before the probe looks for the node's
-# halves, so the system half on a leg finds its data half on /dev/ublkb64.
+# halves, so the system half on a leg finds its data half on /dev/ublkb65535.
 # A member missing still boots (degraded, said loudly); a set that does not
 # open is said and the boot goes on without it.
 #
@@ -68,7 +68,7 @@ if [ "\$2" = list ]; then
     exit 0
 fi
 printf '%s\n' "\$@" > "$WORK/partner.args"
-echo "/dev/ublkb64"
+echo "/dev/ublkb65535"
 EOF
 chmod +x "$WORK/stormblock"
 
@@ -114,12 +114,12 @@ echo "every drive's member: served at id 64, the partner looked for on it"
 reset
 for d in sda sdb sdc sdd; do member "$d" "${d}3" stormblock-raid STORMRD1; member "$d" "${d}2" stormblock-system -; done
 run
-check "served" "$WORK/dev/ublkb64" "$(val SERVED)"
+check "served" "$WORK/dev/ublkb65535" "$(val SERVED)"
 has "at id 64" "$WORK/serve.args" "^64$"
 check "four members" "4" "$(grep -c "^$WORK/dev/sd.3$" "$WORK/serve.args")"
 hasnt "no system region" "$WORK/serve.args" "sda2"
 has "the set named to partner" "$WORK/partner.args" "^--also$"
-has "as the served device" "$WORK/partner.args" "^$WORK/dev/ublkb64$"
+has "as the served device" "$WORK/partner.args" "^$WORK/dev/ublkb65535$"
 hasnt "not degraded" "$WORK/out" "DEGRADED"
 check "let go of" "" "$(val AFTER)"
 
@@ -136,7 +136,7 @@ check "from" "boot" "$(lay 'L["from"]')"
 check "drives" "4" "$(lay 'len(L["drives"])')"
 check "no format on a later boot" "None" "$(lay 'L["drives"][0]["format"]')"
 check "legs" "['$WORK/dev/sda', '$WORK/dev/sdb', '$WORK/dev/sdc']" "$(lay 'L["system_legs"]')"
-check "set device" "$WORK/dev/ublkb64" "$(lay 'L["set"]["device"]')"
+check "set device" "$WORK/dev/ublkb65535" "$(lay 'L["set"]["device"]')"
 check "set state" "optimal" "$(lay 'L["set"]["state"]')"
 check "parity" "1" "$(lay 'L["set"]["parity"]')"
 check "slots" "4" "$(lay 'L["set"]["slots"]')"
@@ -157,7 +157,7 @@ echo "formatted none auto" > "$WORK/run/storage-format/sda.fmt"
 echo "already type1" > "$WORK/run/storage-format/sdb.fmt"
 touch "$WORK/status.spare"
 run "SLAB=http://forge/x" "SYSTEM_DISK=/dev/sda" "STORAGE_DRIVES='/dev/sda /dev/sdb'" \
-    "STORAGE_MEMBERS='/dev/sda3 /dev/sdb3'" "STORAGE_SET=/dev/ublkb64" "STORAGE_SYSTEM='/dev/sda /dev/sdb'" \
+    "STORAGE_MEMBERS='/dev/sda3 /dev/sdb3'" "STORAGE_SET=/dev/ublkb65535" "STORAGE_SYSTEM='/dev/sda /dev/sdb'" \
     "STORAGE_BLOCK_SIZE=4096" "STORAGE_PROTECTION=type1" "STORAGE_METHOD=auto" "STORAGE_PARITY=1" \
     "STORAGE_BOOT_AREA=1073741824" "STORAGE_SYSTEM_REGION=34359738368" "STORAGE_REGION=9000000000000"
 check "from" "install" "$(lay 'L["from"]')"
@@ -166,7 +166,7 @@ check "already" "already type1 None" "$(lay '" ".join(str(L["drives"][1][k]) for
 check "asked" "4096 type1 auto" "$(lay '" ".join(str(L["asked"][k]) for k in ("block_size","protection","method"))')"
 check "regions" "34359738368" "$(lay 'L["regions"]["system"]')"
 check "legs" "['/dev/sda', '/dev/sdb']" "$(lay 'L["system_legs"]')"
-check "set" "/dev/ublkb64 optimal 1" "$(lay '" ".join(str(L["set"][k]) for k in ("device","state","parity"))')"
+check "set" "/dev/ublkb65535 optimal 1" "$(lay '" ".join(str(L["set"][k]) for k in ("device","state","parity"))')"
 
 echo "the install's report: drives that arrived, and what the inventory had that was not laid (#593)"
 reset
@@ -176,7 +176,7 @@ printf '%s\n' "add /dev/sdb serial=S2 wwid=naa.2 controller=0000:03:00.0 bay=Slo
     "add /dev/sde serial=S5 wwid=- controller=0000:03:00.0 bay=5 bytes=10 ready=1 at=1700000100" \
     "remove /dev/sdf serial=S6 wwid=- controller=- bay=- bytes=0 ready=0 at=1700000200" > "$WORK/run/hotplug.log"
 run "SLAB=http://forge/x" "SYSTEM_DISK=/dev/sda" "STORAGE_DRIVES='/dev/sda /dev/sdb'" \
-    "STORAGE_MEMBERS='/dev/sda3 /dev/sdb3'" "STORAGE_SET=/dev/ublkb64" "STORAGE_SYSTEM='/dev/sda /dev/sdb'" \
+    "STORAGE_MEMBERS='/dev/sda3 /dev/sdb3'" "STORAGE_SET=/dev/ublkb65535" "STORAGE_SYSTEM='/dev/sda /dev/sdb'" \
     "HOTPLUG_LOG=$WORK/run/hotplug.log" "INV_NAMES='/dev/sda /dev/sdc /dev/sg4'" "STORAGE_RENAMED='/dev/sg4=/dev/sdb'" \
     "storage_subst() { _r=''; for _w in \$1; do for _p in \$STORAGE_RENAMED; do [ \"\${_p%%=*}\" = \"\$_w\" ] && _w=\"\${_p#*=}\"; done; _r=\"\$_r \$_w\"; done; echo \"\${_r# }\"; }"
 check "two arrived (a remove is not an arrival)" "2" "$(lay 'len(L["arrived"])')"
@@ -213,7 +213,7 @@ reset
 for d in sda sdb sdc; do member "$d" "${d}3" stormblock-raid STORMRD1; done
 echo "stormraid: slot 3 (abcd) is missing" > "$WORK/serve.say"
 run
-check "served" "$WORK/dev/ublkb64" "$(val SERVED)"
+check "served" "$WORK/dev/ublkb65535" "$(val SERVED)"
 has "DEGRADED" "$WORK/out" "NODE-DATA SET DEGRADED"
 has "names the slot" "$WORK/out" "slot 3 (abcd) is missing"
 check "reported degraded" "degraded" "$(lay 'L["set"]["state"]')"

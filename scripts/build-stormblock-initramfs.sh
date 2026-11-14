@@ -1211,7 +1211,8 @@ STORAGE_PLAIN_DISKS=""
 storage_serve() {
     _ss_sys="${STORM_SYS_BLOCK:-/sys/block}"
     _ss_dev="${STORAGE_DEV:-/dev}"
-    _ss_id="${STORAGE_UBLK_ID:-64}"
+    # Far above every id the engine numbers (#605): see the lay below.
+    _ss_id="${STORAGE_UBLK_ID:-65535}"
     _ss_m=""
     for _ss_ev in "$_ss_sys"/*/*/uevent; do
         [ -f "$_ss_ev" ] || continue
@@ -5914,12 +5915,16 @@ $1|$_svp|$3"
     # the smallest drive's size; the system region a leg on the first
     # system_mirror drives; the data regions one stormraid set (parity 1 by
     # default: four drives are three data and one parity). The set is served
-    # at /dev/ublkb$STORAGE_UBLK_ID, clear of the engine's own devices
-    # (root is /dev/ublkb0, and the rest follow it), and boot-local lays the
-    # node's data half on it and its system half on the first leg.
+    # at /dev/ublkb$STORAGE_UBLK_ID, clear of the engine's own devices, and
+    # boot-local lays the node's data half on it and its system half on the
+    # first leg. The engine numbers its devices 0, 1, 2, ... one a volume of
+    # the release, in the order /init mounts them (MOUNT_MAP), so it cannot
+    # skip one: 64 was reached by 12.84's 81 volumes and stormcluster got the
+    # set's device (#605). 65535 is far above any release (the kernel takes
+    # ids below 1<<20), and boot-local refuses an id already live.
     # Destructive: only over drives this boot formatted, with the wipe word,
     # on a fresh install, or over drives that carry nothing.
-    STORAGE_UBLK_ID=${STORAGE_UBLK_ID:-64}
+    STORAGE_UBLK_ID=${STORAGE_UBLK_ID:-65535}
     STORAGE_DEV=${STORAGE_DEV:-/dev}
     STORAGE_MEMBERS=""; STORAGE_SET=""
     if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "${STORAGE_KEPT:-}" ]; then

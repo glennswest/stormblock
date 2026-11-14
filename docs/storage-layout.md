@@ -131,15 +131,18 @@ After the format, every drive taken gets a fresh GPT: a boot area, a
 data region, every region one size on every drive (the smallest drive's).
 With more than one drive the data regions become one stormraid set
 (`stormraid create --role node-data --parity P --force`), served at
-`/dev/ublkb64`; the node's data half is laid on it, and its system half on
-the first leg. Same rule as the format: only over drives this boot formatted,
+`/dev/ublkb65535`; the node's data half is laid on it, and its system half on
+the first leg. The id is far above any the engine numbers (#605): boot-local
+numbers the release's volumes 0, 1, 2, … in the order `/init` mounts them, and
+12.84's 81 volumes reached the old 64. boot-local refuses to start, naming the
+device, when an id it would create is already live. Same rule as the format: only over drives this boot formatted,
 with the wipe word, on a fresh install, or over drives that carry nothing.
 
 ## Every boot: the set served
 
 Before the probe looks for the node's halves, `/init` serves every
 `stormblock-raid` partition carrying a stormraid superblock as the set at
-`/dev/ublkb64` (`stormraid serve --id 64`). A member missing opens it
+`/dev/ublkb65535` (`stormraid serve --id 65535`). A member missing opens it
 degraded (`NODE-DATA SET DEGRADED`, the slot named); a set that does not open
 is said and the boot goes on without it.
 
@@ -179,7 +182,7 @@ drives (`"from": "install"`) and on every boot that serves the node-data set
   "asked": {"block_size": 4096, "protection": "type1", "parity": 1, "spares": 0},
   "regions": {"data_bytes": 0, "system_bytes": 0},
   "system_legs": ["/dev/sda", "/dev/sdb", "/dev/sdc", "/dev/sdd"],
-  "set": {"device": "/dev/ublkb64", "state": "optimal", "parity": 1, "slots": 4,
+  "set": {"device": "/dev/ublkb65535", "state": "optimal", "parity": 1, "slots": 4,
           "spares": 0, "members": ["/dev/sda3", "..."], "missing": []}
 }
 ```

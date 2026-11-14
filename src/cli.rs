@@ -745,7 +745,7 @@ enum SlabAction {
         #[arg(long = "among")]
         among: Vec<String>,
         /// Devices to look at besides those (#573: the node-data set a
-        /// `storage:` layout serves, `/dev/ublkb64`, which is no disk)
+        /// `storage:` layout serves, `/dev/ublkb65535`, which is no disk)
         #[arg(long = "also")]
         also: Vec<String>,
         /// The sysfs root the machine's disks are listed under
@@ -10797,6 +10797,22 @@ async fn handle_boot_local(
         let (done_tx, mut done_rx) =
             tokio::sync::mpsc::unbounded_channel::<(u32, Result<(), String>)>();
         let total = exports.len();
+        // An id already live is another's device (#605: the node-data set at
+        // /dev/ublkb64, and stormcluster numbered 64 too: the data half
+        // unusable, ENOSPC, no install report). /init mounts the exports by
+        // their index, so none can move: refused whole, named.
+        let wanted: Vec<u32> = exports.iter().map(|(d, _, _)| *d).collect();
+        let live = crate::drive::ublk::devices().unwrap_or_default();
+        let taken = crate::drive::ublk::clashes(&wanted, &live);
+        if !taken.is_empty() {
+            let names: Vec<String> = exports
+                .iter()
+                .filter(|(d, _, _)| taken.contains(d))
+                .map(|(d, n, _)| format!("/dev/ublkb{d} ({n})"))
+                .collect();
+            tracing::error!("FATAL: ublk id(s) already in use by another device: {} (#605)", names.join(", "));
+            anyhow::bail!("ublk id(s) already in use by another device: {} (#605)", names.join(", "));
+        }
         // Every export at once holds its rings, eventfds and runtime (#522:
         // server8's 85 ran out at ~65 and 26 volumes never appeared, with
         // nothing on the console). Counted first, refused whole, named.

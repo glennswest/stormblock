@@ -1525,6 +1525,16 @@ pub fn server_pid(dev_id: u32) -> DriveResult<Option<i32>> {
     }
 }
 
+/// The ids among `wanted` that are in `live` (#605): a device someone else
+/// already made — the node-data set /init serves at a fixed id — which a
+/// fresh export of the same id would collide with.
+pub fn clashes(wanted: &[u32], live: &[u32]) -> Vec<u32> {
+    let mut c: Vec<u32> = wanted.iter().copied().filter(|w| live.contains(w)).collect();
+    c.sort_unstable();
+    c.dedup();
+    c
+}
+
 /// Ask whoever is serving these devices to stand down, and wait until it has.
 ///
 /// **This is the handover, not a hunt.** The kernel will not run two servers
@@ -2775,6 +2785,15 @@ fn submit_io_fetch(
 
 #[cfg(test)]
 mod tests {
+    /// 12.84 on pvetest3 (#605): the set at 64, the engine's 81 exports 0..80.
+    #[test]
+    fn an_export_on_a_live_id_is_named() {
+        let wanted: Vec<u32> = (0..81).collect();
+        assert_eq!(super::clashes(&wanted, &[64]), vec![64]);
+        assert!(super::clashes(&wanted, &[65535]).is_empty());
+        assert!(super::clashes(&[], &[0, 1]).is_empty());
+    }
+
     /// A worker waiting for a task on the runtime that waits for the worker
     /// (#538): on one thread a blocking join is the 5 s of every handover.
     #[test]

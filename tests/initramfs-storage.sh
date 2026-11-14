@@ -208,7 +208,7 @@ reset() {
            "$WORK/install-config.yaml" "$WORK/dev" "$WORK"/lay.args "$WORK"/lay.rc \
            "$WORK"/raid.* "$WORK/serve.args" "$WORK"/slow.* "$WORK/report.args" \
            "$WORK"/pt.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" \
-           "${WORK:?}/plan.stderr" "${WORK:?}/sys/vda" "${WORK:?}/sys/vdb" "${WORK:?}/sys/ublkb64" "${WORK:?}/sys/loop0"
+           "${WORK:?}/plan.stderr" "${WORK:?}/sys/vda" "${WORK:?}/sys/vdb" "${WORK:?}/sys/ublkb65535" "${WORK:?}/sys/loop0"
     for d in sda sdb sdc sdd; do mkdisk "$d"; done
 }
 
@@ -345,7 +345,7 @@ has "another drive's slabs still said" "$WORK/plan.args" "dev=/dev/sdb;.*carries
 echo "the layout: every drive the inventory lists reaches the plan, virtio too (#597)"
 reset
 for d in vda vdb; do mkdisk "$d"; echo "VSER-$d" > "$SYS/$d/serial"; done
-mkdisk ublkb64
+mkdisk ublkb65535
 mkdir -p "$SYS/loop0"; echo 100 > "$SYS/loop0/size"
 printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
 printf "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/vda /dev/vdb'\nSTORAGE_SYSTEM='/dev/sda'\n" > "$WORK/plan.out"
@@ -354,7 +354,7 @@ layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml"
 has "vda told to the engine" "$WORK/plan.args" "^dev=/dev/vda;"
 has "vdb too" "$WORK/plan.args" "^dev=/dev/vdb;"
 has "sda still" "$WORK/plan.args" "^dev=/dev/sda;"
-hasnt "never the engine's own ublk device" "$WORK/plan.args" "ublkb64"
+hasnt "never the engine's own ublk device" "$WORK/plan.args" "ublkb65535"
 hasnt "never a loop device" "$WORK/plan.args" "loop0"
 has "each with its serial" "$WORK/plan.args" "dev=/dev/vda;serial=SER-vda;"
 check "six drives laid" "/dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/vda /dev/vdb" "$(val STORAGE_DRIVES)"
@@ -473,7 +473,7 @@ printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
 mkdir -p "$WORK/sg/sg1"
 printf '/dev/sg1 %s\n' "$WORK/sg/sg1" > "$WORK/unready"
 printf "STORAGE_DRIVES='/dev/sda /dev/sdb'\nSTORAGE_SYSTEM='/dev/sda /dev/sdb'\n" > "$WORK/plan.out"
-layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'STORAGE_SERVED=/dev/ublkb64'
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'STORAGE_SERVED=/dev/ublkb65535'
 hasnt "not told to the engine" "$WORK/plan.args" "sg1"
 has "warned" "$WORK/out" "WARNING: storage: /dev/sg1 not ready (no readable format) and this node's set is served"
 check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
@@ -562,7 +562,7 @@ check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
 echo "the format: a keep-data reinstall over this node's layout keeps it"
 reset
 for d in sda sdb; do mkdir -p "$SYS/$d/queue"; echo 4096 > "$SYS/$d/queue/logical_block_size"; echo "superblock: data slab" > "$WORK/slabs.$d"; done
-format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb64 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
 has "KEEP said" "$WORK/out" "KEEP: /dev/sda /dev/sdb carry this node's layout"
 hasnt "no STOP" "$WORK/out" "STOP"
 check "nothing formatted" "" "$(val FORMATTED)"
@@ -573,7 +573,7 @@ echo "the format: a keep-data reinstall over another block size stops"
 reset
 echo 512 > "$SYS/sdb/queue/logical_block_size"
 echo "superblock: data slab" > "$WORK/slabs.sda"
-format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb64 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
 has "what differs" "$WORK/out" "differs from what the drives carry: /dev/sdb(512-byte blocks)"
 has "STOP" "$WORK/out" "STOP: storage:"
 echo 4096 > "$SYS/sdb/queue/logical_block_size"
@@ -581,13 +581,13 @@ echo 4096 > "$SYS/sdb/queue/logical_block_size"
 echo "the format: a keep-data reinstall taking a drive outside the set stops"
 reset
 echo "superblock: data slab" > "$WORK/slabs.sda"
-format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb64 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdc'"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH=""' "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdc'"
 has "what differs" "$WORK/out" "/dev/sdb(not in the node's set) /dev/sdc(in the set, not taken)"
 has "STOP" "$WORK/out" "STOP: storage:"
 
 echo "the format: the wipe word relays even this node's layout"
 reset
-format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH="" STORAGE_FORCE=1' "STORAGE_SERVED=/dev/ublkb64 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH="" STORAGE_FORCE=1' "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'"
 hasnt "no KEEP" "$WORK/out" "KEEP:"
 check "both formatted" "/dev/sda /dev/sdb" "$(val FORMATTED)"
 
@@ -637,7 +637,7 @@ has "over the old bytes" "$WORK/raid.args" "^--force$"
 check "four members" "4" "$(grep -c "^$WORK/dev/sd.3$" "$WORK/raid.args")"
 hasnt "no spare" "$WORK/raid.args" "^--spare$"
 has "served at id 64" "$WORK/serve.args" "^64$"
-check "the data half on the set" "$WORK/dev/ublkb64" "$(val LOCAL_DISK)"
+check "the data half on the set" "$WORK/dev/ublkb65535" "$(val LOCAL_DISK)"
 check "the system half on the first leg" "/dev/sda" "$(val SYSTEM_DISK)"
 check "known by its identity" "ID-sda" "$(val SYSTEM_DISK_ID)"
 check "no pair" "" "$(val PAIR_DISK)"

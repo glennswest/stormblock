@@ -289,7 +289,7 @@ mod tests {
             "from": "boot",
             "drives": [{"device": "/dev/sda"}, {"device": "/dev/sdb"}],
             "system_legs": ["/dev/sda", "/dev/sdb"],
-            "set": {"device": "/dev/ublkb64", "state": if missing { "degraded" } else { "optimal" },
+            "set": {"device": "/dev/ublkb65535", "state": if missing { "degraded" } else { "optimal" },
                     "members": ["/dev/sda3", "/dev/sdb3"],
                     "missing": if missing { json!(["slot 2 (abcd) is missing"]) } else { json!([]) }}
         })

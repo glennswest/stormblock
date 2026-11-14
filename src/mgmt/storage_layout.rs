@@ -143,7 +143,7 @@ mod tests {
                 {"device": "/dev/sdb", "format": "already", "protection": "none", "method": null}
             ],
             "system_legs": ["/dev/sda", "/dev/sdb"],
-            "set": {"device": "/dev/ublkb64", "state": "optimal", "parity": 1, "slots": 2, "spares": 0,
+            "set": {"device": "/dev/ublkb65535", "state": "optimal", "parity": 1, "slots": 2, "spares": 0,
                     "members": ["/dev/sda3", "/dev/sdb3"], "missing": []}
         })
     }
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn every_leg_open_and_the_set_whole_is_ok() {
-        let r = slabs(vec![item("system", "/dev/sda2"), item("system", "/dev/sdb@1048576"), item("data", "/dev/ublkb64")]);
+        let r = slabs(vec![item("system", "/dev/sda2"), item("system", "/dev/sdb@1048576"), item("data", "/dev/ublkb65535")]);
         let v = annotate(laid(), Some(&r), &live);
         assert_eq!(v["state"], "ok");
         assert_eq!(v["legs_present"], json!(["/dev/sda", "/dev/sdb"]));
