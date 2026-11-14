@@ -102,6 +102,22 @@ struct Cli {
 }
 
 #[derive(clap::Subcommand)]
+enum HotplugAction {
+    /// Watch: `add|remove DEV serial=… wwid=… controller=… bay=… bytes=…
+    /// ready=0|1 at=EPOCH`, a line each, appended to `--out` (and on stdout
+    /// without it); `--say` also tells each on stderr, for the console.
+    Watch {
+        #[arg(long)]
+        out: Option<String>,
+        #[arg(long)]
+        say: bool,
+        /// Where sysfs is (tests).
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
 enum SubCommand {
     /// Slab extent store management
     Slab {
@@ -444,6 +460,15 @@ enum SubCommand {
         /// How long to wait for answers, in milliseconds.
         #[arg(long, default_value_t = 2000)]
         wait_ms: u64,
+    },
+    /// Drives that come and go after the storage inventory (#593): one line
+    /// per whole drive added or removed, from the kernel's uevents (no udev),
+    /// each with its serial, WWID, controller and bay. `/init` runs it from
+    /// the inventory until the layout is written, and lays a drive that
+    /// arrived in time. Runs until killed.
+    Hotplug {
+        #[command(subcommand)]
+        action: HotplugAction,
     },
     /// Tell the appliance which long step the install under way is in, and
     /// how far it got (#573): `/init` says `formatting` once a minute while
@@ -1313,6 +1338,9 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubCommand::Ext4Repair { device } => {
                 std::process::exit(ext4_repair(device).await);
+            }
+            SubCommand::Hotplug { action: HotplugAction::Watch { out, say, sys } } => {
+                return handle_hotplug_watch(out.as_deref(), *say, sys);
             }
             SubCommand::Discover { wait_ms } => {
                 let got = crate::mgmt::finder::discover(std::time::Duration::from_millis(*wait_ms), None)?;
@@ -10070,6 +10098,54 @@ pub(crate) const INSTALL_CONFIG_SOURCE: &str = "/run/stormblock/install-config.s
 
 pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTicket, stage: &str) -> ReportOutcome {
     report_install_stage(ticket, stage, None).await
+}
+
+/// `stormblock hotplug watch` (#593): drive events from the kernel's uevents,
+/// a line each, until killed. A lost burst (ENOBUFS) is made up by a rescan.
+#[cfg(target_os = "linux")]
+fn handle_hotplug_watch(out: Option<&str>, say: bool, sys: &str) -> anyhow::Result<()> {
+    use std::io::Write;
+    use crate::drive::uevent::{Listener, Sys, Tracker};
+    // Listening before the drives are read: nothing slips between them.
+    let l = Listener::open().map_err(|e| anyhow::anyhow!("hotplug: the kernel's uevents cannot be read: {e}"))?;
+    let mut t = Tracker::new(Sys::new(sys));
+    t.prime();
+    let mut file = match out {
+        Some(p) => Some(std::fs::OpenOptions::new().create(true).append(true).open(p)?),
+        None => None,
+    };
+    let mut tell = |evs: Vec<crate::drive::uevent::DriveEvent>| -> std::io::Result<()> {
+        for d in evs {
+            let line = d.line();
+            match file.as_mut() {
+                Some(f) => {
+                    writeln!(f, "{line}")?;
+                    f.flush()?;
+                }
+                None => println!("{line}"),
+            }
+            if say {
+                eprintln!("storage: {} (#593)", d.said());
+            }
+        }
+        Ok(())
+    };
+    loop {
+        match l.next(std::time::Duration::from_secs(5)) {
+            Ok(Some(ev)) => {
+                let d = t.on(&ev);
+                tell(d.into_iter().collect())?;
+            }
+            Ok(None) => {}
+            Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) => tell(t.rescan())?,
+            Err(e) => anyhow::bail!("hotplug: reading uevents: {e}"),
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn handle_hotplug_watch(_out: Option<&str>, _say: bool, _sys: &str) -> anyhow::Result<()> {
+    anyhow::bail!("hotplug watch: Linux only")
 }
 
 /// `stormblock install-report` (#573): one report of a long install step.

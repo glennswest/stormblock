@@ -30,6 +30,7 @@ pub mod nvmeof_dev;
 pub mod slab;
 pub mod slab_registry;
 pub mod slottable;
+pub mod uevent;
 #[cfg(target_os = "linux")]
 pub mod ublk;
 #[cfg(target_os = "linux")]
