@@ -30,6 +30,14 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.5.0] — 2026-11-13
+
+### Fixed
+- #595: an install with `storage:` formats every drive it takes to the asked block size with PI (forge1: 4096 + PI type 1), the boot drive too, never skipped as already there; fast, else a full FORMAT UNIT to the same format; no type1 → none fallback: a refusal fails the install with the drive's sense. Each drive is checked afterwards (`FORMATTED: … PROT_EN=1 P_TYPE 1`). Drives with no readable format (NOT READY, no block device or 0 bytes) are listed with their WWID, formatted through `/dev/sgN` first, found again by WWID and planned again; `sg` is loaded.
+
+### Added
+- #595: `image storage-plan --drive '…;ready=0'` takes a drive with no readable format; `STORAGE_UNREADY` names those taken. The inventory's drives carry `wwid` and `ready`.
+
 ## [v24.4.1] — 2026-11-13
 
 ### Fixed
