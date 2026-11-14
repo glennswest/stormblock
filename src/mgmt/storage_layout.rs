@@ -36,7 +36,10 @@ pub fn path() -> PathBuf {
 pub fn report(slabs: Option<&SlabReport>) -> Option<Value> {
     let text = std::fs::read_to_string(path()).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
-    Some(annotate(v, slabs, &live_drive))
+    let mut v = annotate(v, slabs, &live_drive);
+    // Drives that came and went, and those offered for the layout (#593).
+    super::hotplug::annotate(&mut v);
+    Some(v)
 }
 
 /// A drive's logical block and PI profile as the kernel has them now.

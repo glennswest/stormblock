@@ -697,6 +697,10 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     missing) and the node-data set's state; `state` `ok` or `degraded`. Also
     `GET /api/v1/storage/layout` (token; 404 on a node with no layout).
     Shape: [docs/storage-layout.md](docs/storage-layout.md#the-layout-reported-step-8).
+    With `drive_events`, `candidates` and `drives_watched` (#593): the drives
+    added and removed while the engine runs, and the blank or not-ready drives
+    outside the layout offered as `replacement`, `spare` or `system_leg`
+    ([hot plug](docs/storage-layout.md#drives-that-arrive-later-hot-plug-593)).
   - `metadata` (#587): whether the volume record is kept, as
     `GET /api/v1/slabs/durability` (token) says it: `ok`, `stale` (slabs whose
     own region is full while the data directory's `metadata.v2` holds the

@@ -196,3 +196,59 @@ did not take shows here), `legs_present` / `legs_missing` (the legs with a
 local system slab open; left out until the first slab report) and `state`:
 `ok`, or `degraded` when the set is not whole or a leg is missing. Health's
 own `status` does not follow it.
+
+## Drives that arrive later: hot plug (#593)
+
+Owner: "You need to watch for hot plug even after boot." No udev runs on
+stormcos, so drives are watched through the kernel's own uevents
+(`NETLINK_KOBJECT_UEVENT`, `src/drive/uevent.rs`): whole block disks, and the
+`sg` node of a disk with no block device (a drive with no readable format,
+#595). Partitions, loop, ram, ublk, nbd, dm, md and optical devices are not
+drives.
+
+**In the initramfs.** `/init` starts `stormblock hotplug watch --out
+/run/stormblock/hotplug.log --say` right after the storage inventory and stops
+it before switch_root. Each drive added or removed is said on the console
+with its serial, controller and bay (`storage: drive added: /dev/sde (serial
+…) on 0000:03:00.0, bay 4, 10000 GB`) and logged one line each:
+
+```
+add /dev/sde serial=S5 wwid=naa.… controller=0000:03:00.0 bay=4 bytes=10000831348736 ready=1 at=1794626959
+```
+
+Just before the lay writes anything (`storage arrivals`), a drive that arrived
+since the inventory makes the engine plan again over every drive. A drive the
+new plan takes is formatted like the rest (the same go-ahead: the wipe word,
+a fresh install, or a drive that holds nothing) and laid with them:
+`storage: /dev/sde taken into the layout: …`. Drives still arriving during that
+format are planned in the next round, up to `STORAGE_ARRIVAL_ROUNDS` (3).
+After that they are left to the running node. A new plan that stops, or one
+that takes a drive holding something without the wipe word, is not used: the
+layout goes on with the drives it had, and the arrival is said with why.
+
+The install's report carries `arrived` (each with `device`, `serial`, `wwid`,
+`controller`, `bay`, `at` and whether it was `laid`) and `not_laid` (drives
+the inventory saw that the layout does not take), so the inventory and the
+layout never differ in silence. A drive that arrived and was not laid is said
+on the console as the running node's.
+
+**On the running node.** The engine watches the same uevents for as long as
+it runs (`src/mgmt/hotplug.rs`; read from sysfs every 30 s when netlink
+cannot be read; `STORMBLOCK_NO_HOTPLUG` turns it off). Every add and remove
+is logged at WARN with the device, serial, WWID, controller and bay, so it
+reaches the console and the journal. On a node laid by `storage:`, a drive
+that is not in the layout, carries no slab this engine has open, and holds
+nothing (its first and last MiB zeros) or answers with no readable format is
+a **candidate**, said once (`… is blank and not in this node's layout:
+offered as replacement, system_leg`). Each is offered as:
+
+- `replacement` when the node-data set misses a member (first);
+- `spare` when the set is whole;
+- `system_leg`, a system mirror leg.
+
+`GET /api/v1/storage/layout` and health's `storage_layout` carry
+`drive_events` (the last 64, newest last), `candidates` (device, serial,
+WWID, controller, bay, bytes, `holds`: `blank` or `not_ready`, `offered`) and
+`drives_watched` (`uevents` or `sysfs`). Nothing is formatted or joined by
+the engine: a drive that holds anything is never a candidate, and taking one
+is a person's call (#154 decision 3: no auto format).

@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod drive_offer;
+pub mod hotplug;
 pub mod auth;
 pub mod kubeauth;
 pub mod capacity;
@@ -854,6 +855,11 @@ async fn serve_connection<IO>(
 
 /// Start the management REST API server.
 pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()> {
+    // Drives that come and go while the engine runs (#593): logged, and on a
+    // node laid by storage: offered for its layout.
+    if std::env::var_os("STORMBLOCK_NO_HOTPLUG").is_none() {
+        hotplug::spawn(state.clone());
+    }
     // Delete the clones #55 kept standing by (#137). A claim mints inline
     // now, and a volume nobody asked for is a volume nobody can account for.
     {
