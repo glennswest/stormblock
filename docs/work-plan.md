@@ -2,6 +2,30 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #595 — every drive storage: takes formatted 4096 + PI, NOT READY ones included (2026-11-13, P0)
+
+forge1's three SAS drives were left unformatted by the Nov 7 format (refused
+at 4096, fell back to 512 + PI): they answer NOT READY / medium format
+corrupted, have no block device (or one of 0 bytes), and the install never
+saw them. Owner (#595 comments): format **all** drives storage: takes, to
+4096 **with PI** (the config's protection, type1 on forge1), never 512+PI,
+never 4096 without PI; a refusal fails the install loudly with the sense.
+
+- **Inventory**: type-0 SCSI disks with no block device or 0 bytes listed as
+  not ready, with WWID (VPD 0x83 via sysfs `wwid`); `ready`/`wwid` in the JSON.
+  `sg` loaded so an sd-less drive has a node.
+- **Plan** (`image storage-plan`): `ready=0` drives taken (`STORAGE_UNREADY`),
+  no size until formatted.
+- **Layout block**: not-ready drives the plan takes are formatted first (they
+  hold nothing readable) when no node-data set is served or with the wipe
+  word; each found again by WWID as its new sdX; then planned again with sizes.
+- **Format block**: every drive formatted (fast, else full), none skipped as
+  "already"; no type1 -> none fallback; after it the kernel must read the
+  drive at the block size with `protection_type` = the PI asked
+  (READ CAPACITY 16), said per drive, else FATAL.
+- [ ] code + tests/initramfs-storage.sh, storage.rs tests
+- [ ] check.sh green, release, image, shipped with a forge1 console proof
+
 ## #592 — the storage inventory waits for every SAS drive (2026-11-13, P0)
 
 forge1's mpt3sas showed sda only; the wait ended at the first drive, so the
