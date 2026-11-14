@@ -15,7 +15,8 @@ stormdrive prefix the drive).
 - [x] plan: a removable, USB or 0-byte drive left out under `all` is named.
 - [x] the plan's stderr kept apart (layout block; #593's arrivals block on wip/ still to change).
 - [x] one prefix on a format line (2c2f870c). The doubled `format:` in the install log is stormcentral#1400.
-- [ ] check.sh, release, stage, shipped (proof: pvetest3's `disk laid`: 4 legs, set of 4).
+- [x] `sc-build 'sh check.sh'` green on 2c2f870c (1425 tests, every initramfs test, clippy); v24.5.1 (ab53545a), locked musl release build green; stage requested (build c203e415d32e, stormcos b40ffabd).
+- [ ] waits `--after-install stormblock>=ab53545a@pvetest3`; then check its console: `STORAGE: 4 drives`, `a system leg on 4`, `RAID: node-data over` 4 members parity 1, no `eval: … not found`, one `sda: formatted` (no `sda: sda:`); then close #597. A `shipped --proof` names no machine, and only pvetest3 has storage: with 4 disks.
 
 ## #593 — drives that arrive after the inventory: installer and running node act on hot plug (2026-11-13, P1)
 
