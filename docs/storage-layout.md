@@ -101,6 +101,19 @@ slabs or a foreign table stops, names the drives and what they hold, and
 writes nothing (STORAGE-LAYOUT.md: a layout change is a destructive verb,
 never automatic).
 
+**`storage:` is applied on an install only** (#598). forge stages the host's
+install-config on every claim, so an ordinary boot (a reboot, a power cut)
+has the section too. `/init` plans and lays drives only when the appliance
+asked for an install (`/run/stormblock/install.json`), when the probe rules
+the disk installed over, or when the boot media hands down its own
+install-config. Any other boot says `storage: … this boot is no install: the
+drives are booted as laid, none is selected` and boots what the install
+laid: the set, the legs, or with no set (one drive, `data_raid: none`) the
+plain data region, which `storage serve` names to `slab partner` beside the
+set (`storage: /dev/sda3 is this node's data region, no set`). On an install,
+a drive of the served set or carrying this node's plain data region is this
+node's own and is never refused as "carries stormblock slabs".
+
 **A keep-data reinstall keeps the layout it finds** (STORAGE-LAYOUT.md: "a
 keep-data reinstall never relays a drive"). When the set this boot serves is
 made of exactly the drives `storage:` takes, and each is already at the asked

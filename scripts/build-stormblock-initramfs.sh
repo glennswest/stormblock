@@ -1203,6 +1203,11 @@ STORAGE_SERVE_PID=""
 STORAGE_MEMBER_DISKS=""
 STORAGE_SERVE_MEMBERS=""
 STORAGE_SET_STATE=""
+# A layout with no set (one drive, or data_raid: none) keeps the data slab on
+# the plain region (#598): no superblock, a data slab. It is named to
+# `slab partner` beside the set, so the system half finds its data half.
+STORAGE_PLAIN=""
+STORAGE_PLAIN_DISKS=""
 storage_serve() {
     _ss_sys="${STORM_SYS_BLOCK:-/sys/block}"
     _ss_dev="${STORAGE_DEV:-/dev}"
@@ -1219,8 +1224,13 @@ storage_serve() {
             _ss_m="$_ss_m $_ss_p"
             _ss_d="${_ss_ev%/*/uevent}"
             STORAGE_MEMBER_DISKS="$STORAGE_MEMBER_DISKS $_ss_dev/${_ss_d##*/}"
+        elif "${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab list "$_ss_p" 2>/dev/null | grep -q "role=data"; then
+            STORAGE_PLAIN="${STORAGE_PLAIN:+$STORAGE_PLAIN }$_ss_p"
+            _ss_d="${_ss_ev%/*/uevent}"
+            STORAGE_PLAIN_DISKS="${STORAGE_PLAIN_DISKS:+$STORAGE_PLAIN_DISKS }$_ss_dev/${_ss_d##*/}"
+            echo "storage: $_ss_p is this node's data region, no set: its data slab is looked for there (#598)"
         else
-            echo "storage: $_ss_p is named stormblock-raid and carries no stormraid superblock - left out"
+            echo "storage: $_ss_p is named stormblock-raid and carries neither a stormraid superblock nor a data slab - left out"
         fi
     done
     _ss_m="${_ss_m# }"
@@ -1333,12 +1343,16 @@ storage_report() {
             "$(storage_json_num "${STORAGE_BLOCK_SIZE:-}")" "${STORAGE_PROTECTION:-}" "${STORAGE_METHOD:-}")
         _sr_regions=$(printf '{"boot_area": %s, "system": %s, "data": %s}' \
             "$(storage_json_num "${STORAGE_BOOT_AREA:-}")" "$(storage_json_num "${STORAGE_SYSTEM_REGION:-}")" "$(storage_json_num "${STORAGE_REGION:-}")")
-    elif [ -n "$STORAGE_SERVE_MEMBERS" ]; then
+    elif [ -n "$STORAGE_SERVE_MEMBERS" ] || [ -n "${STORAGE_PLAIN:-}" ]; then
         _sr_from=boot
         # A keep-data reinstall that found the layout already there (#573).
         [ -n "${STORAGE_KEPT:-}" ] && _sr_from=reinstall
         _sr_drives="$STORAGE_MEMBER_DISKS"; _sr_members="$STORAGE_SERVE_MEMBERS"
         _sr_set="$STORAGE_SERVED"; _sr_state="$STORAGE_SET_STATE"
+        if [ -z "$STORAGE_SERVE_MEMBERS" ]; then
+            # No set: the plain data regions (#598).
+            _sr_drives="$STORAGE_PLAIN_DISKS"; _sr_members="$STORAGE_PLAIN"
+        fi
         # The boot's own system drive, then the others it mirrors to.
         _sr_legs=""
         case "${SLAB:-}" in ""|*://*) ;; *) _sr_legs=$(disk_of "$SLAB") ;; esac
@@ -1411,7 +1425,11 @@ disk_of() { # slab path -> its drive (a partition's disk; anything else as is)
 partner_of() { # drive -> the drive holding this node's other half; 1 when none
     # The node-data set a storage: layout serves is no disk, so it is named
     # besides them (#573): a leg's system half finds its data half on it.
-    _po=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab partner "$1" ${STORAGE_SERVED:+--also "$STORAGE_SERVED"} 2>/dev/null) || return 1
+    # A layout with no set names its plain data regions the same way (#598).
+    _po_also=""
+    for _po_a in ${STORAGE_SERVED:-} ${STORAGE_PLAIN:-}; do _po_also="$_po_also --also $_po_a"; done
+    # shellcheck disable=SC2086
+    _po=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" slab partner "$1" $_po_also 2>/dev/null) || return 1
     _po=$(printf '%s\n' "$_po" | tail -n 1)
     [ -n "$_po" ] && [ "$_po" != "$1" ] || return 1
     echo "$_po"
@@ -4965,7 +4983,7 @@ if [ "$BOOT_MODE" = "local" ]; then
             # The drives of the node-data set this boot serves are this
             # node's own: a keep-data reinstall finds them carrying it (#573).
             _st_own=""
-            case " ${STORAGE_MEMBER_DISKS:-} " in *" $_dev "*) _st_own=1 ;; esac
+            case " ${STORAGE_MEMBER_DISKS:-} ${STORAGE_PLAIN_DISKS:-} " in *" $_dev "*) _st_own=1 ;; esac
             if [ "$_dev" != "$_st_over" ] && [ -z "$_st_own" ]; then
                 if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
                     _car="stormblock slabs (an install)"
@@ -4991,6 +5009,17 @@ STEOF
     case "${SLAB:-}" in /dev/*) _st_local=1 ;; *) _st_local="" ;; esac
     if [ -n "$STORAGE_FROM" ] && [ -n "$_st_local" ]; then
         echo "  storage: in ${STORAGE_FROM##*/} - this boot runs from $SLAB, nothing is laid (#573)"
+        STORAGE_FROM=""
+    fi
+    # storage: lays drives on an install only (#598): the appliance asked for
+    # one (the install ticket), the probe rules this disk installed over, or
+    # the boot media hands its own install-config down. forge stages this
+    # host's install-config on every claim, so an ordinary boot - a reboot,
+    # a power cut - has it too, and must boot what the install laid (the
+    # set and the legs are served above), never select drives again.
+    if [ -n "$STORAGE_FROM" ] && [ ! -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] \
+       && [ -z "${INSTALL_OVER:-}" ] && [ "$STORAGE_FROM" != "${INSTALL_CONFIG_STAGED:-}" ]; then
+        echo "  storage: in ${STORAGE_FROM##*/} - this boot is no install: the drives are booted as laid, none is selected (#598)"
         STORAGE_FROM=""
     fi
     if [ -n "$STORAGE_FROM" ] && [ "$OVERRIDE" != recovery ] && [ "${ASSIMILATE:-}" != off ] \

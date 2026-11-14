@@ -304,6 +304,44 @@ has "a foreign table said by name" "$WORK/plan.args" "dev=/dev/sdc;.*carries=gpt
 has "this node's own drive carries nothing" "$WORK/plan.args" "dev=/dev/sda;.*carries=;"
 hasnt "no wipe word, no --force" "$WORK/plan.args" "^--force$"
 
+echo "the layout: forge's install-config on a boot that is no install lays nothing (#598)"
+reset
+mkdir -p "$WORK/run"
+printf 'storage:\n  drives: all\n' > "$WORK/run/install-config.forge.yaml"
+printf "STORAGE_DRIVES='/dev/sda'\nSTORAGE_SYSTEM='/dev/sda'\n" > "$WORK/plan.out"
+echo "superblock: data slab" > "$WORK/slabs.sda"
+layout "$BASE" "INSTALL_CONFIG_FORGE=$WORK/run/install-config.forge.yaml" "STORM_INSTALL_TICKET=$WORK/run/install.json" \
+    'SLAB=nvme-tcp://forge:4420/nqn.x?nsid=36'
+check "the engine is not asked" "no" "$([ -e "$WORK/plan.args" ] && echo yes || echo no)"
+check "no drive taken" "" "$(val STORAGE_DRIVES)"
+has "said" "$WORK/out" "this boot is no install: the drives are booted as laid, none is selected (#598)"
+hasnt "no STOP" "$WORK/out" "STOP: storage"
+hasnt "nothing refused" "$WORK/skips" "refused (#573)"
+
+echo "the layout: the same with the appliance's install ticket plans"
+reset
+mkdir -p "$WORK/run"
+printf 'storage:\n  drives: all\n' > "$WORK/run/install-config.forge.yaml"
+printf "STORAGE_DRIVES='/dev/sda'\nSTORAGE_SYSTEM='/dev/sda'\n" > "$WORK/plan.out"
+echo '{}' > "$WORK/run/install.json"
+layout "$BASE" "INSTALL_CONFIG_FORGE=$WORK/run/install-config.forge.yaml" "STORM_INSTALL_TICKET=$WORK/run/install.json" \
+    'SLAB=nvme-tcp://forge:4420/nqn.x?nsid=36'
+check "planned" "yes" "$([ -e "$WORK/plan.args" ] && echo yes || echo no)"
+check "taken" "/dev/sda" "$(val STORAGE_DRIVES)"
+
+echo "the layout: an install over a node laid with no set: its drive is its own (#598)"
+reset
+mkdir -p "$WORK/run"
+printf 'storage:\n  drives: all\n' > "$WORK/run/install-config.forge.yaml"
+printf "STORAGE_DRIVES='/dev/sda'\nSTORAGE_SYSTEM='/dev/sda'\n" > "$WORK/plan.out"
+echo '{}' > "$WORK/run/install.json"
+echo "superblock: data slab" > "$WORK/slabs.sda"
+echo "superblock: data slab" > "$WORK/slabs.sdb"
+layout "$BASE" "INSTALL_CONFIG_FORGE=$WORK/run/install-config.forge.yaml" "STORM_INSTALL_TICKET=$WORK/run/install.json" \
+    'SLAB=nvme-tcp://forge:4420/nqn.x?nsid=36' "STORAGE_PLAIN_DISKS=/dev/sda"
+has "this node's drive carries nothing" "$WORK/plan.args" "dev=/dev/sda;.*carries=;"
+has "another drive's slabs still said" "$WORK/plan.args" "dev=/dev/sdb;.*carries=stormblock slabs (an install);"
+
 echo "the layout: every drive the inventory lists reaches the plan, virtio too (#597)"
 reset
 for d in vda vdb; do mkdisk "$d"; echo "VSER-$d" > "$SYS/$d/serial"; done

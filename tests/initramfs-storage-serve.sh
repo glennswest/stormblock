@@ -64,6 +64,7 @@ cat > "$WORK/stormblock" <<EOF
 #!/bin/sh
 if [ "\$2" = list ]; then
     grep -qx "\$3" "$WORK/system.drives" 2>/dev/null && echo "slab x role=system"
+    grep -qx "\$3" "$WORK/data.parts" 2>/dev/null && echo "\$3: slab y (role=data, tier=hdd, 10 slots, 5 free)"
     exit 0
 fi
 printf '%s\n' "\$@" > "$WORK/partner.args"
@@ -81,7 +82,7 @@ member() { # disk part partname magic|-
     fi
 }
 reset() {
-    rm -rf "$WORK/sys" "$WORK/dev" "$WORK/run" "$WORK"/serve.* "$WORK"/status.* "$WORK/partner.args" "$WORK/out" "$WORK/system.drives" "$WORK/layout.json"
+    rm -rf "$WORK/sys" "$WORK/dev" "$WORK/run" "$WORK"/serve.* "$WORK"/status.* "$WORK/partner.args" "$WORK/out" "$WORK/system.drives" "$WORK/layout.json" "${WORK:?}/data.parts"
     mkdir -p "$WORK/sys" "$WORK/dev"
 }
 run() { # vars...
@@ -93,7 +94,7 @@ run() { # vars...
         cat <<'EOF'
 storage_serve
 echo "=SERVED=$STORAGE_SERVED"
-[ -n "$STORAGE_SERVED" ] && partner_of /dev/sda >/dev/null
+{ [ -n "$STORAGE_SERVED" ] || [ -n "$STORAGE_PLAIN" ]; } && partner_of /dev/sda >/dev/null
 system_legs
 echo "=LEGS=$LEG_ARGS"
 storage_report
@@ -196,7 +197,24 @@ member sda sda3 stormblock-raid STORMRD1
 member sdb sdb3 stormblock-raid -
 run
 hasnt "left out" "$WORK/serve.args" "sdb3"
-has "said" "$WORK/out" "sdb3 is named stormblock-raid and carries no stormraid superblock"
+has "said" "$WORK/out" "sdb3 is named stormblock-raid and carries neither a stormraid superblock nor a data slab"
+
+echo "one drive, no set: the plain data region named to partner (#598)"
+reset
+member sda sda3 stormblock-raid -
+member sda sda2 stormblock-system -
+echo "$WORK/dev/sda3" > "$WORK/data.parts"
+echo "$WORK/dev/sda" > "$WORK/system.drives"
+run "SLAB=$WORK/dev/sda"
+check "no set served" "" "$(val SERVED)"
+hasnt "stormraid not asked" "$WORK/serve.args" "sda3"
+has "said" "$WORK/out" "sda3 is this node's data region, no set"
+has "partner looks there" "$WORK/partner.args" "^$WORK/dev/sda3$"
+has "as an also device" "$WORK/partner.args" "^--also$"
+check "the boot's report: from" "boot" "$(lay 'L["from"]')"
+check "its drive" "$WORK/dev/sda" "$(lay 'L["drives"][0]["device"]')"
+check "no set" "None" "$(lay 'L["set"]')"
+check "its member" "['$WORK/dev/sda3']" "$(lay 'L["members"]')"
 
 echo "a superblock in block 1 counts"
 reset

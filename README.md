@@ -2590,7 +2590,10 @@ stormraid superblock) before the probe runs, and `slab partner … --also
 /dev/ublkb64` finds the data half on it from the system half on a leg. A
 member missing opens the set degraded and the console says
 `NODE-DATA SET DEGRADED`; a set that does not open is said, and the boot goes
-on as if there were none.
+on as if there were none. A layout with no set (one drive, or `data_raid:
+none`) keeps the data slab on the plain region, which is named to `slab
+partner` the same way (#598). `storage:` itself is applied on an install
+only: a reboot boots what was laid (#598).
 Every system leg (the first `system_mirror` drives) carries a full copy of
 the system volumes: `/init` names the other legs to `boot-local` as
 `--system-leg DEV`, the handover record keeps them, and after the flow-over
