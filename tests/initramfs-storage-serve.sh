@@ -168,6 +168,34 @@ check "regions" "34359738368" "$(lay 'L["regions"]["system"]')"
 check "legs" "['/dev/sda', '/dev/sdb']" "$(lay 'L["system_legs"]')"
 check "set" "/dev/ublkb64 optimal 1" "$(lay '" ".join(str(L["set"][k]) for k in ("device","state","parity"))')"
 
+echo "the install's report: drives that arrived, and what the inventory had that was not laid (#593)"
+reset
+for d in sda sdb; do member "$d" "${d}3" stormblock-raid STORMRD1; done
+mkdir -p "$WORK/run"
+printf '%s\n' "add /dev/sdb serial=S2 wwid=naa.2 controller=0000:03:00.0 bay=Slot_02 bytes=10 ready=1 at=1700000000" \
+    "add /dev/sde serial=S5 wwid=- controller=0000:03:00.0 bay=5 bytes=10 ready=1 at=1700000100" \
+    "remove /dev/sdf serial=S6 wwid=- controller=- bay=- bytes=0 ready=0 at=1700000200" > "$WORK/run/hotplug.log"
+run "SLAB=http://forge/x" "SYSTEM_DISK=/dev/sda" "STORAGE_DRIVES='/dev/sda /dev/sdb'" \
+    "STORAGE_MEMBERS='/dev/sda3 /dev/sdb3'" "STORAGE_SET=/dev/ublkb64" "STORAGE_SYSTEM='/dev/sda /dev/sdb'" \
+    "HOTPLUG_LOG=$WORK/run/hotplug.log" "INV_NAMES='/dev/sda /dev/sdc /dev/sg4'" "STORAGE_RENAMED='/dev/sg4=/dev/sdb'" \
+    "storage_subst() { _r=''; for _w in \$1; do for _p in \$STORAGE_RENAMED; do [ \"\${_p%%=*}\" = \"\$_w\" ] && _w=\"\${_p#*=}\"; done; _r=\"\$_r \$_w\"; done; echo \"\${_r# }\"; }"
+check "two arrived (a remove is not an arrival)" "2" "$(lay 'len(L["arrived"])')"
+check "the first is laid" "/dev/sdb S2 Slot_02 True" "$(lay '" ".join(str(L["arrived"][0][k]) for k in ("device","serial","bay","laid"))')"
+check "the second is not" "/dev/sde None 0000:03:00.0 1700000100 False" "$(lay '" ".join(str(L["arrived"][1][k]) for k in ("device","wwid","controller","at","laid"))')"
+has "the one not laid said as the running node's" "$WORK/out" "/dev/sde (serial S5, bay 5) arrived and is not in the layout: left to the running node"
+check "not laid: the inventory's sdc (sg4 is sdb now)" "['/dev/sdc']" "$(lay 'L["not_laid"]')"
+has "and said" "$WORK/out" "the inventory saw /dev/sdc, and the layout does not take them"
+
+echo "a boot's report: arrivals, no not_laid"
+reset
+for d in sda sdb; do member "$d" "${d}3" stormblock-raid STORMRD1; done
+mkdir -p "$WORK/run"
+echo "add /dev/sdc serial=S3 wwid=- controller=- bay=- bytes=10 ready=1 at=1" > "$WORK/run/hotplug.log"
+run "SLAB=$WORK/dev/sda" "HOTPLUG_LOG=$WORK/run/hotplug.log"
+check "arrived" "/dev/sdc False" "$(lay '" ".join(str(L["arrived"][0][k]) for k in ("device","laid"))')"
+check "no not_laid on a boot" "False" "$(lay '"not_laid" in L')"
+hasnt "not said as an install's" "$WORK/out" "left to the running node"
+
 echo "an install's laid legs: the rest of the system list, the first left out"
 reset
 member sda sda3 stormblock-raid STORMRD1

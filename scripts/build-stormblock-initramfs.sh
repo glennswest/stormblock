@@ -1365,6 +1365,34 @@ storage_report() {
         return 0
     fi
     mkdir -p "$_sr_run" 2>/dev/null
+    # Drives that arrived during this boot (#593), each with whether it is
+    # in the layout; one that is not is the running node's to offer, said.
+    _sr_arr=""
+    if [ -f "${HOTPLUG_LOG:-}" ]; then
+        while read -r _sr_a _sr_dev _sr_rest; do
+            [ "$_sr_a" = add ] || continue
+            _sr_in=false
+            case " $_sr_drives " in *" $_sr_dev "*) _sr_in=true ;; esac
+            _sr_kv() { printf '%s\n' "$_sr_rest" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
+            _sr_js() { _v=$(_sr_kv "$1"); if [ -z "$_v" ] || [ "$_v" = - ]; then printf null; else printf '"%s"' "$(printf '%s' "$_v" | sed 's/\\/\\\\/g; s/"/\\"/g')"; fi; }
+            _sr_arr="$_sr_arr${_sr_arr:+, }{\"device\": \"$_sr_dev\", \"serial\": $(_sr_js serial), \"wwid\": $(_sr_js wwid), \"controller\": $(_sr_js controller), \"bay\": $(_sr_js bay), \"at\": $(storage_json_num "$(_sr_kv at)"), \"laid\": $_sr_in}"
+            if [ "$_sr_in" = false ] && [ "$_sr_from" = install ]; then
+                echo "storage: $_sr_dev (serial $(_sr_kv serial), bay $(_sr_kv bay)) arrived and is not in the layout: left to the running node, which offers it (#593)"
+            fi
+        done < "$HOTPLUG_LOG"
+    fi
+    # What the inventory saw that the layout does not have: never a silent
+    # difference (#593).
+    _sr_nl=""
+    if [ "$_sr_from" = install ]; then
+        for _sr_d in ${INV_NAMES:-}; do
+            # A drive the format gave a new name is under that name now.
+            [ -n "${STORAGE_RENAMED:-}" ] && command -v storage_subst >/dev/null 2>&1 && _sr_d=$(storage_subst "$_sr_d")
+            case " $_sr_drives " in *" $_sr_d "*) ;; *) _sr_nl="$_sr_nl $_sr_d" ;; esac
+        done
+        _sr_nl="${_sr_nl# }"
+        [ -n "$_sr_nl" ] && echo "storage: the inventory saw $_sr_nl, and the layout does not take them (the plan above says why) (#593)"
+    fi
     _sr_st="$_sr_run/stormraid-status.txt"
     _sr_parity=$(sed -n 's/^set [^:]*: [0-9]* slots, parity \([0-9]*\),.*/\1/p' "$_sr_st" 2>/dev/null | head -1)
     [ -n "$_sr_parity" ] || { [ "$_sr_from" = install ] && _sr_parity="${STORAGE_PARITY:-}"; }
@@ -1390,6 +1418,9 @@ storage_report() {
             _sr_c=", "
         done
         printf '],\n'
+        printf ' "arrived": [%s],\n' "$_sr_arr"
+        # shellcheck disable=SC2086
+        [ "$_sr_from" = install ] && printf ' "not_laid": %s,\n' "$(storage_json_list $_sr_nl)"
         [ -n "$_sr_asked" ] && printf ' "asked": %s,\n' "$_sr_asked"
         [ -n "$_sr_regions" ] && printf ' "regions": %s,\n' "$_sr_regions"
         # shellcheck disable=SC2086
@@ -2394,6 +2425,7 @@ for _n in $(inv_disks); do
     fi
     INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_n\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"wwid\": $(_ij "$_wwid"), \"size_bytes\": $_bytes, \"ready\": $_ready, \"transport\": \"$_tr\", \"controller\": $(_ij "$_ctl"), \"shelf\": $(shelf_json "$_b"), \"bay\": $(_ij "$_bay")}"
     echo "    $_n: ${_model:-?} serial ${_serial:-?}${_wwid:+ $_wwid}, $_rs, $_tr${_ctl:+ on $_ctl}, $_shpos shelf${_shid:+ $_shid}${_bay:+, bay $_bay}"
+    INV_NAMES="${INV_NAMES:-}${INV_NAMES:+ }/dev/$_n"
 done
 # The not-ready drives sd made no block device for (#595), by their sg node
 # (or SCSI address): what they are comes from their SCSI device, VPD 0x83's
@@ -2413,6 +2445,7 @@ while read -r _udev _usys; do
     _wwid=$(inv_read "$_ud/wwid")
     INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_un\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"wwid\": $(_ij "$_wwid"), \"size_bytes\": 0, \"ready\": false, \"transport\": \"sas\", \"controller\": $(_ij "$_ctl"), \"shelf\": null, \"bay\": null}"
     echo "    $_un (${_upath##*/}, no block device): ${_model:-?} serial ${_serial:-?}${_wwid:+ $_wwid}, NOT READY: no readable format${_ctl:+, on $_ctl} (#595)"
+    [ "$_udev" != - ] && INV_NAMES="${INV_NAMES:-}${INV_NAMES:+ }$_udev"
     [ "$_udev" = - ] && echo "WARNING: storage: ${_upath##*/} is a disk with no block device and no sg node - nothing can format it (#595)"
 done <<INVEOF
 $(inv_unready)
@@ -2427,6 +2460,30 @@ mkdir -p "$(dirname "$INV_REPORT")" 2>/dev/null
 printf '{"state": "unknown", "drive": null, "reason": null, "from": "initramfs", "controllers": %s, "drives": %s}\n' \
     "$INV_CONTROLLERS" "$INV_DRIVES" > "$INV_REPORT" 2>/dev/null || true
 # --- END storage inventory
+
+# --- BEGIN storage watch (covered by tests/initramfs-storage-hotplug.sh)
+# Drives that arrive after the inventory (#593; owner: "You need to watch for
+# hot plug even after boot"): a slow spin-up, a drive swapped for a failed
+# one. `stormblock hotplug watch` listens to the kernel's uevents (there is no
+# udev here) from now until switch_root, says each whole drive added or
+# removed on the console with its serial, controller and bay, and appends it
+# to $HOTPLUG_LOG. The storage layout reads it before it writes anything
+# (storage arrivals); the running node's engine watches after it.
+HOTPLUG_LOG="${STORM_HOTPLUG_LOG:-/run/stormblock/hotplug.log}"
+HOTPLUG_PID=""
+_hp_sb="${STORM_STORMBLOCK:-/usr/sbin/stormblock}"
+if [ -x "$_hp_sb" ]; then
+    mkdir -p "$(dirname "$HOTPLUG_LOG")" 2>/dev/null
+    : > "$HOTPLUG_LOG" 2>/dev/null
+    "$_hp_sb" hotplug watch --out "$HOTPLUG_LOG" --say &
+    HOTPLUG_PID=$!
+fi
+hotplug_stop() {
+    [ -n "$HOTPLUG_PID" ] || return 0
+    kill "$HOTPLUG_PID" 2>/dev/null
+    HOTPLUG_PID=""
+}
+# --- END storage watch
 
 # --- BEGIN node state read (covered by tests/initramfs-boot-nic.sh)
 # What this machine's installed system says about itself, read before the
@@ -5716,6 +5773,142 @@ $1|$_svp|$3"
     fi
     # --- END storage format
 
+    # --- BEGIN storage arrivals (covered by tests/initramfs-storage-hotplug.sh)
+    # A drive that arrived after the inventory and before the layout is
+    # written is in it (#593): the plan above was made from the drives seen
+    # then. Here, just before the tables are written, every drive the watch
+    # saw arrive since makes the engine plan again over all of them; a drive
+    # the new plan takes is formatted like the rest, and the check is made
+    # again (STORAGE_ARRIVAL_ROUNDS, 3: a shelf still filling up is left to
+    # the running node after that). A new plan that stops, or that takes a
+    # drive that holds something without the wipe word, is not used: the
+    # layout goes on with the drives it had, and the arrival is said with
+    # why. A drive that arrives after this is said after the lay, left to the
+    # running node.
+    STORAGE_HOTPLUG_SEEN=${STORAGE_HOTPLUG_SEEN:-0}
+    storage_arrivals() { # -> each device the watch saw added since the last call
+        [ -f "${HOTPLUG_LOG:-}" ] || return 0
+        _sa_n=$(wc -l < "$HOTPLUG_LOG" | tr -d ' ')
+        [ "$_sa_n" -gt "$STORAGE_HOTPLUG_SEEN" ] || return 0
+        sed -n "$((STORAGE_HOTPLUG_SEEN + 1)),${_sa_n}p" "$HOTPLUG_LOG" | awk '$1 == "add" {print $2}'
+        STORAGE_HOTPLUG_SEEN=$_sa_n
+    }
+    storage_plan_keep() { # save | back: the plan's variables
+        if [ "$1" = save ]; then
+            _sk_v="$STORAGE_DRIVES|$STORAGE_SYSTEM|$STORAGE_SAID|${STORAGE_SYSTEM_BYTES:-}|${STORAGE_RAID:-}|${STORAGE_PARITY:-}|${STORAGE_SPARES:-}|${STORAGE_SMALLEST:-}"
+        else
+            _sk_r="$_sk_v"
+            STORAGE_DRIVES=${_sk_r%%|*}; _sk_r=${_sk_r#*|}
+            STORAGE_SYSTEM=${_sk_r%%|*}; _sk_r=${_sk_r#*|}
+            STORAGE_SAID=${_sk_r%%|*}; _sk_r=${_sk_r#*|}
+            STORAGE_SYSTEM_BYTES=${_sk_r%%|*}; _sk_r=${_sk_r#*|}
+            STORAGE_RAID=${_sk_r%%|*}; _sk_r=${_sk_r#*|}
+            STORAGE_PARITY=${_sk_r%%|*}; _sk_r=${_sk_r#*|}
+            STORAGE_SPARES=${_sk_r%%|*}; _sk_r=${_sk_r#*|}
+            STORAGE_SMALLEST=$_sk_r
+        fi
+    }
+    STORAGE_ARRIVED=""; STORAGE_LEFT=""
+    if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "${STORAGE_KEPT:-}" ]; then
+        _sa_dir="${_st_dir:-${STORM_RUN:-/run/stormblock}/storage-format}"
+        mkdir -p "$_sa_dir"
+        _sa_round=0; _sa_again=""
+        while [ "$_sa_round" -lt "${STORAGE_ARRIVAL_ROUNDS:-3}" ]; do
+            storage_arrivals > "$_sa_dir/arrivals"
+            _sa_new=$(tr '\n' ' ' < "$_sa_dir/arrivals"); _sa_new="${_sa_new% }"
+            [ -n "$_sa_new" ] || [ -n "$_sa_again" ] || break
+            _sa_again=""
+            _sa_round=$((_sa_round + 1))
+            [ -n "$_sa_new" ] && echo "  storage: $_sa_new arrived after the inventory - planned again before anything is laid (#593)"
+            storage_plan_keep save
+            _sa_was="$STORAGE_DRIVES"
+            STORAGE_STOP=""; STORAGE_UNREADY=""
+            # Only stdout is shell (#597): the engine's log lines are not eval'd.
+            if _st_out=$(storage_plan 2>"$_sa_dir/plan.err"); then
+                eval "$_st_out"
+            else
+                STORAGE_STOP="the engine could not plan storage: ($( { printf '%s\n' "$_st_out"; cat "$_sa_dir/plan.err"; } | grep . | tail -n 1))"
+            fi
+            if [ -n "$STORAGE_STOP" ]; then
+                echo "  storage: the plan with ${_sa_new:-them} stops ($STORAGE_STOP): laid as planned before, without ${_sa_new:-them} (#593)"
+                STORAGE_LEFT="$STORAGE_LEFT $_sa_new"
+                storage_plan_keep back
+                continue
+            fi
+            if [ -n "$STORAGE_UNREADY" ]; then
+                if [ -n "${STORAGE_EARLY_OK:-}" ]; then
+                    echo "  storage: $STORAGE_UNREADY not ready (no readable format) - formatted first, then planned again (#595, #593)"
+                    storage_format_run "$STORAGE_UNREADY"
+                    STORAGE_EARLY="${STORAGE_EARLY:-} $STORAGE_FORMATTED"
+                    storage_plan_keep back
+                    _sa_again=1
+                else
+                    echo "  storage: $STORAGE_UNREADY not ready (no readable format), and this node's set is served: not taken (#593)"
+                    STORAGE_LEFT="$STORAGE_LEFT $STORAGE_UNREADY"
+                    storage_plan_keep back
+                fi
+                continue
+            fi
+            # The drives the new plan takes that the old did not.
+            _sa_add=""
+            for _dev in $STORAGE_DRIVES; do
+                case " $_sa_was " in *" $_dev "*) ;; *) _sa_add="$_sa_add $_dev" ;; esac
+            done
+            _sa_add="${_sa_add# }"
+            if [ -z "$_sa_add" ]; then
+                [ -n "$_sa_new" ] && echo "  storage: the plan does not take $_sa_new: laid as planned (#593)"
+                STORAGE_LEFT="$STORAGE_LEFT $_sa_new"
+                continue
+            fi
+            # The format's go-ahead, as for the others: the wipe word, a
+            # fresh install that keeps nothing, or a drive that carries nothing.
+            _sa_full=""
+            if [ -z "${STORAGE_FORCE:-}" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "${INSTALL_KEEP:-}" ]; }; then
+                for _dev in $_sa_add; do
+                    case " ${STORAGE_EARLY:-} " in *" $_dev "*) continue ;; esac
+                    if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
+                        _sa_full="$_sa_full $_dev(stormblock slabs)"
+                    else
+                        _st_sig=$(drive_signature "$_dev" "$SURVEY_SYS/${_dev##*/}")
+                        [ -n "$_st_sig" ] && _sa_full="$_sa_full $_dev($_st_sig)"
+                    fi
+                done
+            fi
+            if [ -n "$_sa_full" ]; then
+                echo "  storage: the new plan takes$_sa_full, which hold what is not to be lost: laid as planned before, without them (#593)"
+                STORAGE_LEFT="$STORAGE_LEFT $_sa_add"
+                storage_plan_keep back
+                continue
+            fi
+            printf '%s\n' "$STORAGE_SAID" | sed 's/^/  /'
+            _sa_fmt=""
+            for _dev in $_sa_add; do
+                case " ${STORAGE_EARLY:-} " in *" $_dev "*) ;; *) _sa_fmt="$_sa_fmt $_dev" ;; esac
+            done
+            _sa_fmt="${_sa_fmt# }"
+            if [ -n "$_sa_fmt" ]; then
+                storage_format_run "$_sa_fmt"
+                if [ -n "$STORAGE_RENAMED" ]; then
+                    STORAGE_DRIVES=$(storage_subst "$STORAGE_DRIVES")
+                    STORAGE_SYSTEM=$(storage_subst "$STORAGE_SYSTEM")
+                    _sa_add=$(storage_subst "$_sa_add")
+                fi
+            fi
+            STORAGE_ARRIVED="${STORAGE_ARRIVED:+$STORAGE_ARRIVED }$_sa_add"
+            echo "  storage: $_sa_add taken into the layout: $STORAGE_DRIVES - legs: ${STORAGE_SYSTEM:-none} (#593)"
+        done
+        # Rounds used up with drives still coming: those are the running node's.
+        storage_arrivals > "$_sa_dir/arrivals"
+        _sa_late=$(tr '\n' ' ' < "$_sa_dir/arrivals")
+        if [ -n "$_sa_late" ]; then
+            STORAGE_LEFT="$STORAGE_LEFT $_sa_late"
+            echo "  storage: ${_sa_late% } still arriving after ${STORAGE_ARRIVAL_ROUNDS:-3} plans: left to the running node (#593)"
+        fi
+        STORAGE_LEFT=$(echo $STORAGE_LEFT)
+        STORAGE_EARLY=$(echo ${STORAGE_EARLY:-})
+    fi
+    # --- END storage arrivals
+
     # --- BEGIN storage lay (covered by tests/initramfs-storage.sh)
     # Every drive laid alike (#573): the same regions at the same offsets,
     # the smallest drive's size; the system region a leg on the first
@@ -6704,6 +6897,9 @@ fi
 for _p in $(pidof systemd-udevd udevd 2>/dev/null); do
     kill "$_p" 2>/dev/null || true
 done
+
+# The engine watches drives from here on (#593).
+hotplug_stop
 
 # What is left of the boot's log goes out before the hand-over (#477).
 logcast_stop
