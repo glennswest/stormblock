@@ -24,6 +24,14 @@ Owner: "You need to watch for hot plug even after boot." Plan:
   offered as `replacement` (the set misses a member: first), `spare`, and
   `system_leg`; shown in `GET /api/v1/storage/layout` `candidates` and in
   health. Policy `[storage] hotplug = "offer"` (default) from settings.
+- [x] A: e5d27dd7 on main (`src/drive/uevent.rs`, `hotplug watch`); its sc-build (clippy + `--lib uevent`) was queued when paused.
+- [x] B (code + tests, not yet through check.sh): on **`wip/593-hotplug`** —
+  `storage watch` block after the inventory (`HOTPLUG_LOG`, `hotplug_stop`
+  before switch_root), `storage arrivals` block before the lay, the report's
+  `arrived`/`not_laid`, `INV_NAMES`; `tests/initramfs-storage-hotplug.sh`
+  (new, passes) and report cases in `tests/initramfs-storage-serve.sh`.
+  Next: `sc-build 'sh check.sh'` on the branch, merge to main, then C.
+- Paused 2026-11-13 for P0 #597 (stormcentral handed it over).
 - **D. join**: what joins the set at runtime goes through the node's
   stormraid daemon (it owns the set after the initramfs, changes by its
   RaidSet object under `--kube`): assessed after C, filed where it belongs.
