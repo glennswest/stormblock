@@ -2,6 +2,26 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #598 — a node laid by storage: cannot reboot (2026-11-14, P0)
+
+pvetest3 12.81, the power-cut reboot (console 03:33Z): two faults.
+- **A.** A one-drive layout keeps its data slab on the plain `stormblock-raid`
+  partition (no set). `storage serve` left it out ("carries no stormraid
+  superblock"), so `partner_of` never found the data half: "/dev/sda … is
+  missing 21 mounted volume(s) - asking the appliance instead".
+  Fix: a `stormblock-raid` partition with no superblock and a data slab is
+  `STORAGE_PLAIN`, given to `slab partner` as `--also` like the set; the
+  boot's report names it.
+- **B.** The boot then ran from the appliance's clone and applied
+  `storage:` (forge's staged install-config, on every claim) to a plain boot:
+  sda refused, diskless FATAL. Fix: `storage:` is applied only on an
+  install (install ticket, `INSTALL_OVER`, or the boot media's own
+  install-config), the rule switch_root uses for the install-config; said
+  otherwise. On an install a drive of the served set or with this node's
+  plain data region is this node's (`carries=` empty).
+- [ ] code + tests (initramfs-storage-serve.sh, initramfs-storage.sh)
+- [ ] check.sh, release, stage; proof needs pvetest3 install + power cut + reboot.
+
 ## #597 — storage: drives=all took sda only: the virtio drives never reached the plan (2026-11-14, P0)
 
 pvetest3 12.81: inventory sda vda vdb vdc, layout sda alone, no word why.
