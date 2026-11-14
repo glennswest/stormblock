@@ -92,7 +92,7 @@ nvme_appears() {
 inventory() ( # -> console in inv.out, JSON in report.json
     set +e
     STORM_PCI_SYS="$T/pci"; STORM_INV_BLOCK="$T/block"; STORM_STORAGE_WAIT=${WAIT:-3}
-    STORM_INV_SCSI="$T/scsi"; STORM_INV_SAS_END="$T/sas_end_device"
+    STORM_INV_SCSI="$T/scsi"; STORM_INV_SAS_END="$T/sas_end_device"; STORM_INV_SG="$T/sg"
     STORM_STORAGE_SETTLE=${SETTLE:-1}; STORM_STORAGE_PENDING_WAIT=${PWAIT:-3}
     STORM_LOCAL_DISK_REPORT="$WORK/report.json"
     rm -f "$WORK/report.json"
@@ -212,6 +212,35 @@ out=$(cat "$WORK/inv.out")
 contains "a found drive that never comes up is a WARNING, bounded" \
     "WARNING: storage: after 6s these drives the SAS layer found still have no block device: 0000:c1:00.0:end_device-0:2" "$out"
 contains "  the inventory goes on with what is there" "mpt3sas, 1 drive(s)" "$out"
+
+# forge1 as it is (#595): sda a disk; three drives left unformatted answer
+# with no readable format - two with no block device (only an sg node),
+# one a disk of 0 bytes. Each listed, NOT READY, with its WWID.
+forge_sg() { # n -> sd gave it no disk; sg did
+    _s="$hba/host0/port-0:$1/end_device-0:$1/target0:0:$1/0:0:$1:0"
+    mkdir -p "$_s/scsi_generic/sg$1" "$T/sg/sg$1"; ln -s "$_s" "$T/sg/sg$1/device"
+}
+make_forge
+for n in 1 2 3; do forge_end "$n"; forge_scsi "$n"; done
+echo naa.5000cca2680ab8d8 > "$hba/host0/port-0:0/end_device-0:0/target0:0:0/0:0:0:0/wwid"
+echo naa.5000cca26801b648 > "$hba/host0/port-0:1/end_device-0:1/target0:0:1/0:0:1:0/wwid"
+echo naa.5000cca26a819e68 > "$hba/host0/port-0:2/end_device-0:2/target0:0:2/0:0:2:0/wwid"
+echo naa.5000cca268077300 > "$hba/host0/port-0:3/end_device-0:3/target0:0:3/0:0:3:0/wwid"
+forge_sg 1; forge_sg 2; forge_disk 3
+echo 0 > "$T/block/sdd/size"
+SETTLE=1 PWAIT=2 inventory
+out=$(cat "$WORK/inv.out")
+contains "the readable drive with its WWID" "sda: H7210A520SUN010T serial ? naa.5000cca2680ab8d8, 9796 GB" "$out"
+contains "a drive with only an sg node is listed, NOT READY" \
+    "sg1 (0:0:1:0, no block device): H7210A520SUN010T serial ? naa.5000cca26801b648, NOT READY: no readable format, on 0000:c1:00.0 (#595)" "$out"
+contains "  the other" "sg2 (0:0:2:0, no block device): H7210A520SUN010T serial ? naa.5000cca26a819e68, NOT READY" "$out"
+contains "a disk of 0 bytes is NOT READY" "sdd: H7210A520SUN010T serial ? naa.5000cca268077300, NOT READY: no readable format (0 bytes)" "$out"
+contains "  in the JSON, not ready" '"name": "sg1", "model": "H7210A520SUN010T", "serial": null, "wwid": "naa.5000cca26801b648", "size_bytes": 0, "ready": false' "$(cat "$WORK/report.json")"
+contains "  a ready one ready" '"wwid": "naa.5000cca2680ab8d8", "size_bytes": 9796820402176, "ready": true' "$(cat "$WORK/report.json")"
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$WORK/report.json" 2>/dev/null \
+        && echo "  ok    the report is JSON" || { echo "  FAIL  the report is not JSON"; fail=1; }
+fi
 
 # No SAS/RAID controller bound (NVMe there at once): no settle wait at all.
 make_tree

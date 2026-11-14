@@ -566,6 +566,9 @@ pub struct SeenDrive {
     pub carries: String,
     /// The drive this boot runs from.
     pub running: bool,
+    /// It answers and has no readable format (NOT READY, medium format
+    /// corrupted, no capacity): no size until it is formatted (#595).
+    pub unready: bool,
 }
 
 impl SeenDrive {
@@ -595,6 +598,7 @@ impl SeenDrive {
                 "usb" => d.usb = v == "1",
                 "carries" => d.carries = v,
                 "running" => d.running = v == "1",
+                "ready" => d.unready = v == "0",
                 o => return Err(format!("--drive has '{o}', which is not known")),
             }
         }
@@ -613,12 +617,16 @@ impl SeenDrive {
         let mut s = self.dev.clone();
         let _ = write!(
             s,
-            " ({} shelf{}, bay {}, serial {}, {} GB)",
+            " ({} shelf{}, bay {}, serial {}, {})",
             if self.position.is_empty() { "unknown" } else { &self.position },
             if self.shelf.is_empty() { String::new() } else { format!(" {}", self.shelf) },
             if self.bay.is_empty() { "none" } else { &self.bay },
             if self.serial.is_empty() { "unknown" } else { &self.serial },
-            self.bytes / 1_000_000_000
+            if self.unready {
+                format!("{}not ready: no readable format", if self.wwn.is_empty() { String::new() } else { format!("{}, ", self.wwn) })
+            } else {
+                format!("{} GB", self.bytes / 1_000_000_000)
+            }
         );
         s
     }
@@ -694,7 +702,7 @@ pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<Stora
         DriveSel::All => {
             let mut refused = Vec::new();
             for d in seen {
-                if d.removable || d.usb || d.bytes == 0 {
+                if d.removable || d.usb || (d.bytes == 0 && !d.unready) {
                     continue;
                 }
                 if d.external() {
@@ -723,7 +731,7 @@ pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<Stora
             for e in entries {
                 let said_e = e.iter().map(|(k, v)| if k == "any" { v.clone() } else { format!("{k}={v}") })
                     .collect::<Vec<_>>().join(" ");
-                let m: Vec<&SeenDrive> = seen.iter().filter(|d| d.bytes > 0 && d.matches(e)).collect();
+                let m: Vec<&SeenDrive> = seen.iter().filter(|d| (d.bytes > 0 || d.unready) && d.matches(e)).collect();
                 match m.as_slice() {
                     [] => return Err(format!("storage.drives names '{said_e}', which matches no drive on this machine")),
                     [d] => {
@@ -787,8 +795,19 @@ pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<Stora
             Some(r)
         }
     };
-    let smallest = taken.iter().map(|d| d.bytes).min().unwrap_or(0);
-    let largest = taken.iter().map(|d| d.bytes).max().unwrap_or(0);
+    let unready: Vec<&SeenDrive> = taken.iter().filter(|d| d.unready).collect();
+    if !unready.is_empty() {
+        said.push(format!(
+            "{} drive{} not ready (no readable format): formatted first, then planned again with {} size{}",
+            unready.len(),
+            if unready.len() == 1 { " is" } else { "s are" },
+            if unready.len() == 1 { "its" } else { "their" },
+            if unready.len() == 1 { "" } else { "s" }
+        ));
+    }
+    let ready = taken.iter().filter(|d| !d.unready);
+    let smallest = ready.clone().map(|d| d.bytes).min().unwrap_or(0);
+    let largest = ready.map(|d| d.bytes).max().unwrap_or(0);
     if largest > smallest {
         said.push(format!(
             "the drives differ in size: every data region is the smallest's, {} GB of the largest left unused",
@@ -810,6 +829,8 @@ impl StoragePlan {
         let devs: Vec<&str> = self.drives.iter().map(|d| d.dev.as_str()).collect();
         let _ = writeln!(o, "STORAGE_DRIVES={}", sh_quote(&devs.join(" ")));
         let _ = writeln!(o, "STORAGE_SYSTEM={}", sh_quote(&self.system.join(" ")));
+        let unready: Vec<&str> = self.drives.iter().filter(|d| d.unready).map(|d| d.dev.as_str()).collect();
+        let _ = writeln!(o, "STORAGE_UNREADY={}", sh_quote(&unready.join(" ")));
         let _ = writeln!(o, "STORAGE_BLOCK_SIZE={}", self.spec.block_size);
         let _ = writeln!(o, "STORAGE_PROTECTION={}", self.spec.protection.as_str());
         let _ = writeln!(o, "STORAGE_METHOD={}", self.spec.method);
@@ -826,7 +847,11 @@ impl StoragePlan {
                 let _ = writeln!(o, "STORAGE_SPARES=");
             }
         }
-        let _ = writeln!(o, "STORAGE_SMALLEST={}", self.drives.iter().map(|d| d.bytes).min().unwrap_or(0));
+        let _ = writeln!(
+            o,
+            "STORAGE_SMALLEST={}",
+            self.drives.iter().filter(|d| !d.unready).map(|d| d.bytes).min().unwrap_or(0)
+        );
         let mut said = vec![format!(
             "STORAGE: {} drive{}, each formatted {} + PI {} ({}), a system leg on {}, data {}",
             self.drives.len(),
@@ -1036,6 +1061,39 @@ mod tests {
         assert_eq!(d.shelf, "");
         assert_eq!(d.bytes, 10);
         assert!(SeenDrive::parse("serial=S0").is_err());
+    }
+
+    #[test]
+    fn not_ready_drives_are_taken_and_formatted_first() {
+        // forge1 (#595): sda readable, three unformatted drives behind sg.
+        let mut d = vec![drive("/dev/sda", "0", "S0", 10)];
+        for (dev, bay, wwn) in [("/dev/sg1", "1", "naa.5000cca26801b648"), ("/dev/sg2", "2", "naa.5000cca26a819e68"),
+                                ("/dev/sg3", "3", "naa.5000cca268077300")] {
+            let mut u = SeenDrive::parse(&format!(
+                "dev={dev};serial=;wwn={wwn};model=H7210A520SUN010T;shelf=-;position=front;bay={bay};bytes=0;removable=0;usb=0;carries=;running=0;ready=0"
+            ))
+            .unwrap();
+            assert!(u.unready);
+            u.serial = format!("S{bay}");
+            d.push(u);
+        }
+        let sh = plan_from_config("storage:\n  drives: all\n", &d, false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_DRIVES='/dev/sda /dev/sg1 /dev/sg2 /dev/sg3'\n"), "{sh}");
+        assert!(sh.contains("STORAGE_UNREADY='/dev/sg1 /dev/sg2 /dev/sg3'\n"), "{sh}");
+        assert!(sh.contains("STORAGE_SMALLEST=10000000000000\n"), "{sh}");
+        assert!(sh.contains("naa.5000cca26801b648, not ready: no readable format"), "{sh}");
+        assert!(sh.contains("3 drives are not ready"), "{sh}");
+        // Named by serial, a not-ready drive matches too.
+        let sh = plan_from_config("storage:\n  drives: [S0, S2]\n", &d, false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_UNREADY='/dev/sg2'\n"), "{sh}");
+        // A drive with no media that answers as ready (a card reader) is still not taken.
+        let mut e = d.clone();
+        e[1].unready = false;
+        let sh = plan_from_config("storage:\n  drives: all\n", &e, false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_DRIVES='/dev/sda /dev/sg2 /dev/sg3'\n"), "{sh}");
+        // Every drive ready: an empty list, said.
+        let sh = plan_from_config("storage:\n  drives: all\n", &forge1(), false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_UNREADY=''\n"), "{sh}");
     }
 
     #[test]

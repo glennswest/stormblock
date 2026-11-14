@@ -45,7 +45,8 @@ from the file and prints shell `/init` evaluates:
 | `STORAGE_DRIVES`, `STORAGE_SYSTEM` | the drives taken, and those with a system leg |
 | `STORAGE_BLOCK_SIZE`, `STORAGE_PROTECTION`, `STORAGE_METHOD` | the format |
 | `STORAGE_RAID`, `STORAGE_PARITY`, `STORAGE_SPARES` | the data set |
-| `STORAGE_SMALLEST` | the drive that sets the data region's size |
+| `STORAGE_UNREADY` | drives taken that answer with no readable format (`ready=0`): formatted first, then planned again |
+| `STORAGE_SMALLEST` | the drive that sets the data region's size (ready drives only) |
 | `STORAGE_SAID` | the plan in words, for the console |
 | `STORAGE_STOP` | refused: no drive is taken, the install stops naming why |
 
@@ -54,14 +55,39 @@ install, a foreign partition table) unless `drives:` lists it, an external
 drive (USB, removable, another shelf) not listed, and `system_drive:` given
 with `storage:`.
 
+## Drives with no readable format (#595)
+
+A drive an interrupted format left behind answers on the HBA and reads
+nothing: NOT READY or MEDIUM FORMAT CORRUPTED, so sd gives it no block device,
+or one of 0 bytes (forge1's three SAS drives after the 2026-11-07 format). The
+inventory lists every disk-type SCSI device, these too, with its WWID (VPD
+0x83, which an unformatted drive still answers), as `NOT READY: no readable
+format`, and `"ready": false` in `local-disk.json`. The `sg` module is loaded
+so such a drive has a node (`/dev/sgN`).
+
+The plan takes them (`ready=0`, no size), and `/init` formats them **before**
+the rest of the install decides anything: they hold nothing readable. Each is
+found again afterwards by its WWID (sd makes a new disk of it), and the plan
+runs again with every drive's size. This happens on an install (no node-data
+set served yet) or with the wipe word; a node whose set is served leaves such
+a drive alone and says so in a WARNING (#593).
+
 ## The format
 
 Every drive taken is formatted to the block size and protection **at once**,
 one `stormdrive format` each in the background, its progress on the console
-prefixed with the drive's name. A drive already at the format (`--method
-none` exits 4) is left. A drive or HBA that refuses PI type 1 (exit 3) is
-formatted again with `none`, and that is said. Any other failure is fatal: the
-install result says `failed` and nothing is laid.
+prefixed with the drive's name. **Every** drive is formatted, whatever it is
+at now (owner, #595: "It need to format all the drives"): `auto` is the fast
+format (FFMT), and if the drive refuses it, a full FORMAT UNIT to the same
+block size and PI. There is no other fallback (owner, #595: "4k with pi"):
+a drive that refuses the block size or the PI fails the install loudly with
+the sense data, recorded in the drive's `.fmt` and the install result, and
+nothing is laid. Never 512 + PI, never 4096 without PI.
+
+After the format, the kernel must read each drive at the block size with
+`protection_type` equal to the PI asked (READ CAPACITY 16 as sd saw it); the
+console says `FORMATTED: <dev> reads 4096-byte blocks, PROT_EN=1 P_TYPE 1`,
+and anything else is fatal.
 
 A format loses every byte on the drive, so it runs only:
 

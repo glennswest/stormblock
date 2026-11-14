@@ -1959,9 +1959,10 @@ if [ -n "$UNBOUND" ]; then
 fi
 # --- END unbound controllers
 
-# The ones no device announces: filesystems, and the block driver this image
-# exports its root through.
-for m in ublk_drv erofs overlay ext4 xfs vfat; do
+# The ones no device announces: filesystems, the block driver this image
+# exports its root through, and sg: the door to a SCSI drive sd gave no
+# block device (an unformatted drive, #595), which storage: formats.
+for m in ublk_drv erofs overlay ext4 xfs vfat sg; do
     modprobe -q "$m" 2>/dev/null || true
 done
 
@@ -2249,6 +2250,29 @@ inv_pending() { # -> "pci:what" for each drive the SAS layer knows and no block 
         done
     done
 }
+# A drive that answers and has no readable format (#595: forge1's three SAS
+# drives, left by an interrupted format, answer NOT READY / medium format
+# corrupted): a disk-type SCSI device with no block device, or one of 0
+# bytes. It is a drive all the same: listed, and storage: formats it.
+INV_SG="${STORM_INV_SG:-/sys/class/scsi_generic}"
+inv_unready() { # -> "dev sysdir" per not-ready SCSI disk (sysdir/device is its SCSI device)
+    for _s in "$INV_SCSI"/*:*:*:*; do
+        [ -e "$_s" ] || continue
+        [ "$(cat "$_s/type" 2>/dev/null)" = 0 ] || continue
+        case "$(readlink -f "$_s")" in */usb*) continue ;; esac
+        _ub=""
+        for _b in "$_s"/block/*; do [ -e "$_b" ] && _ub=${_b##*/}; done
+        if [ -n "$_ub" ]; then
+            [ "$(cat "$INV_BLOCK/$_ub/removable" 2>/dev/null)" = 1 ] && continue
+            [ "$(cat "$INV_BLOCK/$_ub/size" 2>/dev/null || echo 0)" -gt 0 ] && continue
+            echo "/dev/$_ub $INV_BLOCK/$_ub"
+        else
+            _ug=""
+            for _g in "$_s"/scsi_generic/sg*; do [ -e "$_g" ] && _ug=${_g##*/}; done
+            if [ -n "$_ug" ]; then echo "/dev/$_ug $INV_SG/$_ug"; else echo "- $_s"; fi
+        fi
+    done
+}
 _iw=0
 _iwhat=$(inv_waiting)
 _ipend=$(inv_pending)
@@ -2344,9 +2368,37 @@ for _n in $(inv_disks); do
     # Controllers -> shelves -> bays -> drives (#347).
     _sh=$(shelf_of "$_b")
     _shid=${_sh%%|*}; _sh=${_sh#*|}; _shpos=${_sh%%|*}; _sh=${_sh#*|}; _bay=${_sh%%|*}
-    INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_n\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"size_bytes\": $_bytes, \"transport\": \"$_tr\", \"controller\": $(_ij "$_ctl"), \"shelf\": $(shelf_json "$_b"), \"bay\": $(_ij "$_bay")}"
-    echo "    $_n: ${_model:-?} serial ${_serial:-?}, $((_bytes / 1000000000)) GB, $_tr${_ctl:+ on $_ctl}, $_shpos shelf${_shid:+ $_shid}${_bay:+, bay $_bay}"
+    _wwid=$(inv_read "$_b/device/wwid")
+    [ -n "$_wwid" ] || _wwid=$(inv_read "$_b/wwid")
+    _ready=true; _rs="$((_bytes / 1000000000)) GB"
+    if [ "$_bytes" = 0 ] && [ "$(cat "$_b/removable" 2>/dev/null)" != 1 ]; then
+        _ready=false; _rs="NOT READY: no readable format (0 bytes)"
+    fi
+    INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_n\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"wwid\": $(_ij "$_wwid"), \"size_bytes\": $_bytes, \"ready\": $_ready, \"transport\": \"$_tr\", \"controller\": $(_ij "$_ctl"), \"shelf\": $(shelf_json "$_b"), \"bay\": $(_ij "$_bay")}"
+    echo "    $_n: ${_model:-?} serial ${_serial:-?}${_wwid:+ $_wwid}, $_rs, $_tr${_ctl:+ on $_ctl}, $_shpos shelf${_shid:+ $_shid}${_bay:+, bay $_bay}"
 done
+# The not-ready drives sd made no block device for (#595), by their sg node
+# (or SCSI address): what they are comes from their SCSI device, VPD 0x83's
+# WWID among it, which an unformatted drive still answers.
+while read -r _udev _usys; do
+    case "$_udev" in /dev/*) ;; -) ;; *) continue ;; esac
+    case "$_usys" in "$INV_BLOCK"/*) continue ;; esac
+    if [ "$_udev" = - ]; then _ud="$_usys"; _un="${_usys##*/}"; else _ud="$_usys/device"; _un="${_udev#/dev/}"; fi
+    _upath=$(readlink -f "$_ud")
+    _ctl=""
+    for _c in $(inv_controllers | awk '{print $1}'); do
+        case "$_upath" in */"$_c"/*) _ctl="$_c" ;; esac
+    done
+    _model=$(inv_read "$_ud/model")
+    _serial=""
+    [ -r "$_ud/vpd_pg80" ] && _serial=$(tail -c +5 "$_ud/vpd_pg80" 2>/dev/null | inv_clean)
+    _wwid=$(inv_read "$_ud/wwid")
+    INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_un\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"wwid\": $(_ij "$_wwid"), \"size_bytes\": 0, \"ready\": false, \"transport\": \"sas\", \"controller\": $(_ij "$_ctl"), \"shelf\": null, \"bay\": null}"
+    echo "    $_un (${_upath##*/}, no block device): ${_model:-?} serial ${_serial:-?}${_wwid:+ $_wwid}, NOT READY: no readable format${_ctl:+, on $_ctl} (#595)"
+    [ "$_udev" = - ] && echo "WARNING: storage: ${_upath##*/} is a disk with no block device and no sg node - nothing can format it (#595)"
+done <<INVEOF
+$(inv_unready)
+INVEOF
 [ -n "$INV_CONTROLLERS" ] || echo "  no storage controller on PCI"
 [ -n "$INV_DRIVES" ] || echo "  no drive"
 INV_CONTROLLERS="[$INV_CONTROLLERS]"
@@ -4703,6 +4755,170 @@ if [ "$BOOT_MODE" = "local" ]; then
         CHOSEN_BY=named
     fi
     # --- END drive choice
+    # --- BEGIN storage format tools (covered by tests/initramfs-storage.sh)
+    # How storage: formats drives (#573, #595), for the not-ready drives the
+    # layout formats before it plans and for every drive the format block
+    # takes. Every drive is formatted to the block size and PI the section
+    # names (owner, #595: "It need to format all the drives", "4k with pi"),
+    # whatever it is at now: never skipped as already there, and a refusal is
+    # never answered with another format (the Nov 7 fallback to 512 + PI, or
+    # 4096 without PI). Afterwards the kernel must read each drive at that
+    # block size with that P_TYPE (READ CAPACITY 16, as sd saw it), else the
+    # install fails with what the drive said.
+    STORAGE_FORMATTED=""; STORAGE_EARLY=""; STORAGE_RENAMED=""
+    _st_tool="${STORM_STORMDRIVE:-/usr/sbin/stormdrive}"
+    _st_dir="${STORM_RUN:-/run/stormblock}/storage-format"
+    _st_sg="${STORM_INV_SG:-/sys/class/scsi_generic}"
+    storage_fail() { # why
+        echo "FATAL: $1 (#573)"
+        ld_write failed "${LOCAL_DISK:-}" "storage: $1"
+        rescue_shell
+    }
+    storage_sys() { # dev -> its sysfs directory (/sys/block/X, or the sg node's for a drive sd made no disk of)
+        case "$1" in /dev/sg*) echo "$_st_sg/${1##*/}" ;; *) echo "$SURVEY_SYS/${1##*/}" ;; esac
+    }
+    storage_find() { # wwid -> the block device that has it and a size, waited for up to STORAGE_FIND_SECS
+        _sfw=0
+        while :; do
+            for _sfb in "$SURVEY_SYS"/*; do
+                [ -e "$_sfb/device" ] || continue
+                [ "$(drive_wwn "$_sfb")" = "$1" ] || continue
+                [ "$(cat "$_sfb/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
+                echo "/dev/${_sfb##*/}"
+                return 0
+            done
+            [ "$_sfw" -lt "${STORAGE_FIND_SECS:-30}" ] || return 1
+            sleep 1
+            _sfw=$((_sfw + 1))
+        done
+    }
+    storage_subst() { # words -> each renamed by STORAGE_RENAMED ("old=new ...")
+        _ssr=""
+        for _ssw in $1; do
+            for _ssp in $STORAGE_RENAMED; do [ "${_ssp%%=*}" = "$_ssw" ] && _ssw="${_ssp#*=}"; done
+            _ssr="$_ssr $_ssw"
+        done
+        echo "${_ssr# }"
+    }
+    # Each drive's lines reach the console as they come (a shell echo,
+    # not sed, which may hold them in a buffer for hours), and its log
+    # keeps them: the heartbeat says the last, a failure quotes it.
+    # `auto` is the fast format (FFMT), else a full FORMAT UNIT: stormdrive's
+    # own auto sends nothing to a drive already at the format.
+    storage_format() { # dev -> its exit code in $_st_dir/<name>.rc
+        _sfn="${1##*/}"
+        : > "$_st_dir/$_sfn.log"
+        {
+            _sfm="$STORAGE_METHOD"
+            [ "$_sfm" = auto ] && _sfm=fast
+            "$_st_tool" format --device "$1" --block-size "$STORAGE_BLOCK_SIZE" \
+                --protection "$STORAGE_PROTECTION" --method "$_sfm" --poll-secs "${STORAGE_POLL_SECS:-60}" 2>&1
+            _sfrc=$?
+            # Refused fast: the full format, same block size and PI. A drive
+            # that refused the block size or the PI refuses it again.
+            if [ "$_sfrc" = 3 ] && [ "$STORAGE_METHOD" = auto ]; then
+                echo "the fast format was refused: a full FORMAT UNIT to the same format instead"
+                "$_st_tool" format --device "$1" --block-size "$STORAGE_BLOCK_SIZE" \
+                    --protection "$STORAGE_PROTECTION" --method full --poll-secs "${STORAGE_POLL_SECS:-60}" 2>&1
+                _sfrc=$?
+            fi
+            echo "$_sfrc" > "$_st_dir/$_sfn.rc"
+        } | while IFS= read -r _l; do
+            echo "  $_sfn: $_l"
+            printf '%s\n' "$_l" >> "$_st_dir/$_sfn.log"
+        done
+    }
+    # Once a minute while drives format (owner: "i need to be able watch
+    # progress"): each drive's last line and the time so far on the
+    # console, local-disk.json in state formatting, and the install's
+    # record on the appliance (`install-report`, one try, never fatal) -
+    # a full FORMAT UNIT is ~19 h and must read as the install's stage,
+    # not a hang. A drive whose format blocks (IMMED refused) says
+    # nothing itself; this line still does.
+    storage_beat() { # drives start -> until $_st_dir/beat.stop
+        while :; do
+            _bi=0
+            while [ "$_bi" -lt "${STORAGE_BEAT_SECS:-60}" ]; do
+                sleep 1
+                [ -e "$_st_dir/beat.stop" ] && return 0
+                _bi=$((_bi + 1))
+            done
+            _bt=$(( ($(date +%s) - $2) / 60 ))
+            _bs=""
+            for _bd in $1; do
+                _bn="${_bd##*/}"
+                if [ -e "$_st_dir/$_bn.rc" ]; then _bl="ended"
+                else _bl=$(tail -n 1 "$_st_dir/$_bn.log" 2>/dev/null); _bl="${_bl#"$_bd": }"; fi
+                _bs="$_bs $_bn: ${_bl:-started};"
+            done
+            _bs="${_bs# }"
+            echo "  FORMAT: ${_bt} min so far - ${_bs%;}"
+            ld_write formatting "${LOCAL_DISK:-}" "storage: formatting, ${_bt} min so far - ${_bs%;}"
+            "$SURVEY_SB" install-report --stage formatting --detail "${_bt} min so far - ${_bs%;}" >/dev/null 2>&1 &
+        done
+    }
+    storage_said() { # dev -> its last lines, the sense among them
+        tail -n 3 "$_st_dir/${1##*/}.log" 2>/dev/null | sed "s|^$1: ||" | tr '\n' ' ' | sed 's/ *$//'
+    }
+    storage_pi() { # protection word -> the P_TYPE sd reports (protection_type)
+        case "$1" in none) echo 0 ;; type1) echo 1 ;; type2) echo 2 ;; type3) echo 3 ;; *) echo "?" ;; esac
+    }
+    storage_format_run() { # drives -> every one formatted at once, found again and checked
+        [ -x "$_st_tool" ] || storage_fail "storage: in ${STORAGE_FROM##*/} formats every drive, and this initramfs has no stormdrive ($_st_tool): it is built with STORMDRIVE_BIN (stormcentral#1335)"
+        mkdir -p "$_st_dir"
+        _sr_todo="$1"
+        for _dev in $_sr_todo; do drive_wwn "$(storage_sys "$_dev")" > "$_st_dir/${_dev##*/}.wwid"; done
+        echo "  FORMAT: $_sr_todo to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION ($STORAGE_METHOD), all at once - every byte on them is lost"
+        rm -f "$_st_dir"/*.rc "$_st_dir/beat.stop"
+        _st_pids=""
+        for _dev in $_sr_todo; do storage_format "$_dev" & _st_pids="$_st_pids $!"; done
+        storage_beat "$_sr_todo" "$(date +%s)" &
+        _st_beat=$!
+        for _p in $_st_pids; do wait "$_p"; done
+        # The beat ends within a second (no sleep left holding the console).
+        touch "$_st_dir/beat.stop"; wait "$_st_beat"
+        _st_bad=""
+        for _dev in $_sr_todo; do
+            _rc=$(cat "$_st_dir/${_dev##*/}.rc" 2>/dev/null || echo 1)
+            case "$_rc" in
+            0|4) ;;
+            3) _st_bad="$_st_bad $_dev(refused $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION: $(storage_said "$_dev"))"
+               echo "refused $STORAGE_PROTECTION: $(storage_said "$_dev")" > "$_st_dir/${_dev##*/}.fmt" ;;
+            *) _st_bad="$_st_bad $_dev(exit $_rc: $(storage_said "$_dev"))"
+               echo "failed: $(storage_said "$_dev")" > "$_st_dir/${_dev##*/}.fmt" ;;
+            esac
+        done
+        [ -n "$_st_bad" ] && storage_fail "the format to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION failed on${_st_bad}; nothing is laid, and no other format is tried (#595)"
+        # Each drive as the kernel reads it now: by its WWID, since sd may
+        # make a new disk of it (a drive it had none for, or one of 0 bytes).
+        _pt_want=$(storage_pi "$STORAGE_PROTECTION")
+        for _dev in $_sr_todo; do
+            _ww=$(cat "$_st_dir/${_dev##*/}.wwid" 2>/dev/null)
+            _now="$_dev"
+            if [ -n "$_ww" ]; then
+                _now=$(storage_find "$_ww") || storage_fail "$_dev ($_ww) was formatted and no disk with its WWID came up"
+            elif [ "$(cat "$SURVEY_SYS/${_dev##*/}/size" 2>/dev/null || echo 0)" -le 0 ]; then
+                storage_fail "$_dev was formatted and reads no size, and has no WWID to find it again by"
+            fi
+            [ "$_now" != "$_dev" ] && { STORAGE_RENAMED="$STORAGE_RENAMED $_dev=$_now"; echo "  $_dev is $_now now (WWID $_ww)"; }
+            _nsys="$SURVEY_SYS/${_now##*/}"
+            _lb=$(cat "$_nsys/queue/logical_block_size" 2>/dev/null)
+            _pt=""
+            for _sd in "$_nsys"/device/scsi_disk/*/protection_type; do [ -r "$_sd" ] && _pt=$(cat "$_sd" 2>/dev/null); done
+            [ "$_lb" = "$STORAGE_BLOCK_SIZE" ] || storage_fail "$_now reads ${_lb:-unknown}-byte blocks after its format to $STORAGE_BLOCK_SIZE: $(storage_said "$_dev")"
+            if [ -n "$_pt" ]; then
+                [ "$_pt" = "$_pt_want" ] || storage_fail "$_now reads P_TYPE ${_pt} (protection_type) after its format to PI $STORAGE_PROTECTION: $(storage_said "$_dev")"
+                if [ "$_pt" = 0 ]; then _pts="PROT_EN=0"; else _pts="PROT_EN=1 P_TYPE $_pt"; fi
+            else
+                _pts="PI not shown by the kernel (no SCSI disk)"
+            fi
+            echo "  FORMATTED: $_now ${_ww:+($_ww) }reads $_lb-byte blocks, $_pts (READ CAPACITY 16)"
+            [ "$_now" != "$_dev" ] && mv -f "$_st_dir/${_dev##*/}.log" "$_st_dir/${_now##*/}.log" 2>/dev/null
+            echo "formatted $STORAGE_PROTECTION $STORAGE_METHOD" > "$_st_dir/${_now##*/}.fmt"
+            STORAGE_FORMATTED="${STORAGE_FORMATTED:+$STORAGE_FORMATTED }$_now"
+        done
+    }
+    # --- END storage format tools
     # --- BEGIN storage layout (covered by tests/initramfs-storage.sh)
     # The install-config's `storage:` (#573; stormcos docs/STORAGE-LAYOUT.md):
     # every drive it takes laid alike - formatted, an ESP, the boot pallets, a
@@ -4745,6 +4961,17 @@ if [ "$BOOT_MODE" = "local" ]; then
             fi
             set -- "$@" --drive "dev=$_dev;serial=$(drive_serial "$_d");wwn=$(drive_wwn "$_d");model=$(drive_model "$_d");shelf=$_sid;position=$_spos;bay=$_sbay;bytes=$(( $(cat "$_d/size" 2>/dev/null || echo 0) * 512 ));removable=${_rm:-0};usb=$_usb;carries=$_car;running=0"
         done
+        # The drives that answer with no readable format (#595), when they
+        # may be formatted: they carry nothing anything can read.
+        if [ -n "$STORAGE_EARLY_OK" ]; then
+            while read -r _dev _d; do
+                case "$_dev" in /dev/*) ;; *) continue ;; esac
+                _s=$(shelf_of "$_d"); _sid=${_s%%|*}; _s=${_s#*|}; _spos=${_s%%|*}; _s=${_s#*|}; _sbay=${_s%%|*}
+                set -- "$@" --drive "dev=$_dev;serial=$(drive_serial "$_d");wwn=$(drive_wwn "$_d");model=$(drive_model "$_d");shelf=$_sid;position=$_spos;bay=$_sbay;bytes=0;removable=0;usb=0;carries=;running=0;ready=0"
+            done <<STEOF
+$(inv_unready)
+STEOF
+        fi
         "$SURVEY_SB" image storage-plan --config "$STORAGE_FROM" "$@"
     }
     case "${SLAB:-}" in /dev/*) _st_local=1 ;; *) _st_local="" ;; esac
@@ -4756,10 +4983,34 @@ if [ "$BOOT_MODE" = "local" ]; then
        && [ "${ASSIMILATE:-}" != ambiguous ]; then
         # The wipe word, as asked now: ASSIMILATE is rewritten below (#311).
         [ "${ASSIMILATE:-}" = force ] && STORAGE_FORCE=1
-        if _st_out=$(storage_plan 2>&1); then
-            eval "$_st_out"
-        else
-            STORAGE_STOP="the engine could not plan storage: ($(printf '%s\n' "$_st_out" | tail -n 1))"
+        # A drive with no readable format (#595) is formatted before the
+        # plan that lays it: on an install (no node-data set served yet) or
+        # with the wipe word. A node already laid leaves it to the operator
+        # (#593), said below.
+        STORAGE_EARLY_OK=""
+        { [ -z "${STORAGE_SERVED:-}" ] || [ -n "$STORAGE_FORCE" ]; } && STORAGE_EARLY_OK=1
+        _st_pass=1
+        while :; do
+            STORAGE_UNREADY=""
+            if _st_out=$(storage_plan 2>&1); then
+                eval "$_st_out"
+            else
+                STORAGE_STOP="the engine could not plan storage: ($(printf '%s\n' "$_st_out" | tail -n 1))"
+            fi
+            [ -z "$STORAGE_STOP" ] && [ -n "$STORAGE_UNREADY" ] || break
+            if [ "$_st_pass" != 1 ]; then
+                STORAGE_STOP="$STORAGE_UNREADY still not ready after the format"
+                break
+            fi
+            printf '%s\n' "$STORAGE_SAID" | sed 's/^/  /'
+            echo "  storage: $STORAGE_UNREADY not ready (no readable format) - formatted first, then planned again (#595)"
+            storage_format_run "$STORAGE_UNREADY"
+            STORAGE_EARLY="$STORAGE_FORMATTED"
+            _st_pass=2
+        done
+        if [ -z "$STORAGE_EARLY_OK" ]; then
+            _st_un=$(inv_unready | awk '$1 ~ /^\/dev\// {print $1}' | tr '\n' ' ')
+            [ -n "$_st_un" ] && echo "WARNING: storage: ${_st_un% } not ready (no readable format) and this node's set is served: not formatted on this boot; install with the wipe word to take them (#595, #593)"
         fi
         if [ -n "$STORAGE_STOP" ]; then
             echo "  STOP: storage: in ${STORAGE_FROM##*/}: $STORAGE_STOP (#573). No drive is taken. The drives:"
@@ -5338,16 +5589,11 @@ $1|$_svp|$3"
     # Every drive storage: takes, formatted to its block size and protection
     # at once (#573; owner: "why not get them done in parallel" - a full
     # FORMAT UNIT on a 10 TB drive is hours, four in a row a day). A drive
-    # already at the format is left. A format is destructive: it runs on a
+    # already at the format is formatted all the same (#595), with the tools
+    # above: 4096 + the PI asked, or the install fails. A format is destructive: it runs on a
     # fresh install, or with the wipe word over a node's data - never on a
     # keep-data reinstall, which stops here naming the drives and writes
     # nothing (STORAGE-LAYOUT.md: a layout change is never automatic).
-    STORAGE_FORMATTED=""
-    storage_fail() { # why
-        echo "FATAL: $1 (#573)"
-        ld_write failed "${LOCAL_DISK:-}" "storage: $1"
-        rescue_shell
-    }
     # A keep-data reinstall over the layout storage: asks keeps it (#573,
     # STORAGE-LAYOUT.md: "a keep-data reinstall never relays a drive"): the
     # drives taken are the node-data set's members this boot serves, each at
@@ -5378,17 +5624,12 @@ $1|$_svp|$3"
     fi
     if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "$STORAGE_KEPT" ]; then
         command -v storage_unserve >/dev/null 2>&1 && storage_unserve
-        _st_tool="${STORM_STORMDRIVE:-/usr/sbin/stormdrive}"
-        [ -x "$_st_tool" ] || storage_fail "storage: in ${STORAGE_FROM##*/} formats every drive, and this initramfs has no stormdrive ($_st_tool): it is built with STORMDRIVE_BIN (stormcentral#1335)"
-        _st_dir="${STORM_RUN:-/run/stormblock}/storage-format"
-        rm -rf "$_st_dir"; mkdir -p "$_st_dir"
+        # Every drive taken, whatever it is at (owner, #595: "It need to
+        # format all the drives"), but those the layout formatted this boot.
         _st_todo=""
         for _dev in $STORAGE_DRIVES; do
-            "$_st_tool" format --device "$_dev" --block-size "$STORAGE_BLOCK_SIZE" \
-                --protection "$STORAGE_PROTECTION" --method none >/dev/null 2>&1
-            case $? in
-            4) echo "  $_dev is at $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION already - not formatted"
-               echo "already $STORAGE_PROTECTION" > "$_st_dir/${_dev##*/}.fmt" ;;
+            case " $STORAGE_EARLY " in
+            *" $_dev "*) echo "  $_dev was formatted this boot (it had no readable format) - not again" ;;
             *) _st_todo="$_st_todo $_dev" ;;
             esac
         done
@@ -5413,88 +5654,13 @@ $1|$_svp|$3"
                 storage_fail "a layout change over what the drives hold, without the wipe word:$_st_full"
             fi
         fi
-        # Each drive's lines reach the console as they come (a shell echo,
-        # not sed, which may hold them in a buffer for hours), and its log
-        # keeps them: the heartbeat says the last, a failure quotes it.
-        storage_format() { # dev protection -> its exit code in $_st_dir/<name>.rc
-            _sfn="${1##*/}"
-            : > "$_st_dir/$_sfn.log"
-            {
-                "$_st_tool" format --device "$1" --block-size "$STORAGE_BLOCK_SIZE" \
-                    --protection "$2" --method "$STORAGE_METHOD" --poll-secs "${STORAGE_POLL_SECS:-60}" 2>&1
-                echo $? > "$_st_dir/$_sfn.rc"
-            } | while IFS= read -r _l; do
-                echo "  $_sfn: $_l"
-                printf '%s\n' "$_l" >> "$_st_dir/$_sfn.log"
-            done
-        }
-        # Once a minute while drives format (owner: "i need to be able watch
-        # progress"): each drive's last line and the time so far on the
-        # console, local-disk.json in state formatting, and the install's
-        # record on the appliance (`install-report`, one try, never fatal) -
-        # a full FORMAT UNIT is ~19 h and must read as the install's stage,
-        # not a hang. A drive whose format blocks (IMMED refused) says
-        # nothing itself; this line still does.
-        storage_beat() { # drives start -> until $_st_dir/beat.stop
-            while :; do
-                _bi=0
-                while [ "$_bi" -lt "${STORAGE_BEAT_SECS:-60}" ]; do
-                    sleep 1
-                    [ -e "$_st_dir/beat.stop" ] && return 0
-                    _bi=$((_bi + 1))
-                done
-                _bt=$(( ($(date +%s) - $2) / 60 ))
-                _bs=""
-                for _bd in $1; do
-                    _bn="${_bd##*/}"
-                    if [ -e "$_st_dir/$_bn.rc" ]; then _bl="ended"
-                    else _bl=$(tail -n 1 "$_st_dir/$_bn.log" 2>/dev/null); _bl="${_bl#"$_bd": }"; fi
-                    _bs="$_bs $_bn: ${_bl:-started};"
-                done
-                _bs="${_bs# }"
-                echo "  FORMAT: ${_bt} min so far - ${_bs%;}"
-                ld_write formatting "${LOCAL_DISK:-}" "storage: formatting, ${_bt} min so far - ${_bs%;}"
-                "$SURVEY_SB" install-report --stage formatting --detail "${_bt} min so far - ${_bs%;}" >/dev/null 2>&1 &
-            done
-        }
-        storage_said() { # dev -> its last lines, the sense among them
-            tail -n 3 "$_st_dir/${1##*/}.log" 2>/dev/null | sed "s|^$1: ||" | tr '\n' ' ' | sed 's/ *$//'
-        }
-        _st_round=1
-        _st_prot="$STORAGE_PROTECTION"
-        while [ -n "$_st_todo" ]; do
-            echo "  FORMAT: $_st_todo to $STORAGE_BLOCK_SIZE + PI $_st_prot ($STORAGE_METHOD), all at once - every byte on them is lost"
-            rm -f "$_st_dir"/*.rc "$_st_dir/beat.stop"
-            _st_pids=""
-            for _dev in $_st_todo; do storage_format "$_dev" "$_st_prot" & _st_pids="$_st_pids $!"; done
-            storage_beat "$_st_todo" "$(date +%s)" &
-            _st_beat=$!
-            for _p in $_st_pids; do wait "$_p"; done
-            # The beat ends within a second (no sleep left holding the console).
-            touch "$_st_dir/beat.stop"; wait "$_st_beat"
-            _st_again=""; _st_bad=""
-            for _dev in $_st_todo; do
-                _rc=$(cat "$_st_dir/${_dev##*/}.rc" 2>/dev/null || echo 1)
-                case "$_rc" in
-                # What each drive got, for the layout report (#573 step 8).
-                0) STORAGE_FORMATTED="$STORAGE_FORMATTED $_dev"
-                   echo "formatted $_st_prot $STORAGE_METHOD" > "$_st_dir/${_dev##*/}.fmt" ;;
-                4) STORAGE_FORMATTED="$STORAGE_FORMATTED $_dev"
-                   echo "already $_st_prot" > "$_st_dir/${_dev##*/}.fmt" ;;
-                3) if [ "$_st_prot" = type1 ] && [ "$_st_round" = 1 ]; then _st_again="$_st_again $_dev"; else _st_bad="$_st_bad $_dev(refused: $(storage_said "$_dev"))"; fi ;;
-                *) _st_bad="$_st_bad $_dev(exit $_rc: $(storage_said "$_dev"))" ;;
-                esac
-            done
-            [ -n "$_st_bad" ] && storage_fail "the format failed on${_st_bad}; nothing is laid"
-            _st_todo="${_st_again# }"
-            if [ -n "$_st_todo" ]; then
-                # The HBA does not pass PI to the drive (STORAGE-LAYOUT.md:
-                # type1 where the path carries it, none otherwise).
-                echo "  $_st_todo refused PI type 1 - formatted with none instead"
-                _st_prot=none
-                _st_round=2
+        if [ -n "$_st_todo" ]; then
+            storage_format_run "$_st_todo"
+            if [ -n "$STORAGE_RENAMED" ]; then
+                STORAGE_DRIVES=$(storage_subst "$STORAGE_DRIVES")
+                STORAGE_SYSTEM=$(storage_subst "$STORAGE_SYSTEM")
             fi
-        done
+        fi
         STORAGE_FORMATTED="${STORAGE_FORMATTED# }"
         if [ -n "$STORAGE_FORMATTED" ]; then
             # The drives are blank now: what the survey saw on them is gone.
