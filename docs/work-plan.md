@@ -2,6 +2,21 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #597 — storage: drives=all took sda only: the virtio drives never reached the plan (2026-11-14, P0)
+
+pvetest3 12.81: inventory sda vda vdb vdc, layout sda alone, no word why.
+Cause: `storage_plan` in /init lists drives with `sd_drives` (`sd*`,
+`nvme*n*` only), so vd* never reach `image storage-plan`. Also seen on the
+console: `/init: eval: … not found` (the plan's stderr, the engine's log
+lines, merged into what is eval'd) and `sda: sda: formatted` (both /init and
+stormdrive prefix the drive).
+- [ ] `storage_disks`: every whole disk the inventory lists (its exclusions),
+  given to the plan; virtio serial from `/sys/block/vdX/serial`.
+- [ ] plan: a removable, USB or 0-byte drive left out under `all` is named.
+- [ ] the plan's stderr kept apart from what is eval'd (layout block and #593's arrivals).
+- [ ] one prefix on a format line.
+- [ ] check.sh, release, stage, shipped (proof: pvetest3's `disk laid`: 4 legs, set of 4).
+
 ## #593 — drives that arrive after the inventory: installer and running node act on hot plug (2026-11-13, P1)
 
 Owner: "You need to watch for hot plug even after boot." Plan:
