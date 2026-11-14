@@ -39,6 +39,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.7.1] — 2026-11-14
+
+### Fixed
+- #605: the node-data set of a `storage:` layout is served at `/dev/ublkb65535`, not `/dev/ublkb64`, which a release of more than 64 volumes reached (12.84's stormcluster: the data half unusable, ENOSPC, no install report on pvetest3). boot-local refuses to start when an id it would create is already live, naming the device.
+
 ## [v24.7.0] — 2026-11-14
 
 ### Added
