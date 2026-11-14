@@ -2,6 +2,32 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #593 — drives that arrive after the inventory: installer and running node act on hot plug (2026-11-13, P1)
+
+Owner: "You need to watch for hot plug even after boot." Plan:
+- **A. `src/drive/uevent.rs`**: a `NETLINK_KOBJECT_UEVENT` listener (no udev
+  in the image) and its parser; a drive event resolved from sysfs to its
+  device, serial, WWID, controller (PCI) and bay. `stormblock hotplug watch
+  --out FILE` for /init: one line per whole-disk add/remove (block disks,
+  and sg nodes of a type-0 SCSI disk with no block device: a NOT READY one).
+- **B. /init**: the watch started right after the storage inventory; at the
+  layout's commit (just before `storage-lay` writes the tables) an arrival
+  since the inventory re-runs the plan, a drive it now takes is formatted
+  like the rest, and the check repeats (bounded); after the lay, arrivals
+  are said "left to the running node". The report (`storage-layout.json`)
+  carries `arrived` (each with whether it was laid) and `not_laid` (the
+  inventory's drives the layout left, so no silent difference). The watch is
+  stopped before switch_root.
+- **C. engine**: the same listener as a task (Linux): every add/remove
+  logged with device, serial, controller and bay (part 3); a blank or
+  not-ready whole disk that is not in the layout is a **candidate**,
+  offered as `replacement` (the set misses a member: first), `spare`, and
+  `system_leg`; shown in `GET /api/v1/storage/layout` `candidates` and in
+  health. Policy `[storage] hotplug = "offer"` (default) from settings.
+- **D. join**: what joins the set at runtime goes through the node's
+  stormraid daemon (it owns the set after the initramfs, changes by its
+  RaidSet object under `--kube`): assessed after C, filed where it belongs.
+
 ## #595 — every drive storage: takes formatted 4096 + PI, NOT READY ones included (2026-11-13, P0)
 
 forge1's three SAS drives were left unformatted by the Nov 7 format (refused
