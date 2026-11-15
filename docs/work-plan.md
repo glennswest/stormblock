@@ -18,8 +18,13 @@ stormcentral's `testhost install --force`.
   without the word; off/recovery), unit test in storage.rs.
 - [x] owner's decision (2026-11-15): a drive already at the asked block size
   + PI (READ CAPACITY 16) is not formatted again, said, still laid; tests.
-- [ ] sc-build check.sh; v24.10.0; stage; companion stormcentral issue
-  (`--force` writes `storage.wipe`); `shipped` with forge1's console proof.
+- [x] check.sh ALL PASS on 77083633; v24.10.0 (f07bf9c1) tagged, locked musl
+  release build passed; stage requested (build aa823ca89cbc); value forms and
+  the console line posted on stormcentral#1428 (its regex needs
+  `wipe: {by: "testhost install --force by <who>", why}`); `shipped` with
+  `console:storage: wipe asked by the install-config|not formatted again \(#614\)`
+  (propose --after #1428 refused: #1428 waits on #614).
+- [ ] forge1's forced install console (only metal shows it).
 
 ## #611 / #595 — the card's own inventory, then #595 on it (2026-11-15, P0)
 
