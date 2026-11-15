@@ -44,6 +44,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.7.3] — 2026-11-15
+
+### Fixed
+- #609: an install the appliance asks for is not the wipe word for `storage:`. The install ticket's `ASSIMILATE=force` passed for `rd.stormblock.assimilate=force`, so a keep-data reinstall formatted the drive it had just said it kept (forge1 12.86: a full FORMAT UNIT of the 10 TB sda). Only the command line's word formats a node's data now; a keep-data reinstall over this node's slabs in another layout stops before writing anything.
+
 ## [v24.7.2] — 2026-11-14
 
 ### Fixed
