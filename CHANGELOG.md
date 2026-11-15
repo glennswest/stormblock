@@ -46,6 +46,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.7.4] — 2026-11-15
+
+### Fixed
+- #595 (reopened): the storage inventory shows each SAS HBA's own view, so a drive the HBA never added reads apart from one that answers NOT READY: every SAS phy with its link, the port and what was added there (end device, SAS address, SCSI device, sd disk or sg node; or an expander), the phys with no link, and the driver's own kernel lines about its devices. A host phy with a link and no device is waited for and named in the WARNING. The settle wait is said.
+
 ## [v24.7.3] — 2026-11-15
 
 ### Fixed
