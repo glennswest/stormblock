@@ -241,8 +241,31 @@ no block device yet: sd still spinning it up) is waited for up to
 `STORM_STORAGE_PENDING_WAIT` (60 s). Drives that kept arriving are said
 (`storage: 1 -> 4 drives on 0000:c1:00.0 after 6s`); one found that never
 became a disk is a WARNING naming it. A machine with no SAS/RAID controller
-(NVMe, virtio, AHCI only) does not wait. The inventory goes into
-`local-disk.json` as `controllers` and `drives`, kept by the verdict below.
+(NVMe, virtio, AHCI only) does not wait. The settle wait is said whether or
+not anything moved (`storage: SAS/RAID drive counts held 5s …`).
+
+**The HBA's own view (#595).** Under each SAS HBA or RAID card the console
+shows what the SAS layer has, so a drive the HBA never added reads apart from
+a drive that answers NOT READY:
+
+```
+  0000:c1:00.0 [1000:0097] class 0x010700: mpt3sas, 1 drive(s)
+    hba: 8 phys, 4 with a link, 1 end device(s), 0 expander(s) (the SAS layer's view)
+    hba: phy-0:0: 12.0 Gbit, end_device-0:0 sas 0x5000cca2680ab8d9, 0:0:0:0 sda
+    hba: phy-0:1: 12.0 Gbit, linked, no device added (the HBA links to something it did not add)
+    hba: phy-0:3: 12.0 Gbit, end_device-0:3 sas 0x5000cca26801b643, 0:0:3:0 sg3 (no block device)
+    hba: no link, Unknown: phy-0:4 phy-0:5 phy-0:6 phy-0:7
+    hba-log: [    5.30] mpt3sas_cm0: discovery errors(device blocked): sas_address(0x…), handle(0x000b)
+```
+
+Every phy (`/sys/class/sas_phy`) with its negotiated link, the port it is in
+and what was added there: an end device with its SAS address, its SCSI
+device and the sd disk or sg node; or an expander. Then the driver's own
+kernel lines about its devices (added, refused, blocked, removed; the last
+40). A host phy with a link and no device counts as a drive still coming
+(`STORM_STORAGE_PENDING_WAIT`) and is named in the WARNING if none comes.
+The inventory goes into `local-disk.json` as `controllers` and `drives`,
+kept by the verdict below.
 
 **The appliance `/init` settled on (#506)** is left in
 `/run/stormblock/appliance`, which survives `switch_root`: its URL alone on one

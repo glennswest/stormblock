@@ -13,6 +13,11 @@
 #     count must hold still for STORM_STORAGE_SETTLE, a drive the SAS layer
 #     found but sd has not made a disk of yet is waited for past the plain
 #     bound, and a machine with no SAS/RAID controller does not wait (#592);
+#   * a SAS HBA's own view is said (#595, reopened): every phy, its link,
+#     what the SAS layer added on it (end device, SAS address, SCSI device,
+#     disk or sg) and the driver's own log lines; a host phy with a link
+#     and no device is waited for as a pending drive, and named in the
+#     WARNING when it never comes;
 #   * the inventory is written to local-disk.json as `controllers` and
 #     `drives`, as JSON the engine reads (#344's verdict file).
 #
@@ -93,6 +98,7 @@ inventory() ( # -> console in inv.out, JSON in report.json
     set +e
     STORM_PCI_SYS="$T/pci"; STORM_INV_BLOCK="$T/block"; STORM_STORAGE_WAIT=${WAIT:-3}
     STORM_INV_SCSI="$T/scsi"; STORM_INV_SAS_END="$T/sas_end_device"; STORM_INV_SG="$T/sg"
+    STORM_INV_SAS_PHY="$T/sas_phy"; STORM_INV_SAS_DEV="$T/sas_device"; STORM_INV_DMESG="cat $T/dmesg"
     STORM_STORAGE_SETTLE=${SETTLE:-1}; STORM_STORAGE_PENDING_WAIT=${PWAIT:-3}
     STORM_LOCAL_DISK_REPORT="$WORK/report.json"
     rm -f "$WORK/report.json"
@@ -241,6 +247,73 @@ if command -v python3 >/dev/null 2>&1; then
     python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$WORK/report.json" 2>/dev/null \
         && echo "  ok    the report is JSON" || { echo "  FAIL  the report is not JSON"; fail=1; }
 fi
+
+echo "the HBA's view (#595, reopened):"
+# forge1's 12.86 install as it was: 8 host phys, 4 with a link, one end
+# device (sda) - the other three links have no device at all.
+forge_phy() { # n rate [port] -> host phy n
+    _p="$hba/host0/phy-0:$1"
+    mkdir -p "$_p/sas_phy/phy-0:$1" "$T/sas_phy"
+    echo "$2" > "$_p/sas_phy/phy-0:$1/negotiated_linkrate"
+    ln -s "$_p/sas_phy/phy-0:$1" "$T/sas_phy/phy-0:$1"
+    if [ -n "${3:-}" ]; then mkdir -p "$hba/host0/port-0:$3"; ln -s "$_p" "$hba/host0/port-0:$3/phy-0:$1"; fi
+}
+forge_sasdev() { # n address -> end device n's SAS address
+    _e="$hba/host0/port-0:$1/end_device-0:$1"
+    mkdir -p "$_e/sas_device/end_device-0:$1" "$T/sas_device"
+    echo "$2" > "$_e/sas_device/end_device-0:$1/sas_address"
+    ln -s "$_e/sas_device/end_device-0:$1" "$T/sas_device/end_device-0:$1"
+}
+forge_phys() {
+    forge_phy 0 "12.0 Gbit" 0
+    forge_sasdev 0 0x5000cca2680ab8d9
+    for n in 1 2 3; do forge_phy "$n" "12.0 Gbit"; done
+    for n in 4 5 6 7; do forge_phy "$n" "Unknown"; done
+    mkdir -p "$hba/host0"
+    cat > "$T/dmesg" <<'DM'
+[    4.10] mpt3sas_cm0: LSISAS3008: FWVersion(16.00.10.00), ChipRevision(0x02)
+[    5.20] scsi 0:0:0:0: SSP: handle(0x000a), sas_addr(0x5000cca2680ab8d9), phy(0), device_name(0x5000cca2680ab8db)
+[    5.30] mpt3sas_cm0: discovery errors(device blocked): sas_address(0x5000cca26801b649), handle(0x000b)
+[    5.31] e1000e 0000:00:19.0 eth0: link timeout
+DM
+}
+make_forge
+forge_phys
+SETTLE=1 PWAIT=4 inventory
+out=$(cat "$WORK/inv.out")
+contains "the phys counted: 8, 4 linked, 1 end device" "hba: 8 phys, 4 with a link, 1 end device(s), 0 expander(s)" "$out"
+contains "the phy with the drive: its end device, SAS address, SCSI device and disk" \
+    "hba: phy-0:0: 12.0 Gbit, end_device-0:0 sas 0x5000cca2680ab8d9, 0:0:0:0 sda" "$out"
+contains "a phy with a link and no device is said" \
+    "hba: phy-0:1: 12.0 Gbit, linked, no device added (the HBA links to something it did not add)" "$out"
+contains "the phys with no link, by state" "hba: no link, Unknown: phy-0:4 phy-0:5 phy-0:6 phy-0:7" "$out"
+contains "a linked phy with no device is waited for" "waiting up to 4s for drives still coming up: 0000:c1:00.0:phy-0:1 0000:c1:00.0:phy-0:2 0000:c1:00.0:phy-0:3" "$out"
+contains "  and a WARNING naming the three when they never come" \
+    "no block device: 0000:c1:00.0:phy-0:1 0000:c1:00.0:phy-0:2 0000:c1:00.0:phy-0:3 (#592; a phy-N is a link" "$out"
+contains "the driver's own words: the drive it added" "hba-log: [    5.20] scsi 0:0:0:0: SSP: handle(0x000a), sas_addr(0x5000cca2680ab8d9)" "$out"
+contains "  and the one it refused" "hba-log: [    5.30] mpt3sas_cm0: discovery errors(device blocked): sas_address(0x5000cca26801b649)" "$out"
+case "$out" in *e1000e*|*FWVersion*) check "  not another driver's lines, nor its chatter" no yes ;; *) check "  not another driver's lines, nor its chatter" yes yes ;; esac
+contains "the settle wait is said" "storage: SAS/RAID drive counts held" "$out"
+
+# The same links whose devices the HBA adds at 2 s, one an sg node only:
+# waited for, and the view says what each is.
+forge_adds() {
+    [ "$SLEPT" = 2 ] || return 0
+    for n in 1 2 3; do
+        rm "$T/sas_phy/phy-0:$n"; rm -rf "$hba/host0/phy-0:$n"; forge_phy "$n" "12.0 Gbit" "$n"
+        forge_end "$n"; forge_scsi "$n"; forge_sasdev "$n" "0x5000cca26801b64$n"
+    done
+    forge_disk 1; forge_disk 2; forge_sg 3
+}
+make_forge
+forge_phys
+SETTLE=1 PWAIT=10 ON_SLEEP=forge_adds inventory
+out=$(cat "$WORK/inv.out")
+contains "links the HBA adds devices for are waited for" "storage: 1 -> 3 drives on 0000:c1:00.0 after 2s" "$out"
+contains "  the view: 4 end devices" "hba: 8 phys, 4 with a link, 4 end device(s), 0 expander(s)" "$out"
+contains "  an sg-only drive: no block device" "hba: phy-0:3: 12.0 Gbit, end_device-0:3 sas 0x5000cca26801b643, 0:0:3:0 sg3 (no block device)" "$out"
+check "  no phy in the WARNING once its device came" 0 "$(echo "$out" | grep '^WARNING' | grep -c ':phy-0' || true)"
+contains "  the sg-only drive is still the one WARNed (sd made no disk)" "no block device: 0000:c1:00.0:0:0:3:0 (#592" "$out"
 
 # No SAS/RAID controller bound (NVMe there at once): no settle wait at all.
 make_tree

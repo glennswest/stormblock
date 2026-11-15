@@ -2302,6 +2302,7 @@ inv_pending() { # -> "pci:what" for each drive the SAS layer knows and no block 
             case "$_sp" in */"$_p"/*) echo "$_p:${_s##*/}" ;; esac
         done
     done
+    for _p in $(inv_settling); do inv_hba_pending "$_p"; done
 }
 # A drive that answers and has no readable format (#595: forge1's three SAS
 # drives, left by an interrupted format, answer NOT READY / medium format
@@ -2326,6 +2327,100 @@ inv_unready() { # -> "dev sysdir" per not-ready SCSI disk (sysdir/device is its 
         fi
     done
 }
+# The HBA's own view (#595, reopened: forge1's 12.86 install saw one drive of
+# four and the console could not say whether the HBA saw the other three):
+# every SAS phy of a controller, its negotiated link, the port it is in and
+# what the SAS layer added there (end device and SAS address, its SCSI
+# device, sd disk or sg node; or an expander). A host phy that has a link
+# and no device is a drive the HBA links to and did not add: it is waited
+# for like a pending drive, and named in the WARNING if it never comes.
+INV_SAS_PHY="${STORM_INV_SAS_PHY:-/sys/class/sas_phy}"
+INV_SAS_DEV="${STORM_INV_SAS_DEV:-/sys/class/sas_device}"
+INV_DMESG="${STORM_INV_DMESG:-dmesg}"
+inv_phys() { # pci -> "name rate|... devdir" per SAS phy under that controller
+    for _ph in "$INV_SAS_PHY"/phy-*; do
+        [ -e "$_ph" ] || continue
+        _phd=$(readlink -f "$_ph")
+        _phd=${_phd%/sas_phy/*}
+        case "$_phd" in */"$1"/*) ;; *) continue ;; esac
+        echo "${_ph##*/} $_phd"
+    done
+}
+inv_phy_port() { # phy-devdir -> the port it is in, or nothing
+    _pn=${1##*/}
+    for _pp in "${1%/*}"/port-*; do
+        [ -e "$_pp/$_pn" ] && { echo "$_pp"; return 0; }
+    done
+    return 0
+}
+inv_phy_linked() { # rate -> 0 when it names a link speed
+    case "$1" in *Gbit*) return 0 ;; esac
+    return 1
+}
+inv_phy_rate() { inv_read "$INV_SAS_PHY/$1/negotiated_linkrate"; }
+inv_phy_what() { # port -> what the SAS layer added there, or nothing
+    [ -n "$1" ] || return 0
+    _pw=""
+    for _pd in "$1"/end_device-* "$1"/expander-*; do
+        [ -e "$_pd" ] || continue
+        _pdn=${_pd##*/}
+        _pa=$(inv_read "$INV_SAS_DEV/$_pdn/sas_address")
+        _pw="$_pw${_pw:+; }$_pdn${_pa:+ sas $_pa}"
+        case "$_pdn" in expander-*) continue ;; esac
+        _ps=""
+        for _sd in "$_pd"/target*/*:*:*:*; do
+            [ -e "$_sd" ] || continue
+            _psb=""; _psg=""
+            for _b in "$_sd"/block/*; do [ -e "$_b" ] && _psb=${_b##*/}; done
+            for _g in "$_sd"/scsi_generic/sg*; do [ -e "$_g" ] && _psg=${_g##*/}; done
+            _ps="$_ps${_ps:+, }${_sd##*/}${_psb:+ $_psb}${_psg:+ $_psg}"
+            [ -n "$_psb" ] || _ps="$_ps (no block device)"
+        done
+        _pw="$_pw, ${_ps:-no SCSI device}"
+    done
+    echo "$_pw"
+}
+inv_hba_pending() { # pci -> "pci:phy" per host phy with a link and no device
+    inv_phys "$1" | while read -r _hn _hd; do
+        case "${_hd%/*}" in */host[0-9]*) ;; *) continue ;; esac
+        case "${_hd%/*}" in */expander-*|*/port-*) continue ;; esac
+        inv_phy_linked "$(inv_phy_rate "$_hn")" || continue
+        [ -n "$(inv_phy_what "$(inv_phy_port "$_hd")")" ] && continue
+        echo "$1:$_hn"
+    done
+}
+inv_hba_view() { # pci driver -> the HBA's view, on the console
+    _hv=$(inv_phys "$1")
+    [ -n "$_hv" ] || { echo "    hba: no SAS phy in sysfs (not a SAS transport driver, or its phys are not up)"; return 0; }
+    _hp=0; _hl=0; _hdown=""
+    _he=$(for _x in "$INV_SAS_DEV"/end_device-*; do [ -e "$_x" ] || continue; case "$(readlink -f "$_x")" in */"$1"/*) echo x ;; esac; done | wc -l | tr -d ' ')
+    _hx=$(for _x in "$INV_SAS_DEV"/expander-*; do [ -e "$_x" ] || continue; case "$(readlink -f "$_x")" in */"$1"/*) echo x ;; esac; done | wc -l | tr -d ' ')
+    _hlines=$(echo "$_hv" | while read -r _hn _hd; do
+        _hr=$(inv_phy_rate "$_hn")
+        if inv_phy_linked "$_hr"; then
+            _hw=$(inv_phy_what "$(inv_phy_port "$_hd")")
+            echo "L $_hn: $_hr, ${_hw:-linked, no device added (the HBA links to something it did not add)}"
+        else
+            echo "D $_hn ${_hr:-?}"
+        fi
+    done)
+    _hp=$(echo "$_hv" | wc -l | tr -d ' ')
+    _hl=$(echo "$_hlines" | grep -c '^L' || true)
+    echo "    hba: $_hp phys, $_hl with a link, $_he end device(s), $_hx expander(s) (the SAS layer's view)"
+    echo "$_hlines" | sed -n 's/^L /    hba: /p'
+    _hdown=$(echo "$_hlines" | awk '$1 == "D" { n = $2; $1 = ""; $2 = ""; sub(/^ */, ""); s[$0] = s[$0] (s[$0] ? " " : "") n } END { for (k in s) print k ": " s[k] }')
+    [ -n "$_hdown" ] && echo "$_hdown" | sed 's/^/    hba: no link, /'
+    # The driver's own words about its devices: what it added and what it
+    # refused (mpt3sas: access status, failure at add, device blocked).
+    _hh=$(echo "$_hv" | sed -n 's#.*/host\([0-9][0-9]*\)/.*#\1#p' | sort -u)
+    _hre="$2"
+    for _x in $_hh; do _hre="$_hre|scsi $_x:|target$_x:|end_device-$_x:|expander-$_x:|port-$_x:"; done
+    $INV_DMESG 2>/dev/null | grep -E "$_hre" \
+        | grep -iE 'sas_addr|access status|failure|fail|not ready|blocked|removing|reject|timeout|fault|unsupported|hidden|spin' \
+        | tail -n 40 | inv_clean_lines | sed 's/^/    hba-log: /'
+    return 0
+}
+inv_clean_lines() { tr -d '"\\' | tr '\000-\011\013-\037' ' '; }
 _iw=0
 _iwhat=$(inv_waiting)
 _ipend=$(inv_pending)
@@ -2373,8 +2468,11 @@ for _ic in $_icounts; do
     [ "$_io" = "$_in" ] || echo "  storage: $_io -> $_in drives on $_ip after ${_ilast}s"
 done
 [ -n "$_iwhat" ] && echo "  storage: after ${_iw}s still no drive on $(echo $_iwhat)"
+# The settle wait said whether or not anything moved (#595: forge1's console
+# could not show that one was made).
+[ -n "$_iset" ] && echo "  storage: SAS/RAID drive counts held ${_istable}s (settle ${INV_SETTLE}s), ${_iw}s waited in all: $(echo $_icounts)"
 if [ -n "$_ipend" ]; then
-    echo "WARNING: storage: after ${_iw}s these drives the SAS layer found still have no block device: $(echo $_ipend) (#592)"
+    echo "WARNING: storage: after ${_iw}s these drives the SAS layer found still have no block device: $(echo $_ipend) (#592; a phy-N is a link the HBA added no device for, #595)"
 fi
 INV_CONTROLLERS=""
 INV_DRIVES=""
@@ -2392,6 +2490,7 @@ while read -r _p _cls _id _drv; do
         echo "WARNING: storage controller $_p [$_id] (class $_cls) has no driver bound - its drives cannot be seen (#345)"
     else
         echo "  $_p [$_id] class $_cls: $_drv, $(echo $_ds | wc -w) drive(s)"
+        case "$_cls" in 0x0104*|0x0107*) inv_hba_view "$_p" "$_drv" ;; esac
     fi
     _seen="$_seen $_ds"
 done <<INVEOF

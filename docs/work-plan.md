@@ -195,6 +195,24 @@ never 4096 without PI; a refusal fails the install loudly with the sense.
   On metal: forge1's next install should print `FORMATTED: … PROT_EN=1 P_TYPE 1` for all 4 and lay 4.
 - Open elsewhere: stormdrive#142 (format gives up on a NOT READY sense other than 31/00); PI type 2 not formatted by stormdrive (forge1 asks type1).
 
+**Reopened 2026-11-15** (forge1 12.86, stormblock 7f1d5cf): the inventory
+listed sda only - no end device, SCSI target or sg node for the other three,
+and nothing on the console said what the HBA saw. Asks: print the HBA's view
+(phys, end devices, SAS addresses, sd/sg); take sd-less targets (done in
+1dede3e8, but none existed here); wait for the HBA; ship with a forge1
+console proof.
+- [x] inventory: `hba:` lines per SAS/RAID controller (every sas_phy, link,
+  port, end device + SAS address, SCSI device, sd/sg; expanders), phys with
+  no link by state, `hba-log:` the driver's own kernel lines; a host phy with
+  a link and no device is pending (waited, WARNed); the settle wait said.
+  tests/initramfs-storage-inventory.sh (forge1 12.86 shape; links whose
+  devices come later). docs/boot-hooks.md.
+- [ ] check.sh green; patch release; stage; `shipped` with a forge1 console
+  proof. If forge1's console then shows linked phys with no device, or the
+  driver refusing them, that is the HBA's word: a question for the owner
+  (iDRAC / HBA), not a stormblock fix. Note #609: forge1's next install
+  STOPs before formatting unless the wipe word is given (master's call).
+
 ## #592 — the storage inventory waits for every SAS drive (2026-11-13, P0)
 
 forge1's mpt3sas showed sda only; the wait ended at the first drive, so the
