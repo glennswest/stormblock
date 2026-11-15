@@ -18,7 +18,11 @@ first, #595's format and layout on it.
   card's no-target rows, the card's count is the expected count (WARNING).
 - [x] after a FORMAT the kernel reads the drive again (rescan / sd bind / host
   scan) while storage_find waits for it by WWID, 60 s.
-- [ ] sc-build check.sh; the image; forge1's console (only metal can show it).
+- [x] sc-build check.sh ALL PASS on d8023312; v24.8.0 (33ed6979) tagged, locked
+  musl release build passed; stage requested (build c11b5e23fbb9); #595
+  `shipped` with `console:STORAGE: 4 drives, each formatted 4096 \+ PI`.
+- [ ] forge1's console (only metal can show it): the card's lines say which
+  case each of the three drives is.
 - [ ] next (#611): FORMAT UNIT through the card's pass-through for a row the
   kernel never makes a target for; the rows in local-disk.json; the engine
   keeps them for the node's life (rescan, re-match, log changes); the
