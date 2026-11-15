@@ -692,8 +692,8 @@ pub struct StoragePlan {
 }
 
 /// Choose the drives and check the section against them. `force` is the
-/// wipe word (`rd.stormblock.assimilate=force`, or an appliance's
-/// fresh-slab install): a drive that carries something is taken under
+/// wipe word (`rd.stormblock.assimilate=force` on the command line; an
+/// install ticket is not it, #609): a drive that carries something is taken under
 /// `drives: all` only with it.
 pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<StoragePlan, String> {
     let mut said = Vec::new();

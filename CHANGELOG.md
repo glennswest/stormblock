@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-15
+- **fix:** #609: an install the appliance asks for is no wipe word for `storage:`. The install ticket sets `ASSIMILATE=force` ("take this drive", #148), and the storage layout block took it for `rd.stormblock.assimilate=force` before the install was turned into a keep-data reinstall (#311): on forge1 12.86 `/init` said "its data half is kept, every volume on it adopted", then ran a full FORMAT UNIT over the 10 TB drive holding it. `STORAGE_FORCE` now comes only from the command line (`ASSIMILATE_ASKED`), so a keep-data reinstall over a drive carrying this node's slabs in another layout stops before anything is written, naming the drive, as docs/storage-layout.md says.
+
 ### 2026-11-14
 - **docs:** #607: work plan - v24.7.2 staged, shipped with its console proof.
 - **fix:** #607: `adopt-ublk` takes a data slab on the node-data set. Its preflight refused any slab on a ublk device (`slab /dev/ublkb65535 is on ublk device ublkb65535 … would hang the handover`), so on a node laid by `storage:` with a set (pvetest3, 12.85) the node's stormblock exited 1 at every restart and the install never reported. The set is stormraid's, served through the engine's stand-down. A ublk device is now refused only when it is one this handover stands down, has no live server, or is served by the incumbent or this process; one another live process serves is read, and the console names its server. A stack over several ublk devices is judged by every one.

@@ -94,7 +94,10 @@ A format loses every byte on the drive, so it runs only:
 - on a fresh install (nothing kept), or
 - over drives that hold nothing at all, or
 - with the wipe word: `rd.stormblock.assimilate=force` on that install's
-  command line (or stormcentral's fresh-slab install).
+  command line. An install the appliance asks for (the install ticket) is
+  not the wipe word: it keeps the data half (#311), and on forge1 12.86 its
+  force taken for the wipe word formatted a 10 TB drive it had just said it
+  kept (#609).
 
 A keep-data reinstall, or an ordinary boot, over a drive holding stormblock
 slabs or a foreign table stops, names the drives and what they hold, and
