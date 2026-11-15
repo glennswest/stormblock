@@ -54,6 +54,16 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.9.0] — 2026-11-15
+
+### Added
+- #611: a drive's own low-level answers and actions, through its sg node or the mpt card's pass-through (`stormblock hba json|details|act`). The answers are INQUIRY, VPD pages, READ CAPACITY 16, format progress, temperature, SMART trip, self-tests, error counters, grown defects and caching. The actions are spin up/down, self-test, and FORMAT UNIT to a block size + PI.
+- #611: the engine keeps the card's rows for the node's life: read again every 30 s and on every drive event, re-matched, each change logged. `GET /api/v1/storage/hba`, `…/hba/{sas}/details` and `POST …/hba/{sas}/action` (admin).
+- #611: at install, `card_rows` in `local-disk.json`. A drive the card lists with no SCSI device is formatted through the card (`drives: all`), then found again and planned in the same boot.
+
+### Fixed
+- #611: after a format, a disk that kept 0 bytes is deleted and its host scanned.
+
 ## [v24.8.0] — 2026-11-15
 
 ### Added
