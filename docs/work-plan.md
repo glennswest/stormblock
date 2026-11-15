@@ -15,8 +15,11 @@ is stormraid's, served by another process through the engine's stand-down.
 - [x] `adopt_preflight` takes the stood-down ids (`dev_ids`) and the
   incumbents' pids; the console says whose device a slab is read from.
 - [x] README, CHANGELOG.
-- [ ] check.sh on the pushed commit; tag v24.7.2; stage; pvetest3 install
-  (storage 512/none/all/parity 1) reports, volumes mounted, survives reboot.
+- [x] check.sh on a2ebf7bc ALL PASS; v24.7.2 (e75d728b, tagged); stage
+  requested; shipped with proof `console:slab /dev/ublkb65535 is on ublk
+  device ublkb65535, served by another process`.
+- [ ] pvetest3 install (storage 512/none/all/parity 1) reports, volumes
+  mounted, survives reboot (#598): the proof closes the issue.
 
 ## #605 — the node-data set's ublk id collides with the engine's (2026-11-14, P0)
 
