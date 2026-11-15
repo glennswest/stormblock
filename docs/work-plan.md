@@ -37,7 +37,11 @@ first, #595's format and layout on it.
     /api/v1/storage/hba`, `GET …/hba/{sas}/details` (cached, timestamp),
     `POST …/hba/{sas}/action`;
   - [x] storage_kick: a 0-byte disk deleted and its host scanned.
-- [ ] then (#611): FORMAT UNIT through the card's pass-through for a row the
+- [x] v24.9.0 (61c43ac1): check.sh ALL PASS on f7aadb34 (1457 tests), locked
+  musl build passed, stage requested (build 8acb4bf16efc), #611 `shipped` with
+  `console:card: ioc … 4 drive(s)`; the rest split to #612 (P2).
+- [ ] forge1's install console (only metal shows it).
+- [x] (done in v24.9.0) FORMAT UNIT through the card's pass-through for a row the
   kernel never makes a target for; the rows in local-disk.json; the engine
   keeps them for the node's life (rescan, re-match, log changes); the
   per-row low-level details (VPD, READ CAPACITY 16, LOG/MODE SENSE, SES).
