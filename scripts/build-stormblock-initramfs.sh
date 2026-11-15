@@ -5395,25 +5395,34 @@ STEOF
                     echo "WARNING: storage: the card lists drives the kernel has no device for: $(echo $_st_cards); only drives: all takes them (#611)"
                 elif [ -n "$_st_cards" ]; then
                     echo "  storage: $(echo $_st_cards) listed by the card with no SCSI device - formatted through the card to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION (a full FORMAT UNIT), then found again (#611)"
+                    # The card's rows as found, before anything is sent (#595).
+                    inv_card view | sed 's/^/    /'
+                    # Reported as the sg path is (#595, owner on forge1: "No
+                    # way to monitor progress"): each drive's lines on the
+                    # console as they come (a shell echo, never a buffer), a
+                    # line a minute with %, ETA and time so far from the
+                    # binary, and the minute beat (`FORMAT: N min so far`,
+                    # local-disk.json and the install record in `formatting`)
+                    # over the card's drives too.
+                    mkdir -p "$_st_dir"
+                    rm -f "$_st_dir/beat.stop"
                     _st_cp=""
                     for _sc in $_st_cards; do
-                        { inv_card_act --sas "$_sc" --action format --block-size "$STORAGE_BLOCK_SIZE" --pi "$STORAGE_PROTECTION" --wait \
-                            > "$_st_dir/card-$_sc.log" 2>&1; echo $? > "$_st_dir/card-$_sc.rc"; } &
+                        rm -f "$_st_dir/$_sc.rc"; : > "$_st_dir/$_sc.log"
+                        { inv_card_act --sas "$_sc" --action format --block-size "$STORAGE_BLOCK_SIZE" --pi "$STORAGE_PROTECTION" --wait 2>&1
+                            echo $? > "$_st_dir/$_sc.rc"; } | while IFS= read -r _l; do
+                            case "$_l" in "$_sc: "*) echo "  storage: $_l" ;; *) echo "  storage: $_sc: $_l" ;; esac
+                            printf '%s\n' "$_l" >> "$_st_dir/$_sc.log"
+                        done &
                         _st_cp="$_st_cp $!"
                     done
-                    _st_cw=0
-                    while :; do
-                        _st_run=""
-                        for _sc in $_st_cards; do [ -e "$_st_dir/card-$_sc.rc" ] || _st_run=1; done
-                        [ -z "$_st_run" ] && break
-                        sleep 1; _st_cw=$((_st_cw + 1))
-                        [ $((_st_cw % 600)) = 0 ] && for _sc in $_st_cards; do echo "  storage: $_sc: $(tail -n 1 "$_st_dir/card-$_sc.log" 2>/dev/null)"; done
-                    done
+                    storage_beat "$_st_cards" "$(date +%s)" &
+                    _st_beat=$!
                     for _p in $_st_cp; do wait "$_p" 2>/dev/null; done
+                    touch "$_st_dir/beat.stop"; wait "$_st_beat" 2>/dev/null
                     _st_cbad=""
                     for _sc in $_st_cards; do
-                        sed 's/^/  storage: /' "$_st_dir/card-$_sc.log"
-                        [ "$(cat "$_st_dir/card-$_sc.rc")" = 0 ] || _st_cbad="$_st_cbad $_sc"
+                        [ "$(cat "$_st_dir/$_sc.rc" 2>/dev/null || echo 1)" = 0 ] || _st_cbad="$_st_cbad $_sc($(storage_said "$_sc"))"
                     done
                     [ -n "$_st_cbad" ] && storage_fail "the format through the card failed on$_st_cbad (#611); nothing is laid"
                     # Found again: the card's rows each with a SCSI device.

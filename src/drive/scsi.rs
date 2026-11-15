@@ -605,6 +605,27 @@ pub fn format_progress(t: &dyn Transport) -> Result<Option<f32>, String> {
     }
 }
 
+/// A span of seconds as the console says it: `7h 10m`, `58m`, `0m`.
+pub fn span(secs: u64) -> String {
+    let (h, m) = (secs / 3600, secs % 3600 / 60);
+    if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") }
+}
+
+/// A format's minute line through the card (#595), the shape the sg path
+/// prints: `0x…: formatting (full) 12.3% through the card, about 7h 10m
+/// left, 58m so far`. The ETA is the pace so far; none before 0.1 %.
+pub fn card_format_line(addr: u64, pct: f32, elapsed_secs: u64) -> String {
+    let left = if pct >= 0.1 && pct < 100.0 {
+        let rest = elapsed_secs as f64 * f64::from(100.0 - pct) / f64::from(pct);
+        format!("about {} left", span(rest as u64))
+    } else if pct >= 100.0 {
+        "about 0m left".to_string()
+    } else {
+        "no ETA yet".to_string()
+    };
+    format!("0x{addr:016x}: formatting (full) {pct:.1}% through the card, {left}, {} so far", span(elapsed_secs))
+}
+
 // ---- the transports ----
 
 /// `SG_IO` on an sg (or sd) node.
@@ -704,6 +725,19 @@ impl Transport for Sg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn card_format_lines() {
+        // forge1's 10 TB drive: 14 h 25 m for the whole format.
+        assert_eq!(
+            card_format_line(0x5000cca268077301, 10.0, 3600),
+            "0x5000cca268077301: formatting (full) 10.0% through the card, about 9h 0m left, 1h 0m so far"
+        );
+        assert_eq!(card_format_line(1, 0.0, 30), "0x0000000000000001: formatting (full) 0.0% through the card, no ETA yet, 0m so far");
+        assert_eq!(card_format_line(1, 100.0, 120), "0x0000000000000001: formatting (full) 100.0% through the card, about 0m left, 2m so far");
+        assert_eq!(span(59), "0m");
+        assert_eq!(span(3 * 3600 + 7 * 60), "3h 7m");
+    }
 
     #[test]
     fn cdbs() {

@@ -10277,21 +10277,36 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
                 // No "an hour ago": an Instant before the boot panics (an
                 // install's first minutes).
                 let mut last: Option<std::time::Instant> = None;
+                // A progress read the card or the drive did not answer is
+                // said and asked again (the format goes on regardless); five
+                // minutes of nothing but errors ends the wait, loudly.
+                let mut misses = 0u32;
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(10));
-                    let p = mpt::with_drive(devp, sysp, a, scsi::format_progress).map_err(anyhow::Error::msg)?;
+                    let p = mpt::with_drive(devp, sysp, a, scsi::format_progress).and_then(|r| r);
                     match p {
                         Ok(None) => break,
                         Ok(Some(pct)) => {
+                            misses = 0;
+                            // One line a minute, the sg path's shape (#595).
                             if last.is_none_or(|l| l.elapsed() >= std::time::Duration::from_secs(60)) {
                                 last = Some(std::time::Instant::now());
-                                println!("0x{a:016x}: formatting {pct:.1}%, {}m so far", start.elapsed().as_secs() / 60);
+                                println!("{}", scsi::card_format_line(a, pct, start.elapsed().as_secs()));
                             }
                         }
-                        Err(e) => anyhow::bail!("hba act: 0x{a:016x}: the format: {e}"),
+                        Err(e) => {
+                            misses += 1;
+                            println!("0x{a:016x}: the format's progress not read ({e}); asked again in 10 s ({misses} in a row)");
+                            if misses >= 30 {
+                                anyhow::bail!("hba act: 0x{a:016x}: the format's progress unread for 5 min: {e}");
+                            }
+                        }
                     }
                 }
-                println!("0x{a:016x}: the format ended after {}m; the kernel asked to look again", start.elapsed().as_secs() / 60);
+                println!(
+                    "0x{a:016x}: formatted (full) through the card in {}; the kernel asked to look again",
+                    scsi::span(start.elapsed().as_secs())
+                );
                 mpt::rescan_for(sysp, a);
             }
         }

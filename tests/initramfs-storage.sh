@@ -516,6 +516,34 @@ has "  the card's answer on the console" "$WORK/out" "storage: 0x5000cca26807730
 has "  found again, the card's row" "$WORK/out" "card: drive sas 0x5000cca268077301 slot 3, SSP target, phy 3, present: ready - 0:0:3:0 sdb sg3"
 has "  and planned again" "$WORK/out" "STORAGE: 2 drives, planned again"
 hasnt "  no rescue" "$WORK/out" "RESCUE"
+has "  the card's rows before the format" "$WORK/out" "^    card: drive sas 0x5000cca268077301 slot 3"
+
+cp "$WORK/plan.out" "$WORK/cardplan.1"; cp "$WORK/plan.out2" "$WORK/cardplan.2"
+cardplans() { cp "$WORK/cardplan.1" "$WORK/plan.out"; cp "$WORK/cardplan.2" "$WORK/plan.out2"; }
+
+echo "the layout: a format through the card reports as the sg path does (#595)"
+# forge1 12.87: the card path said nothing for 10 min at a time, and no beat.
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+CARDSLOW='inv_card() { case "$1" in pending) [ -e "$W/card.formatted" ] || echo "0000:c1:00.0:sas-0x5000cca268077301" ;; view) echo "card: drive sas 0x5000cca268077301 slot 3" ;; esac; }
+inv_card_act() { echo "0x5000cca268077301: FORMAT UNIT to 4096 with PI type 1 started (IMMED) through the card"; echo "0x5000cca268077301: formatting (full) 1.0% through the card, about 9h 0m left, 5m so far"; sleep 3; touch "$W/card.formatted"; echo "0x5000cca268077301: formatted (full) through the card in 10m"; }'
+cardplans
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'STORAGE_BEAT_SECS=1' "$CARDSLOW"
+has "  each line on the console" "$WORK/out" "^  storage: 0x5000cca268077301: formatting (full) 1.0% through the card, about 9h 0m left, 5m so far"
+has "  the minute beat over the card's drive" "$WORK/out" "FORMAT: 0 min so far - 0x5000cca268077301: formatting (full) 1.0% through the card"
+has "  the install record in formatting" "$WORK/report.args" "^formatting$"
+has "  with the card's progress" "$WORK/report.args" "0x5000cca268077301: formatting (full) 1.0%"
+has "  the end said" "$WORK/out" "storage: 0x5000cca268077301: formatted (full) through the card in 10m"
+has "  planned again" "$WORK/out" "STORAGE: 2 drives, planned again"
+
+echo "the layout: a format through the card that fails fails the install, its words quoted (#595)"
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+CARDBAD='inv_card() { case "$1" in pending) echo "0000:c1:00.0:sas-0x5000cca268077301" ;; view) echo "card: drive sas 0x5000cca268077301 slot 3" ;; esac; }
+inv_card_act() { echo "hba act: 0x5000cca268077301: FORMAT UNIT: CHECK CONDITION ILLEGAL REQUEST asc/ascq 0x24/0x00" >&2; return 1; }'
+cardplans
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" "$CARDBAD"
+has "  failed, named with the sense" "$WORK/out" "the format through the card failed on 0x5000cca268077301(.*asc/ascq 0x24/0x00"
 
 reset
 printf 'storage:\n  drives: [sda]\n' > "$WORK/install-config.yaml"

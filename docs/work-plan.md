@@ -282,6 +282,17 @@ console proof.
   driver refusing them, that is the HBA's word: a question for the owner
   (iDRAC / HBA), not a stormblock fix. Note #609: forge1's next install
   STOPs before formatting unless the wipe word is given (master's call).
+- [ ] forge1 12.87 (master, 23:42Z, twice): the card path formats on metal
+  (REQUEST SENSE progress through the card works, 1.1-1.3 % at 9 min) but
+  says a line only every 600 s, the SAS address twice, no ETA, and no
+  `install-report --stage formatting` beat. Fix: `hba act --wait` prints the
+  sg path's minute line with ETA, tolerates unread progress; /init streams
+  the card's lines, runs `storage_beat` over them, prints the card's rows
+  first. tests/initramfs-storage.sh covers it. stormcentral's console
+  detector only takes kernel names (`is_drive`): the card lines count
+  through the install record, not the console (stormcentral issue filed).
+- The pvetest3 proof failure (12.87): its storage: asks 512 + no PI, so
+  `4096 \+ PI` cannot match there; the proof must be read on forge1.
 
 ## #592 — the storage inventory waits for every SAS drive (2026-11-13, P0)
 
