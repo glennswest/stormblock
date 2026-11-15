@@ -370,6 +370,38 @@ pub struct StorageSpec {
     pub system_size: Option<u64>,
     /// None: `data_raid: none`, a data slab per drive's region, no set.
     pub data_raid: Option<DataRaid>,
+    /// The wipe word for this install (#614): `wipe: all` (or `true`), or
+    /// `wipe: {by: .., why: ..}` naming who asked and why. Every drive taken
+    /// is formatted and laid whatever it holds, as with
+    /// `rd.stormblock.assimilate=force`. None: what a drive holds is kept.
+    pub wipe: Option<Wipe>,
+}
+
+/// Who asked for a wipe and why, as the install-config says (#614).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Wipe {
+    pub by: String,
+    pub why: String,
+}
+
+impl Wipe {
+    /// Where the word came from, for the console.
+    pub fn said(&self) -> String {
+        let mut s = String::from("the install-config");
+        match (self.by.is_empty(), self.why.is_empty()) {
+            (true, true) => {}
+            (false, true) => {
+                let _ = write!(s, " ({})", self.by);
+            }
+            (true, false) => {
+                let _ = write!(s, " ({})", self.why);
+            }
+            (false, false) => {
+                let _ = write!(s, " ({}: {})", self.by, self.why);
+            }
+        }
+        s
+    }
 }
 
 impl Default for StorageSpec {
@@ -382,6 +414,7 @@ impl Default for StorageSpec {
             system_mirror: Mirror::All,
             system_size: None,
             data_raid: Some(DataRaid { parity: 1, spares: 0 }),
+            wipe: None,
         }
     }
 }
@@ -422,7 +455,7 @@ impl StorageSpec {
             Yaml::Str(s) if s.is_empty() => return Ok(spec),
             other => return Err(format!("storage is {}, not a mapping", other.kind())),
         };
-        keys_known(m, "storage", &["drives", "format", "system_mirror", "system_size", "data_raid"])?;
+        keys_known(m, "storage", &["drives", "format", "system_mirror", "system_size", "data_raid", "wipe"])?;
         for (k, v) in m {
             match k.as_str() {
                 "drives" => {
@@ -535,6 +568,35 @@ impl StorageSpec {
                             Some(d)
                         }
                         other => return Err(format!("storage.data_raid is {}: a mapping or none", other.kind())),
+                    };
+                }
+                "wipe" => {
+                    spec.wipe = match v {
+                        Yaml::Str(s) => match s.to_ascii_lowercase().as_str() {
+                            "all" | "true" | "yes" => Some(Wipe::default()),
+                            "" | "false" | "no" | "none" => None,
+                            _ => {
+                                return Err(format!(
+                                    "storage.wipe is '{s}': all (or true) to format every drive taken whatever it \
+                                     holds, or leave it out"
+                                ))
+                            }
+                        },
+                        Yaml::Map(w) => {
+                            keys_known(w, "storage.wipe", &["drives", "by", "why"])?;
+                            let mut out = Wipe::default();
+                            for (k, v) in w {
+                                let t = scalar(v, &format!("storage.wipe.{k}"))?;
+                                match k.as_str() {
+                                    "drives" if t == "all" || t == "true" => {}
+                                    "drives" => return Err(format!("storage.wipe.drives is '{t}': all")),
+                                    "by" => out.by = t.to_string(),
+                                    _ => out.why = t.to_string(),
+                                }
+                            }
+                            Some(out)
+                        }
+                        other => return Err(format!("storage.wipe is {}: all, or a mapping (by, why)", other.kind())),
                     };
                 }
                 _ => {}
@@ -692,10 +754,12 @@ pub struct StoragePlan {
 }
 
 /// Choose the drives and check the section against them. `force` is the
-/// wipe word (`rd.stormblock.assimilate=force` on the command line; an
-/// install ticket is not it, #609): a drive that carries something is taken under
-/// `drives: all` only with it.
+/// wipe word on the command line (`rd.stormblock.assimilate=force`; an
+/// install ticket is not it, #609); `storage.wipe` is the same word for one
+/// install (#614). A drive that carries something is taken under
+/// `drives: all` only with one of them.
 pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<StoragePlan, String> {
+    let force = force || spec.wipe.is_some();
     let mut said = Vec::new();
     let mut taken: Vec<SeenDrive> = Vec::new();
     match &spec.drives {
@@ -732,7 +796,8 @@ pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<Stora
             if !refused.is_empty() {
                 return Err(format!(
                     "storage.drives is all, and these drives are not taken: {}. Name them in storage.drives \
-                     to take them, or install with the wipe word (rd.stormblock.assimilate=force)",
+                     to take them, or install with the wipe word (storage.wipe: all in this install's install-config, \
+                     or rd.stormblock.assimilate=force)",
                     refused.join("; ")
                 ));
             }
@@ -889,6 +954,9 @@ impl StoragePlan {
         }
         said.extend(self.said.iter().map(|s| format!("  {s}")));
         let _ = writeln!(o, "STORAGE_SAID={}", sh_quote(&said.join("\n")));
+        // The wipe word from the install-config (#614): /init takes it as
+        // STORAGE_FORCE for this install and says where it came from.
+        let _ = writeln!(o, "STORAGE_WIPE={}", sh_quote(&self.spec.wipe.as_ref().map(|w| w.said()).unwrap_or_default()));
         let _ = writeln!(o, "STORAGE_STOP=");
         o
     }
@@ -1045,6 +1113,44 @@ mod tests {
         let e = plan(&StorageSpec::default(), &d, false).unwrap_err();
         assert!(e.contains("/dev/sdd") && e.contains("a stormblock install") && e.contains("assimilate=force"), "{e}");
         assert_eq!(plan(&StorageSpec::default(), &d, true).unwrap().drives.len(), 4);
+    }
+
+    /// #614: forge1's four drives, sda holding this node's slabs, an
+    /// operator's `wipe:` in the install-config takes it; without the word
+    /// the same plan refuses it.
+    #[test]
+    fn the_install_config_wipe_word_takes_what_carries_something() {
+        let mut d = forge1();
+        d[1].carries = "stormblock slabs (an install)".into();
+        let without = "storage: {\"drives\":\"all\"}\n";
+        let e = plan_from_config(without, &d, false).unwrap_err();
+        assert!(e.contains("/dev/sda") && e.contains("storage.wipe: all"), "{e}");
+        for doc in [
+            "storage:\n  drives: all\n  wipe: all\n",
+            "storage: {\"drives\":\"all\",\"wipe\":true}\n",
+            "storage: {\"drives\":\"all\",\"wipe\":{\"by\":\"testhost install --force by ops\",\"why\":\"four drives\"}}\n",
+        ] {
+            let sh = plan_from_config(doc, &d, false).unwrap().unwrap();
+            assert!(sh.contains("STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc /dev/sdd'\n"), "{sh}");
+            assert!(sh.contains("STORAGE_WIPE='the install-config"), "{sh}");
+        }
+        let sh = plan_from_config(
+            "storage: {\"wipe\":{\"by\":\"testhost install --force by ops\",\"why\":\"four drives\"}}\n",
+            &d,
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(sh.contains("STORAGE_WIPE='the install-config (testhost install --force by ops: four drives)'\n"), "{sh}");
+        // No word, or a word that says no: nothing to wipe, said empty.
+        for doc in ["storage:\n  wipe: false\n", "storage:\n  drives: all\n"] {
+            let sh = plan_from_config(doc, &forge1(), false).unwrap().unwrap();
+            assert!(sh.contains("STORAGE_WIPE=''\n"), "{sh}");
+        }
+        let v = top_level("storage:\n  wipe: some\n", "storage").unwrap().unwrap();
+        assert!(StorageSpec::from_yaml(&v).unwrap_err().contains("storage.wipe is 'some'"));
+        let v = top_level("storage:\n  wipe: {who: x}\n", "storage").unwrap().unwrap();
+        assert!(StorageSpec::from_yaml(&v).unwrap_err().contains("'who'"));
     }
 
     #[test]

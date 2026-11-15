@@ -48,6 +48,7 @@ from the file and prints shell `/init` evaluates:
 | `STORAGE_UNREADY` | drives taken that answer with no readable format (`ready=0`): formatted first, then planned again |
 | `STORAGE_SMALLEST` | the drive that sets the data region's size (ready drives only) |
 | `STORAGE_SAID` | the plan in words, for the console |
+| `STORAGE_WIPE` | the install-config's wipe word (`storage.wipe`, #614), said as where it came from; empty without it |
 | `STORAGE_STOP` | refused: no drive is taken, the install stops naming why |
 
 It refuses by name a drive that `carries` something (another node's
@@ -98,11 +99,46 @@ A format loses every byte on the drive, so it runs only:
 
 - on a fresh install (nothing kept), or
 - over drives that hold nothing at all, or
-- with the wipe word: `rd.stormblock.assimilate=force` on that install's
-  command line. An install the appliance asks for (the install ticket) is
-  not the wipe word: it keeps the data half (#311), and on forge1 12.86 its
-  force taken for the wipe word formatted a 10 TB drive it had just said it
-  kept (#609).
+- with the wipe word: `storage.wipe` in that install's install-config
+  (#614), or `rd.stormblock.assimilate=force` on its command line. An
+  install the appliance asks for (the install ticket) is not the wipe word:
+  it keeps the data half (#311), and on forge1 12.86 its force taken for the
+  wipe word formatted a 10 TB drive it had just said it kept (#609).
+
+### The wipe word in the install-config (#614)
+
+The command line is the release pallet's, the same for every host that boots
+the release, so it cannot carry one install's go-ahead. The install-config
+can: it is per install, staged by stormcentral, and `storage:` is read from
+it. The operator's tool (stormcentral's `testhost install --force`, which
+already means "reinstall whatever its disk holds" and demands `--why`)
+writes it for that install:
+
+```yaml
+storage:
+  drives: all
+  wipe: all            # or true; false, none or absent: what the drives hold is kept
+  # or, saying who asked and why (shown on the console):
+  # wipe: {by: "testhost install --force by <who>", why: "<why>"}
+```
+
+`/init` takes it as `STORAGE_FORCE`, exactly as `rd.stormblock.assimilate=force`:
+every drive `storage:` takes is formatted and laid whatever it holds, the
+plan takes drives that carry something under `drives: all`, and is made
+again with the drives that have no readable format even when this node's set
+is served. The console says where the word came from and names what is lost:
+
+```
+  storage: wipe asked by the install-config (testhost install --force by <who>: <why>): every drive storage: takes is formatted and laid, whatever it holds (#614)
+  storage: wipe asked by the install-config (…): /dev/sda(stormblock slabs) formatted to 4096 + PI type1, what it holds is lost (#614)
+```
+
+Nothing else changes: an install without the word still keeps data and
+STOPs as below, `rd.stormblock.assimilate=off` and recovery still lay
+nothing, and a boot that is no install (#598) never reads `storage:` at all,
+so a wipe word left in forge's staged config does not touch a reboot. It is
+still the operator tool's job to write it for one install only: the next
+install the appliance asks for with the word still there would wipe too.
 
 A keep-data reinstall, or an ordinary boot, over a drive holding stormblock
 slabs or a foreign table stops, names the drives and what they hold, and

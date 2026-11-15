@@ -399,6 +399,56 @@ layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'ASSIMILATE=for
 hasnt "no --force" "$WORK/plan.args" "^--force$"
 check "no STORAGE_FORCE" "" "$(val STORAGE_FORCE)"
 
+echo "the layout: the install-config's wipe word is the wipe word for this install (#614)"
+# forge1 after #609: the appliance's ticket (ASSIMILATE=force, nothing on the
+# command line), sda carrying this node's data and its set served, two drives
+# with no readable format; the operator's tool wrote storage.wipe.
+reset
+printf 'storage:\n  drives: all\n  wipe: {by: "testhost install --force by ops", why: "four drives"}\n' > "$WORK/install-config.yaml"
+cat > "$WORK/plan.out" <<'PEOF'
+STORAGE_DRIVES='/dev/sda'
+STORAGE_SYSTEM='/dev/sda'
+STORAGE_WIPE='the install-config (testhost install --force by ops: four drives)'
+PEOF
+mkdir -p "$WORK/sg"
+printf '/dev/sg1 %s\n' "$WORK/sg/sg1" > "$WORK/unready"
+echo "superblock: data slab" > "$WORK/slabs.sda"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'ASSIMILATE=force INSTALL_OVER=/dev/sda4' \
+    "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS=/dev/sda"
+check "STORAGE_FORCE from the install-config" "1" "$(val STORAGE_FORCE)"
+has "where the word came from is said" "$WORK/out" "storage: wipe asked by the install-config (testhost install --force by ops: four drives): every drive storage: takes is formatted"
+hasnt "the first plan had no --force" "$WORK/plan.args1" "^--force$"
+has "planned again with --force" "$WORK/plan.args" "^--force$"
+hasnt "the first plan left the not-ready drive out (the set is served)" "$WORK/plan.args1" "dev=/dev/sg1;"
+has "the second has it" "$WORK/plan.args" "dev=/dev/sg1;.*ready=0"
+check "the drive taken" "/dev/sda" "$(val STORAGE_DRIVES)"
+hasnt "no STOP" "$WORK/out" "STOP: storage"
+hasnt "no 'not formatted on this boot' warning" "$WORK/out" "install with the wipe word to take them"
+
+echo "the layout: the same install without the word: no force, the not-ready drive warned"
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+printf "STORAGE_DRIVES='/dev/sda'\nSTORAGE_SYSTEM='/dev/sda'\nSTORAGE_WIPE=''\n" > "$WORK/plan.out"
+mkdir -p "$WORK/sg"
+printf '/dev/sg1 %s\n' "$WORK/sg/sg1" > "$WORK/unready"
+echo "superblock: data slab" > "$WORK/slabs.sda"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'ASSIMILATE=force INSTALL_OVER=/dev/sda4' \
+    "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS=/dev/sda"
+check "no STORAGE_FORCE" "" "$(val STORAGE_FORCE)"
+hasnt "no wipe said" "$WORK/out" "wipe asked by"
+hasnt "no --force" "$WORK/plan.args" "^--force$"
+check "planned once" "no" "$([ -e "$WORK/plan.args1" ] && echo yes || echo no)"
+
+echo "the layout: assimilate=off and recovery outweigh the install-config's wipe word"
+for v in 'ASSIMILATE=off' 'OVERRIDE=recovery'; do
+    reset
+    printf 'storage:\n  drives: all\n  wipe: all\n' > "$WORK/install-config.yaml"
+    printf "STORAGE_DRIVES='/dev/sda'\nSTORAGE_WIPE='the install-config'\n" > "$WORK/plan.out"
+    layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" "$v"
+    check "$v: no STORAGE_FORCE" "" "$(val STORAGE_FORCE)"
+    check "$v: the engine not asked" "no" "$([ -e "$WORK/plan.args" ] && echo yes || echo no)"
+done
+
 echo "the layout: a plan that stops takes nothing"
 reset
 printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
@@ -680,6 +730,23 @@ format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP=1 INSTALL_FRESH="" STO
 check "both formatted" "/dev/sda /dev/sdb" "$(val FORMATTED)"
 check "nothing kept now" "" "$(val INSTALL_KEEP)"
 hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the format: the install-config's wipe word over this node's own data goes ahead, naming what is lost (#614)"
+# The keep-data case that STOPs above (#609), with storage.wipe.
+reset
+echo "superblock: data slab" > "$WORK/slabs.sda"
+format "STORAGE_DRIVES='/dev/sda'" 'INSTALL_KEEP=1 INSTALL_FRESH=1 STORAGE_FORCE=1' \
+    "STORAGE_WIPE='the install-config (testhost install --force by ops: four drives)'"
+has "the wipe line" "$WORK/out" "storage: wipe asked by the install-config (testhost install --force by ops: four drives): /dev/sda(stormblock slabs) formatted to 4096 + PI type1, what it holds is lost (#614)"
+hasnt "no STOP" "$WORK/out" "STOP"
+check "formatted" "/dev/sda" "$(val FORMATTED)"
+hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the format: the STOP names the install-config's wipe word"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sda"
+format "STORAGE_DRIVES='/dev/sda'" 'INSTALL_KEEP=1 INSTALL_FRESH=1 STORAGE_FORCE=""'
+has "how to say it" "$WORK/out" "storage.wipe: all in this install's install-config"
 
 echo "the format: no stormdrive in the initramfs is fatal"
 reset

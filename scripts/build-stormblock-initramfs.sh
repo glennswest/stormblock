@@ -5237,7 +5237,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     # each drive is and does what it prints. Only `storage:` and
     # `system_drive:` are read from the file, never printed (#275).
     STORAGE_FROM=""; STORAGE_DRIVES=""; STORAGE_SYSTEM=""; STORAGE_STOP=""; STORAGE_SAID=""
-    STORAGE_FORCE=""
+    STORAGE_FORCE=""; STORAGE_WIPE=""
     for _icf in "${INSTALL_CONFIG_STAGED:-}" "${INSTALL_CONFIG_FORGE:-${STORM_RUN:-/run/stormblock}/install-config.forge.yaml}"; do
         [ -n "$_icf" ] && [ -f "$_icf" ] || continue
         if grep -q '^storage:' "$_icf"; then STORAGE_FROM="$_icf"; break; fi
@@ -5331,10 +5331,26 @@ STEOF
             # Only its stdout is shell: the engine's log lines (stderr) are
             # kept apart, never eval'd (#597: "/init: eval: … not found").
             mkdir -p "$_st_dir"
+            _st_wipe_was="$STORAGE_WIPE"; STORAGE_WIPE=""
             if _st_out=$(storage_plan 2>"$_st_dir/plan.err"); then
                 eval "$_st_out"
             else
                 STORAGE_STOP="the engine could not plan storage: ($( { printf '%s\n' "$_st_out"; cat "$_st_dir/plan.err"; } | grep . | tail -n 1))"
+            fi
+            [ -z "$STORAGE_WIPE" ] && STORAGE_WIPE="$_st_wipe_was"
+            # The wipe word for this install (#614): `storage.wipe` in the
+            # install-config, written by the operator's tool for one install
+            # (stormcentral's `testhost install --force`). It is
+            # STORAGE_FORCE, as rd.stormblock.assimilate=force is; recovery
+            # and assimilate=off never reach here. Planned again with it, so
+            # the drives with no readable format are in the plan too.
+            if [ -z "$STORAGE_STOP" ] && [ -n "$STORAGE_WIPE" ] && [ -z "$STORAGE_FORCE" ]; then
+                STORAGE_FORCE=1
+                echo "  storage: wipe asked by $STORAGE_WIPE: every drive storage: takes is formatted and laid, whatever it holds (#614)"
+                if [ -z "$STORAGE_EARLY_OK" ]; then
+                    STORAGE_EARLY_OK=1
+                    continue
+                fi
             fi
             # A drive the card lists and the kernel never made a SCSI device
             # of (#611): formatted through the card's own pass-through, then
@@ -6016,9 +6032,10 @@ $1|$_svp|$3"
         done
         _st_todo="${_st_todo# }"
         # The go-ahead: the wipe word, or a fresh install that keeps nothing.
-        # Any other boot formats only drives that carry nothing at all.
-        if [ -n "$_st_todo" ] && [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ]; }; then
-            _st_full=""
+        # Any other boot formats only drives that carry nothing at all. The
+        # install-config's wipe word (#614) names what it loses.
+        _st_full=""
+        if [ -n "$_st_todo" ] && { [ -n "${STORAGE_WIPE:-}" ] || { [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ]; }; }; }; then
             for _dev in $_st_todo; do
                 if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
                     _st_full="$_st_full $_dev(stormblock slabs)"
@@ -6027,11 +6044,14 @@ $1|$_svp|$3"
                     [ -n "$_st_sig" ] && _st_full="$_st_full $_dev($_st_sig)"
                 fi
             done
-            if [ -n "$_st_full" ]; then
+            if [ -n "$_st_full" ] && [ -n "${STORAGE_WIPE:-}" ] && [ -n "$STORAGE_FORCE" ]; then
+                echo "  storage: wipe asked by $STORAGE_WIPE:$_st_full formatted to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION, what it holds is lost (#614)"
+            elif [ -n "$_st_full" ] && [ -z "$STORAGE_FORCE" ]; then
                 echo "  STOP: storage: in ${STORAGE_FROM##*/} formats $_st_todo to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION,"
                 echo "  and what they hold is not to be lost:$_st_full. A layout change is never made on"
                 echo "  a keep-data reinstall or an ordinary boot. Nothing was written. Install with"
-                echo "  rd.stormblock.assimilate=force (what they hold is lost), or leave storage: out."
+                echo "  storage.wipe: all in this install's install-config, or rd.stormblock.assimilate=force"
+                echo "  (what they hold is lost), or leave storage: out."
                 storage_fail "a layout change over what the drives hold, without the wipe word:$_st_full"
             fi
         fi
@@ -6219,8 +6239,9 @@ $1|$_svp|$3"
         fi
         if [ -n "$_sl_full" ]; then
             echo "  STOP: storage: in ${STORAGE_FROM##*/} lays $STORAGE_DRIVES afresh, and what they hold is"
-            echo "  not to be lost:$_sl_full. Nothing was written. Install with"
-            echo "  rd.stormblock.assimilate=force (what they hold is lost), or leave storage: out."
+            echo "  not to be lost:$_sl_full. Nothing was written. Install with storage.wipe: all in"
+            echo "  this install's install-config or rd.stormblock.assimilate=force (what they hold is"
+            echo "  lost), or leave storage: out."
             storage_fail "laying storage: over what the drives hold, without the wipe word:$_sl_full"
         fi
         # Device paths carry no spaces: the words below are split on purpose

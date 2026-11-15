@@ -2615,7 +2615,11 @@ member missing opens the set degraded and the console says
 on as if there were none. A layout with no set (one drive, or `data_raid:
 none`) keeps the data slab on the plain region, which is named to `slab
 partner` the same way (#598). `storage:` itself is applied on an install
-only: a reboot boots what was laid (#598).
+only: a reboot boots what was laid (#598). On an install it formats a drive
+that holds something only with the wipe word: `storage.wipe: all` in that
+install's install-config (#614, written by stormcentral's `testhost install
+--force`) or `rd.stormblock.assimilate=force`; the install ticket is not it
+(#609).
 Every system leg (the first `system_mirror` drives) carries a full copy of
 the system volumes: `/init` names the other legs to `boot-local` as
 `--system-leg DEV`, the handover record keeps them, and after the flow-over

@@ -2,6 +2,23 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #614 — the wipe word per install, `storage.wipe` in the install-config (2026-11-15, P0)
+
+After #609 only `rd.stormblock.assimilate=force` (the release's command line,
+every host's) could let an install format a drive holding slabs: no route for
+one install. Master: a field in the install-config's `storage:`, written by
+stormcentral's `testhost install --force`.
+
+- [x] `src/image/storage.rs`: `storage.wipe: all|true` or `{by, why}`; the
+  plan takes drives that carry something with it; `STORAGE_WIPE` printed.
+- [x] /init layout: `STORAGE_WIPE` → `STORAGE_FORCE`, said on the console,
+  planned again with the not-ready drives when the set is served; format: the
+  wipe line names what is lost instead of the STOP; STOP texts name the word.
+- [x] tests: tests/initramfs-storage.sh (forge1 keep-data case with and
+  without the word; off/recovery), unit test in storage.rs.
+- [ ] sc-build check.sh; v24.10.0; stage; companion stormcentral issue
+  (`--force` writes `storage.wipe`); `shipped` with forge1's console proof.
+
 ## #611 / #595 — the card's own inventory, then #595 on it (2026-11-15, P0)
 
 Owner (#595): "use a direct api the the sas card"; #611: "use the low level
