@@ -15,7 +15,8 @@ slabs stops, nothing written) never ran.
 - [x] tests: the ticket's force is no wipe word; a keep-data reinstall over
   this node's own data stops with nothing formatted (initramfs-storage.sh);
   the hotplug wipe-word case says the command line (initramfs-storage-hotplug.sh).
-- [ ] check.sh on the commit; v24.7.3; stage; close.
+- [x] check.sh on 4c70bf4f ALL PASS; v24.7.3 (1ab0b4ef, tagged); stage requested;
+  shipped with proof `console:KEEP: … nothing is formatted or laid|STOP: storage: in … formats`.
 - Not changed: every drive taken is formatted whatever it is at, and FFMT
   refused falls back to FORMAT UNIT (owner, #595); the blocking fallback on a
   shared HBA is stormdrive#89. forge1's next install now STOPs before writing
