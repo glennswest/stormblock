@@ -18,6 +18,9 @@
 #     disk or sg) and the driver's own log lines; a host phy with a link
 #     and no device is waited for as a pending drive, and named in the
 #     WARNING when it never comes;
+#   * each SAS/RAID host is asked to scan again at once and while a drive is
+#     pending, and a linked phy with no device gets one link reset (#595:
+#     drives not ready at the driver's own scan never got a SCSI target);
 #   * the inventory is written to local-disk.json as `controllers` and
 #     `drives`, as JSON the engine reads (#344's verdict file).
 #
@@ -100,6 +103,7 @@ inventory() ( # -> console in inv.out, JSON in report.json
     STORM_INV_SCSI="$T/scsi"; STORM_INV_SAS_END="$T/sas_end_device"; STORM_INV_SG="$T/sg"
     STORM_INV_SAS_PHY="$T/sas_phy"; STORM_INV_SAS_DEV="$T/sas_device"; STORM_INV_DMESG="cat $T/dmesg"
     STORM_STORAGE_SETTLE=${SETTLE:-1}; STORM_STORAGE_PENDING_WAIT=${PWAIT:-3}
+    STORM_INV_SCSI_HOST="$T/scsi_host"; STORM_STORAGE_RESCAN=${RESCAN:-10}
     STORM_LOCAL_DISK_REPORT="$WORK/report.json"
     rm -f "$WORK/report.json"
     SLEPT=0
@@ -110,6 +114,7 @@ inventory() ( # -> console in inv.out, JSON in report.json
         :
     }
     . "$WORK/inv.sh" > "$WORK/inv.out" 2>&1
+    wait # the rescan's writes run in the background
     echo "$SLEPT" > "$WORK/slept"
 )
 
@@ -124,6 +129,10 @@ make_forge() {
     forge_end 0
     forge_scsi 0
     forge_disk 0
+    # its SCSI host, whose scan the inventory writes (#595)
+    mkdir -p "$hba/host0/scsi_host/host0" "$T/scsi_host"
+    ln -s "$hba/host0/scsi_host/host0" "$T/scsi_host/host0"
+    : > "$hba/host0/scsi_host/host0/scan"
 }
 forge_end() { # n -> the SAS layer finds end device n (no SCSI target yet)
     _e="$hba/host0/port-0:$1/end_device-0:$1"
@@ -314,6 +323,39 @@ contains "  the view: 4 end devices" "hba: 8 phys, 4 with a link, 4 end device(s
 contains "  an sg-only drive: no block device" "hba: phy-0:3: 12.0 Gbit, end_device-0:3 sas 0x5000cca26801b643, 0:0:3:0 sg3 (no block device)" "$out"
 check "  no phy in the WARNING once its device came" 0 "$(echo "$out" | grep '^WARNING' | grep -c ':phy-0' || true)"
 contains "  the sg-only drive is still the one WARNed (sd made no disk)" "no block device: 0000:c1:00.0:0:0:3:0 (#592" "$out"
+
+echo "asking the HBA again (#595, owner: not ready drives never appear):"
+# forge1 at 12.86 again: each SAS host is asked to scan at once, again while
+# a drive is pending, and a linked phy with no device gets one link reset.
+make_forge
+forge_phys
+for n in 0 1 2 3; do : > "$T/sas_phy/phy-0:$n/link_reset"; done
+SETTLE=1 PWAIT=5 RESCAN=2 inventory
+out=$(cat "$WORK/inv.out")
+contains "each SAS host is asked to scan at once" "storage: asked each SAS/RAID host to scan again: host0(0000:c1:00.0)" "$out"
+check "  the user scan is written" "- - -" "$(cat "$hba/host0/scsi_host/host0/scan")"
+contains "the linked phys with no device get a link reset" "a link reset on the phys that link and have no device: phy-0:1 phy-0:2 phy-0:3 (#595)" "$out"
+check "  written to each" "1 1 1" "$(cat "$T/sas_phy/phy-0:1/link_reset" "$T/sas_phy/phy-0:2/link_reset" "$T/sas_phy/phy-0:3/link_reset" | tr '\n' ' ' | sed 's/ $//')"
+check "  never the phy with the drive on it" "" "$(cat "$T/sas_phy/phy-0:0/link_reset")"
+check "  only once" 1 "$(grep -c 'a link reset' "$WORK/inv.out")"
+contains "the asks are counted" "storage: the hosts were asked to scan 3 times in 5s" "$out"
+
+# The drives the scan makes: they come after it, and are all inventoried.
+forge_scanned() {
+    [ -s "$hba/host0/scsi_host/host0/scan" ] && [ "$SLEPT" = 3 ] || return 0
+    for n in 1 2 3; do
+        rm "$T/sas_phy/phy-0:$n"; rm -rf "$hba/host0/phy-0:$n"; forge_phy "$n" "12.0 Gbit" "$n"
+        forge_end "$n"; forge_scsi "$n"; forge_sasdev "$n" "0x5000cca26801b64$n"
+        forge_disk "$n"
+    done
+}
+make_forge
+forge_phys
+SETTLE=1 PWAIT=10 RESCAN=20 ON_SLEEP=forge_scanned inventory
+out=$(cat "$WORK/inv.out")
+contains "the drives the scan made are inventoried" "storage: 1 -> 4 drives on 0000:c1:00.0 after 3s" "$out"
+contains "  four end devices" "hba: 8 phys, 4 with a link, 4 end device(s), 0 expander(s)" "$out"
+check "  no WARNING" 0 "$(grep -c '^WARNING: storage: after' "$WORK/inv.out" || true)"
 
 # No SAS/RAID controller bound (NVMe there at once): no settle wait at all.
 make_tree

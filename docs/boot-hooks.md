@@ -238,7 +238,8 @@ such controller's drive count must also hold still for
 `STORM_STORAGE_SETTLE` (5 s) inside the same bound, and a drive the SAS layer
 has already found (an end device with no SCSI target yet, or a SCSI disk with
 no block device yet: sd still spinning it up) is waited for up to
-`STORM_STORAGE_PENDING_WAIT` (60 s). Drives that kept arriving are said
+`STORM_STORAGE_PENDING_WAIT` (90 s: a not-ready disk can take 30–90 s to
+spin up, #595). Drives that kept arriving are said
 (`storage: 1 -> 4 drives on 0000:c1:00.0 after 6s`); one found that never
 became a disk is a WARNING naming it. A machine with no SAS/RAID controller
 (NVMe, virtio, AHCI only) does not wait. The settle wait is said whether or
@@ -264,6 +265,21 @@ device and the sd disk or sg node; or an expander. Then the driver's own
 kernel lines about its devices (added, refused, blocked, removed; the last
 40). A host phy with a link and no device counts as a drive still coming
 (`STORM_STORAGE_PENDING_WAIT`) and is named in the WARNING if none comes.
+**Asking the HBA again (#595).** A drive that was not ready when the
+driver's own scan ran may never get a SCSI target unless someone asks. So
+every SAS/RAID host is asked to scan again once at the start (`- - -` into
+`/sys/class/scsi_host/hostN/scan`), and again every `STORM_STORAGE_RESCAN`
+(10 s, 0 is off) while a drive is pending. At the first ask in the wait, a
+host phy that links and still has no device gets one `link_reset`: nothing in
+Linux sits on it. Each write runs in the background, so a drive slow to
+answer INQUIRY holds the scan, never the boot:
+
+```
+  storage: asked each SAS/RAID host to scan again: host0(0000:c1:00.0) (a drive not ready at the driver's scan, #595)
+  storage: after 10s a link reset on the phys that link and have no device: phy-0:1 phy-0:2 phy-0:3 (#595)
+  storage: the hosts were asked to scan 9 times in 90s
+```
+
 The inventory goes into `local-disk.json` as `controllers` and `drives`,
 kept by the verdict below.
 

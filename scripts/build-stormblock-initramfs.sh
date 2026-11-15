@@ -2212,7 +2212,9 @@ shelf_json() { # /sys/block/X -> {"id": …, "position": …, "bay": …, "ident
 # SAS and expander discovery runs on after the driver loads), not skipped; a
 # SAS/RAID controller's drive count must then hold still for
 # STORM_STORAGE_SETTLE (5 s), and a drive the SAS layer already found is
-# waited for up to STORM_STORAGE_PENDING_WAIT (60 s) (#592). The
+# waited for up to STORM_STORAGE_PENDING_WAIT (90 s: a not-ready disk can
+# take 30-90 s to spin up; #592, #595), every SAS/RAID host asked to scan
+# again (STORM_STORAGE_RESCAN). The
 # inventory goes into /run/stormblock/local-disk.json (`controllers`,
 # `drives`), which the slab decision's verdict (#344) keeps, and from there
 # into the engine's health for stormcentral to hold against what it knows the
@@ -2264,7 +2266,7 @@ inv_waiting() { # -> bound SAS/RAID/NVMe/SCSI controllers with no drive yet
 INV_SCSI="${STORM_INV_SCSI:-/sys/bus/scsi/devices}"
 INV_SAS_END="${STORM_INV_SAS_END:-/sys/class/sas_end_device}"
 INV_SETTLE="${STORM_STORAGE_SETTLE:-5}"
-INV_PENDING_WAIT="${STORM_STORAGE_PENDING_WAIT:-60}"
+INV_PENDING_WAIT="${STORM_STORAGE_PENDING_WAIT:-90}"
 inv_settling() { # -> bound SAS/RAID controllers (their drives arrive one by one)
     inv_controllers | while read -r _p _cls _id _drv; do
         [ "$_drv" = - ] && continue
@@ -2421,6 +2423,46 @@ inv_hba_view() { # pci driver -> the HBA's view, on the console
     return 0
 }
 inv_clean_lines() { tr -d '"\\' | tr '\000-\011\013-\037' ' '; }
+# Asking the HBA again (#595, owner: "It will not appear, at the linux level,
+# because the drives are not ready!"). A drive that was not ready when the
+# driver's own scan ran may never get a SCSI target unless someone asks: so
+# every SAS/RAID host is asked to scan again once at the start (the user scan,
+# `- - -` into its scsi_host's scan), and again every STORM_STORAGE_RESCAN
+# (10 s) while a drive is pending. A host phy that links and still has no
+# device at the second ask is given one link reset: nothing in Linux sits on
+# it, so nothing is cut off. Each write runs in the background: a drive slow
+# to answer INQUIRY holds the scan, never the boot.
+INV_SCSI_HOST="${STORM_INV_SCSI_HOST:-/sys/class/scsi_host}"
+INV_RESCAN="${STORM_STORAGE_RESCAN:-10}"
+inv_write() { ( printf '%s\n' "$2" > "$1" ) >/dev/null 2>&1 & } # its own stdout: a $( ) never waits on it
+inv_hosts_of() { # pci -> the scsi_host dirs under that controller
+    for _h in "$INV_SCSI_HOST"/host*; do
+        [ -e "$_h/scan" ] || continue
+        case "$(readlink -f "$_h")" in */"$1"/*) echo "$_h" ;; esac
+    done
+}
+inv_rescan() { # "pci..." -> asks each of their hosts to scan again; says which
+    _rs=""
+    for _rp in $1; do
+        for _rh in $(inv_hosts_of "$_rp"); do
+            inv_write "$_rh/scan" "- - -"
+            _rs="$_rs ${_rh##*/}($_rp)"
+        done
+    done
+    echo "$_rs"
+}
+inv_pending_pcis() { echo "$1" | tr ' ' '\n' | cut -c1-12 | sort -u | tr '\n' ' '; }
+inv_link_reset() { # pending list -> one link reset per host phy pending; says which
+    _lr=""
+    for _lx in $1; do
+        case "$_lx" in ????:??:??.?:phy-*) ;; *) continue ;; esac
+        _ln=${_lx#????:??:??.?:}
+        [ -e "$INV_SAS_PHY/$_ln/link_reset" ] || continue
+        inv_write "$INV_SAS_PHY/$_ln/link_reset" 1
+        _lr="$_lr $_ln"
+    done
+    echo "$_lr"
+}
 _iw=0
 _iwhat=$(inv_waiting)
 _ipend=$(inv_pending)
@@ -2430,6 +2472,13 @@ _istable=0
 _ilast=0
 _iset=$(inv_settling)
 _isaid=""
+_iasked=0
+_ilastask=0
+_ireset=""
+if [ -n "$_iset" ] && [ "$INV_RESCAN" -gt 0 ]; then
+    _irs=$(inv_rescan "$_iset")
+    [ -n "$_irs" ] && { _iasked=1; echo "  storage: asked each SAS/RAID host to scan again:$_irs (a drive not ready at the driver's scan, #595)"; }
+fi
 while :; do
     _ibound=$INV_WAIT
     [ -n "$_ipend" ] && [ "$INV_PENDING_WAIT" -gt "$_ibound" ] && _ibound=$INV_PENDING_WAIT
@@ -2458,7 +2507,18 @@ while :; do
     _iwhat=$(inv_waiting)
     [ -n "$_iwas" ] && [ -z "$_iwhat" ] && echo "  storage: drives appeared after ${_iw}s"
     _ipend=$(inv_pending)
+    if [ -n "$_ipend" ] && [ "$INV_RESCAN" -gt 0 ] && [ $((_iw - _ilastask)) -ge "$INV_RESCAN" ]; then
+        _ilastask=$_iw
+        _irs=$(inv_rescan "$(inv_pending_pcis "$_ipend")")
+        [ -n "$_irs" ] && _iasked=$((_iasked + 1))
+        if [ -z "$_ireset" ]; then
+            _ireset=$(inv_link_reset "$_ipend")
+            [ -n "$_ireset" ] && echo "  storage: after ${_iw}s a link reset on the phys that link and have no device:$_ireset (#595)"
+            _ireset=${_ireset:-none}
+        fi
+    fi
 done
+[ "$_iasked" -gt 1 ] && echo "  storage: the hosts were asked to scan $_iasked times in ${_iw}s"
 # Each controller whose drives kept arriving is said with what it went from
 # and to, and when the last one came (#592).
 for _ic in $_icounts; do

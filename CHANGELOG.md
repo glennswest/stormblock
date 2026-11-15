@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-15
+- **fix:** #595 (owner: "It will not appear, at the linux level, because the drives are not ready!"): the storage inventory asks each SAS/RAID host to scan again (the user scan) at once and every `STORM_STORAGE_RESCAN` (10 s) while a drive is pending, gives a linked host phy with no device one link reset, and waits `STORM_STORAGE_PENDING_WAIT` 90 s (was 60) for a not-ready disk to spin up. The writes run in the background.
 - **docs:** #595: work plan - v24.7.4 staged.
 - **fix:** #595 (reopened): the storage inventory shows each SAS HBA's own view. forge1's 12.86 install inventoried one drive of four, and the console could not say whether the HBA saw the other three. Under each SAS/RAID controller `/init` now lists every SAS phy with its negotiated link, the port it is in and what the SAS layer added there (end device and SAS address, SCSI device, sd disk or sg node; or an expander), the phys with no link by state, and the driver's own kernel lines about its devices (added, refused, blocked, removed). A host phy with a link and no device is waited for like a drive still coming up (`STORM_STORAGE_PENDING_WAIT`) and named in the WARNING if it never comes. The settle wait is said whether or not anything moved.
 - **docs:** #609: work plan - v24.7.3 staged, shipped with its console proof.
