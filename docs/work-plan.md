@@ -53,7 +53,7 @@ v24.3.0. Plan: the open `/api/v1/health` gains `metadata`: `{"ok", "stale":
 manager, #571), else the last reading. New proof:
 `get:http://{node}:9090/api/v1/health ~ "metadata":\{"ok":true`.
 - [x] code + tests (cf2497d6): `summarize`/`summary_for_health` in `src/mgmt/api/slabs.rs`, health `metadata`; README, docs/auth.md. check.sh green (1427 tests); v24.6.0 (8d9d0bbf), musl release build prints 24.6.0; stage requested (build e03f24727a44).
-- [ ] waits `--after-install stormblock>=8d9d0bbf` (not `shipped`: stormcentral#1344 checks a reship against b8dbed62). Then read `http://<node>:9090/api/v1/health` `"metadata":{"ok":true`, and on forge too if it runs it; ship/close.
+- [x] seen on pvetest3, 12.86 (stormblock 24.7.2, 7f1d5cff, carries 8d9d0bbf; install 2026-11-15 02:12Z passed): open `GET /api/v1/health` → `"metadata":{"ok":true,"stale":[],"short":[]}`, no token. Closed directly (stormcentral#1344 still open). Forge runs 24.2.2 (before v24.3.0): its slab 7661cf8b… is seen in its health once forge is upgraded to a release carrying 8d9d0bbf.
 
 ## #598 — a node laid by storage: cannot reboot (2026-11-14, P0)
 
