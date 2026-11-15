@@ -615,7 +615,7 @@ pub fn span(secs: u64) -> String {
 /// prints: `0x…: formatting (full) 12.3% through the card, about 7h 10m
 /// left, 58m so far`. The ETA is the pace so far; none before 0.1 %.
 pub fn card_format_line(addr: u64, pct: f32, elapsed_secs: u64) -> String {
-    let left = if pct >= 0.1 && pct < 100.0 {
+    let left = if (0.1..100.0).contains(&pct) {
         let rest = elapsed_secs as f64 * f64::from(100.0 - pct) / f64::from(pct);
         format!("about {} left", span(rest as u64))
     } else if pct >= 100.0 {
