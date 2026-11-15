@@ -139,9 +139,13 @@ Owner: "You need to watch for hot plug even after boot." Plan:
 - D (the join) filed as #599: format + lay + RaidSpares (needs stormcos RBAC for
   stormblock to write raidspares) + system leg; `[storage] hotplug` policy there.
 - [x] merged (ff946f1c), v24.7.0 (182915f8), musl release build prints 24.7.0, stage requested (build 0980fcd98452).
-- [ ] waits `--after-install stormblock>=182915f8@pvetest3`; proof on pvetest3 (laid by storage:):
-  health `storage_layout` `"drives_watched":"uevents"`, the install's
-  `arrived`/`not_laid`.
+- [x] seen on pvetest3, 12.86 (stormblock 24.7.2, 7f1d5cff; install 2026-11-15 02:12Z, passed):
+  health `storage_layout` has `"drives_watched":"uevents"`, `arrived: []`,
+  `candidates: []`, `drive_events: []`, the set optimal over 4 members; the
+  install console named no arrival (nothing arrived; all 4 inventory drives
+  laid, so `not_laid` was empty). No real hot plug was made on a node (that
+  needs root on the pve host); arrivals are covered by the uevent, hotplug and
+  initramfs-storage-hotplug tests. #593 closed; the join is #599.
 
 ## #595 — every drive storage: takes formatted 4096 + PI, NOT READY ones included (2026-11-13, P0)
 
