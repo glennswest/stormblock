@@ -50,6 +50,15 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.8.0] — 2026-11-15
+
+### Added
+- #611, #595: the storage inventory reads the mpt card's own MPI2 pages through `/dev/mpt3ctl` (`stormblock hba view|pending|count`): SAS IO Unit 0, SAS Device 0 by handle, Enclosure 0. Each drive is matched to Linux by SAS address (`ready` / `not ready` / `no target`), and a no-target drive is asked INQUIRY and TEST UNIT READY through the card. The card's no-target drives are waited for and rescanned, and its drive count is the expected count.
+
+### Fixed
+- #595: each SAS/RAID host is asked to scan again (at once, then every 10 s while a drive is pending), a linked phy with no device gets one link reset, and the pending wait is 90 s.
+- #611: after a format the kernel reads each drive again in the same boot (rescan, sd bind or host scan) while the drive is found again by WWID, for up to 60 s.
+
 ## [v24.7.4] — 2026-11-15
 
 ### Fixed
