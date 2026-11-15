@@ -16,6 +16,8 @@ stormcentral's `testhost install --force`.
   wipe line names what is lost instead of the STOP; STOP texts name the word.
 - [x] tests: tests/initramfs-storage.sh (forge1 keep-data case with and
   without the word; off/recovery), unit test in storage.rs.
+- [x] owner's decision (2026-11-15): a drive already at the asked block size
+  + PI (READ CAPACITY 16) is not formatted again, said, still laid; tests.
 - [ ] sc-build check.sh; v24.10.0; stage; companion stormcentral issue
   (`--force` writes `storage.wipe`); `shipped` with forge1's console proof.
 

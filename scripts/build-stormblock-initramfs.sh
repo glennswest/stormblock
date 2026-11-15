@@ -5172,20 +5172,50 @@ if [ "$BOOT_MODE" = "local" ]; then
     storage_pi() { # protection word -> the P_TYPE sd reports (protection_type)
         case "$1" in none) echo 0 ;; type1) echo 1 ;; type2) echo 2 ;; type3) echo 3 ;; *) echo "?" ;; esac
     }
+    storage_at_format() { # dev -> 0 when the kernel reads it at the asked block size and PI already
+        # What sd read with READ CAPACITY 16: the logical block size, and
+        # the P_TYPE (protection_type; 0 is PROT_EN=0). A drive with no
+        # size, no SCSI disk or no protection_type is not known to be at it.
+        _af="$SURVEY_SYS/${1##*/}"
+        [ "$(cat "$_af/size" 2>/dev/null || echo 0)" -gt 0 ] || return 1
+        [ "$(cat "$_af/queue/logical_block_size" 2>/dev/null)" = "$STORAGE_BLOCK_SIZE" ] || return 1
+        _afp=""
+        for _sd in "$_af"/device/scsi_disk/*/protection_type; do [ -r "$_sd" ] && _afp=$(cat "$_sd" 2>/dev/null); done
+        [ -n "$_afp" ] && [ "$_afp" = "$(storage_pi "$STORAGE_PROTECTION")" ]
+    }
     storage_format_run() { # drives -> every one formatted at once, found again and checked
-        [ -x "$_st_tool" ] || storage_fail "storage: in ${STORAGE_FROM##*/} formats every drive, and this initramfs has no stormdrive ($_st_tool): it is built with STORMDRIVE_BIN (stormcentral#1335)"
         mkdir -p "$_st_dir"
         _sr_todo="$1"
+        # A drive the kernel already reads at the asked format gets no FORMAT
+        # UNIT (owner, #614: "skip the format on drives already at 4096 +
+        # PI"): forge1's 10 TB sda took 14 h 25 m to get there. It is still
+        # laid afresh - what it holds is lost to the lay - and read back below
+        # like the rest.
+        _sr_fmt=""; _sr_skip=""
+        for _dev in $_sr_todo; do
+            if storage_at_format "$_dev"; then
+                _sr_skip="$_sr_skip $_dev"
+                if [ "$STORAGE_PROTECTION" = none ]; then _afs="no PI"; else _afs="PI $STORAGE_PROTECTION"; fi
+                echo "  ${_dev##*/}: already $STORAGE_BLOCK_SIZE + $_afs (READ CAPACITY 16), not formatted again (#614)"
+            else
+                _sr_fmt="$_sr_fmt $_dev"
+            fi
+        done
+        _sr_fmt="${_sr_fmt# }"
         for _dev in $_sr_todo; do drive_wwn "$(storage_sys "$_dev")" > "$_st_dir/${_dev##*/}.wwid"; done
-        echo "  FORMAT: $_sr_todo to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION ($STORAGE_METHOD), all at once - every byte on them is lost"
         rm -f "$_st_dir"/*.rc "$_st_dir/beat.stop"
-        _st_pids=""
-        for _dev in $_sr_todo; do storage_format "$_dev" & _st_pids="$_st_pids $!"; done
-        storage_beat "$_sr_todo" "$(date +%s)" &
-        _st_beat=$!
-        for _p in $_st_pids; do wait "$_p"; done
-        # The beat ends within a second (no sleep left holding the console).
-        touch "$_st_dir/beat.stop"; wait "$_st_beat"
+        if [ -n "$_sr_fmt" ]; then
+            [ -x "$_st_tool" ] || storage_fail "storage: in ${STORAGE_FROM##*/} formats every drive, and this initramfs has no stormdrive ($_st_tool): it is built with STORMDRIVE_BIN (stormcentral#1335)"
+            echo "  FORMAT: $_sr_fmt to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION ($STORAGE_METHOD), all at once - every byte on them is lost"
+            _st_pids=""
+            for _dev in $_sr_fmt; do storage_format "$_dev" & _st_pids="$_st_pids $!"; done
+            storage_beat "$_sr_fmt" "$(date +%s)" &
+            _st_beat=$!
+            for _p in $_st_pids; do wait "$_p"; done
+            # The beat ends within a second (no sleep left holding the console).
+            touch "$_st_dir/beat.stop"; wait "$_st_beat"
+        fi
+        for _dev in $_sr_skip; do echo 0 > "$_st_dir/${_dev##*/}.rc"; : >> "$_st_dir/${_dev##*/}.log"; done
         _st_bad=""
         for _dev in $_sr_todo; do
             _rc=$(cat "$_st_dir/${_dev##*/}.rc" 2>/dev/null || echo 1)
@@ -5223,7 +5253,10 @@ if [ "$BOOT_MODE" = "local" ]; then
             fi
             echo "  FORMATTED: $_now ${_ww:+($_ww) }reads $_lb-byte blocks, $_pts (READ CAPACITY 16)"
             [ "$_now" != "$_dev" ] && mv -f "$_st_dir/${_dev##*/}.log" "$_st_dir/${_now##*/}.log" 2>/dev/null
-            echo "formatted $STORAGE_PROTECTION $STORAGE_METHOD" > "$_st_dir/${_now##*/}.fmt"
+            case " $_sr_skip " in
+            *" $_dev "*) echo "already $STORAGE_PROTECTION none" > "$_st_dir/${_now##*/}.fmt" ;;
+            *) echo "formatted $STORAGE_PROTECTION $STORAGE_METHOD" > "$_st_dir/${_now##*/}.fmt" ;;
+            esac
             STORAGE_FORMATTED="${STORAGE_FORMATTED:+$STORAGE_FORMATTED }$_now"
         done
     }
@@ -6045,7 +6078,7 @@ $1|$_svp|$3"
                 fi
             done
             if [ -n "$_st_full" ] && [ -n "${STORAGE_WIPE:-}" ] && [ -n "$STORAGE_FORCE" ]; then
-                echo "  storage: wipe asked by $STORAGE_WIPE:$_st_full formatted to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION, what it holds is lost (#614)"
+                echo "  storage: wipe asked by $STORAGE_WIPE:$_st_full laid afresh at $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION, what it holds is lost (#614)"
             elif [ -n "$_st_full" ] && [ -z "$STORAGE_FORCE" ]; then
                 echo "  STOP: storage: in ${STORAGE_FROM##*/} formats $_st_todo to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION,"
                 echo "  and what they hold is not to be lost:$_st_full. A layout change is never made on"

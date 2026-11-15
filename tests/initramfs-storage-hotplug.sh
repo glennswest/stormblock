@@ -42,7 +42,9 @@ mkdisk() { # name
     mkdir -p "$SYS/$1/queue" "$SYS/$1/device/scsi_disk/0:0:0:0"
     echo 19532873728 > "$SYS/$1/size"; echo 0 > "$SYS/$1/removable"
     echo 4096 > "$SYS/$1/queue/logical_block_size"
-    echo 1 > "$SYS/$1/device/scsi_disk/0:0:0:0/protection_type"
+    # PROT_EN=0: not at the asked 4096 + PI type1, so a format runs (a drive
+    # already at it is not formatted again, #614; a test sets it so).
+    echo 0 > "$SYS/$1/device/scsi_disk/0:0:0:0/protection_type"
 }
 
 # The engine: the Nth `image storage-plan` answers plan.N (the last one there
@@ -83,6 +85,7 @@ if [ -e "$W/becomes.$n" ]; then
     echo 1 > "$S/device/scsi_disk/1:0:0:0/protection_type"
     cp "$W/wwn.$n" "$W/wwn.$b"; touch "$W/done.$n"
 fi
+[ -d "$W/sys/$n/device/scsi_disk/0:0:0:0" ] && echo 1 > "$W/sys/$n/device/scsi_disk/0:0:0:0/protection_type"
 if [ -e "$W/more.$n" ]; then
     a=$(cat "$W/more.$n")
     echo "add /dev/$a serial=S wwid=- controller=- bay=- bytes=1 ready=1 at=1" >> "$W/run/hotplug.log"

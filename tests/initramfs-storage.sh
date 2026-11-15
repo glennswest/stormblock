@@ -58,7 +58,7 @@ hasnt() { # name file pattern
     fi
 }
 
-# Four drives, sda..sdd, as sysfs shows them: 4096-byte blocks, P_TYPE 1
+# Four drives, sda..sdd, as sysfs shows them: 4096-byte blocks, P_TYPE 0
 # (what a format leaves them at; a test sets otherwise).
 SYS="$WORK/sys"
 mkdisk() { # name
@@ -66,7 +66,9 @@ mkdisk() { # name
     echo 19532873728 > "$SYS/$1/size"
     echo 0 > "$SYS/$1/removable"
     echo 4096 > "$SYS/$1/queue/logical_block_size"
-    echo 1 > "$SYS/$1/device/scsi_disk/0:0:0:0/protection_type"
+    # PROT_EN=0: not at the asked 4096 + PI type1, so a format runs (a drive
+    # already at it is not formatted again, #614; a test sets it so).
+    echo 0 > "$SYS/$1/device/scsi_disk/0:0:0:0/protection_type"
 }
 for d in sda sdb sdc sdd; do mkdisk "$d"; done
 
@@ -123,10 +125,11 @@ cat > "$WORK/stormdrive" <<EOF
 W="$WORK"
 EOF
 cat >> "$WORK/stormdrive" <<'EOF'
-dev=""; prot=""; meth=""
+dev=""; prot=""; meth=""; bsz=""
 while [ $# -gt 0 ]; do
     case "$1" in
     --device) dev=$2; shift ;;
+    --block-size) bsz=$2; shift ;;
     --protection) prot=$2; shift ;;
     --method) meth=$2; shift ;;
     esac
@@ -148,6 +151,11 @@ if [ "$rc" = 0 ] && [ -e "$W/becomes.$n" ]; then
     cp "$W/wwn.$n" "$W/wwn.$b"
     # Now a disk with a size: no longer one with no readable format.
     touch "$W/done.$n"
+fi
+# A format leaves the drive at the PI it was asked (pt.<name>: at another).
+[ "$rc" = 0 ] && [ -n "$bsz" ] && [ -d "$W/sys/$n/queue" ] && echo "$bsz" > "$W/sys/$n/queue/logical_block_size"
+if [ "$rc" = 0 ] && [ -d "$W/sys/$n/device/scsi_disk/0:0:0:0" ]; then
+    case "$prot" in none) echo 0 ;; type1) echo 1 ;; *) echo 9 ;; esac > "$W/sys/$n/device/scsi_disk/0:0:0:0/protection_type"
 fi
 [ -e "$W/pt.$n" ] && cat "$W/pt.$n" > "$W/sys/$n/device/scsi_disk/0:0:0:0/protection_type"
 echo "end $n $prot" >> "$W/format.log"
@@ -612,7 +620,38 @@ has "the appliance told" "$WORK/report.args" "^formatting$"
 has "with the progress" "$WORK/report.args" "sdb: formatting (fast) 40%"
 check "the beat ended with the formats" "" "$(sed -n '/=FORMATTED=/,$p' "$WORK/out" | grep 'FORMAT: ' || true)"
 
-echo "the format: a drive at the format already is formatted all the same (#595)"
+echo "the format: a drive already at 4096 + PI type1 is not formatted again, the rest are (#614)"
+# Owner, #614: "skip the format on drives already at 4096 + PI". forge1: sda
+# at 4096 + PI type 1 after its 14 h FORMAT UNIT, the others not.
+reset
+echo 1 > "$SYS/sda/device/scsi_disk/0:0:0:0/protection_type"
+echo 512 > "$SYS/sdb/queue/logical_block_size"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc'"
+has "the skip said" "$WORK/out" "  sda: already 4096 + PI type1 (READ CAPACITY 16), not formatted again (#614)"
+hasnt "no FORMAT UNIT for sda" "$WORK/format.log" "start sda "
+has "sdb at 512 formatted" "$WORK/format.log" "start sdb type1 fast"
+has "sdc without PI formatted" "$WORK/format.log" "start sdc type1 fast"
+has "the FORMAT line names only those" "$WORK/out" "FORMAT: /dev/sdb /dev/sdc to 4096"
+has "sda read back all the same" "$WORK/out" "FORMATTED: /dev/sda reads 4096-byte blocks, PROT_EN=1 P_TYPE 1 (READ CAPACITY 16)"
+has "sdb read back at 4096" "$WORK/out" "FORMATTED: /dev/sdb reads 4096-byte blocks, PROT_EN=1 P_TYPE 1"
+check "all three ready to lay" "/dev/sda /dev/sdb /dev/sdc" "$(val FORMATTED)"
+check "sda's record says it was kept at its format" "already type1 none" "$(cat "$WORK/run/storage-format/sda.fmt" 2>/dev/null)"
+check "the fresh drives still forced" "1" "$(val FORCE_LOCAL)"
+
+echo "the format: every drive at the format: nothing formatted, no stormdrive needed"
+reset
+for d in sda sdb; do echo 1 > "$SYS/$d/device/scsi_disk/0:0:0:0/protection_type"; done
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" "STORM_STORMDRIVE=$WORK/none"
+check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
+hasnt "no rescue" "$WORK/out" "RESCUE"
+check "both ready to lay" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+
+echo "the format: protection none asks P_TYPE 0"
+reset
+format "STORAGE_DRIVES='/dev/sda'" 'STORAGE_PROTECTION=none'
+has "said" "$WORK/out" "sda: already 4096 + no PI (READ CAPACITY 16), not formatted again"
+
+echo "the format: a drive formatted (#595)"
 reset
 format "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc'"
 check "all three formatted" "/dev/sda /dev/sdb /dev/sdc" "$(val FORMATTED)"
@@ -737,10 +776,22 @@ reset
 echo "superblock: data slab" > "$WORK/slabs.sda"
 format "STORAGE_DRIVES='/dev/sda'" 'INSTALL_KEEP=1 INSTALL_FRESH=1 STORAGE_FORCE=1' \
     "STORAGE_WIPE='the install-config (testhost install --force by ops: four drives)'"
-has "the wipe line" "$WORK/out" "storage: wipe asked by the install-config (testhost install --force by ops: four drives): /dev/sda(stormblock slabs) formatted to 4096 + PI type1, what it holds is lost (#614)"
+has "the wipe line" "$WORK/out" "storage: wipe asked by the install-config (testhost install --force by ops: four drives): /dev/sda(stormblock slabs) laid afresh at 4096 + PI type1, what it holds is lost (#614)"
 hasnt "no STOP" "$WORK/out" "STOP"
 check "formatted" "/dev/sda" "$(val FORMATTED)"
 hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the format: forge1 under the wipe word: sda at 4096 + PI type1 skipped, still taken (#614)"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sda"
+echo 1 > "$SYS/sda/device/scsi_disk/0:0:0:0/protection_type"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc /dev/sdd'" 'INSTALL_KEEP=1 INSTALL_FRESH=1 STORAGE_FORCE=1' \
+    "STORAGE_WIPE='the install-config'"
+has "what is lost said" "$WORK/out" "wipe asked by the install-config: /dev/sda(stormblock slabs) laid afresh"
+has "sda not formatted again" "$WORK/out" "sda: already 4096 + PI type1 (READ CAPACITY 16), not formatted again"
+check "three formats" "3" "$(grep -c '^start' "$WORK/format.log")"
+check "all four laid next" "/dev/sda /dev/sdb /dev/sdc /dev/sdd" "$(val FORMATTED)"
+check "nothing kept" "" "$(val INSTALL_KEEP)"
 
 echo "the format: the STOP names the install-config's wipe word"
 reset

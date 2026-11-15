@@ -82,8 +82,16 @@ a drive alone and says so in a WARNING (#593).
 
 Every drive taken is formatted to the block size and protection **at once**,
 one `stormdrive format` each in the background, its progress on the console
-prefixed with the drive's name. **Every** drive is formatted, whatever it is
-at now (owner, #595: "It need to format all the drives"): `auto` is the fast
+prefixed with the drive's name. Every drive is formatted (owner, #595: "It
+need to format all the drives") **but one the kernel already reads at the
+asked format** (owner, #614: "skip the format on drives already at 4096 +
+PI"): its logical block size and `protection_type` (what sd read with READ
+CAPACITY 16) are the block size and PI asked, so it gets no FORMAT UNIT and
+the console says `sda: already 4096 + PI type1 (READ CAPACITY 16), not
+formatted again (#614)`. It is still laid afresh with the rest (what it holds
+is lost to the lay, so the same go-ahead applies), read back with its
+`FORMATTED:` line, and recorded as `already` in the layout report. forge1's
+10 TB sda took 14 h 25 m to reach 4096 + PI type 1. `auto` is the fast
 format (FFMT), and if the drive refuses it, a full FORMAT UNIT to the same
 block size and PI. There is no other fallback (owner, #595: "4k with pi"):
 a drive that refuses the block size or the PI fails the install loudly with
@@ -130,7 +138,7 @@ is served. The console says where the word came from and names what is lost:
 
 ```
   storage: wipe asked by the install-config (testhost install --force by <who>: <why>): every drive storage: takes is formatted and laid, whatever it holds (#614)
-  storage: wipe asked by the install-config (…): /dev/sda(stormblock slabs) formatted to 4096 + PI type1, what it holds is lost (#614)
+  storage: wipe asked by the install-config (…): /dev/sda(stormblock slabs) laid afresh at 4096 + PI type1, what it holds is lost (#614)
 ```
 
 Nothing else changes: an install without the word still keeps data and
