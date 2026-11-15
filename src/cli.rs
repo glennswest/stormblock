@@ -10274,15 +10274,17 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
             println!("0x{a:016x}: {said}");
             if *wait && matches!(act, scsi::Action::Format { .. }) {
                 let start = std::time::Instant::now();
-                let mut last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+                // No "an hour ago": an Instant before the boot panics (an
+                // install's first minutes).
+                let mut last: Option<std::time::Instant> = None;
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(10));
                     let p = mpt::with_drive(devp, sysp, a, scsi::format_progress).map_err(anyhow::Error::msg)?;
                     match p {
                         Ok(None) => break,
                         Ok(Some(pct)) => {
-                            if last.elapsed() >= std::time::Duration::from_secs(60) {
-                                last = std::time::Instant::now();
+                            if last.is_none_or(|l| l.elapsed() >= std::time::Duration::from_secs(60)) {
+                                last = Some(std::time::Instant::now());
                                 println!("0x{a:016x}: formatting {pct:.1}%, {}m so far", start.elapsed().as_secs() / 60);
                             }
                         }

@@ -616,6 +616,7 @@ pub struct Sg {
 
 #[cfg(target_os = "linux")]
 #[repr(C)]
+#[allow(dead_code)] // the kernel's struct: some fields are only its to fill
 struct SgIoHdr {
     interface_id: libc::c_int,
     dxfer_direction: libc::c_int,
