@@ -74,7 +74,7 @@ pvetest3 12.81, the power-cut reboot (console 03:33Z): two faults.
   plain data region is this node's (`carries=` empty).
 - [x] code + tests (initramfs-storage-serve.sh, initramfs-storage.sh), 381ea9f4; docs/storage-layout.md, README.
 - [x] `sc-build 'sh check.sh'` green on 381ea9f4; v24.5.2 (12e925e6), locked musl release build green; stage requested (build 473abf8ab771).
-- [ ] waits `--after-install stormblock>=12e925e6@pvetest3`: its install, then the power-cut reboot, must say `storage: … this boot is no install` and boot its own drives (with #597: 4 legs, the set served); then close #598.
+- [x] seen on pvetest3, 12.86 (install 2026-11-15 02:12Z, passed): the install laid sda vda vdb vdc (sda's old install discarded, nothing refused); after the install's power cycle the reboot booted from /dev/sda with intent local, said `storage: in install-config.forge.yaml - this boot runs from /dev/sda, nothing is laid`, served the set over sda3 vda3 vdb3 vdc3 at /dev/ublkb65535, opened the 3 other legs, mounted 79/79 volumes, no FATAL. #598 closed.
 - Not done: a keep-data reinstall over a no-set layout (no `KEEP:` path without a set); the #593 wip arrivals block still uses `2>&1` around the plan.
 
 ## #597 — storage: drives=all took sda only: the virtio drives never reached the plan (2026-11-14, P0)
