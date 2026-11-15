@@ -23,7 +23,21 @@ first, #595's format and layout on it.
   `shipped` with `console:STORAGE: 4 drives, each formatted 4096 \+ PI`.
 - [ ] forge1's console (only metal can show it): the card's lines say which
   case each of the three drives is.
-- [ ] next (#611): FORMAT UNIT through the card's pass-through for a row the
+- [ ] #611 second part (2026-11-15, in progress):
+  - [ ] `src/drive/scsi.rs`: one SCSI transport, SG_IO on the sg node or the
+    card's pass-through; details: INQUIRY, VPD 0x00/80/83/B0/B1/B2, READ
+    CAPACITY 16, LOG SENSE 0x0D/0x2F/0x10/0x0E/0x02/0x03, MODE SENSE 0x08,
+    READ DEFECT DATA 12 (grown count), REQUEST SENSE progress;
+  - [ ] `stormblock hba details --sas` and actions (spin up/down, self-test,
+    FORMAT UNIT 4096 + PI through the card with IMMED, progress polled);
+  - [ ] /init: card rows in local-disk.json (`card_rows`); a no-target row
+    `storage:` takes is formatted through the card, then the host scanned;
+  - [ ] the engine (`src/mgmt/hba.rs`): rows re-read every 30 s and on every
+    hotplug event, re-matched, state changes logged; `GET
+    /api/v1/storage/hba`, `GET …/hba/{sas}/details` (cached, timestamp),
+    `POST …/hba/{sas}/action`;
+  - [ ] storage_kick: a 0-byte disk deleted and its host scanned.
+- [ ] then (#611): FORMAT UNIT through the card's pass-through for a row the
   kernel never makes a target for; the rows in local-disk.json; the engine
   keeps them for the node's life (rescan, re-match, log changes); the
   per-row low-level details (VPD, READ CAPACITY 16, LOG/MODE SENSE, SES).
