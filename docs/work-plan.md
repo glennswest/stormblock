@@ -209,7 +209,7 @@ console proof.
   devices come later). docs/boot-hooks.md.
 - [x] check.sh ALL PASS on c7f6b43d (1073 s); v24.7.4 (5e05d779, tagged),
   locked musl release build green; stage requested (build fc0941e7052e).
-- [ ] `shipped`, proof `console:STORAGE: 4 drives, each formatted 4096 \+ PI`
+- [x] `shipped`, proof `console:STORAGE: 4 drives, each formatted 4096 \+ PI`
   (only forge1's install can show it). If forge1's console then shows linked phys with no device, or the
   driver refusing them, that is the HBA's word: a question for the owner
   (iDRAC / HBA), not a stormblock fix. Note #609: forge1's next install
