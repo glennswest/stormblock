@@ -325,6 +325,14 @@ install (12.78, 17:11Z) was cancelled before the layout. The item waits
 (`LAY:` per-drive format lines, `System legs`) and `GET /api/v1/storage/layout`
 `state: ok` with the 3+1 set, and close #573.
 
+2026-11-15: 12.86 (stormblock 24.7.2) passed on pvetest3 and forge1.
+pvetest3's `storage_layout` after its reboot: 4 drives, system legs on all 4,
+the set ublkb65535 `optimal`, parity 1 over 4 slots, `state: ok` (the layout
+verified). forge1's inventory saw sda only (full format 4096 + PI1, 14h 25m,
+FFMT refused), so its layout is one leg and no set: #595/#611 (v24.8.0/v24.9.0).
+Commented on #573; item `--after` #595. On forge1's next install with 4
+drives: the #609 stop unless `rd.stormblock.assimilate=force`.
+
 - [x] A: e52171be (tools in the initramfs, `tests/initramfs-tools.sh`).
 - [x] B (plan): 1cb48235 `image storage-plan` (`src/image/storage.rs`); clippy fix after.
 - [x] B (/init): `storage layout` + `storage format` blocks,

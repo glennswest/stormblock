@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-15
+- **docs:** #573: work plan - the layout verified on pvetest3 12.86 (4 legs, set optimal 3+1, `state: ok`); forge1 waits behind #595 (its inventory saw one drive of four).
 - **docs:** #611: work plan - v24.9.0 staged, shipped with its console proof; the rest of the owner's list filed as #612.
 - **feat:** #611: a drive's own low-level answers and actions, through its sg node or the mpt card's pass-through (`src/drive/scsi.rs`). The answers are INQUIRY, VPD 0x00/0x80/0x83/0xB0/0xB1/0xB2, READ CAPACITY 16, REQUEST SENSE progress, LOG SENSE 0x0D/0x2F/0x10/0x0E/0x02/0x03/0x06, READ DEFECT DATA 12 and MODE SENSE 0x08. The actions are spin up/down, self-test, and FORMAT UNIT to 4096/512 + PI (MODE SELECT with the drive's own descriptor, FMTDATA + IMMED + FMTPINFO). On the command line: `stormblock hba json|details|act`.
 - **feat:** #611: the engine keeps the card's rows for the node's life (`src/mgmt/hba.rs`). They are read again every 30 s and on every drive event, matched to Linux again, and each change is logged. API: `GET /api/v1/storage/hba`, `GET /api/v1/storage/hba/{sas}/details` (cached, `?fresh=1`), and `POST /api/v1/storage/hba/{sas}/action` (admin; a format needs `confirm`, is followed to its end, and then the kernel looks again).
