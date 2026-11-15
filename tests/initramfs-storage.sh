@@ -183,6 +183,9 @@ STORM_STORMRAID="$WORK/stormraid"
 STORAGE_DEV="$WORK/dev"
 STORM_INV_SG="$WORK/sg"
 STORAGE_FIND_SECS=2
+STORM_STORAGE_SCSI="$WORK/scsi"
+STORM_STORAGE_SD_BIND="$WORK/sd-bind"
+STORM_STORAGE_SCSI_HOST="$WORK/scsi_host"
 W="$WORK"
 EOF
 cat >> "$WORK/env.sh" <<'EOF'
@@ -207,7 +210,7 @@ reset() {
            "$WORK"/sig.* "$WORK/format.log" "$WORK/skips" "$WORK/ldwrite" "$WORK/out" \
            "$WORK/install-config.yaml" "$WORK/dev" "$WORK"/lay.args "$WORK"/lay.rc \
            "$WORK"/raid.* "$WORK/serve.args" "$WORK"/slow.* "$WORK/report.args" \
-           "$WORK"/pt.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" \
+           "$WORK"/pt.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" "$WORK/scsi" "$WORK/sd-bind" \
            "${WORK:?}/plan.stderr" "${WORK:?}/sys/vda" "${WORK:?}/sys/vdb" "${WORK:?}/sys/ublkb65535" "${WORK:?}/sys/loop0"
     for d in sda sdb sdc sdd; do mkdisk "$d"; done
 }
@@ -428,6 +431,9 @@ mkdir -p "$WORK/sg/sg1" "$WORK/sg/sg2"
 printf '/dev/sg1 %s\n/dev/sg2 %s\n' "$WORK/sg/sg1" "$WORK/sg/sg2" > "$WORK/unready"
 echo naa.5000cca26801b648 > "$WORK/wwn.sg1"; echo sdf > "$WORK/becomes.sg1"
 echo naa.5000cca26a819e68 > "$WORK/wwn.sg2"; echo sde > "$WORK/becomes.sg2"
+# sg1's SCSI device, which sd made no disk of: bound to sd after the format
+# (#611); sg2 has none, so every SCSI host is scanned.
+mkdir -p "$WORK/scsi/0:0:1:0"; echo naa.5000cca26801b648 > "$WORK/scsi/0:0:1:0/wwid"
 cat > "$WORK/plan.out" <<'EOF'
 STORAGE_DRIVES='/dev/sda /dev/sg1 /dev/sg2'
 STORAGE_SYSTEM='/dev/sda /dev/sg1 /dev/sg2'
@@ -452,6 +458,9 @@ has "said" "$WORK/out" "/dev/sg1 /dev/sg2 not ready (no readable format) - forma
 has "sg1 formatted with PI" "$WORK/format.log" "start sg1 type1 fast"
 has "sg2 formatted with PI" "$WORK/format.log" "start sg2 type1 fast"
 has "found again by WWID" "$WORK/out" "/dev/sg1 is /dev/sdf now (WWID naa.5000cca26801b648)"
+has "the kernel asked to read it again: sd bound" "$WORK/out" "the kernel asked to read naa.5000cca26801b648 again: sd bound to 0:0:1:0 (#611)"
+check "  written to sd's bind" "0:0:1:0" "$(cat "$WORK/sd-bind" 2>/dev/null)"
+has "  no SCSI device: every host scanned" "$WORK/out" "the kernel asked to read naa.5000cca26a819e68 again: a scan of every SCSI host"
 has "checked" "$WORK/out" "FORMATTED: /dev/sde (naa.5000cca26a819e68) reads 4096-byte blocks, PROT_EN=1 P_TYPE 1"
 check "formatted this boot" "/dev/sdf /dev/sde" "$(val STORAGE_EARLY)"
 has "the second plan sees them as disks" "$WORK/plan.args" "dev=/dev/sdf;"

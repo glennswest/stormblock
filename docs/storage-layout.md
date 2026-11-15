@@ -68,7 +68,12 @@ so such a drive has a node (`/dev/sgN`).
 The plan takes them (`ready=0`, no size), and `/init` formats them **before**
 the rest of the install decides anything: they hold nothing readable. Each is
 found again afterwards by its WWID (sd makes a new disk of it), and the plan
-runs again with every drive's size. This happens on an install (no node-data
+runs again with every drive's size. The kernel is asked to read each one
+again, in the same boot (#611): a disk it has is rescanned (its new block
+size and PI), a SCSI device sd made no disk of is bound to sd, and with no
+SCSI device at all every SCSI host is scanned. That happens at once and every
+10 s for up to 60 s (`STORAGE_FIND_SECS`), each time said on the console
+(`storage: after 0s the kernel asked to read naa.… again: sd bound to 0:0:1:0`). This happens on an install (no node-data
 set served yet) or with the wipe word; a node whose set is served leaves such
 a drive alone and says so in a WARNING (#593).
 

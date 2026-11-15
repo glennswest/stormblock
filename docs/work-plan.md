@@ -16,11 +16,12 @@ first, #595's format and layout on it.
   INQUIRY + TEST UNIT READY through the card for a no-target row.
 - [x] the initramfs inventory prints the card's lines, waits/rescans for the
   card's no-target rows, the card's count is the expected count (WARNING).
+- [x] after a FORMAT the kernel reads the drive again (rescan / sd bind / host
+  scan) while storage_find waits for it by WWID, 60 s.
 - [ ] sc-build check.sh; the image; forge1's console (only metal can show it).
 - [ ] next (#611): FORMAT UNIT through the card's pass-through for a row the
   kernel never makes a target for; the rows in local-disk.json; the engine
-  keeps them for the node's life (rescan, re-match, log changes); after a
-  FORMAT, rescan the target and re-match before the layout (one boot); the
+  keeps them for the node's life (rescan, re-match, log changes); the
   per-row low-level details (VPD, READ CAPACITY 16, LOG/MODE SENSE, SES).
 
 ## #609 — a keep-data reinstall formatted forge1's drive (2026-11-15, P1)

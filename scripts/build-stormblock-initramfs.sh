@@ -5039,9 +5039,42 @@ if [ "$BOOT_MODE" = "local" ]; then
     storage_sys() { # dev -> its sysfs directory (/sys/block/X, or the sg node's for a drive sd made no disk of)
         case "$1" in /dev/sg*) echo "$_st_sg/${1##*/}" ;; *) echo "$SURVEY_SYS/${1##*/}" ;; esac
     }
+    # After a format the kernel is asked to read the drive again (#611, owner:
+    # Linux must find it without a reboot): a disk it has is rescanned (its
+    # new block size and PI), a SCSI device sd made no disk of is bound to
+    # sd, and with no SCSI device at all every SCSI host is scanned. Asked at
+    # once and every 10 s while the disk is not there; said on stderr, since
+    # storage_find's stdout is the device.
+    STORAGE_SCSI="${STORM_STORAGE_SCSI:-/sys/bus/scsi/devices}"
+    STORAGE_SD_BIND="${STORM_STORAGE_SD_BIND:-/sys/bus/scsi/drivers/sd/bind}"
+    STORAGE_SCSI_HOST="${STORM_STORAGE_SCSI_HOST:-/sys/class/scsi_host}"
+    storage_wwid_of() { head -n 1 "$1" 2>/dev/null | tr -d '"\\;' | tr '\000-\037' ' ' | sed 's/^ *//; s/ *$//'; }
+    storage_kick() { # wwid -> asks the kernel to read that drive again; says what it asked
+        for _skd in "$STORAGE_SCSI"/*:*:*:*; do
+            [ -r "$_skd/wwid" ] || continue
+            [ "$(storage_wwid_of "$_skd/wwid")" = "$1" ] || continue
+            _skb=""
+            for _skx in "$_skd"/block/*; do [ -e "$_skx" ] && _skb=1; done
+            if [ -n "$_skb" ]; then
+                { echo 1 > "$_skd/rescan"; } 2>/dev/null
+                echo "a rescan of ${_skd##*/}"
+            else
+                { echo "${_skd##*/}" > "$STORAGE_SD_BIND"; } 2>/dev/null
+                echo "sd bound to ${_skd##*/}"
+            fi
+            return 0
+        done
+        for _skh in "$STORAGE_SCSI_HOST"/host*; do
+            [ -e "$_skh/scan" ] && { echo "- - -" > "$_skh/scan"; } 2>/dev/null
+        done
+        echo "a scan of every SCSI host (no SCSI device has it)"
+    }
     storage_find() { # wwid -> the block device that has it and a size, waited for up to STORAGE_FIND_SECS
         _sfw=0
         while :; do
+            if [ $((_sfw % 10)) = 0 ]; then
+                echo "  storage: after ${_sfw}s the kernel asked to read $1 again: $(storage_kick "$1") (#611)" >&2
+            fi
             for _sfb in "$SURVEY_SYS"/*; do
                 [ -e "$_sfb/device" ] || continue
                 [ "$(drive_wwn "$_sfb")" = "$1" ] || continue
@@ -5049,7 +5082,7 @@ if [ "$BOOT_MODE" = "local" ]; then
                 echo "/dev/${_sfb##*/}"
                 return 0
             done
-            [ "$_sfw" -lt "${STORAGE_FIND_SECS:-30}" ] || return 1
+            [ "$_sfw" -lt "${STORAGE_FIND_SECS:-60}" ] || return 1
             sleep 1
             _sfw=$((_sfw + 1))
         done
