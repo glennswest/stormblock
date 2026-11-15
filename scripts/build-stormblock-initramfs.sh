@@ -1143,7 +1143,10 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.boothost=*)    BOOTHOST="${param#*=}" ;;
         rd.stormblock.discover=*)    DISCOVER="${param#*=}" ;;
         rd.stormblock.bootport=*)    BOOTPORT="${param#*=}" ;;
-        rd.stormblock.assimilate=*)  ASSIMILATE="${param#*=}" ;;
+        # ASSIMILATE is rewritten below (an install ticket makes it force,
+        # #148); ASSIMILATE_ASKED keeps what the command line said: only that
+        # is the wipe word storage: formats a node's data under (#609).
+        rd.stormblock.assimilate=*)  ASSIMILATE="${param#*=}"; ASSIMILATE_ASKED="${param#*=}" ;;
         rd.stormblock.wipe=*)        WIPE="${param#*=}" ;;
         # A guessed (SMBIOS) identity may install over a disk after all: for
         # an image whose machines are named by serial and booted without
@@ -5082,8 +5085,12 @@ STEOF
     fi
     if [ -n "$STORAGE_FROM" ] && [ "$OVERRIDE" != recovery ] && [ "${ASSIMILATE:-}" != off ] \
        && [ "${ASSIMILATE:-}" != ambiguous ]; then
-        # The wipe word, as asked now: ASSIMILATE is rewritten below (#311).
-        [ "${ASSIMILATE:-}" = force ] && STORAGE_FORCE=1
+        # The wipe word: rd.stormblock.assimilate=force on this boot's
+        # command line, never the force an install ticket makes of ASSIMILATE
+        # (#148). An install the appliance asks for keeps the data half
+        # (#311): on forge1 12.86 the ticket's force passed for the wipe word
+        # and a keep-data reinstall formatted its 10 TB drive (#609).
+        [ "${ASSIMILATE:-}" = force ] && [ "${ASSIMILATE_ASKED:-}" = force ] && STORAGE_FORCE=1
         # A drive with no readable format (#595) is formatted before the
         # plan that lays it: on an install (no node-data set served yet) or
         # with the wipe word. A node already laid leaves it to the operator

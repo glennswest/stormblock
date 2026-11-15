@@ -2,6 +2,27 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #609 — a keep-data reinstall formatted forge1's drive (2026-11-15, P1)
+forge1 12.86: the appliance asked an install, `/init` said "its data half is
+kept, every volume on it adopted (#311)", then FORMAT UNIT'd the 10 TB sda
+(FFMT refused, 12.5 h). Cause: the install ticket makes `ASSIMILATE=force`
+(#148: "take this drive"), and the storage layout block read that as the
+wipe word (`STORAGE_FORCE=1`) before install_keeping turned it into a keep -
+so the documented guard (a keep-data reinstall over a drive with stormblock
+slabs stops, nothing written) never ran.
+- [x] `ASSIMILATE_ASKED`: what the command line said; `STORAGE_FORCE` only
+  when it is `force` (scripts/build-stormblock-initramfs.sh).
+- [x] tests: the ticket's force is no wipe word; a keep-data reinstall over
+  this node's own data stops with nothing formatted (initramfs-storage.sh);
+  the hotplug wipe-word case says the command line (initramfs-storage-hotplug.sh).
+- [ ] check.sh on the commit; v24.7.3; stage; close.
+- Not changed: every drive taken is formatted whatever it is at, and FFMT
+  refused falls back to FORMAT UNIT (owner, #595); the blocking fallback on a
+  shared HBA is stormdrive#89. forge1's next install now STOPs before writing
+  anything (its sda holds this node's slabs in the old layout): to lay
+  `storage:` it needs `rd.stormblock.assimilate=force` (forge's data lost),
+  else `storage:` out of forge1's install-config - the master's call.
+
 ## #607 — adopt-ublk refuses the data slab on the node-data set (2026-11-14, P0)
 
 pvetest3 12.85: past #605 the set is at /dev/ublkb65535 and the data

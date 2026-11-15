@@ -375,11 +375,22 @@ reset
 printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
 printf "STORAGE_DRIVES='/dev/sdb'\nSTORAGE_SYSTEM='/dev/sdb'\n" > "$WORK/plan.out"
 echo "superblock: data slab" > "$WORK/slabs.sda"
-layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'ASSIMILATE=force INSTALL_OVER=/dev/sda4'
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'ASSIMILATE=force ASSIMILATE_ASKED=force INSTALL_OVER=/dev/sda4'
 has "--force passed" "$WORK/plan.args" "^--force$"
 check "STORAGE_FORCE kept for the format" "1" "$(val STORAGE_FORCE)"
 check "a drive it does not take is no longer this node's" "" "$(val INSTALL_OVER)"
 has "and that is said" "$WORK/out" "storage: does not take it"
+
+echo "the layout: an install ticket's force is no wipe word (#609)"
+# forge1 12.86: the appliance asked an install (ASSIMILATE=force from the
+# ticket), the command line said nothing, the drive carries this node's data.
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+printf "STORAGE_DRIVES='/dev/sda'\nSTORAGE_SYSTEM='/dev/sda'\n" > "$WORK/plan.out"
+echo "superblock: data slab" > "$WORK/slabs.sda"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'ASSIMILATE=force INSTALL_OVER=/dev/sda4'
+hasnt "no --force" "$WORK/plan.args" "^--force$"
+check "no STORAGE_FORCE" "" "$(val STORAGE_FORCE)"
 
 echo "the layout: a plan that stops takes nothing"
 reset
@@ -602,6 +613,15 @@ echo "the format: an ordinary boot over blank drives formats them"
 reset
 format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_FRESH=""'
 check "both formatted" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+
+echo "the format: a keep-data reinstall over this node's own data stops, nothing formatted (#609)"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sda"
+format "STORAGE_DRIVES='/dev/sda'" 'INSTALL_KEEP=1 INSTALL_FRESH=1 STORAGE_FORCE=""'
+has "STOP" "$WORK/out" "STOP: storage:"
+has "names the drive" "$WORK/out" "/dev/sda(stormblock slabs)"
+check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
+has "rescue" "$WORK/out" "RESCUE"
 
 echo "the format: the wipe word over this node's data goes ahead"
 reset

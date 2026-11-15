@@ -204,7 +204,7 @@ reset
 mkdisk sdd; arrive /dev/sdd
 echo "superblock: data slab" > "$WORK/slabs.sdd"
 printf "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc /dev/sdd'\nSTORAGE_SYSTEM='/dev/sda /dev/sdb'\n" > "$WORK/plan.2"
-run 'INSTALL_FRESH=""' 'ASSIMILATE=force'
+run 'INSTALL_FRESH=""' 'ASSIMILATE=force ASSIMILATE_ASKED=force'
 check "four drives" "/dev/sda /dev/sdb /dev/sdc /dev/sdd" "$(val DRIVES)"
 check "formatted" "start sdd" "$(cat "$WORK/format.log" 2>/dev/null)"
 
