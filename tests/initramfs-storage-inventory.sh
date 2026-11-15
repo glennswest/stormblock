@@ -372,6 +372,7 @@ fake_hba() {
         for a in 0x5000cca26801b649 0x5000cca26a819e69 0x5000cca268077301; do echo "0000:c1:00.0:sas-$a"; done
         ;;
     count) echo "0000:c1:00.0 4" ;;
+    json) echo '[{"pci": "0000:c1:00.0", "sas_address": "0x5000cca26a819e69", "slot": 2, "state": "no target"}]' ;;
     esac
 }
 card_makes() {
@@ -388,6 +389,11 @@ contains "the card's drives with no SCSI device are waited for" \
     "waiting up to 10s for drives still coming up: 0000:c1:00.0:sas-0x5000cca26801b649 0000:c1:00.0:sas-0x5000cca26a819e69 0000:c1:00.0:sas-0x5000cca268077301" "$out"
 contains "  until the scan makes them" "storage: 1 -> 3 drives on 0000:c1:00.0 after 4s" "$out"
 contains "the card's count is met" "storage: the card on 0000:c1:00.0 lists 4 drive(s), 4 in the inventory (#611)" "$out"
+contains "the card's rows in local-disk.json" '"card_rows": [{"pci": "0000:c1:00.0", "sas_address": "0x5000cca26a819e69", "slot": 2, "state": "no target"}]' "$(cat "$WORK/report.json")"
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$WORK/report.json" 2>/dev/null \
+        && echo "  ok      the report with card_rows is JSON" || { echo "  FAIL    the report with card_rows is not JSON"; fail=1; }
+fi
 
 make_forge
 HBA=fake_hba SETTLE=1 PWAIT=3 inventory

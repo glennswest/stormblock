@@ -202,6 +202,8 @@ fn refresh(state: &crate::mgmt::AppState, present: &[DriveEvent]) {
 
 fn record(ev: &DriveEvent) {
     tracing::warn!("{} (#593)", ev.said());
+    // The card's rows are matched to Linux again (#611).
+    crate::mgmt::hba::poke();
     let mut w = view();
     w.events.push_back(ev.clone());
     while w.events.len() > KEEP {

@@ -701,6 +701,18 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     added and removed while the engine runs, and the blank or not-ready drives
     outside the layout offered as `replacement`, `spare` or `system_leg`
     ([hot plug](docs/storage-layout.md#drives-that-arrive-later-hot-plug-593)).
+  - The card's rows (#611): `GET /api/v1/storage/hba` (token) gives every
+    drive an mpt card lists (SAS address, enclosure, slot, phy, link, type,
+    `state` `ready` / `not ready` / `no target`, its Linux devices), read
+    again every 30 s and on every drive event, with the recent `changes`
+    (also logged at WARN). `GET /api/v1/storage/hba/{sas}/details` is the
+    drive's own answers through sg or the card (INQUIRY, VPD, READ CAPACITY
+    16, temperature, SMART trip, self-tests, error counters, grown defects,
+    caching), cached with `read_at` (`?fresh=1` reads again). `POST
+    …/hba/{sas}/action` (admin) runs `spin_up`, `spin_down`, `self_test`,
+    `self_test_extended` or `format` (`block_size`, `pi`, `confirm` = the SAS
+    address); a format is followed to its end and the kernel asked to look
+    again. [docs/storage-layout.md](docs/storage-layout.md#the-cards-rows-611).
   - `metadata` (#587): whether the volume record is kept, as
     `GET /api/v1/slabs/durability` (token) says it: `ok`, `stale` (slabs whose
     own region is full while the data directory's `metadata.v2` holds the

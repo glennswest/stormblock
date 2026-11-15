@@ -134,6 +134,45 @@ enum HbaAction {
         #[arg(long, default_value = "/dev")]
         dev: String,
     },
+    /// The drive rows as one JSON array (`card_rows` in local-disk.json).
+    Json {
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
+    /// A drive's own low-level answers (#611): identity, VPD pages, READ
+    /// CAPACITY 16, LOG SENSE health pages, grown defects, caching. Through
+    /// its sg node, or the card when the kernel has none. JSON on stdout.
+    Details {
+        /// Its SAS address (`0x5000cca2…`).
+        #[arg(long)]
+        sas: String,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
+    /// An action on a drive (#611): spin_up, spin_down, self_test,
+    /// self_test_extended, or format (`--block-size`, `--pi none|type1`;
+    /// every byte on the drive is lost). `--wait` follows a format to its
+    /// end, a line a minute, then asks the kernel to look again.
+    Act {
+        #[arg(long)]
+        sas: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        block_size: Option<u32>,
+        #[arg(long)]
+        pi: Option<String>,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -10212,6 +10251,46 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
             let (cards, _) = mpt::cards(Path::new(dev), Path::new(sys), false);
             for c in &cards {
                 println!("{} {}", c.pci, c.drives().count());
+            }
+        }
+        HbaAction::Json { sys, dev } => {
+            let (cards, _) = mpt::cards(Path::new(dev), Path::new(sys), true);
+            let rows: Vec<serde_json::Value> = cards.iter().flat_map(|c| c.rows_json()).collect();
+            println!("{}", serde_json::Value::Array(rows));
+        }
+        HbaAction::Details { sas, sys, dev } => {
+            let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba details: {sas} is no SAS address"))?;
+            let d = mpt::with_drive(Path::new(dev), Path::new(sys), a, crate::drive::scsi::details).map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&d)?);
+        }
+        HbaAction::Act { sas, action, block_size, pi, wait, sys, dev } => {
+            use crate::drive::scsi;
+            let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba act: {sas} is no SAS address"))?;
+            let act = scsi::Action::parse(action, *block_size, pi.as_deref()).map_err(anyhow::Error::msg)?;
+            let (devp, sysp) = (Path::new(dev), Path::new(sys));
+            let said = mpt::with_drive(devp, sysp, a, |t| scsi::act(t, act).map(|s| format!("{s} through {}", t.name())))
+                .map_err(anyhow::Error::msg)?
+                .map_err(|e| anyhow::anyhow!("hba act: 0x{a:016x}: {e}"))?;
+            println!("0x{a:016x}: {said}");
+            if *wait && matches!(act, scsi::Action::Format { .. }) {
+                let start = std::time::Instant::now();
+                let mut last = std::time::Instant::now() - std::time::Duration::from_secs(3600);
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    let p = mpt::with_drive(devp, sysp, a, scsi::format_progress).map_err(anyhow::Error::msg)?;
+                    match p {
+                        Ok(None) => break,
+                        Ok(Some(pct)) => {
+                            if last.elapsed() >= std::time::Duration::from_secs(60) {
+                                last = std::time::Instant::now();
+                                println!("0x{a:016x}: formatting {pct:.1}%, {}m so far", start.elapsed().as_secs() / 60);
+                            }
+                        }
+                        Err(e) => anyhow::bail!("hba act: 0x{a:016x}: the format: {e}"),
+                    }
+                }
+                println!("0x{a:016x}: the format ended after {}m; the kernel asked to look again", start.elapsed().as_secs() / 60);
+                mpt::rescan_for(sysp, a);
             }
         }
     }

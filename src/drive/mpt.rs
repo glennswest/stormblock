@@ -41,7 +41,11 @@ const IOCSTATUS_MASK: u16 = 0x7FFF;
 const IOCSTATUS_SUCCESS: u16 = 0x0000;
 const IOCSTATUS_CONFIG_INVALID_PAGE: u16 = 0x0022;
 const IOCSTATUS_SCSI_DATA_UNDERRUN: u16 = 0x0045;
+/// The drive answered and the card recovered something on the way: still
+/// the drive's answer.
+const IOCSTATUS_SCSI_RECOVERED_ERROR: u16 = 0x0040;
 const SCSIIO_CONTROL_READ: u32 = 0x0200_0000;
+const SCSIIO_CONTROL_WRITE: u32 = 0x0100_0000;
 const SCSI_STATE_AUTOSENSE_VALID: u8 = 0x01;
 
 /// The config request's SGL offset (`PageBufferSGE`, 0x1C), in dwords.
@@ -84,13 +88,22 @@ pub fn config_reply(r: &[u8]) -> (u16, u16, u8) {
 /// A SCSI IO request frame (`MPI2_SCSI_IO_REQUEST`, 0x60 bytes before its
 /// SGL) to a device handle, LUN 0, reading `len` bytes (0: no data).
 pub fn scsi_io_request(handle: u16, cdb: &[u8], len: u32) -> Vec<u8> {
+    scsi_io_request_dir(handle, cdb, len, false)
+}
+
+/// The same, writing `len` bytes to the drive when `out`.
+pub fn scsi_io_request_dir(handle: u16, cdb: &[u8], len: u32, out: bool) -> Vec<u8> {
     let mut f = vec![0u8; (SCSIIO_SGE_DWORDS * 4) as usize];
     f[0x00..0x02].copy_from_slice(&handle.to_le_bytes());
     f[0x03] = MPI2_FUNCTION_SCSI_IO_REQUEST;
     f[0x14] = SCSIIO_SGE_DWORDS as u8; // SGLOffset0
     f[0x1C..0x20].copy_from_slice(&len.to_le_bytes());
     f[0x24..0x26].copy_from_slice(&(cdb.len() as u16).to_le_bytes()); // IoFlags: CDB length
-    let control = if len > 0 { SCSIIO_CONTROL_READ } else { 0 };
+    let control = match (len > 0, out) {
+        (false, _) => 0,
+        (true, false) => SCSIIO_CONTROL_READ,
+        (true, true) => SCSIIO_CONTROL_WRITE,
+    };
     f[0x3C..0x40].copy_from_slice(&control.to_le_bytes());
     f[0x40..0x40 + cdb.len().min(32)].copy_from_slice(&cdb[..cdb.len().min(32)]);
     f
@@ -488,6 +501,84 @@ impl Card {
         }
         out
     }
+
+    /// The drive rows as JSON (#611: `card_rows` in local-disk.json, the
+    /// engine's `GET /api/v1/storage/hba`).
+    pub fn rows_json(&self) -> Vec<serde_json::Value> {
+        self.drives()
+            .map(|r| {
+                let d = &r.device;
+                let phy = self.phys.iter().find(|p| p.attached == d.handle);
+                serde_json::json!({
+                    "pci": self.pci,
+                    "host": self.host,
+                    "ioc": self.ioc,
+                    "sas_address": hex_addr(d.sas_address),
+                    "handle": d.handle,
+                    "enclosure": r.enclosure.as_ref().map(|e| hex_addr(e.logical_id)),
+                    "slot": d.slot,
+                    "phy": d.phy,
+                    "link": phy.map(Phy::rate_name),
+                    "kind": d.kind(),
+                    "present": d.present(),
+                    "access": d.access(),
+                    "state": r.linux.state(),
+                    "end_device": r.linux.end_device,
+                    "scsi": r.linux.scsi,
+                    "block": r.linux.block,
+                    "sg": r.linux.sg,
+                    "bytes": r.linux.sectors.map(|n| n * 512),
+                    "card_inquiry": r.probe.as_ref().and_then(|p| p.0.clone()),
+                    "card_test_unit_ready": r.probe.as_ref().map(|p| p.1.clone()),
+                })
+            })
+            .collect()
+    }
+}
+
+/// A SAS address as given on the command line or in a path
+/// (`0x5000cca2…`, `5000cca2…`).
+pub fn parse_addr(s: &str) -> Option<u64> {
+    u64::from_str_radix(s.trim().trim_start_matches("sas-").trim_start_matches("0x"), 16).ok()
+}
+
+/// Runs `f` on the drive with SAS address `sas`: through its sg node when
+/// the kernel made one, else through the card to its handle.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn with_drive<R>(dev: &Path, sys: &Path, sas: u64, f: impl FnOnce(&dyn crate::drive::scsi::Transport) -> R) -> Result<R, String> {
+    let ctls = Ctl::open(dev).map_err(|e| format!("the mpt control device: {e}"))?;
+    for (ioc, pci, host) in mpt_hosts(sys) {
+        for c in &ctls {
+            let Ok(card) = c.card(ioc, &pci, &host, sys, false) else { continue };
+            let Some(r) = card.drives().find(|r| r.device.sas_address == sas) else { continue };
+            if let Some(sg) = &r.linux.sg {
+                if let Ok(t) = crate::drive::scsi::Sg::open(&dev.join(sg)) {
+                    return Ok(f(&t));
+                }
+            }
+            return Ok(f(&CardDrive { ctl: c, ioc, handle: r.device.handle }));
+        }
+    }
+    Err(format!("no mpt card lists a drive with SAS address {}", hex_addr(sas)))
+}
+
+/// After a format (#611: "linux needs to find them without a reboot"):
+/// the kernel is asked to look at the drive again. Its SCSI device is
+/// rescanned when it has one (and deleted first when its disk reads 0
+/// bytes, so sd makes it anew); every mpt host is scanned otherwise.
+pub fn rescan_for(sys: &Path, sas: u64) {
+    let l = match_linux(sys, sas);
+    if let Some(scsi) = &l.scsi {
+        let dev = sys.join("bus/scsi/devices").join(scsi);
+        if l.block.is_some() && l.sectors.unwrap_or(0) > 0 {
+            let _ = std::fs::write(dev.join("rescan"), "1");
+            return;
+        }
+        let _ = std::fs::write(dev.join("delete"), "1");
+    }
+    for (_, _, host) in mpt_hosts(sys) {
+        let _ = std::fs::write(sys.join("class/scsi_host").join(host).join("scan"), "- - -");
+    }
 }
 
 // ---- the device ----
@@ -547,6 +638,11 @@ impl Ctl {
     /// One request to IOC `ioc`: the frame, its SGE offset, a buffer to read
     /// into. -> the reply frame and the sense data.
     pub fn command(&self, ioc: u32, frame: &[u8], sge_dwords: u32, data_in: &mut [u8], timeout: u32) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
+        self.command_io(ioc, frame, sge_dwords, data_in, &[], timeout)
+    }
+
+    /// The same, with data to the drive as well.
+    pub fn command_io(&self, ioc: u32, frame: &[u8], sge_dwords: u32, data_in: &mut [u8], data_out: &[u8], timeout: u32) -> std::io::Result<(Vec<u8>, Vec<u8>)> {
         use std::os::fd::AsRawFd;
         let mut reply = vec![0u8; 128];
         let mut sense = vec![0u8; 96];
@@ -557,11 +653,11 @@ impl Ctl {
             timeout,
             reply_frame_buf_ptr: reply.as_mut_ptr() as u64,
             data_in_buf_ptr: if data_in.is_empty() { 0 } else { data_in.as_mut_ptr() as u64 },
-            data_out_buf_ptr: 0,
+            data_out_buf_ptr: if data_out.is_empty() { 0 } else { data_out.as_ptr() as u64 },
             sense_data_ptr: sense.as_mut_ptr() as u64,
             max_reply_bytes: reply.len() as u32,
             data_in_size: data_in.len() as u32,
-            data_out_size: 0,
+            data_out_size: data_out.len() as u32,
             max_sense_bytes: sense.len() as u32,
             data_sge_offset: sge_dwords,
             mf: [0u8; 128],
@@ -665,6 +761,52 @@ impl Ctl {
             })
             .collect();
         Ok(Card { ioc, ctl: self.name.clone(), pci: pci.to_string(), host: host.to_string(), phys, devices, enclosures, rows })
+    }
+}
+
+/// A drive reached through the card's pass-through to its device handle
+/// (#611): one the kernel made no target for still answers.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub struct CardDrive<'a> {
+    pub ctl: &'a Ctl,
+    pub ioc: u32,
+    pub handle: u16,
+}
+
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+impl crate::drive::scsi::Transport for CardDrive<'_> {
+    fn run(&self, cdb: &[u8], dir: crate::drive::scsi::Dir, data: &mut [u8], timeout_s: u32) -> std::io::Result<crate::drive::scsi::Reply> {
+        use crate::drive::scsi::Dir;
+        let out = dir == Dir::Out;
+        let len = if dir == Dir::None { 0 } else { data.len() };
+        let f = scsi_io_request_dir(self.handle, cdb, len as u32, out);
+        let (r, sense) = if out {
+            self.ctl.command_io(self.ioc, &f, SCSIIO_SGE_DWORDS, &mut [], data, timeout_s.max(10))?
+        } else if len > 0 {
+            self.ctl.command(self.ioc, &f, SCSIIO_SGE_DWORDS, data, timeout_s.max(10))?
+        } else {
+            self.ctl.command(self.ioc, &f, SCSIIO_SGE_DWORDS, &mut [], timeout_s.max(10))?
+        };
+        let ioc_status = le16(&r, 0x0E) & IOCSTATUS_MASK;
+        let state = r.get(0x0D).copied().unwrap_or(0);
+        let transfer = le32(&r, 0x14) as usize;
+        // A context reply (no reply frame) is a success with every byte moved.
+        let replied = r.iter().any(|b| *b != 0);
+        let mut sense = if state & SCSI_STATE_AUTOSENSE_VALID != 0 { sense } else { Vec::new() };
+        let sc = le32(&r, 0x18) as usize;
+        if sc > 0 && sc < sense.len() {
+            sense.truncate(sc);
+        }
+        Ok(crate::drive::scsi::Reply {
+            status: r.get(0x0C).copied().unwrap_or(0),
+            sense,
+            len: if replied && !out { transfer.min(len) } else { len },
+            transport: (!matches!(ioc_status, IOCSTATUS_SUCCESS | IOCSTATUS_SCSI_DATA_UNDERRUN | IOCSTATUS_SCSI_RECOVERED_ERROR))
+                .then(|| format!("the card: IOCStatus 0x{ioc_status:04x}")),
+        })
+    }
+    fn name(&self) -> String {
+        format!("the card ({} ioc {}), handle 0x{:04x}", self.ctl.name, self.ioc, self.handle)
     }
 }
 

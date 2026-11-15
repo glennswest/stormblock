@@ -263,3 +263,55 @@ WWID, controller, bay, bytes, `holds`: `blank` or `not_ready`, `offered`) and
 `drives_watched` (`uevents` or `sysfs`). Nothing is formatted or joined by
 the engine: a drive that holds anything is never a candidate, and taking one
 is a person's call (#154 decision 3: no auto format).
+
+## The card's rows (#611)
+
+An mpt2sas/mpt3sas card is asked for its drives through its own API
+(`/dev/mpt3ctl`, MPI2 config pages; `src/drive/mpt.rs`), and each row is then
+matched to Linux by SAS address (`docs/boot-hooks.md`, the card's own rows).
+
+**At install.** The rows go into `local-disk.json` as `card_rows`. A drive the
+card lists and the kernel never made a SCSI device of is formatted through
+the card's own SCSI pass-through, at the plan's block size and PI, when the
+config says `drives: all` and the install may format (an install, or the
+wipe word). The steps are MODE SELECT with the drive's own descriptor, then
+FORMAT UNIT with FMTDATA, IMMED and FMTPINFO, a full format, followed by
+REQUEST SENSE / TEST UNIT READY. The kernel is then asked to look again, and
+the plan runs again over the drives that came up, all in one boot. With
+named drives, such a drive is a WARNING and is not taken.
+
+```
+  storage: 0x5000cca268077301 listed by the card with no SCSI device - formatted through the card to 4096 + PI type1 (a full FORMAT UNIT), then found again (#611)
+  storage: 0x5000cca268077301: FORMAT UNIT to 4096 with PI type 1 started (IMMED) through the card (mpt3ctl ioc 0), handle 0x000c
+  storage: 0x5000cca268077301: formatting 41.3%, 95m so far
+```
+
+**On a running node.** The engine reads the cards again every 30 s and on
+every drive event, matches the rows to Linux again, and logs each change
+at WARN: a row appearing, a slot emptied, a state, link, access or device
+changing (`storage: the card's drive 0x… (slot 2): state: no target -> not
+ready (#611)`). The API:
+
+- `GET /api/v1/storage/hba`: `rows`, `read_at`, `changes` (the last 64),
+  `errors`.
+- `GET /api/v1/storage/hba/{sas}/details`: the drive's own answers, through
+  its sg node or the card: INQUIRY, the VPD pages (serial, designators and
+  WWID, rotation rate, form factor, transfer limits, thin provisioning),
+  READ CAPACITY 16 (block size, PI), a format's progress, temperature, the
+  informational exceptions (a SMART trip), the self-test log, start-stop
+  cycles, read/write uncorrected and non-medium errors, the grown defect
+  count, and the caching page. It is cached with `read_at`; `?fresh=1` reads
+  it again, and an action or a change on the row drops the cache.
+- `POST /api/v1/storage/hba/{sas}/action` (admin token, #274): `spin_up`,
+  `spin_down`, `self_test`, `self_test_extended`, or `format` with
+  `block_size` (512 or 4096), `pi` (`none` or `type1`) and `confirm` = the
+  SAS address. A format is followed to its end; then the kernel is asked to
+  look again (a rescan, or a delete and host scan when its disk read
+  0 bytes) and the rows are read again.
+
+On the command line, `stormblock hba view|pending|count|json|details|act`
+does the same.
+
+Not read yet: ATA SMART for SATA drives behind the card, NVMe logs, SES slot
+status and the locate LED, and SANITIZE.
+

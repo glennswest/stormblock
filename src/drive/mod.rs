@@ -16,6 +16,7 @@ pub mod freemap;
 pub mod flushgate;
 pub mod identity;
 pub mod mpt;
+pub mod scsi;
 pub mod designation;
 pub mod handover;
 pub mod httpdev;

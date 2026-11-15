@@ -203,6 +203,10 @@ sd_list() { echo "  (the drives)"; }
 ld_skip() { echo "skip $1" >> "$W/skips"; }
 ld_write() { echo "ldwrite $*" >> "$W/ldwrite"; }
 rescue_shell() { echo RESCUE; exit 0; }
+inv_card() { :; }
+inv_card_act() { return 1; }
+inv_rescan() { :; }
+inv_settling() { :; }
 EOF
 
 reset() {
@@ -210,7 +214,7 @@ reset() {
            "$WORK"/sig.* "$WORK/format.log" "$WORK/skips" "$WORK/ldwrite" "$WORK/out" \
            "$WORK/install-config.yaml" "$WORK/dev" "$WORK"/lay.args "$WORK"/lay.rc \
            "$WORK"/raid.* "$WORK/serve.args" "$WORK"/slow.* "$WORK/report.args" \
-           "$WORK"/pt.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" "$WORK/scsi" "$WORK/sd-bind" \
+           "$WORK"/pt.* "$WORK"/card.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" "$WORK/scsi" "$WORK/sd-bind" \
            "${WORK:?}/plan.stderr" "${WORK:?}/sys/vda" "${WORK:?}/sys/vdb" "${WORK:?}/sys/ublkb65535" "${WORK:?}/sys/loop0"
     for d in sda sdb sdc sdd; do mkdisk "$d"; done
 }
@@ -423,6 +427,43 @@ for v in 'OVERRIDE=recovery' 'ASSIMILATE=off' 'SLAB=/dev/sdb4'; do
     check "$v: nothing taken" "" "$(val STORAGE_DRIVES)"
     check "$v: the engine not asked" "no" "$([ -e "$WORK/plan.args" ] && echo yes || echo no)"
 done
+
+echo "the layout: a drive only the card lists is formatted through the card, then planned again (#611)"
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+cat > "$WORK/plan.out" <<'EOF'
+STORAGE_DRIVES='/dev/sda'
+STORAGE_SYSTEM='/dev/sda'
+STORAGE_UNREADY=''
+STORAGE_BLOCK_SIZE=4096
+STORAGE_PROTECTION=type1
+STORAGE_METHOD=auto
+STORAGE_SAID='STORAGE: 1 drive'
+EOF
+cat > "$WORK/plan.out2" <<'EOF'
+STORAGE_DRIVES='/dev/sda /dev/sdb'
+STORAGE_SYSTEM='/dev/sda /dev/sdb'
+STORAGE_UNREADY=''
+STORAGE_BLOCK_SIZE=4096
+STORAGE_PROTECTION=type1
+STORAGE_METHOD=auto
+STORAGE_SAID='STORAGE: 2 drives, planned again'
+EOF
+CARD='inv_card() { case "$1" in pending) [ -e "$W/card.formatted" ] || echo "0000:c1:00.0:sas-0x5000cca268077301" ;; view) echo "card: drive sas 0x5000cca268077301 slot 3, SSP target, phy 3, present: ready - 0:0:3:0 sdb sg3" ;; esac; }
+inv_card_act() { echo "$*" >> "$W/card.args"; touch "$W/card.formatted"; echo "0x5000cca268077301: FORMAT UNIT to 4096 with PI type 1 started (IMMED) through the card"; }'
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" "$CARD"
+has "the card-only drive is said" "$WORK/out" "storage: 0x5000cca268077301 listed by the card with no SCSI device - formatted through the card to 4096 + PI type1"
+has "  formatted through the card at the plan's format" "$WORK/card.args" "^--sas 0x5000cca268077301 --action format --block-size 4096 --pi type1 --wait"
+has "  the card's answer on the console" "$WORK/out" "storage: 0x5000cca268077301: FORMAT UNIT to 4096 with PI type 1 started"
+has "  found again, the card's row" "$WORK/out" "card: drive sas 0x5000cca268077301 slot 3, SSP target, phy 3, present: ready - 0:0:3:0 sdb sg3"
+has "  and planned again" "$WORK/out" "STORAGE: 2 drives, planned again"
+hasnt "  no rescue" "$WORK/out" "RESCUE"
+
+reset
+printf 'storage:\n  drives: [sda]\n' > "$WORK/install-config.yaml"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" "$CARD"
+has "drives not all: the card-only drive is named, not taken" "$WORK/out" "WARNING: storage: the card lists drives the kernel has no device for: 0x5000cca268077301; only drives: all takes them (#611)"
+check "  not formatted" "" "$(cat "$WORK/card.args" 2>/dev/null)"
 
 echo "the layout: forge1 - drives with no readable format are formatted, then planned again (#595)"
 reset

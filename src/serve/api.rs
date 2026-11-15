@@ -454,6 +454,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if matches!(*method, Method::PUT | Method::DELETE) && seg.len() == 6 && seg[3] == "boothost" && seg[5] == "tpm" {
         return true;
     }
+    // An action on a card's drive row (#611): a format, a spin-down, a
+    // self-test on a drive that may carry the node's data.
+    if *method == Method::POST && seg.len() == 7 && seg[3] == "storage" && seg[4] == "hba" && seg[6] == "action" {
+        return true;
+    }
     false
 }
 
@@ -1907,6 +1912,8 @@ mod tests {
     #[test]
     fn formatting_a_drive_is_destructive() {
         assert_eq!(classify(&Method::POST, "/api/v1/drives/0e6b3c1a-1111-4222-8333-444455556666/format", None), Class::Destructive);
+        assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26801b649/action", None), Class::Destructive);
+        assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26801b649/details", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/drives", None), Class::Ordinary);
     }
 

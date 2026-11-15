@@ -2315,6 +2315,7 @@ inv_pending() { # -> "pci:what" for each drive the SAS layer knows and no block 
 # address. Nothing when there is no mpt card or no binary.
 INV_HBA="${STORM_INV_HBA:-${STORM_STORMBLOCK:-/usr/sbin/stormblock} hba}"
 inv_card() { $INV_HBA "$@" 2>/dev/null || true; }
+inv_card_act() { $INV_HBA act "$@"; } # its exit code and stderr are the format's
 # A drive that answers and has no readable format (#595: forge1's three SAS
 # drives, left by an interrupted format, answer NOT READY / medium format
 # corrupted): a disk-type SCSI device with no block device, or one of 0
@@ -2643,8 +2644,11 @@ INV_DRIVES="[$INV_DRIVES]"
 # The verdict starts unknown; the slab decision fills it in (#344), and keeps
 # the inventory.
 mkdir -p "$(dirname "$INV_REPORT")" 2>/dev/null
-printf '{"state": "unknown", "drive": null, "reason": null, "from": "initramfs", "controllers": %s, "drives": %s}\n' \
-    "$INV_CONTROLLERS" "$INV_DRIVES" > "$INV_REPORT" 2>/dev/null || true
+# The card's rows (#611): every drive the card lists, matched to Linux.
+INV_CARD_ROWS=$(inv_card json | tail -n 1)
+case "$INV_CARD_ROWS" in "["*"]") ;; *) INV_CARD_ROWS="[]" ;; esac
+printf '{"state": "unknown", "drive": null, "reason": null, "from": "initramfs", "controllers": %s, "drives": %s, "card_rows": %s}\n' \
+    "$INV_CONTROLLERS" "$INV_DRIVES" "$INV_CARD_ROWS" > "$INV_REPORT" 2>/dev/null || true
 # --- END storage inventory
 
 # --- BEGIN storage watch (covered by tests/initramfs-storage-hotplug.sh)
@@ -5055,7 +5059,16 @@ if [ "$BOOT_MODE" = "local" ]; then
             [ "$(storage_wwid_of "$_skd/wwid")" = "$1" ] || continue
             _skb=""
             for _skx in "$_skd"/block/*; do [ -e "$_skx" ] && _skb=1; done
-            if [ -n "$_skb" ]; then
+            _sksz=0
+            for _skx in "$_skd"/block/*/size; do [ -r "$_skx" ] && _sksz=$(cat "$_skx" 2>/dev/null); done
+            if [ -n "$_skb" ] && [ "${_sksz:-0}" -le 0 ]; then
+                # sd kept the 0 bytes it read before the format: made anew.
+                { echo 1 > "$_skd/delete"; } 2>/dev/null
+                for _skh in "$STORAGE_SCSI_HOST"/host*; do
+                    [ -e "$_skh/scan" ] && { echo "- - -" > "$_skh/scan"; } 2>/dev/null
+                done
+                echo "${_skd##*/} deleted (0 bytes) and every SCSI host scanned"
+            elif [ -n "$_skb" ]; then
                 { echo 1 > "$_skd/rescan"; } 2>/dev/null
                 echo "a rescan of ${_skd##*/}"
             else
@@ -5322,6 +5335,48 @@ STEOF
                 eval "$_st_out"
             else
                 STORAGE_STOP="the engine could not plan storage: ($( { printf '%s\n' "$_st_out"; cat "$_st_dir/plan.err"; } | grep . | tail -n 1))"
+            fi
+            # A drive the card lists and the kernel never made a SCSI device
+            # of (#611): formatted through the card's own pass-through, then
+            # the kernel asked to look again, and planned again with the rest.
+            if [ -z "$STORAGE_STOP" ] && [ -n "$STORAGE_EARLY_OK" ] && [ -z "${_st_card_done:-}" ]; then
+                _st_card_done=1
+                _st_cards=$(inv_card pending | sed 's/^.*:sas-//')
+                if [ -n "$_st_cards" ] && ! grep -qE '^[[:space:]]*drives:[[:space:]]*all' "$STORAGE_FROM" 2>/dev/null; then
+                    echo "WARNING: storage: the card lists drives the kernel has no device for: $(echo $_st_cards); only drives: all takes them (#611)"
+                elif [ -n "$_st_cards" ]; then
+                    echo "  storage: $(echo $_st_cards) listed by the card with no SCSI device - formatted through the card to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION (a full FORMAT UNIT), then found again (#611)"
+                    _st_cp=""
+                    for _sc in $_st_cards; do
+                        { inv_card_act --sas "$_sc" --action format --block-size "$STORAGE_BLOCK_SIZE" --pi "$STORAGE_PROTECTION" --wait \
+                            > "$_st_dir/card-$_sc.log" 2>&1; echo $? > "$_st_dir/card-$_sc.rc"; } &
+                        _st_cp="$_st_cp $!"
+                    done
+                    _st_cw=0
+                    while :; do
+                        _st_run=""
+                        for _sc in $_st_cards; do [ -e "$_st_dir/card-$_sc.rc" ] || _st_run=1; done
+                        [ -z "$_st_run" ] && break
+                        sleep 1; _st_cw=$((_st_cw + 1))
+                        [ $((_st_cw % 600)) = 0 ] && for _sc in $_st_cards; do echo "  storage: $_sc: $(tail -n 1 "$_st_dir/card-$_sc.log" 2>/dev/null)"; done
+                    done
+                    for _p in $_st_cp; do wait "$_p" 2>/dev/null; done
+                    _st_cbad=""
+                    for _sc in $_st_cards; do
+                        sed 's/^/  storage: /' "$_st_dir/card-$_sc.log"
+                        [ "$(cat "$_st_dir/card-$_sc.rc")" = 0 ] || _st_cbad="$_st_cbad $_sc"
+                    done
+                    [ -n "$_st_cbad" ] && storage_fail "the format through the card failed on$_st_cbad (#611); nothing is laid"
+                    # Found again: the card's rows each with a SCSI device.
+                    _st_cw=0
+                    while [ -n "$(inv_card pending)" ] && [ "$_st_cw" -lt "${STORAGE_FIND_SECS:-60}" ]; do
+                        [ $((_st_cw % 10)) = 0 ] && inv_rescan "$(inv_settling)" >/dev/null
+                        sleep 1; _st_cw=$((_st_cw + 1))
+                    done
+                    [ -n "$(inv_card pending)" ] && storage_fail "formatted through the card and still no SCSI device: $(echo $(inv_card pending)) (#611)"
+                    inv_card view | sed 's/^/    /'
+                    continue
+                fi
             fi
             [ -z "$STORAGE_STOP" ] && [ -n "$STORAGE_UNREADY" ] || break
             if [ "$_st_pass" != 1 ]; then

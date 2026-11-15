@@ -327,6 +327,88 @@ async fn storage_layout(axum::extract::State(state): axum::extract::State<Arc<Ap
     }
 }
 
+/// `GET /api/v1/storage/hba` (#611): the card's rows, kept current.
+async fn hba_rows() -> Response {
+    Json(super::hba::report()).into_response()
+}
+
+#[derive(serde::Deserialize, Default)]
+struct HbaDetailsQuery {
+    fresh: Option<String>,
+}
+
+fn hba_addr(sas: &str) -> Result<u64, Response> {
+    crate::drive::mpt::parse_addr(sas).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("{sas} is no SAS address")}))).into_response()
+    })
+}
+
+/// `GET /api/v1/storage/hba/{sas}/details` (#611): the drive's own answers,
+/// cached with when they were read; `?fresh=1` reads them again.
+async fn hba_details(
+    axum::extract::Path(sas): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HbaDetailsQuery>,
+) -> Response {
+    let a = match hba_addr(&sas) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let k = format!("0x{a:016x}");
+    let fresh = matches!(q.fresh.as_deref(), Some("1" | "true" | "yes"));
+    if !fresh {
+        if let Some(v) = super::hba::cached_details(&k) {
+            return Json(v).into_response();
+        }
+    }
+    match tokio::task::spawn_blocking(move || super::hba::read_details(a)).await {
+        Ok(Ok(v)) => {
+            super::hba::keep_details(&k, v.clone());
+            Json(v).into_response()
+        }
+        Ok(Err(e)) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct HbaActionRequest {
+    action: String,
+    block_size: Option<u32>,
+    pi: Option<String>,
+    /// A format's confirmation: the drive's SAS address.
+    confirm: Option<String>,
+}
+
+/// `POST /api/v1/storage/hba/{sas}/action` (#611; admin only, #274):
+/// spin_up, spin_down, self_test, self_test_extended, format. A format
+/// starts (IMMED) and runs on: its progress is in the details.
+async fn hba_action(axum::extract::Path(sas): axum::extract::Path<String>, Json(req): Json<HbaActionRequest>) -> Response {
+    let a = match hba_addr(&sas) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let act = match crate::drive::scsi::Action::parse(&req.action, req.block_size, req.pi.as_deref()) {
+        Ok(x) => x,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let want = format!("0x{a:016x}");
+    if matches!(act, crate::drive::scsi::Action::Format { .. })
+        && req.confirm.as_deref().and_then(crate::drive::mpt::parse_addr) != Some(a)
+    {
+        return (
+            StatusCode::PRECONDITION_FAILED,
+            Json(serde_json::json!({"error": format!("a format loses every byte on {want}: confirm with its SAS address"), "confirm": want})),
+        )
+            .into_response();
+    }
+    tracing::warn!(drive = %want, action = %req.action, "an action on the card's drive (#611)");
+    match tokio::task::spawn_blocking(move || super::hba::act(a, act)).await {
+        Ok(Ok(said)) => Json(serde_json::json!({"sas_address": want, "said": said})).into_response(),
+        Ok(Err(e)) => (StatusCode::CONFLICT, Json(serde_json::json!({"sas_address": want, "error": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
 async fn version() -> Response {
     Json(serde_json::json!({
         "service": "stormblock",
@@ -342,6 +424,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/health", axum::routing::get(health).with_state(state.clone()))
         .route("/api/v1/version", axum::routing::get(version))
         .route("/api/v1/storage/layout", axum::routing::get(storage_layout).with_state(state.clone()))
+        .route("/api/v1/storage/hba", axum::routing::get(hba_rows))
+        .route("/api/v1/storage/hba/{sas}/details", axum::routing::get(hba_details))
+        .route("/api/v1/storage/hba/{sas}/action", axum::routing::post(hba_action))
         .nest("/api/v1/drives", drives::router(state.clone()))
         .nest("/api/v1/arrays", arrays::router(state.clone()))
         .nest("/api/v1/shelves", shelves::shelves_router(state.clone()))

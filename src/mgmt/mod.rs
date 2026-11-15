@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod drive_offer;
+pub mod hba;
 pub mod hotplug;
 pub mod auth;
 pub mod kubeauth;
@@ -859,6 +860,9 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
     // node laid by storage: offered for its layout.
     if std::env::var_os("STORMBLOCK_NO_HOTPLUG").is_none() {
         hotplug::spawn(state.clone());
+        // The card's rows kept current (#611): read again every 30 s and on
+        // every drive event.
+        hba::spawn();
     }
     // Delete the clones #55 kept standing by (#137). A claim mints inline
     // now, and a volume nobody asked for is a volume nobody can account for.
