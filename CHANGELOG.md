@@ -58,6 +58,14 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.10.0] — 2026-11-15
+
+### Added
+- #614: `storage.wipe` in the install-config (`all`, `true`, or `{by, why}`) is the wipe word for that install: every drive `storage:` takes is formatted and laid whatever it holds, said on the console with who asked and what is lost. Without it a keep-data reinstall still stops (#609).
+
+### Changed
+- #614 (owner): a drive the kernel already reads at the asked block size + PI (READ CAPACITY 16) is not formatted again; it is still laid afresh and read back.
+
 ## [v24.9.0] — 2026-11-15
 
 ### Added
