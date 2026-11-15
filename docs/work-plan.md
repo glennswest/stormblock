@@ -207,8 +207,10 @@ console proof.
   a link and no device is pending (waited, WARNed); the settle wait said.
   tests/initramfs-storage-inventory.sh (forge1 12.86 shape; links whose
   devices come later). docs/boot-hooks.md.
-- [ ] check.sh green; patch release; stage; `shipped` with a forge1 console
-  proof. If forge1's console then shows linked phys with no device, or the
+- [x] check.sh ALL PASS on c7f6b43d (1073 s); v24.7.4 (5e05d779, tagged),
+  locked musl release build green; stage requested (build fc0941e7052e).
+- [ ] `shipped`, proof `console:STORAGE: 4 drives, each formatted 4096 \+ PI`
+  (only forge1's install can show it). If forge1's console then shows linked phys with no device, or the
   driver refusing them, that is the HBA's word: a question for the owner
   (iDRAC / HBA), not a stormblock fix. Note #609: forge1's next install
   STOPs before formatting unless the wipe word is given (master's call).
