@@ -8811,25 +8811,61 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
     }
 
     /// What `adopt-ublk` checks before it stands the incumbent down (#190), and
-    /// the slab paths to restore from. After the stand-down nothing ublk-backed
-    /// answers until this process serves it, so every local path the restore
-    /// reads must be on memory or a non-ublk disk — `--meta`, a slab in a file,
-    /// a slab device — and a fabric host name is resolved now (the resolver
-    /// reads `/etc`, on the root). Refusing here is safe: the incumbent serves on.
+    /// the slab paths to restore from. After the stand-down nothing this
+    /// handover stands down answers until this process serves it, so every
+    /// local path the restore reads must be on memory, a non-ublk disk, or a
+    /// ublk device another live process serves (#607: stormraid's node-data
+    /// set at `/dev/ublkb65535`, which keeps serving through the engine's
+    /// handover) — `--meta`, a slab in a file, a slab device — and a fabric
+    /// host name is resolved now (the resolver reads `/etc`, on the root).
+    /// Refusing here is safe: the incumbent serves on.
     #[cfg(target_os = "linux")]
-    async fn adopt_preflight(slab_paths: &[String], meta: Option<&str>) -> anyhow::Result<Vec<String>> {
-        use crate::drive::backing::backing;
+    async fn adopt_preflight(
+        slab_paths: &[String],
+        meta: Option<&str>,
+        stood_down: &[u32],
+    ) -> anyhow::Result<Vec<String>> {
+        use crate::drive::backing::{backing, ublk_unsafe_why, Backing};
+        let me = std::process::id() as i32;
+        let server = |id: u32| crate::drive::ublk::server_pid(id).ok().flatten();
+        let mut incumbents: Vec<i32> = Vec::new();
+        for &id in stood_down {
+            if let Some(pid) = server(id) {
+                if pid > 0 && pid != me && !incumbents.contains(&pid) {
+                    incumbents.push(pid);
+                }
+            }
+        }
         let check = |what: &str, path: &str| -> anyhow::Result<()> {
             let b = backing(std::path::Path::new(path))
                 .map_err(|e| anyhow::anyhow!("{what} {path}: cannot tell what it is stored on: {e}"))?;
-            if !b.is_safe() {
-                anyhow::bail!(
-                    "{what} {path} is on {b}: after the stand-down nothing ublk-backed answers until \
-                     this process serves it, so reading it would hang the handover. Put it on tmpfs \
-                     or a disk of its own. The current server keeps serving."
-                );
+            if b.is_safe() {
+                return Ok(());
             }
-            Ok(())
+            let why = match &b {
+                Backing::Ublk(_) => match ublk_unsafe_why(&b.ublk_ids(), stood_down, &incumbents, me, server) {
+                    None => {
+                        let who: Vec<String> = b
+                            .ublk_ids()
+                            .iter()
+                            .map(|&id| format!("/dev/ublkb{id} by process {}", server(id).unwrap_or(0)))
+                            .collect();
+                        println!(
+                            "adopt: {what} {path} is on {b}, served by another process ({}): it answers through the handover",
+                            who.join(", ")
+                        );
+                        return Ok(());
+                    }
+                    Some(why) => format!(" ({why})"),
+                },
+                _ => String::new(),
+            };
+            anyhow::bail!(
+                "{what} {path} is on {b}{why}: after the stand-down nothing this handover stands \
+                 down answers until this process serves it, so reading it would hang the handover. \
+                 Put it on tmpfs, a disk of its own, or a ublk device another server keeps \
+                 serving. The current server keeps serving."
+            );
         };
         if let Some(m) = meta {
             check("--meta", m)?;
@@ -9174,7 +9210,7 @@ async fn handle_adopt_ublk(
         // Everything the restore will read, checked while the incumbent still
         // serves (#190): from the stand-down until this process serves the
         // devices, nothing on them answers — a read there is a hang, not an error.
-        let restore_paths = adopt_preflight(slab_paths, meta).await?;
+        let restore_paths = adopt_preflight(slab_paths, meta, &dev_ids).await?;
         steps.mark(format_args!("{} volume(s) to adopt; what the restore reads checked", volumes.len()));
         // The window units wait in starts here: say so, for whoever holds them
         // (stormpump), until `serving`.

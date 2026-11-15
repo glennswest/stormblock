@@ -2,6 +2,22 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #607 — adopt-ublk refuses the data slab on the node-data set (2026-11-14, P0)
+
+pvetest3 12.85: past #605 the set is at /dev/ublkb65535 and the data
+volumes mount, then the node's stormblock refuses its data slab
+(`adopt_preflight`: any ublk backing was "would hang the handover"). The set
+is stormraid's, served by another process through the engine's stand-down.
+
+- [x] `drive/backing.rs`: every ublk device below a path named;
+  `ublk_unsafe_why`: refused when stood down, no live server, the incumbent's
+  or ours; another live server's device answers. Unit-tested.
+- [x] `adopt_preflight` takes the stood-down ids (`dev_ids`) and the
+  incumbents' pids; the console says whose device a slab is read from.
+- [x] README, CHANGELOG.
+- [ ] check.sh on the pushed commit; tag v24.7.2; stage; pvetest3 install
+  (storage 512/none/all/parity 1) reports, volumes mounted, survives reboot.
+
 ## #605 — the node-data set's ublk id collides with the engine's (2026-11-14, P0)
 
 12.84 on pvetest3: the set is served at /dev/ublkb64 (STORAGE_UBLK_ID default),
