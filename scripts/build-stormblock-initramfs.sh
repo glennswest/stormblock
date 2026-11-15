@@ -2305,7 +2305,16 @@ inv_pending() { # -> "pci:what" for each drive the SAS layer knows and no block 
         done
     done
     for _p in $(inv_settling); do inv_hba_pending "$_p"; done
+    # The drives the card itself lists that Linux has no SCSI device for
+    # (#611: the card is the source of presence, Linux the second column).
+    _cpend=$(inv_card pending)
+    for _p in $(inv_settling); do echo "$_cpend" | grep "^$_p:" || true; done
 }
+# The card's own rows (#611, #595): `stormblock hba` reads the mpt card's
+# MPI2 pages through /dev/mpt3ctl and matches each drive to Linux by SAS
+# address. Nothing when there is no mpt card or no binary.
+INV_HBA="${STORM_INV_HBA:-${STORM_STORMBLOCK:-/usr/sbin/stormblock} hba}"
+inv_card() { $INV_HBA "$@" 2>/dev/null || true; }
 # A drive that answers and has no readable format (#595: forge1's three SAS
 # drives, left by an interrupted format, answer NOT READY / medium format
 # corrupted): a disk-type SCSI device with no block device, or one of 0
@@ -2392,6 +2401,7 @@ inv_hba_pending() { # pci -> "pci:phy" per host phy with a link and no device
     done
 }
 inv_hba_view() { # pci driver -> the HBA's view, on the console
+    inv_card view --pci "$1" | inv_clean_lines | sed 's/^/    /'
     _hv=$(inv_phys "$1")
     [ -n "$_hv" ] || { echo "    hba: no SAS phy in sysfs (not a SAS transport driver, or its phys are not up)"; return 0; }
     _hp=0; _hl=0; _hdown=""
@@ -2612,6 +2622,19 @@ while read -r _udev _usys; do
     [ "$_udev" = - ] && echo "WARNING: storage: ${_upath##*/} is a disk with no block device and no sg node - nothing can format it (#595)"
 done <<INVEOF
 $(inv_unready)
+INVEOF
+# The expected count is the card's (#595, #611): every drive it lists is in
+# the inventory, or the WARNING names the ones Linux never made a device of.
+while read -r _cp _cn; do
+    [ -n "$_cp" ] || continue
+    _cm=$(echo "$INV_DRIVES" | grep -o "\"controller\": \"$_cp\"" | wc -l | tr -d ' ')
+    if [ "$_cm" -ge "$_cn" ]; then
+        echo "  storage: the card on $_cp lists $_cn drive(s), $_cm in the inventory (#611)"
+    else
+        echo "WARNING: storage: the card on $_cp lists $_cn drive(s), the inventory has $_cm: Linux made no device of $(inv_card pending | grep "^$_cp:" | sed "s/^$_cp://" | tr '\n' ' ')(#611; the card's lines above say what each answers)"
+    fi
+done <<INVEOF
+$(inv_card count)
 INVEOF
 [ -n "$INV_CONTROLLERS" ] || echo "  no storage controller on PCI"
 [ -n "$INV_DRIVES" ] || echo "  no drive"

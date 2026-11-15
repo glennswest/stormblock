@@ -2,6 +2,27 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #611 / #595 — the card's own inventory, then #595 on it (2026-11-15, P0)
+
+Owner (#595): "use a direct api the the sas card"; #611: "use the low level
+scan and then match to linux devices". Master: build the inventory (#611)
+first, #595's format and layout on it.
+
+- [x] 99d71a18: every SAS host asked to scan again (at once, every 10 s while
+  pending), one link reset on a linked phy with no device, 90 s pending wait.
+- [x] `src/drive/mpt.rs` + `stormblock hba view|pending|count`: MPT3COMMAND on
+  /dev/mpt3ctl (mpt2ctl), SAS IO Unit 0, SAS Device 0 by handle, Enclosure 0;
+  rows matched to Linux by SAS address (`ready` / `not ready` / `no target`);
+  INQUIRY + TEST UNIT READY through the card for a no-target row.
+- [x] the initramfs inventory prints the card's lines, waits/rescans for the
+  card's no-target rows, the card's count is the expected count (WARNING).
+- [ ] sc-build check.sh; the image; forge1's console (only metal can show it).
+- [ ] next (#611): FORMAT UNIT through the card's pass-through for a row the
+  kernel never makes a target for; the rows in local-disk.json; the engine
+  keeps them for the node's life (rescan, re-match, log changes); after a
+  FORMAT, rescan the target and re-match before the layout (one boot); the
+  per-row low-level details (VPD, READ CAPACITY 16, LOG/MODE SENSE, SES).
+
 ## #609 — a keep-data reinstall formatted forge1's drive (2026-11-15, P1)
 forge1 12.86: the appliance asked an install, `/init` said "its data half is
 kept, every volume on it adopted (#311)", then FORMAT UNIT'd the 10 TB sda

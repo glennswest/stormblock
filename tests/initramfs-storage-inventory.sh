@@ -104,6 +104,7 @@ inventory() ( # -> console in inv.out, JSON in report.json
     STORM_INV_SAS_PHY="$T/sas_phy"; STORM_INV_SAS_DEV="$T/sas_device"; STORM_INV_DMESG="cat $T/dmesg"
     STORM_STORAGE_SETTLE=${SETTLE:-1}; STORM_STORAGE_PENDING_WAIT=${PWAIT:-3}
     STORM_INV_SCSI_HOST="$T/scsi_host"; STORM_STORAGE_RESCAN=${RESCAN:-10}
+    STORM_INV_HBA=${HBA:-false}
     STORM_LOCAL_DISK_REPORT="$WORK/report.json"
     rm -f "$WORK/report.json"
     SLEPT=0
@@ -356,6 +357,43 @@ out=$(cat "$WORK/inv.out")
 contains "the drives the scan made are inventoried" "storage: 1 -> 4 drives on 0000:c1:00.0 after 3s" "$out"
 contains "  four end devices" "hba: 8 phys, 4 with a link, 4 end device(s), 0 expander(s)" "$out"
 check "  no WARNING" 0 "$(grep -c '^WARNING: storage: after' "$WORK/inv.out" || true)"
+
+echo "the card's own rows (#611):"
+# `stormblock hba` stood in for: the card lists four drives; the three
+# behind phys 1-3 have no SCSI device until the scan makes them (CARD_LATE).
+fake_hba() {
+    case "$1" in
+    view)
+        echo "card: ioc 0 (mpt3ctl) 0000:c1:00.0 host0: 8 phys, 4 with a link, 4 drive(s), 0 expander(s), 1 enclosure(s) (the card's own pages)"
+        echo "card: drive sas 0x5000cca26a819e69 slot 2, SSP target, phy 2, present: no target - end_device-0:2, no SCSI target yet; through the card: INQUIRY HGST H7210A520SUN010T A3B0, TEST UNIT READY NOT READY asc/ascq 0x31/0x00"
+        ;;
+    pending)
+        [ -e "$T/card-made" ] && return 0
+        for a in 0x5000cca26801b649 0x5000cca26a819e69 0x5000cca268077301; do echo "0000:c1:00.0:sas-$a"; done
+        ;;
+    count) echo "0000:c1:00.0 4" ;;
+    esac
+}
+card_makes() {
+    [ "$SLEPT" = "${CARD_LATE:-1000}" ] || return 0
+    for n in 1 2 3; do forge_end "$n"; forge_scsi "$n"; done
+    forge_disk 1; forge_disk 2; forge_sg 3
+    : > "$T/card-made"
+}
+make_forge
+HBA=fake_hba SETTLE=1 PWAIT=10 CARD_LATE=4 ON_SLEEP=card_makes inventory
+out=$(cat "$WORK/inv.out")
+contains "the card's lines under its controller" "    card: ioc 0 (mpt3ctl) 0000:c1:00.0 host0: 8 phys, 4 with a link, 4 drive(s)" "$out"
+contains "the card's drives with no SCSI device are waited for" \
+    "waiting up to 10s for drives still coming up: 0000:c1:00.0:sas-0x5000cca26801b649 0000:c1:00.0:sas-0x5000cca26a819e69 0000:c1:00.0:sas-0x5000cca268077301" "$out"
+contains "  until the scan makes them" "storage: 1 -> 3 drives on 0000:c1:00.0 after 4s" "$out"
+contains "the card's count is met" "storage: the card on 0000:c1:00.0 lists 4 drive(s), 4 in the inventory (#611)" "$out"
+
+make_forge
+HBA=fake_hba SETTLE=1 PWAIT=3 inventory
+out=$(cat "$WORK/inv.out")
+contains "a card's drive Linux never made a device of is a WARNING with its SAS address" \
+    "WARNING: storage: the card on 0000:c1:00.0 lists 4 drive(s), the inventory has 1: Linux made no device of sas-0x5000cca26801b649 sas-0x5000cca26a819e69 sas-0x5000cca268077301 (#611" "$out"
 
 # No SAS/RAID controller bound (NVMe there at once): no settle wait at all.
 make_tree

@@ -102,6 +102,41 @@ struct Cli {
 }
 
 #[derive(clap::Subcommand)]
+enum HbaAction {
+    /// The card's view on stdout, a `card:` line each: its phys, links,
+    /// enclosures, and every drive it lists with its SAS address, slot,
+    /// type, state (`ready`, `not ready`, `no target`) and Linux devices; a
+    /// drive with no SCSI device asked INQUIRY and TEST UNIT READY through
+    /// the card unless `--no-probe`.
+    View {
+        /// Only the card on this PCI function.
+        #[arg(long)]
+        pci: Option<String>,
+        #[arg(long)]
+        no_probe: bool,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
+    /// `PCI:sas-0xADDR` per drive the card lists that Linux has no SCSI
+    /// device for (the inventory waits and rescans for these).
+    Pending {
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
+    /// `PCI N`: how many drives each card lists (the expected count).
+    Count {
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
+}
+
+#[derive(clap::Subcommand)]
 enum HotplugAction {
     /// Watch: `add|remove DEV serial=… wwid=… controller=… bay=… bytes=…
     /// ready=0|1 at=EPOCH`, a line each, appended to `--out` (and on stdout
@@ -469,6 +504,15 @@ enum SubCommand {
     Hotplug {
         #[command(subcommand)]
         action: HotplugAction,
+    },
+    /// The SAS card's own inventory (#611, #595): mpt2sas/mpt3sas through
+    /// `/dev/mpt3ctl` (MPI2 SAS IO Unit 0, SAS Device 0, Enclosure 0), each
+    /// drive then matched to Linux by SAS address. A drive the kernel made no
+    /// target for is a row all the same. Exit 0 with nothing when there is
+    /// no mpt card.
+    Hba {
+        #[command(subcommand)]
+        action: HbaAction,
     },
     /// Tell the appliance which long step the install under way is in, and
     /// how far it got (#573): `/init` says `formatting` once a minute while
@@ -1341,6 +1385,9 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubCommand::Hotplug { action: HotplugAction::Watch { out, say, sys } } => {
                 return handle_hotplug_watch(out.as_deref(), *say, sys);
+            }
+            SubCommand::Hba { action } => {
+                return handle_hba(action);
             }
             SubCommand::Discover { wait_ms } => {
                 let got = crate::mgmt::finder::discover(std::time::Duration::from_millis(*wait_ms), None)?;
@@ -10134,6 +10181,46 @@ pub(crate) const INSTALL_CONFIG_SOURCE: &str = "/run/stormblock/install-config.s
 
 pub(crate) async fn report_installed(ticket: &crate::drive::handover::InstallTicket, stage: &str) -> ReportOutcome {
     report_install_stage(ticket, stage, None).await
+}
+
+/// `stormblock hba` (#611, #595): the card's rows.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
+    use crate::drive::mpt;
+    use std::path::Path;
+    match action {
+        HbaAction::View { pci, no_probe, sys, dev } => {
+            let (cards, errs) = mpt::cards(Path::new(dev), Path::new(sys), !no_probe);
+            for e in errs {
+                println!("{e}");
+            }
+            for c in cards.iter().filter(|c| pci.as_deref().is_none_or(|p| p == c.pci)) {
+                for l in c.lines() {
+                    println!("{l}");
+                }
+            }
+        }
+        HbaAction::Pending { sys, dev } => {
+            let (cards, _) = mpt::cards(Path::new(dev), Path::new(sys), false);
+            for c in &cards {
+                for r in c.drives().filter(|r| r.linux.scsi.is_none()) {
+                    println!("{}:sas-0x{:016x}", c.pci, r.device.sas_address);
+                }
+            }
+        }
+        HbaAction::Count { sys, dev } => {
+            let (cards, _) = mpt::cards(Path::new(dev), Path::new(sys), false);
+            for c in &cards {
+                println!("{} {}", c.pci, c.drives().count());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn handle_hba(_action: &HbaAction) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// `stormblock hotplug watch` (#593): drive events from the kernel's uevents,

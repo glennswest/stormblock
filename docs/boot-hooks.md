@@ -265,6 +265,24 @@ device and the sd disk or sg node; or an expander. Then the driver's own
 kernel lines about its devices (added, refused, blocked, removed; the last
 40). A host phy with a link and no device counts as a drive still coming
 (`STORM_STORAGE_PENDING_WAIT`) and is named in the WARNING if none comes.
+**The card's own rows (#611, #595).** For an mpt2sas/mpt3sas card the
+inventory asks the card first: `stormblock hba view` reads its MPI2 config
+pages through `/dev/mpt3ctl` (SAS IO Unit 0, SAS Device 0 by handle,
+Enclosure 0), the pages `sas3ircu DISPLAY` reads, and matches each drive to
+Linux by SAS address. A drive the kernel made no SCSI target for is a row
+all the same, and the card asks it INQUIRY and TEST UNIT READY itself:
+
+```
+    card: ioc 0 (mpt3ctl) 0000:c1:00.0 host0: 8 phys, 4 with a link, 4 drive(s), 0 expander(s), 1 enclosure(s) (the card's own pages)
+    card: phy 1: 12.0 Gbit, port 1, device 0x000a sas 0x5000cca26801b649 (SSP target)
+    card: drive sas 0x5000cca26a819e69 enclosure 0x… slot 2, SSP target, phy 2, present: no target - end_device-0:2, no SCSI target yet; through the card: INQUIRY HGST H7210A520SUN010T A3B0, TEST UNIT READY NOT READY asc/ascq 0x31/0x00
+  storage: the card on 0000:c1:00.0 lists 4 drive(s), 4 in the inventory (#611)
+```
+
+The card's drives with no SCSI device are pending (waited for and rescanned
+as below). Its drive count is the expected count: if the inventory has fewer
+drives, a WARNING names the missing ones by SAS address.
+
 **Asking the HBA again (#595).** A drive that was not ready when the
 driver's own scan ran may never get a SCSI target unless someone asks. So
 every SAS/RAID host is asked to scan again once at the start (`- - -` into
