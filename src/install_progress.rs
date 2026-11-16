@@ -138,7 +138,9 @@ pub fn parse_line(raw: &str) -> Option<Line> {
             Some((m, r)) => (Some(m), r),
             None => (None, rest),
         };
-        let elapsed_s = rest.split(" in ").nth(1).map(|r| r.split([':', ';']).next().unwrap_or(r)).and_then(parse_span);
+        // `in 1m 00s: …` right after the mode, or `through the card in 14h 20m; …`.
+        let padded = format!(" {rest}");
+        let elapsed_s = padded.split(" in ").nth(1).map(|r| r.split([':', ';']).next().unwrap_or(r)).and_then(parse_span);
         return Some(Line { state: "formatted".into(), mode, percent: Some(100.0), eta_s: Some(0), elapsed_s });
     }
     if l.starts_with("already ") {
