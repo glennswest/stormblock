@@ -149,7 +149,7 @@ pub fn parse_line(raw: &str) -> Option<Line> {
     if l.starts_with("refused ") || l.starts_with("failed") {
         return Some(Line { state: "failed".into(), ..Default::default() });
     }
-    if l.starts_with("full format") || l.starts_with("fast format") || l.contains("FORMAT UNIT to ") {
+    if l.starts_with("full format") || l.starts_with("fast format") || l.starts_with("FORMAT UNIT to ") {
         let mode = if l.starts_with("fast") { "fast" } else { "full" };
         return Some(Line { state: "formatting".into(), mode: Some(mode.into()), percent: Some(0.0), ..Default::default() });
     }
