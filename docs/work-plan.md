@@ -13,9 +13,12 @@ dropped); the matrix at the format it has + the mode pages.
   `crc_t10dif`, `mode_pages` (also in `details`)
 - [x] `POST/GET /api/v1/storage/hba/{sas}/write-test` (admin, confirm, open
   slab refused), `stormblock hba write-test`
-- [ ] check.sh; release; the run on forge1 (needs the binary there + root
-  or the admin token: an owner/master step); the table + NETAPP policy into
-  docs/storage-layout.md; stormdrive's Drive object carries mode pages
+- [x] check.sh passed on 546b38c1; v24.14.0 (2622e4b3), golden-stormblock-
+  188c350be71e (stormcos#956); `component fetch` gives its binary (sha256
+  bc95ed47…), `hba write-test` there; stormdrive#146 for the Drive object
+- [ ] the run on forge1 bay 3, on the live node (no reboot): root on forge1,
+  so an owner to-do card (`wait-owner --action`); then the table and the
+  NETAPP policy into docs/storage-layout.md, close
 
 ## #630 — kernel 7.3.3-300.fc45: the initramfs for it (2026-11-16, P0)
 
