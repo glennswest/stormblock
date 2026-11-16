@@ -62,6 +62,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.10.2] — 2026-11-16
+
+### Fixed
+- #611: the storage inventory's controller line gives the card's drive count beside the kernel's when they differ (`mpt3sas, 4 drive(s) on the card, 1 with a Linux device`).
+
 ## [v24.10.1] — 2026-11-15
 
 ### Fixed
