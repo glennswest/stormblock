@@ -1457,7 +1457,11 @@ storage_report() {
             _sr_f=$(cat "$_sr_run/storage-format/${_sr_d##*/}.fmt" 2>/dev/null)
             # shellcheck disable=SC2086
             set -- $_sr_f
-            printf '%s{"device": "%s", "format": %s, "protection": %s, "method": %s}' "$_sr_c" "$_sr_d" \
+            # The drive's WWID, by which a later boot's report finds what
+            # the install did to it whatever its name is then (#573 step 8).
+            _sr_w=$(head -n 1 "${SURVEY_SYS:-${STORM_SYS_BLOCK:-/sys/block}}/${_sr_d##*/}/device/wwid" 2>/dev/null | tr -d '"\\' | tr -d '\000-\037' | sed 's/^ *//; s/ *$//')
+            printf '%s{"device": "%s", "wwid": %s, "format": %s, "protection": %s, "method": %s}' "$_sr_c" "$_sr_d" \
+                "$([ -n "$_sr_w" ] && printf '"%s"' "$_sr_w" || printf null)" \
                 "$([ -n "${1:-}" ] && printf '"%s"' "$1" || printf null)" \
                 "$([ -n "${2:-}" ] && printf '"%s"' "$2" || printf null)" \
                 "$([ -n "${3:-}" ] && printf '"%s"' "$3" || printf null)"
@@ -7116,6 +7120,16 @@ if [ -s "$SD_DEV_FILE" ]; then
             printf ' "install_config": %s,\n' "$(sd_str "$(install_config_source 2>/dev/null || echo none)")"
             printf ' "handover": %s}\n' "$(sd_json "$SD_RUN/handover.json")"
         } > "$sd_boot"
+        # The install's drive layout, kept (#573 step 8): every later boot
+        # puts it beside its own report, so the engine still says what the
+        # install formatted after the node has rebooted.
+        if grep -q '"from": "install"' "$SD_RUN/storage-layout.json" 2>/dev/null; then
+            cp "$SD_RUN/storage-layout.json" "$SD_DIR/config/storage-layout.install.json" \
+                && echo "  system-data: the drive layout recorded (#573)"
+        fi
+        if [ -s "$SD_DIR/config/storage-layout.install.json" ]; then
+            cp "$SD_DIR/config/storage-layout.install.json" "$SD_RUN/storage-layout.install.json" 2>/dev/null || :
+        fi
         if grep -q '"installed"' "$SD_RUN/handover.json" 2>/dev/null; then
             cp "$sd_boot" "$SD_DIR/history/installs/$sd_at.json"
             echo "  system-data: install recorded ($sd_at, ${sd_release:-release unknown})"

@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#573)
+- **feat:** #573 step 8 (stormcentral#1318: "every drive, by serial and bay; the format used"): the storage layout report (`GET /api/v1/storage/layout`, health's `storage_layout`) gives each drive its `serial`, `wwid`, `controller`, `bay` (the enclosure slot, else the mpt card's slot, `bay_from`) and `pi_type` (sd's `protection_type`; `integrity` is the kernel's DIX profile, `none` on forge1's HBA330 for PI type 1 drives). After a reboot it still says what the install did: the install's report is kept in system-data (`config/storage-layout.install.json`), put back on every boot, and the engine fills each drive's `format`/`protection`/`method` from it by WWID (`format_from: install`), with `asked` and `regions`. `/init`'s report carries each drive's WWID.
+
 ### 2026-11-16 (after v24.12.1)
 - **docs:** #625: work plan - v24.12.1 staged and shipped with its console proof; stormcentral#1439 filed for test machines' `on_drive_failure: continue`.
 

@@ -117,6 +117,21 @@ sleep 1
 run
 case "$(cat "$WORK/sd.out")" in *"node name:"*) echo "  FAIL  a rename said against a record with no name"; fail=1 ;; *) echo "  ok    a last record from before #560 (no name): nothing said" ;; esac
 
+# #573 step 8: the install's drive layout kept, and put back on every boot.
+printf '{"from": "install",\n "drives": [{"device": "/dev/sda", "wwid": "naa.1", "format": "formatted"}]}\n' > "$WORK/run/storage-layout.json"
+rm -f "$WORK/run/storage-layout.install.json"
+sleep 1
+run
+contains "an install's layout is recorded" "system-data: the drive layout recorded (#573)" "$(cat "$WORK/sd.out")"
+check "  kept in config/" "yes" "$(grep -q '"format": "formatted"' "$WORK/sd/config/storage-layout.install.json" && echo yes || echo no)"
+printf '{"from": "boot",\n "drives": [{"device": "/dev/sdb", "wwid": "naa.1", "format": null}]}\n' > "$WORK/run/storage-layout.json"
+rm -f "$WORK/run/storage-layout.install.json"
+sleep 1
+run
+case "$(cat "$WORK/sd.out")" in *"layout recorded"*) echo "  FAIL  a boot's layout recorded over the install's"; fail=1 ;; *) echo "  ok    a boot's layout is not the install's" ;; esac
+check "  the install's put back beside the boot's" "yes" "$(grep -q '"from": "install"' "$WORK/run/storage-layout.install.json" && echo yes || echo no)"
+rm -f "$WORK/run/storage-layout.json" "$WORK/run/storage-layout.install.json"
+
 # A mount that fails: said, and the boot goes on.
 MOUNT_FAILS=1 run
 contains "a failed mount is a WARNING" "WARNING: system-data: /dev/ublkb7 would not mount" "$(cat "$WORK/sd.out")"

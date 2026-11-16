@@ -2,6 +2,21 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #573 — the layout laid on every drive: step 8 finished, verification (2026-11-16, P0)
+
+Steps 1–8 landed in v24.4.0 (and the fixes through v24.12.1). Seen working:
+pvetest3 12.86 (4 drives, set optimal 3+1, `state: ok`); forge1 runs 24.10.0
+laid over 3 drives (sda/sdc/sdd: 3 legs, set optimal parity 1 over 3 slots,
+`state: ok`). sdb is the drive that takes no write (#625/#626), offered as a
+candidate; joining it is #599.
+
+Step 8 left short of stormcentral#1318's shape on forge1: drives had no
+serial/bay, `integrity: none` for PI type 1 drives, `format` null after the
+reboot.
+- [x] the report: `serial`, `wwid`, `controller`, `bay` (card slot fallback),
+  `pi_type`; the install's format kept in system-data and filled by WWID
+- [ ] sc-build `sh check.sh`; release; stage; close with forge1's report
+
 ## #625 — a drive that cannot be laid: explained, and not the whole install (2026-11-16, P0)
 
 forge1 12.87: sdb (NetApp X378, 4096 + PI type 1 after its card format) took

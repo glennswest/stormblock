@@ -155,6 +155,7 @@ for d in sda sdb sdc sdd; do member "$d" "${d}3" stormblock-raid STORMRD1; done
 mkdir -p "$WORK/run/storage-format"
 echo "formatted none auto" > "$WORK/run/storage-format/sda.fmt"
 echo "already type1" > "$WORK/run/storage-format/sdb.fmt"
+mkdir -p "$WORK/sys/sda/device"; printf 'naa.5000cca26a819e68\n' > "$WORK/sys/sda/device/wwid"
 touch "$WORK/status.spare"
 run "SLAB=http://forge/x" "SYSTEM_DISK=/dev/sda" "STORAGE_DRIVES='/dev/sda /dev/sdb'" \
     "STORAGE_MEMBERS='/dev/sda3 /dev/sdb3'" "STORAGE_SET=/dev/ublkb65535" "STORAGE_SYSTEM='/dev/sda /dev/sdb'" \
@@ -163,6 +164,7 @@ run "SLAB=http://forge/x" "SYSTEM_DISK=/dev/sda" "STORAGE_DRIVES='/dev/sda /dev/
 check "from" "install" "$(lay 'L["from"]')"
 check "formatted" "formatted none auto" "$(lay '" ".join(L["drives"][0][k] for k in ("format","protection","method"))')"
 check "already" "already type1 None" "$(lay '" ".join(str(L["drives"][1][k]) for k in ("format","protection","method"))')"
+check "a drive's WWID (#573 step 8: a later boot finds the install's format by it)" "naa.5000cca26a819e68 None" "$(lay '" ".join(str(L["drives"][i]["wwid"]) for i in (0, 1))')"
 check "asked" "4096 type1 auto" "$(lay '" ".join(str(L["asked"][k]) for k in ("block_size","protection","method"))')"
 check "regions" "34359738368" "$(lay 'L["regions"]["system"]')"
 check "legs" "['/dev/sda', '/dev/sdb']" "$(lay 'L["system_legs"]')"

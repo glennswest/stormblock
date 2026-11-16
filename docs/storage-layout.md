@@ -282,7 +282,8 @@ drives (`"from": "install"`) and on every boot that serves the node-data set
 ```json
 {
   "from": "install",
-  "drives": [{"device": "/dev/sda", "format": "formatted", "protection": "none", "method": "auto"}],
+  "drives": [{"device": "/dev/sda", "wwid": "naa.5000cca26a819e68", "format": "formatted",
+              "protection": "type1", "method": "auto"}],
   "asked": {"block_size": 4096, "protection": "type1", "parity": 1, "spares": 0},
   "regions": {"data_bytes": 0, "system_bytes": 0},
   "system_legs": ["/dev/sda", "/dev/sdb", "/dev/sdc", "/dev/sdd"],
@@ -292,14 +293,31 @@ drives (`"from": "install"`) and on every boot that serves the node-data set
 ```
 
 `format` is `formatted` (with the `protection` and `method` used) or
-`already` (the drive was at the format); null on a later boot. `set.state` is
+`already` (the drive was at the format). `wwid` is the drive's, as sysfs had it
+at the time. The install's report is also kept in system-data as
+`config/storage-layout.install.json`, and every later boot puts it back beside
+its own as `/run/stormblock/storage-layout.install.json`, so the format is
+not lost when the node reboots (see below). `set.state` is
 `optimal`, `degraded` (a member missing: `missing` quotes stormraid's line) or
 `not-served`; `"set": null` with one drive or `data_raid: none`.
 
 The engine serves it at `GET /api/v1/storage/layout` (token; 404 when there is
-none) and in health as `storage_layout`, with what it sees now laid over it:
-each drive's `logical_block` and `integrity` from the kernel (a format that
-did not take shows here), `legs_present` / `legs_missing` (the legs with a
+none) and in health as `storage_layout`, with what it sees now laid over it.
+For each drive:
+- `logical_block` from the kernel (a format that did not take shows here).
+- `pi_type`: the P_TYPE the drive is formatted at (sd's `protection_type`:
+  0 none, 1 type 1).
+- `integrity`: the kernel's DIX profile. It is `none` on an HBA that
+  registers none, however the drive is formatted (forge1's HBA330 reads
+  `integrity: none` with `pi_type: 1`).
+- `serial`, `wwid`, `controller` and `bay`, as stormcentral#1318 checks
+  drives by serial and bay. `bay` is the enclosure slot, else the mpt card's
+  slot for that disk (`bay_from`: `enclosure` or `card`, #611).
+- On a boot's report, `format`, `protection` and `method` from the kept
+  install report, matched by WWID, then by device name (`format_from:
+  install`), and its `asked` and `regions` when the boot's report has none.
+
+Then `legs_present` / `legs_missing` (the legs with a
 local system slab open; left out until the first slab report) and `state`:
 `ok`, or `degraded` when the set is not whole or a leg is missing. Health's
 own `status` does not follow it.
