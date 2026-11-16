@@ -13,7 +13,11 @@ path's modules by name (aarch64 only, #514): a renamed driver would build.
 - [x] `boot_path_missing` on x86_64 (nvme, nvme-tcp, ublk_drv), aarch64 + r8169
 - [x] `ci-kernel-initramfs.sh <NVR>`: the image from Fedora's packages, the
   boot path listed
-- [ ] sc-build it for 7.3.3-300.fc45; check.sh; the initramfs at the new head
+- [x] `sc-build 'bash ci-kernel-initramfs.sh 7.3.3-300.fc45'` (cf98a0ed): Fedora
+  45's signed packages, the boot path whole (ublk_drv, nvme-tcp, nvme, mpt3sas
+  modules; sd_mod, virtio built in), 773 modules, image built; check.sh passed;
+  v24.13.2 (6be21803): `component initramfs` blob-09670e541656a442 for
+  7.3.3-300.fc45.x86_64; stormblock stage 95a0ccf760a1 requested; closed
 
 ## #628 / #613 — stops race in-flight I/O through dead connections (2026-11-16, P1)
 
