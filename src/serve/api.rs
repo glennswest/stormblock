@@ -466,6 +466,10 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if *method == Method::POST && seg.len() == 7 && seg[3] == "storage" && seg[4] == "hba" && seg[6] == "action" {
         return true;
     }
+    // The write-test matrix (#627): it overwrites two blocks of the drive.
+    if *method == Method::POST && seg.len() == 7 && seg[3] == "storage" && seg[4] == "hba" && seg[6] == "write-test" {
+        return true;
+    }
     false
 }
 
@@ -1927,6 +1931,8 @@ mod tests {
         assert_eq!(classify(&Method::POST, "/api/v1/drives/0e6b3c1a-1111-4222-8333-444455556666/format", None), Class::Destructive);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26801b649/action", None), Class::Destructive);
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26801b649/details", None), Class::Ordinary);
+        assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Destructive);
+        assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/drives", None), Class::Ordinary);
     }
 

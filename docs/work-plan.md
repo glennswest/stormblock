@@ -2,6 +2,21 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #627 — NetApp firmware and 4096 + PI: the write-test matrix (2026-11-16, P0)
+
+forge1 bay 3 (NETAPP X378 NA02, sas 0x5000cca26a819e69) at 4096 + PI type 1
+drops its link on its first write (#625). Owner: no reformat of it (step 2
+dropped); the matrix at the format it has + the mode pages.
+
+- [x] `scsi::write_matrix` (WRPROTECT 0/1 at LBA 0 and last, RDPROTECT 0/1,
+  TUR + card link after each, mode/log pages before/after, stop when gone),
+  `crc_t10dif`, `mode_pages` (also in `details`)
+- [x] `POST/GET /api/v1/storage/hba/{sas}/write-test` (admin, confirm, open
+  slab refused), `stormblock hba write-test`
+- [ ] check.sh; release; the run on forge1 (needs the binary there + root
+  or the admin token: an owner/master step); the table + NETAPP policy into
+  docs/storage-layout.md; stormdrive's Drive object carries mode pages
+
 ## #630 — kernel 7.3.3-300.fc45: the initramfs for it (2026-11-16, P0)
 
 Nothing in the script names a kernel: it takes KVER, and stormcentral's

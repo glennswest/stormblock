@@ -45,6 +45,8 @@ struct State {
     errors: Vec<String>,
     changes: VecDeque<Change>,
     details: HashMap<String, Value>,
+    /// The last write-test matrix run on each drive (#627).
+    tests: HashMap<String, Value>,
     poked: bool,
 }
 
@@ -156,6 +158,59 @@ pub fn report() -> Value {
 
 pub fn cached_details(sas: &str) -> Option<Value> {
     with(|s| s.details.get(sas).cloned())
+}
+
+/// The last write-test matrix run on a drive (#627), kept for the engine's life.
+pub fn cached_test(sas: &str) -> Option<Value> {
+    with(|s| s.tests.get(sas).cloned())
+}
+
+/// A card row's link, as the card says it now (#627): rate, state, presence.
+fn link_word(rows: &[Value], sas: u64) -> Option<String> {
+    let k = format!("0x{sas:016x}");
+    rows.iter()
+        .find(|r| key(r) == k)
+        .map(|r| format!("{} ({}, {})", word(r, "link"), word(r, "state"), if r.get("present") == Some(&Value::Bool(true)) { "present" } else { "not present" }))
+        .or(Some("not listed by the card".into()))
+}
+
+/// The write-test matrix on a card's drive (#627, blocking), through its sg
+/// node or the card: WRPROTECT 0 and 1 at LBA 0 and the last LBA, read back
+/// with RDPROTECT 0 and 1, the card's link after each step, the mode and log
+/// pages before and after. **Overwrites those two blocks.** Each line goes
+/// to the log (the console) and the run is kept for `GET …/write-test`.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn write_test(sas: u64) -> Result<Value, String> {
+    use std::path::Path;
+    let link = move || {
+        let (rows, _) = read();
+        link_word(&rows, sas)
+    };
+    let before = link();
+    let m = crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), sas, |t| crate::drive::scsi::write_matrix(t, &link))?;
+    let lines = m.lines();
+    tracing::warn!("storage: 0x{sas:016x}: write test (#627), link before: {}", before.as_deref().unwrap_or("?"));
+    for l in &lines {
+        tracing::warn!("storage: 0x{sas:016x}: write test: {l} (#627)");
+    }
+    let mut v = serde_json::to_value(&m).map_err(|e| e.to_string())?;
+    if let Some(o) = v.as_object_mut() {
+        o.insert("sas_address".into(), serde_json::json!(format!("0x{sas:016x}")));
+        o.insert("at".into(), serde_json::json!(now()));
+        o.insert("link_before".into(), serde_json::json!(before));
+        o.insert("lines".into(), serde_json::json!(lines));
+    }
+    with(|s| {
+        s.tests.insert(format!("0x{sas:016x}"), v.clone());
+        s.details.remove(&format!("0x{sas:016x}"));
+    });
+    poke();
+    Ok(v)
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+pub fn write_test(_sas: u64) -> Result<Value, String> {
+    Err("no mpt card here".into())
 }
 
 pub fn keep_details(sas: &str, v: Value) {

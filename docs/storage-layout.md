@@ -422,6 +422,35 @@ ready (#611)`). The API:
   SAS address. A format is followed to its end; then the kernel is asked to
   look again (a rescan, or a delete and host scan when its disk read
   0 bytes) and the rows are read again.
+- `POST /api/v1/storage/hba/{sas}/write-test` (admin token, #627) with
+  `confirm` = the SAS address: the write-test matrix at the format the drive
+  has. One block at LBA 0 and one at the last LBA are written with
+  WRPROTECT 0 (the drive makes the PI), then WRPROTECT 1 (the host's PI:
+  the T10-DIF guard, application tag 0, the LBA as reference tag). Each is
+  read back with RDPROTECT 0 (the data as written?) and RDPROTECT 1 (the
+  data and the PI as expected?). After each step it reads TEST UNIT READY
+  and the card's link for the drive (rate, state, present). Mode pages
+  0x03/0x08/0x0A/0x19/0x1A/0x1C and log pages 0x0E/0x15 are read before and
+  after, and what changed is said. The run stops when the drive no longer
+  answers (a transport error: the link gone). **Two blocks are
+  overwritten**, and a drive holding a slab this engine has open is refused
+  (409). Every line goes to the log at WARN, and `GET …/write-test` answers
+  the last run. On a shell: `stormblock hba write-test --sas 0x… --confirm
+  0x… [--json]`.
+- `…/details` carries `mode_pages` too: each page raw (`hex`) and what its
+  bits say (`said`): caching WCE/RCD, control DPICZ/D_SENSE/QAM/SWP/ATO/TAS,
+  the power-condition timers, informational exceptions. Two drives can be
+  compared page by page.
+
+### NetApp-firmware drives (#627)
+
+forge1's bay 3 is a NETAPP `X378_HLBRE10TA07` fw `NA02` (an HGST He10 with
+NetApp firmware), formatted through the card to 4096 + PI type 1. It reads
+back PROT_EN=1 P_TYPE 1, but its first write through the kernel's sd path
+left the SAS link, twice (#625). The matrix above is what answers it, on
+the running node. Its results and the policy for a drive whose INQUIRY vendor
+is `NETAPP` go here once it has been run; until then nothing in the install
+treats NetApp firmware differently.
 
 On the command line, `stormblock hba view|pending|count|json|details|act`
 does the same.

@@ -153,6 +153,26 @@ enum HbaAction {
         #[arg(long, default_value = "/dev")]
         dev: String,
     },
+    /// The write-test matrix on a drive at the format it has (#627):
+    /// WRITE(16) of one block at LBA 0 and at the last LBA with WRPROTECT 0
+    /// (the drive makes the PI), then 1 (the host's, T10-DIF guard and the
+    /// LBA as reference tag), each read back with RDPROTECT 0 and 1; the
+    /// sense, TEST UNIT READY and the card's link after each step; mode pages
+    /// 0x03/0x08/0x0A/0x19/0x1A/0x1C and log pages 0x0E/0x15 before and
+    /// after. **Overwrites those two blocks**: `--confirm` is its SAS address.
+    WriteTest {
+        #[arg(long)]
+        sas: String,
+        #[arg(long)]
+        confirm: String,
+        /// The whole run as JSON on stdout, after the lines
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
     /// An action on a drive (#611): spin_up, spin_down, self_test,
     /// self_test_extended, or format (`--block-size`, `--pi none|type1`;
     /// every byte on the drive is lost). `--wait` follows a format to its
@@ -10397,6 +10417,28 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
             let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba details: {sas} is no SAS address"))?;
             let d = mpt::with_drive(Path::new(dev), Path::new(sys), a, crate::drive::scsi::details).map_err(anyhow::Error::msg)?;
             println!("{}", serde_json::to_string_pretty(&d)?);
+        }
+        HbaAction::WriteTest { sas, confirm, json, sys, dev } => {
+            use crate::drive::scsi;
+            let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba write-test: {sas} is no SAS address"))?;
+            if mpt::parse_addr(confirm) != Some(a) {
+                anyhow::bail!("hba write-test: it overwrites LBA 0 and the last LBA of 0x{a:016x}: --confirm with its SAS address");
+            }
+            let (devp, sysp) = (Path::new(dev), Path::new(sys));
+            let link = || {
+                let (cards, _) = mpt::cards(devp, sysp, false);
+                let want = format!("0x{a:016x}");
+                cards.iter().flat_map(|c| c.rows_json()).find(|r| r["sas_address"] == want.as_str()).map(|r| {
+                    format!("{} ({})", r["link"].as_str().unwrap_or("none"), r["state"].as_str().unwrap_or("?"))
+                })
+            };
+            let m = mpt::with_drive(devp, sysp, a, |t| scsi::write_matrix(t, &link)).map_err(anyhow::Error::msg)?;
+            for l in m.lines() {
+                println!("0x{a:016x}: {l}");
+            }
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&m)?);
+            }
         }
         HbaAction::Act { sas, action, block_size, pi, wait, sys, dev } => {
             use crate::drive::scsi;

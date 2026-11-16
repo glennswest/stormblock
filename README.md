@@ -720,7 +720,12 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     …/hba/{sas}/action` (admin) runs `spin_up`, `spin_down`, `self_test`,
     `self_test_extended` or `format` (`block_size`, `pi`, `confirm` = the SAS
     address); a format is followed to its end and the kernel asked to look
-    again. [docs/storage-layout.md](docs/storage-layout.md#the-cards-rows-611).
+    again. `POST …/hba/{sas}/write-test` (admin, `confirm`, #627) runs the
+    write-test matrix (WRPROTECT 0/1 at LBA 0 and the last LBA, read back
+    with RDPROTECT 0/1, the card's link after each step, the mode and log
+    pages before and after; two blocks overwritten, a drive with an open
+    slab refused); `GET` answers the last run. The details carry the mode
+    pages (`mode_pages`). [docs/storage-layout.md](docs/storage-layout.md#the-cards-rows-611).
   - The install's page and record (#616): `GET /` (or `/install`) is a page
     and `GET /api/v1/install/progress` its record: every drive (found by
     Linux or only by the card), its format state, percent and ETA, the

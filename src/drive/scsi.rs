@@ -393,6 +393,9 @@ pub struct Details {
     pub grown_defects: Option<u32>,
     pub write_cache: Option<bool>,
     pub read_cache_disabled: Option<bool>,
+    /// Mode pages 0x03/0x08/0x0A/0x19/0x1A/0x1C, raw and said (#627: the
+    /// drives compared side by side).
+    pub mode_pages: Vec<ModePage>,
     /// What did not answer, and how.
     pub errors: Vec<String>,
 }
@@ -523,6 +526,7 @@ pub fn details(t: &dyn Transport) -> Details {
             d.read_cache_disabled = Some(rcd);
         }
     }
+    d.mode_pages = mode_pages(t);
     d.errors = e;
     d
 }
@@ -710,6 +714,303 @@ pub fn kernel_lines_of(records: &[String], name: &str, max: usize) -> Vec<String
     let n = v.len();
     v.drain(..n.saturating_sub(max));
     v
+}
+
+// ---- the write-test matrix (#627) ----
+
+/// CRC-16 T10-DIF (polynomial 0x8BB7, no reflection, init 0): a block's
+/// protection-information guard.
+pub fn crc_t10dif(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 { (crc << 1) ^ 0x8BB7 } else { crc << 1 };
+        }
+    }
+    crc
+}
+
+/// A block's 8 bytes of type-1 protection information: guard, application
+/// tag 0, reference tag the LBA's low 32 bits.
+pub fn pi_type1(data: &[u8], lba: u64) -> [u8; 8] {
+    let g = crc_t10dif(data).to_be_bytes();
+    let r = (lba as u32).to_be_bytes();
+    [g[0], g[1], 0, 0, r[0], r[1], r[2], r[3]]
+}
+
+/// READ(16) / WRITE(16) with RDPROTECT / WRPROTECT (bits 7-5 of byte 1).
+pub fn cdb_rw16_protect(write: bool, protect: u8, lba: u64, blocks: u32) -> [u8; 16] {
+    let mut c = if write { cdb::write16(lba, blocks) } else { cdb::read16(lba, blocks) };
+    c[1] = (protect & 0x07) << 5;
+    c
+}
+
+/// A mode page, read: its code, raw bytes (from the page code on), and
+/// the bits #627 asks about, when it is one of those pages.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct ModePage {
+    pub page: String,
+    pub hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub said: Option<String>,
+}
+
+/// The page out of a MODE SENSE(10) answer (header, block descriptors).
+pub fn mode_page_of(d: &[u8]) -> Option<&[u8]> {
+    if d.len() < 8 {
+        return None;
+    }
+    let total = (be16(d, 0) as usize + 2).min(d.len());
+    let bdl = be16(d, 6) as usize;
+    let p = d.get(8 + bdl..total)?;
+    let len = 2 + *p.get(1)? as usize;
+    p.get(..len.min(p.len()))
+}
+
+/// What a page's bits say (#627: caching WCE/RCD, control DPICZ/ATO/QAM,
+/// power-condition timers, informational exceptions).
+pub fn mode_page_said(p: &[u8]) -> Option<String> {
+    let b = |i: usize| p.get(i).copied().unwrap_or(0);
+    Some(match b(0) & 0x3F {
+        0x08 => format!("caching: WCE {} RCD {}", (b(2) >> 2) & 1, b(2) & 1),
+        0x0A => format!(
+            "control: DPICZ {} D_SENSE {} QAM {} SWP {} ATO {} TAS {}",
+            (b(2) >> 2) & 1, (b(2) >> 3) & 1, b(3) >> 4, (b(4) >> 3) & 1, b(5) >> 7, (b(5) >> 6) & 1
+        ),
+        0x1A => format!(
+            "power condition: IDLE_A {} STANDBY_Z {} idle_a {} standby_z {} (100 ms units)",
+            (b(3) >> 1) & 1, b(3) & 1, be32(p, 4), be32(p, 8)
+        ),
+        0x1C => format!("informational exceptions: DEXCPT {} EWASC {} MRIE {}", (b(2) >> 3) & 1, (b(2) >> 4) & 1, b(3) & 0x0F),
+        0x19 => format!("protocol-specific port: protocol {}", b(2) & 0x0F),
+        0x03 => format!("format device: {} bytes a sector", be16(p, 12)),
+        _ => return None,
+    })
+}
+
+/// The pages #627 reads before and after each step.
+pub const MATRIX_MODE_PAGES: &[u8] = &[0x03, 0x08, 0x0A, 0x19, 0x1A, 0x1C];
+pub const MATRIX_LOG_PAGES: &[u8] = &[0x0E, 0x15];
+
+/// The mode pages, read now; a page the drive refuses is said so.
+pub fn mode_pages(t: &dyn Transport) -> Vec<ModePage> {
+    MATRIX_MODE_PAGES
+        .iter()
+        .map(|&pg| {
+            let mut m = vec![0u8; 252];
+            let page = format!("0x{pg:02x}");
+            match t.run(&cdb::mode_sense10(pg, false, true, 252), Dir::In, &mut m, 30) {
+                Ok(r) if r.good() => match mode_page_of(&m[..r.len.min(252)]) {
+                    Some(p) => ModePage { page, hex: hex(p), said: mode_page_said(p) },
+                    None => ModePage { page, hex: String::new(), said: Some("an answer with no page in it".into()) },
+                },
+                Ok(r) => ModePage { page, hex: String::new(), said: Some(format!("refused: {}", r.said())) },
+                Err(e) => ModePage { page, hex: String::new(), said: Some(format!("not sent: {e}")) },
+            }
+        })
+        .collect()
+}
+
+/// The log pages, as (page, parameter count or the refusal).
+pub fn log_pages(t: &dyn Transport) -> Vec<(String, String)> {
+    MATRIX_LOG_PAGES
+        .iter()
+        .map(|&pg| {
+            let mut e = Vec::new();
+            let v = ask(t, &cdb::log_sense(pg, 0, 1024), 1024, &format!("LOG SENSE 0x{pg:02x}"), &mut e);
+            let said = match v {
+                Some(d) => {
+                    let ps = log_params(&d);
+                    let vals: Vec<String> = ps.iter().take(8).map(|(c, v)| format!("{c:04x}={}", hex(v))).collect();
+                    format!("{} parameter(s): {}", ps.len(), vals.join(" "))
+                }
+                None => e.join("; "),
+            };
+            (format!("0x{pg:02x}"), said)
+        })
+        .collect()
+}
+
+/// One step of the matrix.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MatrixStep {
+    pub lba: u64,
+    pub wrprotect: u8,
+    pub write: String,
+    /// RDPROTECT 0: the data as written?
+    pub read0: String,
+    /// RDPROTECT 1: the data and its PI (guard, reference tag) as expected?
+    pub read1: String,
+    pub ready_after: String,
+    /// The card's word for the drive's link after the step, when asked.
+    pub link_after: Option<String>,
+}
+
+/// The whole run: what the drive is, its pages before and after, the steps.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Matrix {
+    pub via: String,
+    pub vendor: Option<String>,
+    pub product: Option<String>,
+    pub revision: Option<String>,
+    pub capacity: Option<Capacity>,
+    pub mode_before: Vec<ModePage>,
+    pub log_before: Vec<(String, String)>,
+    pub steps: Vec<MatrixStep>,
+    pub mode_after: Vec<ModePage>,
+    pub log_after: Vec<(String, String)>,
+    pub capacity_after: Option<Capacity>,
+    /// Why the run stopped short, when it did.
+    pub stopped: Option<String>,
+}
+
+fn said_reply(r: std::io::Result<Reply>) -> (String, bool) {
+    match r {
+        Ok(r) => (r.said(), r.good()),
+        Err(e) => (format!("not sent: {e}"), false),
+    }
+}
+
+/// The write-test matrix (#627) at the format the drive has: one block at
+/// LBA 0 and at the last LBA, WRPROTECT 0 (the drive makes the PI), then
+/// WRPROTECT 1 (the host's PI: guard and reference tag), each read back
+/// with RDPROTECT 0 and 1. **Overwrites those two blocks.** `link` asks the
+/// card for the drive's link after each step. Stops when the drive no
+/// longer answers TEST UNIT READY by a transport (the link gone).
+pub fn write_matrix(t: &dyn Transport, link: &dyn Fn() -> Option<String>) -> Matrix {
+    let mut m = Matrix { via: t.name(), ..Default::default() };
+    let mut e = Vec::new();
+    if let Some(i) = ask(t, &cdb::inquiry(None, 96), 96, "INQUIRY", &mut e) {
+        if i.len() >= 36 {
+            m.vendor = Some(text(&i[8..16]));
+            m.product = Some(text(&i[16..32]));
+            m.revision = Some(text(&i[32..36]));
+        }
+    }
+    m.capacity = ask(t, &cdb::read_capacity16(32), 32, "READ CAPACITY 16", &mut e).and_then(|c| parse_capacity16(&c));
+    m.mode_before = mode_pages(t);
+    m.log_before = log_pages(t);
+    let Some(cap) = m.capacity.clone() else {
+        m.stopped = Some(format!("READ CAPACITY 16 did not answer: {}", e.join("; ")));
+        return m;
+    };
+    let bs = cap.block_size as usize;
+    let last = cap.blocks.saturating_sub(1);
+    'steps: for wrprotect in [0u8, 1] {
+        for lba in [0, last] {
+            if wrprotect == 1 && !cap.prot_en {
+                break 'steps;
+            }
+            let mut st = MatrixStep { lba, wrprotect, ..Default::default() };
+            // A pattern that names the step, so a read of the other step's
+            // block cannot pass for this one.
+            let data: Vec<u8> = (0..bs).map(|i| (i as u64 ^ lba ^ (wrprotect as u64 * 0x5A)) as u8).collect();
+            let pi = pi_type1(&data, lba);
+            let mut out = data.clone();
+            if wrprotect == 1 {
+                out.extend_from_slice(&pi);
+            }
+            let (w, _) = said_reply(t.run(&cdb_rw16_protect(true, wrprotect, lba, 1), Dir::Out, &mut out, 60));
+            st.write = w;
+            let mut back = vec![0u8; bs];
+            st.read0 = match t.run(&cdb_rw16_protect(false, 0, lba, 1), Dir::In, &mut back, 60) {
+                Ok(r) if r.good() => if back == data { "good, the data as written".into() } else { "good, but NOT the data written".into() },
+                Ok(r) => r.said(),
+                Err(x) => format!("not sent: {x}"),
+            };
+            if cap.prot_en {
+                let mut back = vec![0u8; bs + 8];
+                st.read1 = match t.run(&cdb_rw16_protect(false, 1, lba, 1), Dir::In, &mut back, 60) {
+                    Ok(r) if r.good() => {
+                        let (d, p) = back.split_at(bs);
+                        let want = pi_type1(&data, lba);
+                        match (d == data.as_slice(), p == want.as_slice()) {
+                            (true, true) => "good, data and PI as expected".into(),
+                            (true, false) => format!("good data, PI {} (expected {})", hex(p), hex(&want)),
+                            (false, _) => format!("NOT the data written; PI {}", hex(p)),
+                        }
+                    }
+                    Ok(r) => r.said(),
+                    Err(x) => format!("not sent: {x}"),
+                };
+            } else {
+                st.read1 = "no PI on this format".into();
+            }
+            let tur = t.run(&cdb::test_unit_ready(), Dir::None, &mut [], 30);
+            let gone = match &tur {
+                Ok(r) => r.transport.is_some(),
+                Err(_) => true,
+            };
+            st.ready_after = said_reply(tur).0;
+            st.link_after = link();
+            m.steps.push(st);
+            if gone {
+                m.stopped = Some(format!(
+                    "the drive stopped answering after WRPROTECT {wrprotect} at LBA {lba}: TEST UNIT READY {}",
+                    m.steps.last().map(|s| s.ready_after.clone()).unwrap_or_default()
+                ));
+                break 'steps;
+            }
+        }
+    }
+    m.mode_after = mode_pages(t);
+    m.log_after = log_pages(t);
+    let mut e2 = Vec::new();
+    m.capacity_after = ask(t, &cdb::read_capacity16(32), 32, "READ CAPACITY 16", &mut e2).and_then(|c| parse_capacity16(&c));
+    m
+}
+
+impl Matrix {
+    /// The run as console lines (and the issue's table rows).
+    pub fn lines(&self) -> Vec<String> {
+        let mut v = vec![format!(
+            "drive {} {} {} through {}; {}",
+            self.vendor.as_deref().unwrap_or("?"),
+            self.product.as_deref().unwrap_or("?"),
+            self.revision.as_deref().unwrap_or("?"),
+            self.via,
+            self.capacity
+                .as_ref()
+                .map(|c| format!("{} blocks of {}{}", c.blocks, c.block_size, if c.prot_en { format!(" + PI type {}", c.pi_type) } else { ", no PI".into() }))
+                .unwrap_or_else(|| "no READ CAPACITY 16".into())
+        )];
+        for p in &self.mode_before {
+            v.push(format!("mode page {} before: {}", p.page, p.said.clone().unwrap_or_else(|| p.hex.clone())));
+        }
+        for (pg, s) in &self.log_before {
+            v.push(format!("log page {pg} before: {s}"));
+        }
+        for s in &self.steps {
+            v.push(format!(
+                "WRPROTECT {} LBA {}: write {}; read RDPROTECT 0 {}; RDPROTECT 1 {}; then TUR {}{}",
+                s.wrprotect,
+                s.lba,
+                s.write,
+                s.read0,
+                s.read1,
+                s.ready_after,
+                s.link_after.as_ref().map(|l| format!(", link {l}")).unwrap_or_default()
+            ));
+        }
+        for (b, a) in self.mode_before.iter().zip(&self.mode_after) {
+            if b.hex != a.hex {
+                v.push(format!("mode page {} changed: {} -> {}", a.page, b.hex, a.hex));
+            }
+        }
+        for ((pg, b), (_, a)) in self.log_before.iter().zip(&self.log_after) {
+            if b != a {
+                v.push(format!("log page {pg} after: {a}"));
+            }
+        }
+        if self.capacity_after != self.capacity {
+            v.push(format!("READ CAPACITY 16 after: {:?}", self.capacity_after));
+        }
+        if let Some(s) = &self.stopped {
+            v.push(format!("STOPPED: {s}"));
+        }
+        v
+    }
 }
 
 // ---- actions ----
@@ -1116,6 +1417,118 @@ mod tests {
         assert!(wp.hint().unwrap().contains("write protected"));
         let pi = WriteProbe { senses: vec![(0xB, 0x10, 0x03)], ..Default::default() };
         assert!(pi.hint().unwrap().contains("reference tag"));
+    }
+
+    #[test]
+    fn crc_t10dif_and_pi() {
+        // The standard check value of CRC-16/T10-DIF.
+        assert_eq!(crc_t10dif(b"123456789"), 0xD0DB);
+        assert_eq!(crc_t10dif(&[0u8; 4096]), 0);
+        let pi = pi_type1(b"123456789", 0x1_0000_0007);
+        assert_eq!(pi, [0xD0, 0xDB, 0, 0, 0, 0, 0, 7]);
+        let c = cdb_rw16_protect(true, 1, 5, 1);
+        assert_eq!((c[0], c[1], c[9], c[13]), (0x8A, 0x20, 5, 1));
+        assert_eq!(cdb_rw16_protect(false, 1, 0, 1)[..2], [0x88, 0x20]);
+    }
+
+    #[test]
+    fn mode_pages_said() {
+        // MODE SENSE(10) header (no block descriptors), then the control page.
+        let mut d = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        d.extend_from_slice(&[0x0A, 0x0A, 0x04, 0x10, 0x08, 0x80, 0, 0, 0, 0, 0, 0]);
+        let len = (d.len() - 2) as u16;
+        d[..2].copy_from_slice(&len.to_be_bytes());
+        let p = mode_page_of(&d).unwrap();
+        assert_eq!(p.len(), 12);
+        assert_eq!(mode_page_said(p).unwrap(), "control: DPICZ 1 D_SENSE 0 QAM 1 SWP 1 ATO 1 TAS 0");
+        assert_eq!(mode_page_said(&[0x08, 0x12, 0x05]).unwrap(), "caching: WCE 1 RCD 1");
+    }
+
+    /// A drive at 4096 + PI type 1 that keeps what it is sent: the host's PI
+    /// as given, its own (correct) PI for a WRPROTECT 0 write; and one that
+    /// drops its link on the first write (forge1 bay 3, #625/#627).
+    struct PiDrive {
+        blocks: std::cell::RefCell<std::collections::HashMap<u64, Vec<u8>>>,
+        drop_link: bool,
+        gone: std::cell::Cell<bool>,
+    }
+    impl Transport for PiDrive {
+        fn run(&self, cdb: &[u8], _dir: Dir, data: &mut [u8], _t: u32) -> std::io::Result<Reply> {
+            if self.gone.get() {
+                return Ok(Reply { transport: Some("host status 0x1, driver status 0x0".into()), ..Default::default() });
+            }
+            let lba = u64::from_be_bytes(cdb.get(2..10).map(|s| s.try_into().unwrap()).unwrap_or([0; 8]));
+            let prot = cdb.get(1).copied().unwrap_or(0) >> 5;
+            match cdb[0] {
+                0x9E => {
+                    data[..32].fill(0);
+                    data[..8].copy_from_slice(&999u64.to_be_bytes());
+                    data[8..12].copy_from_slice(&4096u32.to_be_bytes());
+                    data[12] = 1;
+                    Ok(Reply { len: 32, ..Default::default() })
+                }
+                0x12 => {
+                    let mut i = vec![0u8; 36];
+                    i[8..16].copy_from_slice(b"NETAPP  ");
+                    i[16..32].copy_from_slice(b"X378_HLBRE10TA07");
+                    i[32..36].copy_from_slice(b"NA02");
+                    let n = data.len().min(36);
+                    data[..n].copy_from_slice(&i[..n]);
+                    Ok(Reply { len: n, ..Default::default() })
+                }
+                0x8A => {
+                    if self.drop_link {
+                        self.gone.set(true);
+                        return Ok(Reply { transport: Some("host status 0x1, driver status 0x0".into()), ..Default::default() });
+                    }
+                    let mut b = data[..4096].to_vec();
+                    b.extend_from_slice(&if prot == 1 { data[4096..4104].try_into().unwrap() } else { pi_type1(&data[..4096], lba) });
+                    self.blocks.borrow_mut().insert(lba, b);
+                    Ok(Reply::default())
+                }
+                0x88 => {
+                    let b = self.blocks.borrow().get(&lba).cloned().unwrap_or_else(|| vec![0; 4104]);
+                    let n = if prot == 0 { 4096 } else { 4104 };
+                    data[..n].copy_from_slice(&b[..n]);
+                    Ok(Reply { len: n, ..Default::default() })
+                }
+                0x00 => Ok(Reply::default()),
+                _ => Ok(Reply { status: 2, sense: vec![0x70, 0, 5, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0x24, 0], len: 0, transport: None }),
+            }
+        }
+        fn name(&self) -> String {
+            "sg9".into()
+        }
+    }
+
+    #[test]
+    fn the_write_matrix() {
+        let d = PiDrive { blocks: Default::default(), drop_link: false, gone: Default::default() };
+        let m = write_matrix(&d, &|| Some("12.0 Gbit".into()));
+        assert_eq!(m.vendor.as_deref(), Some("NETAPP"));
+        assert_eq!(m.revision.as_deref(), Some("NA02"));
+        assert_eq!(m.steps.len(), 4, "{:?}", m.steps);
+        assert_eq!((m.steps[0].wrprotect, m.steps[0].lba), (0, 0));
+        assert_eq!((m.steps[3].wrprotect, m.steps[3].lba), (1, 999));
+        for s in &m.steps {
+            assert_eq!(s.write, "good");
+            assert_eq!(s.read0, "good, the data as written");
+            assert_eq!(s.read1, "good, data and PI as expected");
+            assert_eq!(s.link_after.as_deref(), Some("12.0 Gbit"));
+        }
+        assert!(m.stopped.is_none());
+        assert!(m.mode_before.iter().all(|p| p.said.as_deref().is_some_and(|s| s.starts_with("refused"))));
+        let l = m.lines().join("\n");
+        assert!(l.contains("drive NETAPP X378_HLBRE10TA07 NA02 through sg9; 1000 blocks of 4096 + PI type 1"), "{l}");
+        assert!(l.contains("WRPROTECT 1 LBA 999: write good"), "{l}");
+
+        // The link dropped on the first write: said, and the run stops there.
+        let d = PiDrive { blocks: Default::default(), drop_link: true, gone: Default::default() };
+        let m = write_matrix(&d, &|| Some("down".into()));
+        assert_eq!(m.steps.len(), 1);
+        assert!(m.steps[0].write.starts_with("host status"), "{:?}", m.steps[0]);
+        assert_eq!(m.steps[0].link_after.as_deref(), Some("down"));
+        assert!(m.stopped.as_deref().unwrap().contains("after WRPROTECT 0 at LBA 0"));
     }
 
     #[test]

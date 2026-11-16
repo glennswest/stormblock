@@ -409,6 +409,69 @@ async fn hba_action(axum::extract::Path(sas): axum::extract::Path<String>, Json(
     }
 }
 
+#[derive(serde::Deserialize)]
+struct HbaWriteTestRequest {
+    /// The drive's SAS address: two of its blocks are overwritten.
+    confirm: Option<String>,
+}
+
+/// `POST /api/v1/storage/hba/{sas}/write-test` (#627; admin only, #274):
+/// the write-test matrix on the drive at the format it has. Overwrites LBA 0
+/// and the last LBA: `confirm` is its SAS address, and a drive this engine
+/// has a slab open on is refused. `GET` answers the last run.
+async fn hba_write_test(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(sas): axum::extract::Path<String>,
+    Json(req): Json<HbaWriteTestRequest>,
+) -> Response {
+    let a = match hba_addr(&sas) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let want = format!("0x{a:016x}");
+    if req.confirm.as_deref().and_then(crate::drive::mpt::parse_addr) != Some(a) {
+        return (
+            StatusCode::PRECONDITION_FAILED,
+            Json(serde_json::json!({"error": format!("the write test overwrites LBA 0 and the last LBA of {want}: confirm with its SAS address"), "confirm": want})),
+        )
+            .into_response();
+    }
+    // Never a drive in use: its block device, by the card's row, against
+    // every slab this engine has open.
+    let block = super::hba::report()["rows"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["sas_address"] == want.as_str()).and_then(|r| r["block"].as_str().map(str::to_string)));
+    if let Some(b) = block {
+        let dev = format!("/dev/{b}");
+        let reg = state.slab_registry.read().await;
+        if reg.iter().any(|(_, s)| crate::mgmt::storage_layout::on_drive(&s.device().id().path, &dev)) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": format!("{want} is {dev}, which holds a slab this engine has open: not tested")})),
+            )
+                .into_response();
+        }
+    }
+    tracing::warn!(drive = %want, "the write-test matrix on the card's drive (#627)");
+    match tokio::task::spawn_blocking(move || super::hba::write_test(a)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => (StatusCode::CONFLICT, Json(serde_json::json!({"sas_address": want, "error": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// `GET /api/v1/storage/hba/{sas}/write-test` (#627): the last run.
+async fn hba_write_test_last(axum::extract::Path(sas): axum::extract::Path<String>) -> Response {
+    let a = match hba_addr(&sas) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    match super::hba::cached_test(&format!("0x{a:016x}")) {
+        Some(v) => Json(v).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no write test run on this drive since the engine started"}))).into_response(),
+    }
+}
+
 async fn version() -> Response {
     Json(serde_json::json!({
         "service": "stormblock",
@@ -427,6 +490,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/storage/hba", axum::routing::get(hba_rows))
         .route("/api/v1/storage/hba/{sas}/details", axum::routing::get(hba_details))
         .route("/api/v1/storage/hba/{sas}/action", axum::routing::post(hba_action))
+        .route(
+            "/api/v1/storage/hba/{sas}/write-test",
+            axum::routing::post(hba_write_test).get(hba_write_test_last).with_state(state.clone()),
+        )
         .nest("/api/v1/drives", drives::router(state.clone()))
         .nest("/api/v1/arrays", arrays::router(state.clone()))
         .nest("/api/v1/shelves", shelves::shelves_router(state.clone()))
