@@ -85,6 +85,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.13.0] — 2026-11-16
+
+### Added
+- #573 step 8: the layout report names each drive by `serial`, `wwid`, `controller` and `bay` (the card's slot when no enclosure names one), gives its `pi_type`, and after a reboot still says what the install did to it (kept in system-data, matched by WWID).
+
 ## [v24.12.1] — 2026-11-16
 
 ### Fixed
