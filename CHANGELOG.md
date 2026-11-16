@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-16
+- **docs:** #609: closed, seen on pvetest3 12.87: an appliance-asked install with `storage:` and no wipe word STOPs before any write, with no format (forge1 12.86 formatted); the over-eager STOP is #615.
 - **docs:** #611: closed, verified on forge1 12.87's console (the card lists 4 drives with slots, INQUIRY and TUR through the card; three formatting through it); v24.10.2 staged.
 
 ### 2026-11-15

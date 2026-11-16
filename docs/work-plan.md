@@ -98,6 +98,13 @@ slabs stops, nothing written) never ran.
   anything (its sda holds this node's slabs in the old layout): to lay
   `storage:` it needs `rd.stormblock.assimilate=force` (forge's data lost),
   else `storage:` out of forge1's install-config - the master's call.
+  (Master: `storage:` stays; the wipe word per install is #614, v24.10.0.)
+- [x] Seen on a node (2026-11-16): pvetest3 12.87 (stormblock fe3ea08),
+  install at 20:35Z, appliance-asked (`intent install`), `storage: drives:
+  all`, no wipe word: `STOP: storage: ...` before any write, 0 format lines.
+  forge1 12.86's case formatted. The shipped proof was read on pvetest3's
+  `--wipe` install (23:19Z), where neither KEEP nor STOP can show. That the
+  STOP fires over this node's own layout is #615. Closed.
 
 ## #607 — adopt-ublk refuses the data slab on the node-data set (2026-11-14, P0)
 
