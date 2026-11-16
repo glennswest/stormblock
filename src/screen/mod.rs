@@ -129,8 +129,8 @@ pub fn run(o: &Opts) -> anyhow::Result<()> {
     }
     // SAFETY: the handler only stores to an atomic.
     unsafe {
-        libc::signal(libc::SIGTERM, on_term as libc::sighandler_t);
-        libc::signal(libc::SIGINT, on_term as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
     }
     let display = match drm::Display::open(o.card.as_deref()) {
         Ok(Some(d)) => d,

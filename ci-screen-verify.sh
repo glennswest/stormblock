@@ -73,11 +73,10 @@ EOF
 chmod +x "$R/init"
 ( cd "$R" && find . | cpio -o -H newc --quiet | gzip -1 ) > "$W/initrd.gz"
 
-ACCEL=""
-[ -w /dev/kvm ] && ACCEL="-enable-kvm -cpu host"
-echo "== QEMU: $KERNEL, vga=0x318 (1024x768x24 linear framebuffer)${ACCEL:+, kvm}"
-# shellcheck disable=SC2086
-"$QEMU" $ACCEL -m 1024 -smp 2 -kernel "$KERNEL" -initrd "$W/initrd.gz" \
+# As every other harness here: kvm when the build VM offers it, else tcg.
+ACCEL=tcg; [ -w /dev/kvm ] && ACCEL=kvm
+echo "== QEMU ($ACCEL): $KERNEL, vga=0x318 (a 1024x768 linear framebuffer)"
+"$QEMU" -accel "$ACCEL" -m 1024 -smp 2 -kernel "$KERNEL" -initrd "$W/initrd.gz" \
     -append "console=ttyS0 vga=0x318 panic=-1" -vga std -display none \
     -serial "file:$W/serial.log" -monitor "unix:$W/mon,server,nowait" -no-reboot &
 QPID=$!
