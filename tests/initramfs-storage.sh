@@ -307,6 +307,19 @@ EOF
 
 BASE='OVERRIDE="" ASSIMILATE="" SLAB="" NAMED_DISK="" CHOSEN_BY="" INSTALL_OVER=""'
 
+echo "the layout: the kernel's messages on the console while drives are laid (#625)"
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+printf "STORAGE_DRIVES='/dev/sda'\nSTORAGE_SYSTEM='/dev/sda'\nSTORAGE_WIPE=''\n" > "$WORK/plan.out"
+printf '4\t4\t1\t7\n' > "$WORK/printk"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" "STORM_PRINTK=$WORK/printk" 'INSTALL_FRESH=1'
+has "said" "$WORK/out" "console loglevel 7 (was 4): the kernel's messages, SCSI sense included"
+check "raised" "7" "$(cat "$WORK/printk")"
+printf '7\t4\t1\t7\n' > "$WORK/printk"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" "STORM_PRINTK=$WORK/printk" 'INSTALL_FRESH=1'
+has "already 7, said" "$WORK/out" "console loglevel 7: the kernel's messages, SCSI sense included"
+rm -f "$WORK/printk"
+
 echo "the layout: no storage: changes nothing"
 reset
 printf 'hostname: n1\n' > "$WORK/install-config.yaml"

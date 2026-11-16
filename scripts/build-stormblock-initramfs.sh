@@ -5412,8 +5412,13 @@ STEOF
         STORAGE_PRINTK="${STORM_PRINTK:-/proc/sys/kernel/printk}"
         STORAGE_PRINTK_WAS=$(cut -f1 "$STORAGE_PRINTK" 2>/dev/null | tr -dc 0-9)
         if [ -n "$STORAGE_PRINTK_WAS" ] && [ "$STORAGE_PRINTK_WAS" -lt 7 ]; then
-            echo 7 > "$STORAGE_PRINTK" 2>/dev/null \
-                && echo "  storage: the kernel's messages (SCSI sense) on the console until the drives are laid (#625)"
+            if echo 7 > "$STORAGE_PRINTK" 2>/dev/null; then
+                echo "  storage: console loglevel 7 (was $STORAGE_PRINTK_WAS): the kernel's messages, SCSI sense included, on the console until the drives are laid (#625)"
+            else
+                echo "  storage: console loglevel $STORAGE_PRINTK_WAS, not raised: the kernel's SCSI sense is not on the console (#625)"
+            fi
+        elif [ -n "$STORAGE_PRINTK_WAS" ]; then
+            echo "  storage: console loglevel $STORAGE_PRINTK_WAS: the kernel's messages, SCSI sense included, on the console (#625)"
         fi
         # The wipe word: rd.stormblock.assimilate=force on this boot's
         # command line, never the force an install ticket makes of ASSIMILATE
