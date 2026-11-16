@@ -57,6 +57,11 @@ hex = "0.4"
 hyper = "1"
 tower = "0.5"
 
+# The boot and install screen (#618): glyphs from the bundled typeface
+# (src/screen/fonts), drawn on the firmware's display. Three small crates
+# (ab_glyph, ab_glyph_rasterizer, owned_ttf_parser/ttf-parser), Apache-2.0.
+ab_glyph = "0.2"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
