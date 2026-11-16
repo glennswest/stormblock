@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#625, a drive that left the link)
+- **fix:** #625 (forge1's second attempt: the X378 left the SAS link on its first write and the kernel removed `/dev/sda` mid-lay): the lay's failure block reads each drive's SAS address before the lay. When the kernel has removed the drive, the first line says so: `so: the drive left the SAS link on the write: the kernel removed /dev/sda (SAS 0x…)`. It gives the card's own row for the drive (slot, link, state, present, Linux device, or not listed), asks the drive through the card by address when it has no Linux device, and matches the kernel's lines by the SAS address too (mpt3sas's `removing handle(…), sas_addr(…)` never names the disk). Before, it said only "SG_IO cannot be sent to it".
+- **docs:** #625: the shipped proof failed on pvetest2, which has no `storage:` section; pvetest3's 12.89 install console has the line (`storage: console loglevel 7: the kernel's messages, SCSI sense included, on the console (#625)`).
+
 ### 2026-11-16 (#573, the proof)
 - **docs:** #573: the shipped proof failed on pvetest2, which has no `storage:` layout; the change is seen on pvetest3 (24.13.1); shipped again with the proof on pvetest3. Work plan.
 

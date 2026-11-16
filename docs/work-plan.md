@@ -2,6 +2,17 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #625 (again) — a drive that left the link; the proof (2026-11-16, P0)
+
+Reopened: the proof was checked on pvetest2 (no storage:). pvetest3's 12.89
+console (/var/lib/stormcentral/console/pvetest3-20261116-175939.log:185) has
+the loglevel line. The master's 15:24Z note: the X378 left the SAS link on
+its write and the kernel removed it; the block said only "SG_IO cannot be
+sent to it".
+- [x] SAS address read before the lay; a gone drive said first (`so:`); the
+  card's row; the probe through the card by address; kernel lines by address
+- [ ] check.sh; release; shipped with the proof on pvetest3's console
+
 ## #627 — NetApp firmware and 4096 + PI: the write-test matrix (2026-11-16, P0)
 
 forge1 bay 3 (NETAPP X378 NA02, sas 0x5000cca26a819e69) at 4096 + PI type 1

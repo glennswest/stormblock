@@ -209,6 +209,17 @@ Storage: /dev/sdb:   NETAPP X378_HLBRE10TA07 NA02 serial …: write uncorrected 
 Storage: /dev/sdb:   kernel: sd 0:0:3:0: [sdb] tag#9 Sense Key : Medium Error [current]
 ```
 
+A drive that **left the SAS link** on the write (forge1's X378 on its
+second attempt: the kernel removed its device mid-lay) is said so first:
+`so: the drive left the SAS link on the write: the kernel removed /dev/sda
+(SAS 0x5000cca26a819e69)`. Its SAS address is read before the lay, while
+sysfs still has it. The block then gives the card's own row for it (slot,
+link, state, present, Linux device, or that the card no longer lists it),
+asks the drive through the card by that address (the probe below works
+with no Linux device), and matches the kernel's lines by the address too
+(`removing handle(0x000b), sas_addr(0x5000cca26a819e69)` never names the
+disk).
+
 The write at LBA 0 is one block of zeros with WRPROTECT 0 (no protection
 information sent; the drive makes its own), so it tells a drive that refuses
 writes from a path that does not carry them: when it succeeds, the failure is

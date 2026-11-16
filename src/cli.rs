@@ -3685,6 +3685,10 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
             .map_err(|e| anyhow::anyhow!("cannot open {d}: {e}"))?;
         devs.push(dev);
     }
+    // Each drive's SAS address, read now while sysfs has it (#625: forge1's
+    // X378 left the SAS link on its first write, and the kernel removed its
+    // device; the card and the kernel's lines still know it by address).
+    let sas_of: Vec<Option<u64>> = drives.iter().map(|d| drive_sas_address(d)).collect();
     let smallest = devs.iter().map(|d| d.capacity_bytes()).min().unwrap_or(0);
     let regions = local::storage_regions(smallest, system_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
     let t = std::time::Instant::now();
@@ -3700,13 +3704,13 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
     let mut members = Vec::new();
     let mut done = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
-    for (r, d) in laid.into_iter().zip(drives) {
+    for ((r, d), sas) in laid.into_iter().zip(drives).zip(sas_of) {
         // A drive that fails is explained and left out (#625): the others
         // stay laid, and /init decides by `storage.on_drive_failure`.
         let r = match r {
             Ok(r) => r,
             Err(e) => {
-                let why = explain_lay_failure(d, &e.to_string()).await;
+                let why = explain_lay_failure(d, &e.to_string(), sas).await;
                 failed.push((d.clone(), why));
                 continue;
             }
@@ -3751,14 +3755,16 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
 /// error counters) and the kernel's lines about it, as one block on stderr
 /// (the console, through /init). Answers the error with what it means, in
 /// one line, for the FATAL or the warning.
-async fn explain_lay_failure(dev: &str, err: &str) -> String {
+async fn explain_lay_failure(dev: &str, err: &str, sas: Option<u64>) -> String {
     eprintln!("Storage: {dev}: NOT LAID: {err}");
     let path = dev.to_string();
-    let block = tokio::task::spawn_blocking(move || lay_failure_block(&path)).await.unwrap_or_default();
+    let block = tokio::task::spawn_blocking(move || lay_failure_block(&path, sas)).await.unwrap_or_default();
+    // The first hint is the one: a drive that is gone says so before what
+    // the card's path then made of it.
     let mut hint = None;
     for (l, h) in block {
         eprintln!("Storage: {dev}:   {l}");
-        if h {
+        if h && hint.is_none() {
             hint = Some(l.trim_start_matches("so: ").to_string());
         }
     }
@@ -3768,20 +3774,61 @@ async fn explain_lay_failure(dev: &str, err: &str) -> String {
     }
 }
 
+/// A disk's SAS address from sysfs (`/sys/block/sdb/device/sas_address`),
+/// when it is on a SAS transport.
+fn drive_sas_address(dev: &str) -> Option<u64> {
+    let name = dev.rsplit('/').next()?;
+    let s = std::fs::read_to_string(format!("/sys/block/{name}/device/sas_address")).ok()?;
+    crate::drive::mpt::parse_addr(s.trim())
+}
+
+/// Whether the kernel still has the disk (#625: a drive that left the SAS
+/// link is removed, `/dev/sda` and `/sys/block/sda` gone).
+fn drive_gone(dev: &str, sys_block: &std::path::Path) -> bool {
+    let name = dev.rsplit('/').next().unwrap_or(dev);
+    !sys_block.join(name).exists()
+}
+
 /// The lines of [`explain_lay_failure`]'s block, each with whether it is
 /// the hint.
-#[cfg(target_os = "linux")]
-fn lay_failure_block(dev: &str) -> Vec<(String, bool)> {
-    use crate::drive::scsi;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn lay_failure_block(dev: &str, sas: Option<u64>) -> Vec<(String, bool)> {
+    use crate::drive::{mpt, scsi};
+    use std::path::Path;
     let mut v = Vec::new();
-    match scsi::Sg::open(std::path::Path::new(dev)) {
-        Ok(t) => {
-            let p = scsi::write_probe(&t, 4096);
+    let gone = drive_gone(dev, Path::new("/sys/block"));
+    if gone {
+        v.push((format!(
+            "so: the drive left the SAS link on the write: the kernel removed {dev}{}",
+            sas.map(|a| format!(" (SAS 0x{a:016x})")).unwrap_or_default()
+        ), true));
+    }
+    if let Some(a) = sas {
+        let want = format!("0x{a:016x}");
+        let (cards, _) = mpt::cards(Path::new("/dev"), Path::new("/sys"), false);
+        match cards.iter().flat_map(|c| c.rows_json()).find(|r| r["sas_address"] == want.as_str()) {
+            Some(r) => v.push((format!(
+                "the card: {want} slot {}, link {}, {}, {}, Linux device {}",
+                r["slot"], r["link"].as_str().unwrap_or("none"), r["state"].as_str().unwrap_or("?"),
+                if r["present"] == true { "present" } else { "not present" },
+                r["block"].as_str().unwrap_or("none")
+            ), false)),
+            None if !cards.is_empty() => v.push((format!("the card does not list {want} now: the drive is off the link"), false)),
+            None => {}
+        }
+    }
+    // Through its sg node, else the card by its address (a drive the
+    // kernel removed still answers the card when it is back on the link).
+    let asked = match sas {
+        Some(a) => mpt::with_drive(Path::new("/dev"), Path::new("/sys"), a, |t| (scsi::write_probe(t, 4096), scsi::details(t))),
+        None => scsi::Sg::open(Path::new(dev)).map(|t| (scsi::write_probe(&t, 4096), scsi::details(&t))).map_err(|e| e.to_string()),
+    };
+    match asked {
+        Ok((p, d)) => {
             for l in p.lines() {
                 let h = l.starts_with("so: ");
                 v.push((l, h));
             }
-            let d = scsi::details(&t);
             let n = |x: Option<u64>| x.map(|x| x.to_string()).unwrap_or_else(|| "-".into());
             v.push((
                 format!(
@@ -3800,10 +3847,13 @@ fn lay_failure_block(dev: &str) -> Vec<(String, bool)> {
                 false,
             ));
         }
-        Err(e) => v.push((format!("SG_IO cannot be sent to it ({e}): no sense read"), false)),
+        Err(e) => v.push((format!("nothing can be sent to it ({e}): no sense read"), false)),
     }
     let name = dev.rsplit('/').next().unwrap_or(dev);
-    let k = scsi::kernel_lines(name, 12);
+    // By name, and by SAS address: the kernel's link lines (`removing
+    // handle(0x000b), sas_addr(0x5000cca26a819e69)`) never name the disk.
+    let extra: Vec<String> = sas.map(|a| vec![format!("{a:016x}")]).unwrap_or_default();
+    let k = scsi::kernel_lines(name, &extra, 12);
     if k.is_empty() {
         v.push(("the kernel said nothing of it in /dev/kmsg".into(), false));
     }
@@ -3813,8 +3863,8 @@ fn lay_failure_block(dev: &str) -> Vec<(String, bool)> {
     v
 }
 
-#[cfg(not(target_os = "linux"))]
-fn lay_failure_block(_dev: &str) -> Vec<(String, bool)> {
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn lay_failure_block(_dev: &str, _sas: Option<u64>) -> Vec<(String, bool)> {
     vec![("no SCSI pass-through on this OS".into(), false)]
 }
 
@@ -11425,6 +11475,17 @@ async fn handle_migrate_boot(
 #[cfg(test)]
 mod tests {
     use super::note_no_intent;
+
+    /// #625: a drive the kernel removed after its write (it left the SAS
+    /// link) is told from one that is still there.
+    #[test]
+    fn a_drive_the_kernel_removed_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sdb")).unwrap();
+        assert!(!super::drive_gone("/dev/sdb", dir.path()));
+        assert!(super::drive_gone("/dev/sda", dir.path()));
+        assert_eq!(super::drive_sas_address("/dev/no-such-disk-625"), None);
+    }
 
     /// #413: the engines that serve the API keep metrics, the node's
     /// `adopt-ublk` among them (it answered 500 to every scrape); the tools

@@ -678,7 +678,7 @@ impl WriteProbe {
 /// errors, and the card's lines beside them (#625: the console carried
 /// none). Read from `/dev/kmsg`, at most `max`.
 #[cfg(target_os = "linux")]
-pub fn kernel_lines(name: &str, max: usize) -> Vec<String> {
+pub fn kernel_lines(name: &str, extra: &[String], max: usize) -> Vec<String> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let Ok(mut f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open("/dev/kmsg") else {
@@ -695,12 +695,15 @@ pub fn kernel_lines(name: &str, max: usize) -> Vec<String> {
             Err(_) => break,
         }
     }
-    kernel_lines_of(&all, name, max)
+    kernel_lines_of(&all, name, extra, max)
 }
 
 /// [`kernel_lines`] over records already read (`pri,seq,usec,flags;text`).
-pub fn kernel_lines_of(records: &[String], name: &str, max: usize) -> Vec<String> {
-    let marks = [format!("[{name}]"), format!("dev {name},"), format!("{name}:"), format!(" {name} ")];
+/// `extra` are more words a line may carry instead (#625: the drive's SAS
+/// address, which the link's lines name it by).
+pub fn kernel_lines_of(records: &[String], name: &str, extra: &[String], max: usize) -> Vec<String> {
+    let mut marks = vec![format!("[{name}]"), format!("dev {name},"), format!("{name}:"), format!(" {name} ")];
+    marks.extend(extra.iter().filter(|e| !e.is_empty()).cloned());
     let mut v: Vec<String> = records
         .iter()
         .filter_map(|r| {
@@ -1544,11 +1547,24 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let v = kernel_lines_of(&recs, "sdb", 10);
+        let v = kernel_lines_of(&recs, "sdb", &[], 10);
         assert_eq!(v.len(), 4, "{v:?}");
         assert!(v[2].starts_with("I/O error, dev sdb"));
         assert!(v[3].starts_with("mpt3sas_cm0: log_info"));
-        assert_eq!(kernel_lines_of(&recs, "sdb", 2).len(), 2);
+        assert_eq!(kernel_lines_of(&recs, "sdb", &[], 2).len(), 2);
+        // #625: the link's lines name the drive by its SAS address only.
+        let gone: Vec<String> = [
+            "6,200,1,-;mpt3sas_cm0: handle(0xc) sas_address(0x5000cca2680ab8d9) port_type(0x1)",
+            "6,201,1,-;mpt3sas_cm0: removing handle(0x000b), sas_addr(0x5000cca26a819e69)",
+            "6,202,1,-;mpt3sas_cm0: enclosure logical id(0x52cea7f04e8aa500), slot(3)",
+            "6,203,1,-;sd 1:0:1:0: [sda] Synchronizing SCSI cache",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let v = kernel_lines_of(&gone, "sda", &["5000cca26a819e69".into()], 10);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(v[0].contains("removing handle(0x000b)"));
     }
 
     #[test]
