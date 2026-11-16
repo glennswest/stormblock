@@ -26,6 +26,15 @@ stormcentral's `testhost install --force`.
   (propose --after #1428 refused: #1428 waits on #614).
 - [ ] forge1's forced install console (only metal shows it).
 
+## #620 — the card path reports as the sg path (2026-11-16, P0)
+
+Split from #611. Done under #595/#611: v24.10.1 (274eee18, bac0337b: a line a
+minute with %, ETA, elapsed; the FORMAT beat and install-report over the
+card drives; the card's rows printed before the format) and v24.10.2
+(d697cffc: the inventory's controller line gives the card's count). Here:
+the minute line drops `through the card`, so both paths print one shape.
+Proof waits on forge1's next install console (as #595).
+
 ## #616 — the install's page and progress record, on the host (2026-11-16, P0)
 
 Owner: "a web page with status, instead of primitive logging"; "on host",

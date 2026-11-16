@@ -529,11 +529,11 @@ echo "the layout: a format through the card reports as the sg path does (#595)"
 reset
 printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
 CARDSLOW='inv_card() { case "$1" in pending) [ -e "$W/card.formatted" ] || echo "0000:c1:00.0:sas-0x5000cca268077301" ;; view) echo "card: drive sas 0x5000cca268077301 slot 3" ;; esac; }
-inv_card_act() { echo "0x5000cca268077301: FORMAT UNIT to 4096 with PI type 1 started (IMMED) through the card"; echo "0x5000cca268077301: formatting (full) 1.0% through the card, about 9h 0m left, 5m so far"; sleep 3; touch "$W/card.formatted"; echo "0x5000cca268077301: formatted (full) through the card in 10m"; }'
+inv_card_act() { echo "0x5000cca268077301: FORMAT UNIT to 4096 with PI type 1 started (IMMED) through the card"; echo "0x5000cca268077301: formatting (full) 1.0%, about 9h 0m left, 5m so far"; sleep 3; touch "$W/card.formatted"; echo "0x5000cca268077301: formatted (full) through the card in 10m"; }'
 cardplans
 layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'STORAGE_BEAT_SECS=1' "$CARDSLOW"
-has "  each line on the console" "$WORK/out" "^  storage: 0x5000cca268077301: formatting (full) 1.0% through the card, about 9h 0m left, 5m so far"
-has "  the minute beat over the card's drive" "$WORK/out" "FORMAT: 0 min so far - 0x5000cca268077301: formatting (full) 1.0% through the card"
+has "  each line on the console" "$WORK/out" "^  storage: 0x5000cca268077301: formatting (full) 1.0%, about 9h 0m left, 5m so far"
+has "  the minute beat over the card's drive" "$WORK/out" "FORMAT: 0 min so far - 0x5000cca268077301: formatting (full) 1.0%, about 9h 0m left"
 has "  the install record in formatting" "$WORK/report.args" "^formatting$"
 has "  with the card's progress" "$WORK/report.args" "0x5000cca268077301: formatting (full) 1.0%"
 has "  the end said" "$WORK/out" "storage: 0x5000cca268077301: formatted (full) through the card in 10m"

@@ -103,7 +103,7 @@ pub struct Line {
 /// A format line from stormdrive (the sg path) or `stormblock hba act`
 /// (the card path), its drive's name already taken off or not:
 /// `formatting (full) 57.6%, about 5h 17m left, 7h 12m so far`,
-/// `formatting (full) 1.2% through the card, about 12h 40m left, 9m so far`,
+/// `formatting (full) 1.2%, about 12h 40m left, 9m so far`,
 /// `formatted (fast) in 1m 00s: …`, `already 512 with no PI: …`,
 /// `refused 4096 with PI type 1; …`, `full format (FORMAT UNIT) to …`.
 /// `(full) rest` → (`full`, `rest`).
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(l.percent, Some(57.6));
         assert_eq!(l.eta_s, Some(5 * 3600 + 17 * 60));
         assert_eq!(l.elapsed_s, Some(7 * 3600 + 12 * 60));
-        let c = parse_line("0x5000cca26801b649: formatting (full) 1.2% through the card, about 12h 40m left, 9m so far").unwrap();
+        let c = parse_line("0x5000cca26801b649: formatting (full) 1.2%, about 12h 40m left, 9m so far").unwrap();
         assert_eq!((c.percent, c.eta_s, c.elapsed_s), (Some(1.2), Some(12 * 3600 + 40 * 60), Some(540)));
         let f = parse_line("sda: formatted (fast) in 1m 00s: 512-byte blocks, no PI").unwrap();
         assert_eq!((f.state.as_str(), f.elapsed_s), ("formatted", Some(60)));
@@ -512,7 +512,7 @@ mod tests {
         std::fs::write(f.join("sda.fmt"), "already type1 none\n").unwrap();
         std::fs::write(
             f.join("0x5000cca26801b649.log"),
-            "0x5000cca26801b649: FORMAT UNIT to 4096 with PI type 1 started (IMMED) through the card\n0x5000cca26801b649: formatting (full) 1.2% through the card, about 12h 40m left, 9m so far\n",
+            "0x5000cca26801b649: FORMAT UNIT to 4096 with PI type 1 started (IMMED) through the card\n0x5000cca26801b649: formatting (full) 1.2%, about 12h 40m left, 9m so far\n",
         )
         .unwrap();
         append(run, "step", "inventory", "done", "4 drives on the card, 1 with a Linux device", 100).unwrap();

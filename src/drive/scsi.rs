@@ -611,9 +611,9 @@ pub fn span(secs: u64) -> String {
     if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") }
 }
 
-/// A format's minute line through the card (#595), the shape the sg path
-/// prints: `0x…: formatting (full) 12.3% through the card, about 7h 10m
-/// left, 58m so far`. The ETA is the pace so far; none before 0.1 %.
+/// A format's minute line through the card (#595, #620), in the sg path's
+/// own wording, named by SAS address: `0x…: formatting (full) 12.3%, about
+/// 7h 10m left, 58m so far`. The ETA is the pace so far; none before 0.1 %.
 pub fn card_format_line(addr: u64, pct: f32, elapsed_secs: u64) -> String {
     let left = if (0.1..100.0).contains(&pct) {
         let rest = elapsed_secs as f64 * f64::from(100.0 - pct) / f64::from(pct);
@@ -623,7 +623,7 @@ pub fn card_format_line(addr: u64, pct: f32, elapsed_secs: u64) -> String {
     } else {
         "no ETA yet".to_string()
     };
-    format!("0x{addr:016x}: formatting (full) {pct:.1}% through the card, {left}, {} so far", span(elapsed_secs))
+    format!("0x{addr:016x}: formatting (full) {pct:.1}%, {left}, {} so far", span(elapsed_secs))
 }
 
 // ---- the transports ----
@@ -731,10 +731,10 @@ mod tests {
         // forge1's 10 TB drive: 14 h 25 m for the whole format.
         assert_eq!(
             card_format_line(0x5000cca268077301, 10.0, 3600),
-            "0x5000cca268077301: formatting (full) 10.0% through the card, about 9h 0m left, 1h 0m so far"
+            "0x5000cca268077301: formatting (full) 10.0%, about 9h 0m left, 1h 0m so far"
         );
-        assert_eq!(card_format_line(1, 0.0, 30), "0x0000000000000001: formatting (full) 0.0% through the card, no ETA yet, 0m so far");
-        assert_eq!(card_format_line(1, 100.0, 120), "0x0000000000000001: formatting (full) 100.0% through the card, about 0m left, 2m so far");
+        assert_eq!(card_format_line(1, 0.0, 30), "0x0000000000000001: formatting (full) 0.0%, no ETA yet, 0m so far");
+        assert_eq!(card_format_line(1, 100.0, 120), "0x0000000000000001: formatting (full) 100.0%, about 0m left, 2m so far");
         assert_eq!(span(59), "0m");
         assert_eq!(span(3 * 3600 + 7 * 60), "3h 7m");
     }
