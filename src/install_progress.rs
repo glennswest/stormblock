@@ -106,6 +106,12 @@ pub struct Line {
 /// `formatting (full) 1.2% through the card, about 12h 40m left, 9m so far`,
 /// `formatted (fast) in 1m 00s: …`, `already 512 with no PI: …`,
 /// `refused 4096 with PI type 1; …`, `full format (FORMAT UNIT) to …`.
+/// `(full) rest` → (`full`, `rest`).
+fn mode_of(s: &str) -> Option<(String, &str)> {
+    let (m, rest) = s.strip_prefix('(')?.split_once(')')?;
+    Some((m.to_string(), rest.trim_start()))
+}
+
 pub fn parse_line(raw: &str) -> Option<Line> {
     let l = raw.trim();
     // `sda: …`, `/dev/sda: …`, `0x5000…: …`: the drive's own name first.
@@ -113,7 +119,6 @@ pub fn parse_line(raw: &str) -> Option<Line> {
         Some((head, rest)) if !head.contains(' ') => rest,
         _ => l,
     };
-    let mode_of = |s: &str| s.strip_prefix('(').and_then(|r| r.split_once(')')).map(|(m, rest)| (m.to_string(), rest.trim_start()));
     if let Some(rest) = l.strip_prefix("formatting ") {
         let (mode, rest) = match mode_of(rest) {
             Some((m, r)) => (Some(m), r),

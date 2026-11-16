@@ -1885,6 +1885,12 @@ mod tests {
         // The question a booting node asks of every address DHCP gave it,
         // before it has any credential (#107).
         assert!(is_public("/api/v1/health"));
+        // The install's page and record (#616): open, and nothing beside them.
+        assert!(is_public("/api/v1/install/progress"));
+        assert!(is_public("/install"));
+        assert!(is_public("/"));
+        assert!(!is_public("/api/v1/install"));
+        assert!(!is_public("/install/x"));
         assert!(!is_public("/mk/v1/status"));
         assert!(!is_public("/api/v1/volumes"));
         assert!(!is_public("/metrics"));
