@@ -137,14 +137,18 @@ fn wrap(c: &Canvas, text: &str, px: f32, max: f32) -> Vec<String> {
 /// The whole screen.
 pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     c.clear(BG);
-    // Everything is laid out on 1920 × 1080 and scaled to the display.
-    let k = (c.w as f32 / 1920.0).min(c.h as f32 / 1080.0);
-    let ox = (c.w as f32 - 1920.0 * k) / 2.0;
-    let oy = (c.h as f32 - 1080.0 * k) / 2.0;
-    let x = |v: f32| (ox + v * k) as i64;
-    let y = |v: f32| (oy + v * k) as i64;
-    let xf = |v: f32| ox + v * k;
-    let yf = |v: f32| oy + v * k;
+    // Laid out on 1920 × 1080 and stretched to the display, across and down
+    // apart (a BMC's 4:3 or 5:4 console is filled, not letterboxed); type
+    // and corners take the smaller scale, so nothing is distorted.
+    let (kx, ky) = (c.w as f32 / 1920.0, c.h as f32 / 1080.0);
+    let k = kx.min(ky);
+    let x = |v: f32| (v * kx) as i64;
+    let y = |v: f32| (v * ky) as i64;
+    let xf = |v: f32| v * kx;
+    let yf = |v: f32| v * ky;
+    // Lengths across (lw), down (lh), and radii (l).
+    let lw = |v: f32| (v * kx) as i64;
+    let lh = |v: f32| (v * ky) as i64;
     let l = |v: f32| (v * k) as i64;
     let p = |v: f32| v * k;
 
@@ -155,17 +159,17 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
 
     // ---- the header frame ----
     let head = if failed { RED } else { AMBER };
-    c.elbow(x(24.0), y(24.0), l(1872.0), l(300.0), l(200.0), l(44.0), l(70.0), l(28.0), true, head);
+    c.elbow(x(24.0), y(24.0), lw(1872.0), lh(300.0), lw(200.0), lh(44.0), l(70.0), l(28.0), true, head);
     // The title, cut into the bar.
     let title = format!("{}  {kind}", if info.product.is_empty() { "STORMCOS" } else { info.product.as_str() });
     let tw = c.text_width(&title, p(54.0));
-    c.fill_rect(x(1896.0) - tw as i64 - l(48.0), y(24.0), tw as i64 + l(24.0), l(44.0), BG);
+    c.fill_rect(x(1896.0) - tw as i64 - lw(48.0), y(24.0), tw as i64 + lw(24.0), lh(44.0), BG);
     c.text(xf(1896.0 - 36.0), yf(66.0), p(54.0), head, Align::Right, &title);
     // The end cap of the bar.
-    c.round_rect(x(1896.0) - l(16.0), y(24.0), l(16.0), l(44.0), l(8.0), Corners::RIGHT, head);
+    c.round_rect(x(1896.0) - lw(16.0), y(24.0), lw(16.0), lh(44.0), l(8.0), Corners::RIGHT, head);
     // Side blocks of the header's vertical bar.
-    c.fill_rect(x(24.0), y(196.0), l(200.0), l(6.0), BG);
-    c.fill_rect(x(24.0), y(202.0), l(200.0), l(122.0), GREY);
+    c.fill_rect(x(24.0), y(196.0), lw(200.0), lh(6.0), BG);
+    c.fill_rect(x(24.0), y(202.0), lw(200.0), lh(122.0), GREY);
     c.text(xf(214.0), yf(190.0), p(30.0), INK, Align::Right, kind);
     c.text(xf(214.0), yf(316.0), p(30.0), INK, Align::Right, &format!("{}", info.release.to_uppercase()));
 
@@ -199,23 +203,23 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     };
     c.text(xf(1880.0), yf(206.0), p(124.0), if failed { RED } else { AMBER }, Align::Right, &big);
     let eta = u(rec, "eta_s").map(|e| format!("ETA {}", span(e))).unwrap_or_else(|| if formatting.is_empty() { String::new() } else { "ETA —".into() });
-    if !eta.is_empty() {
+    if !eta.is_empty() && !failed && !finished {
         c.text(xf(1880.0), yf(262.0), p(44.0), BLUE, Align::Right, &eta);
     }
     let now_said = rec.get("stage").map(|v| s(v, "detail").to_string()).unwrap_or_default();
-    if !now_said.is_empty() && !failed {
+    if !now_said.is_empty() && !failed && !finished {
         c.text(xf(1880.0), yf(304.0), p(26.0), GREY, Align::Right, &c.fit(&now_said.to_uppercase(), p(26.0), p(760.0)));
     }
 
     // ---- the lower frame ----
     let frame = if failed { RED } else { LAVENDER };
-    c.elbow(x(24.0), y(348.0), l(1872.0), l(708.0), l(200.0), l(36.0), l(70.0), l(28.0), false, frame);
-    c.round_rect(x(1896.0) - l(16.0), y(1020.0), l(16.0), l(36.0), l(8.0), Corners::RIGHT, frame);
+    c.elbow(x(24.0), y(348.0), lw(1872.0), lh(708.0), lw(200.0), lh(36.0), l(70.0), l(28.0), false, frame);
+    c.round_rect(x(1896.0) - lw(16.0), y(1020.0), lw(16.0), lh(36.0), l(8.0), Corners::RIGHT, frame);
     // Side blocks: DRIVES, STEPS, HEALTH.
     let blocks: [(f32, f32, Rgb, &str); 3] = [(348.0, 328.0, BLUE, "DRIVES"), (682.0, 186.0, AMBER, "STEPS"), (874.0, 108.0, PEACH, "HEALTH")];
     for (top, h, col, label) in blocks {
-        c.fill_rect(x(24.0), y(top), l(200.0), l(h), col);
-        c.fill_rect(x(24.0), y(top + h), l(200.0), l(6.0), BG);
+        c.fill_rect(x(24.0), y(top), lw(200.0), lh(h), col);
+        c.fill_rect(x(24.0), y(top + h), lw(200.0), lh(6.0), BG);
         c.text(xf(214.0), yf(top + h - 12.0), p(30.0), INK, Align::Right, label);
     }
 
@@ -248,14 +252,14 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
         c.text(xf(cols[3]), yf(base), p(30.0), GREY, Align::Left, &s(d, "found").to_uppercase());
         let (said, col) = drive_state(d);
         let sw = c.text_width(&said, p(28.0)) + p(36.0);
-        c.pill(x(cols[4]), y(ry + 12.0), sw as i64, l(36.0), col);
-        c.text(xf(cols[4]) + p(18.0), yf(ry + 40.0), p(28.0), INK, Align::Left, &said);
+        c.pill(x(cols[4]), y(ry + 12.0), sw as i64, lh(36.0), col);
+        c.text(xf(cols[4]) + p(18.0), yf(ry + 12.0) + (lh(36.0) as f32 + p(28.0) * 0.72) / 2.0, p(28.0), INK, Align::Left, &said);
         let pct = d.get("percent").and_then(Value::as_f64);
         let frac = match s(d, "state") {
             "formatted" | "already" | "laid" => 1.0,
             _ => pct.unwrap_or(0.0) as f32 / 100.0,
         };
-        c.bar(x(cols[5]), y(ry + 20.0), l(420.0), l(22.0), frac, TRACK, col);
+        c.bar(x(cols[5]), y(ry + 20.0), lw(420.0), lh(22.0), frac, TRACK, col);
         if let Some(pc) = pct {
             c.text(xf(cols[6]), yf(base), p(34.0), col, Align::Left, &format!("{pc:.1}%"));
         }
@@ -271,7 +275,7 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     // ---- the end panels, else the steps and the health strip ----
     if failed || finished {
         let col = if failed { RED } else { BLUE };
-        c.round_rect(x(260.0), y(700.0), l(1636.0), l(296.0), l(36.0), Corners::ALL, col);
+        c.round_rect(x(260.0), y(700.0), lw(1636.0), lh(296.0), l(36.0), Corners::ALL, col);
         let head = if failed { format!("{kind} STOPPED") } else { "INSTALL COMPLETE".to_string() };
         c.text(xf(300.0), yf(776.0), p(64.0), INK, Align::Left, &head);
         let words = if failed {
@@ -284,10 +288,10 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
             if !st.is_empty() { st } else if !step.is_empty() { step } else { "SEE THE LOG (F2)".into() }
         } else {
             format!(
-                "{} AT {} BOOTS FROM ITS OWN DISK.  THE INSTALL'S RECORD: HTTP://{}:9090/INSTALL",
+                "{} AT {} BOOTS FROM ITS OWN DISK.   ITS INSTALL RECORD:  http://{}:9090/install",
                 if info.node.is_empty() { "THIS NODE".into() } else { info.node.to_uppercase() },
                 if info.address.is_empty() { "ITS ADDRESS".into() } else { info.address.clone() },
-                if info.address.is_empty() { "<NODE>".into() } else { info.address.clone() },
+                if info.address.is_empty() { "<node>".into() } else { info.address.clone() },
             )
         };
         for (i, line) in wrap(c, &words, p(32.0), p(1560.0)).iter().take(5).enumerate() {
@@ -309,7 +313,7 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
             let sx = 260.0 + i as f32 * (w + 14.0);
             let state = s(st, "state");
             let col = step_colour(state);
-            c.pill(x(sx), y(712.0), l(w), l(56.0), col);
+            c.pill(x(sx), y(712.0), lw(w), lh(56.0), col);
             let ink = if col == TRACK { GREY } else { INK };
             c.text(xf(sx + w / 2.0), yf(752.0), p(30.0), ink, Align::Center, &c.fit(&step_name(s(st, "step")), p(30.0), p(w - 20.0)));
             let when = match (state, u(st, "at"), started) {
@@ -348,7 +352,7 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     // The key line along the bottom bar.
     let keys = "F2  LOG    F1  THIS SCREEN";
     let kw = c.text_width(keys, p(26.0));
-    c.fill_rect(x(1896.0) - kw as i64 - l(60.0), y(1020.0), kw as i64 + l(24.0), l(36.0), BG);
+    c.fill_rect(x(1896.0) - kw as i64 - lw(60.0), y(1020.0), kw as i64 + lw(24.0), lh(36.0), BG);
     c.text(xf(1896.0 - 48.0), yf(1050.0), p(26.0), frame, Align::Right, keys);
 }
 

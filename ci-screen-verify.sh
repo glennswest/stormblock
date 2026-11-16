@@ -27,7 +27,9 @@ cargo build --locked --release --target x86_64-unknown-linux-musl --bin stormblo
 BIN="${CARGO_TARGET_DIR:-target}/x86_64-unknown-linux-musl/release/stormblock"
 
 W=$(mktemp -d)
-trap 'kill "${QPID:-0}" 2>/dev/null || :; rm -rf "$W"' EXIT
+# Only QEMU's own pid: an empty one must never become `kill 0` (the whole
+# process group, the build job with it).
+trap '[ -n "${QPID:-}" ] && kill "$QPID" 2>/dev/null; rm -rf "$W"' EXIT
 R=$W/root
 mkdir -p "$R"/{bin,sbin,proc,sys,dev,tmp,run/stormblock/storage-format}
 cp "$BB" "$R/bin/busybox"
