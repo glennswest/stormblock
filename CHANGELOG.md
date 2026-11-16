@@ -68,6 +68,14 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.11.0] — 2026-11-16
+
+### Added
+- #616: the install's page and progress record, served by the host: `GET /` (or `/install`) and `GET /api/v1/install/progress` on :9090, by `stormblock install-status` in the initramfs until switch_root and by the engine after; open, GET only. Every drive (Linux's or the card's only), its format state, percent and ETA, the layout's steps, the stages, the console's last lines. docs/install-progress.md.
+
+### Fixed
+- #620: the card path's minute line is the sg path's wording, named by SAS address.
+
 ## [v24.10.2] — 2026-11-16
 
 ### Fixed
