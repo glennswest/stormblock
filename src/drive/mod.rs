@@ -126,7 +126,47 @@ pub enum DriveError {
     Other(anyhow::Error),
 }
 
+/// The runtime every initiator connection (NVMe/TCP, iSCSI) is made on
+/// (#628, #613).
+///
+/// A socket belongs to the reactor of the runtime it was made in, and is
+/// driven only while that runtime lives. Connections are made lazily, by
+/// whatever operation finds none, and a node's engine runs every ublk export
+/// on a runtime of its own (#522): a connection made by one export's request
+/// was shared by all 81, and when the exports stopped one by one at a
+/// handover, the first runtime to go took the connection with it. Every
+/// other export's in-flight read, and the volume records written after, then
+/// failed with "A Tokio 1.x context was found, but it is being shutdown":
+/// the slab marked failed for a volume, the records not written (forge1
+/// 12.86/12.87). Made here, on one runtime that is never dropped (a static
+/// lives until the process exits), a connection outlives any caller's
+/// runtime; the callers still poll it from their own.
+pub fn io_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("initiator-io")
+            .enable_all()
+            .build()
+            .expect("the initiators' I/O runtime")
+    })
+}
+
+/// Tokio's word for an I/O resource whose runtime is gone or going (#628):
+/// "A Tokio 1.x context was found, but it is being shutdown." Tokio gives it
+/// no kind of its own (`Other`), so it is told by its text.
+pub fn is_runtime_shutdown(e: &std::io::Error) -> bool {
+    e.to_string().contains("context was found, but it is being shutdown")
+}
+
 impl DriveError {
+    /// The process (a runtime of it) is stopping: never the storage's fault,
+    /// never a leg failure, never a path down (#628).
+    pub fn is_runtime_shutdown(&self) -> bool {
+        matches!(self, DriveError::Io(e) if is_runtime_shutdown(e))
+    }
+
     /// The network (or a remote device) did not answer: a timeout, a refused,
     /// reset or dropped connection (#359). Worth another attempt on a new
     /// connection; never a reason to stop trusting the media.
@@ -145,6 +185,9 @@ impl DriveError {
     /// that survives a restart. Same reasoning as #92: answer at the layer
     /// the fault is actually in.
     pub fn is_media_failure(&self) -> bool {
+        if self.is_runtime_shutdown() {
+            return false;
+        }
         match self {
             // A timeout or a dropped connection is the network, not the
             // media (#359): the same I/O on a new connection succeeds.
@@ -587,5 +630,18 @@ mod uri_tests {
         assert_eq!(iqn, "iqn.2024.io.stormblock:v1");
         assert!(parse_iscsi_uri("iscsi://noport/iqn").is_none());
         assert!(parse_iscsi_uri("nvme-tcp://h:4420/nqn").is_none());
+    }
+
+    /// #628: a runtime stopping under an I/O is neither the media nor the
+    /// network, and never a reason to mark a leg failed.
+    #[test]
+    fn a_runtime_stopping_is_not_a_drive_failure() {
+        let e = DriveError::Io(std::io::Error::other("A Tokio 1.x context was found, but it is being shutdown."));
+        assert!(e.is_runtime_shutdown());
+        assert!(!e.is_media_failure());
+        assert!(!e.is_transport());
+        let media = DriveError::Io(std::io::Error::other("I/O error"));
+        assert!(!media.is_runtime_shutdown());
+        assert!(media.is_media_failure());
     }
 }

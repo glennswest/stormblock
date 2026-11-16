@@ -68,7 +68,13 @@ data. A restore is `POST /v1/volumes` with `source: {kind: snapshot}` (#130).
   connection (#301). Every NVMe/TCP command and connect is bounded
   (`STORMBLOCK_NVME_TCP_IO_TIMEOUT_SECS`, 30 s) and its sockets carry TCP
   keepalive: a connection that went silent fails the command, is dropped,
-  and the next command reconnects (#358). An answer is checked against its
+  and the next command reconnects (#358). Both initiators make every
+  connection on one runtime of their own that lives as long as the process
+  (#628): a connection is shared by every ublk export's runtime and outlives
+  any of them stopping. An I/O that fails because this process is stopping
+  ("Tokio context … being shutdown") marks no leg failed and no path down,
+  and a stop whose volume records were not written says `FATAL: … stop:
+  DURABILITY: …` and exits non-zero. An answer is checked against its
   command (its CID and data offset, and a read's length): one that is not the
   command's, or is short, drops the connection and the command is retried on
   a new one, by another path when there is one; a command its caller gave up

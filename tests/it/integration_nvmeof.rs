@@ -920,3 +920,64 @@ async fn a_read_abandoned_before_its_answer_never_answers_the_next_command() {
     proxy_task.abort();
     server.abort();
 }
+
+/// #628 / #613 (forge1 12.86, 12.87): a node's engine serves each ublk export
+/// on a runtime of its own, and the device's connections were made by
+/// whichever export's request found none. When those runtimes stopped at a
+/// handover, every connection made in one died with it ("A Tokio 1.x context
+/// was found, but it is being shutdown") for every other user: reads failed,
+/// a slab was marked failed for a volume, the volume records were not
+/// written. Connections made from a runtime that is then dropped must keep
+/// working from another.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connections_outlive_the_runtime_that_made_them() {
+    let (_dir, vol, _vm) = common::setup_raid1_volume(64 * 1024 * 1024, 32 * 1024 * 1024).await;
+    let (addr, server) = common::start_nvmeof_target(vol, default_nvmeof_config()).await;
+    let uri = format!("nvme-tcp://{addr}/{SUBSYSTEM_NQN}?nsid=1");
+    let dev: std::sync::Arc<dyn BlockDevice> = std::sync::Arc::from(open_one_drive(&uri).await.expect("URI attach"));
+    let bs = dev.block_size() as usize;
+    let data: Vec<u8> = (0..bs * 64).map(|i| (i % 253) as u8).collect();
+    dev.write(0, &data).await.unwrap();
+
+    // Parallel reads from a runtime of their own: every pooled connection
+    // the device lacks is made here. Then the runtime is dropped, as an
+    // export's is when it stops.
+    let d = dev.clone();
+    tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let reads = (0..32).map(|i| {
+                let d = d.clone();
+                async move {
+                    let mut b = vec![0u8; bs];
+                    d.read((i % 64 * bs) as u64, &mut b).await.map(|_| ())
+                }
+            });
+            for r in futures_util::future::join_all(reads).await {
+                r.expect("a read in the export's runtime");
+            }
+        });
+        drop(rt);
+    })
+    .await
+    .unwrap();
+
+    // From this runtime, as many reads at once: every connection is used,
+    // and none may have died with the runtime that made it.
+    let reads = (0..32).map(|i| {
+        let d = dev.clone();
+        let want = data[(i % 64) * bs..(i % 64 + 1) * bs].to_vec();
+        async move {
+            let mut b = vec![0u8; bs];
+            d.read(((i % 64) * bs) as u64, &mut b).await.map(|_| b == want)
+        }
+    });
+    for (i, r) in futures_util::future::join_all(reads).await.into_iter().enumerate() {
+        match r {
+            Ok(same) => assert!(same, "read {i}: the bytes written"),
+            Err(e) => panic!("read {i} after the other runtime stopped: {e}"),
+        }
+    }
+    dev.flush().await.expect("a flush after the other runtime stopped (the records' flush, #628)");
+    server.abort();
+}

@@ -454,6 +454,21 @@ async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = io::Resul
 impl Conn {
     /// TCP connect + ICReq/ICResp + Fabric Connect for `qid`, and
     /// DH-HMAC-CHAP when the target asks for it.
+    /// [`establish`](Self::establish) on [`crate::drive::io_runtime`]: the connection is
+    /// registered with a runtime that outlives every caller's (#628).
+    async fn establish_owned(
+        spec: &NvmeTcpSpec,
+        addr: &str,
+        source: Option<&crate::netif::PathSource>,
+        qid: u16,
+    ) -> io::Result<Self> {
+        let (spec, addr, source) = (spec.clone(), addr.to_string(), source.cloned());
+        crate::drive::io_runtime()
+            .spawn(async move { Conn::establish(&spec, &addr, source.as_ref(), qid).await })
+            .await
+            .map_err(|e| io::Error::other(format!("NVMe-TCP connect: {e}")))?
+    }
+
     async fn establish(
         spec: &NvmeTcpSpec,
         addr: &str,
@@ -997,7 +1012,7 @@ impl NvmeofDevice {
         let mut last = None;
         for (i, p) in paths.iter().enumerate() {
             let a = &p.addr;
-            match Conn::establish(spec, a, p.source.as_ref(), 0).await {
+            match Conn::establish_owned(spec, a, p.source.as_ref(), 0).await {
                 Ok(c) => {
                     admin = Some((i, c));
                     break;
@@ -1037,7 +1052,7 @@ impl NvmeofDevice {
         let max_transfer = transfer_for(mdts, block_size);
         drop(admin);
 
-        let io_conn = Conn::establish(spec, &paths[first].addr, paths[first].source.as_ref(), 1)
+        let io_conn = Conn::establish_owned(spec, &paths[first].addr, paths[first].source.as_ref(), 1)
             .await
             .map_err(DriveError::Io)?;
         let mtu = io_conn.mtu;
@@ -1133,7 +1148,7 @@ impl NvmeofDevice {
         };
         let mut guard = ConnGuard { guard, path };
         if guard.is_none() {
-            match Conn::establish(&self.spec, &path.addr, path.source.as_ref(), 1).await {
+            match Conn::establish_owned(&self.spec, &path.addr, path.source.as_ref(), 1).await {
                 Ok(c) => {
                     if c.mtu > 0 {
                         path.mtu.store(c.mtu, Ordering::Relaxed);
@@ -1172,6 +1187,11 @@ impl NvmeofDevice {
     /// skip its path for a while (#90): the retry goes by another.
     fn failed(guard: &mut ConnGuard<'_>, e: io::Error) -> DriveError {
         **guard = None;
+        // The caller's runtime stopping is not the path failing (#628).
+        if crate::drive::is_runtime_shutdown(&e) {
+            tracing::debug!("NVMe-TCP initiator: path {}: the caller's runtime is stopping: {e}", guard.path.name());
+            return DriveError::Io(e);
+        }
         *guard.path.down_until.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now() + PATH_DOWN);
         tracing::warn!("NVMe-TCP initiator: path {} failed: {e}", guard.path.name());
         DriveError::Io(e)
@@ -1239,7 +1259,7 @@ impl BlockDevice for NvmeofDevice {
     async fn refresh_capacity(&self) -> DriveResult<u64> {
         let mut last = None;
         for p in &self.paths {
-            let mut admin = match Conn::establish(&self.spec, &p.addr, p.source.as_ref(), 0).await {
+            let mut admin = match Conn::establish_owned(&self.spec, &p.addr, p.source.as_ref(), 0).await {
                 Ok(c) => c,
                 Err(e) => {
                     last = Some(e);

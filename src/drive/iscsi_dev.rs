@@ -653,7 +653,13 @@ impl IscsiDevice {
     async fn session(&self) -> DriveResult<tokio::sync::MutexGuard<'_, Option<IscsiConnection>>> {
         let mut g = self.conn.lock().await;
         if g.is_none() {
-            let mut c = Self::establish(&self.portal, &self.iqn).await?;
+            // On the initiators' own runtime (#628): the connection is
+            // shared by every caller and must not die with the one that made it.
+            let (portal, iqn) = (self.portal.clone(), self.iqn.clone());
+            let mut c = crate::drive::io_runtime()
+                .spawn(async move { Self::establish(&portal, &iqn).await })
+                .await
+                .map_err(|e| DriveError::Other(anyhow::anyhow!("iSCSI login: {e}")))??;
             c.block_size = self.block_size.load(Ordering::Relaxed);
             *g = Some(c);
             tracing::info!("iSCSI initiator: logged in again to {} target={}", self.portal, self.iqn);
@@ -668,7 +674,11 @@ impl IscsiDevice {
     ) -> DriveResult<Self> {
         let addr = format!("{portal}:{port}");
         tracing::info!("iSCSI initiator: connecting to {addr} target={iqn}");
-        let mut conn = Self::establish(&addr, iqn).await?;
+        let (a2, i2) = (addr.clone(), iqn.to_string());
+        let mut conn = crate::drive::io_runtime()
+            .spawn(async move { Self::establish(&a2, &i2).await })
+            .await
+            .map_err(|e| DriveError::Other(anyhow::anyhow!("iSCSI login: {e}")))??;
         tracing::info!("iSCSI initiator: login successful");
 
         // READ CAPACITY to get disk size

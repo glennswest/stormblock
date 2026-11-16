@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#628, #613)
+- **fix:** #628, #613 (forge1 12.86 and 12.87: at boot-local's stop, reads on the appliance's clone failed with "A Tokio 1.x context was found, but it is being shutdown", a slab was marked failed for a volume, the volume records were not written; 12.86's stormcert then died by SIGBUS on EIO): NVMe/TCP and iSCSI connections are made on one initiator runtime of their own that is never dropped (`drive::io_runtime`). Before, a connection was made lazily in the runtime of whichever ublk export's request found none, shared by all 81 exports, and died with that export's runtime when the exports stopped one by one: every other export's in-flight reads and the records' flush after it failed through it.
+- **fix:** #628: an I/O that fails because this process's runtime is stopping is no leg failure (`DriveError::is_runtime_shutdown`): no slab marked failed for a volume, no media failure, no NVMe/TCP path marked down.
+- **fix:** #628: a stop whose volume records were not written is a FATAL, said in words on the console: `FATAL: boot-local stop: DURABILITY: the volume records were NOT written on the way down (…)`, and boot-local exits non-zero; adopt-ublk's stop says the same line.
+
 ### 2026-11-16 (#573)
 - **feat:** #573 step 8 (stormcentral#1318: "every drive, by serial and bay; the format used"): the storage layout report (`GET /api/v1/storage/layout`, health's `storage_layout`) gives each drive its `serial`, `wwid`, `controller`, `bay` (the enclosure slot, else the mpt card's slot, `bay_from`) and `pi_type` (sd's `protection_type`; `integrity` is the kernel's DIX profile, `none` on forge1's HBA330 for PI type 1 drives). After a reboot it still says what the install did: the install's report is kept in system-data (`config/storage-layout.install.json`), put back on every boot, and the engine fills each drive's `format`/`protection`/`method` from it by WWID (`format_from: install`), with `asked` and `regions`. `/init`'s report carries each drive's WWID.
 

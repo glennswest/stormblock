@@ -10022,10 +10022,17 @@ async fn handle_adopt_ublk(
             let flushed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let vm = state.volume_manager.lock().await;
                 vm.persist().await;
+                vm.durability_fault()
             })
             .await;
             match flushed {
-                Ok(()) => tracing::info!("volume metadata flushed"),
+                // Said as a FATAL of the stop (#628), on the console too.
+                Ok(Some(why)) => {
+                    let line = stop_durability_fatal("adopt", &why);
+                    eprintln!("{line}");
+                    tracing::error!("{line}");
+                }
+                Ok(None) => tracing::info!("volume metadata flushed"),
                 Err(_) => tracing::warn!(
                     "volume metadata not flushed within 10s — something still holds the manager. \
                      Each slab's own copy stands, which is what adoption reads."
@@ -11270,6 +11277,16 @@ async fn handle_boot_local(
         // Capture extent maps mutated while serving (COW allocations) so
         // snapshots stay bootable across the next reattach (#13).
         mgr.persist().await;
+        // The records the successor opens (#628): not written is a FATAL of
+        // this stop, said in words, never a WARN scrolled past. The slabs'
+        // own slot tables stand; the next engine reconciles from them.
+        if let Some(why) = mgr.durability_fault() {
+            let line = stop_durability_fatal("boot-local", &why);
+            eprintln!("{line}");
+            tracing::error!("{line}");
+            steps.mark("volume metadata NOT persisted; exiting");
+            anyhow::bail!("{line}");
+        }
         steps.mark("volume metadata persisted; exiting");
         if let Some(msg) = fatal {
             anyhow::bail!("{msg} — is ublk_drv loaded (Linux 6.0+)?");
@@ -11285,6 +11302,16 @@ async fn handle_boot_local(
 
     #[cfg(target_os = "linux")]
     Ok(())
+}
+
+/// The line a stop says when the volume records it owes were not written
+/// (#628): a FATAL of the stop, in words.
+fn stop_durability_fatal(who: &str, why: &str) -> String {
+    format!(
+        "FATAL: {who} stop: DURABILITY: the volume records were NOT written on the way down ({why}). \
+         The next engine reconciles the volumes from the slabs' slot tables; what changed since the \
+         last records were written is only as good as that (#628)"
+    )
 }
 
 #[cfg(feature = "iscsi")]

@@ -2,6 +2,27 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #628 / #613 — stops race in-flight I/O through dead connections (2026-11-16, P1)
+
+forge1 12.86 (#613) and 12.87 (#628): at boot-local's stop, reads on forge's
+clone failed "Tokio context … being shutdown", a slab was marked failed for a
+volume, the records were not written. Cause: NVMe/TCP connections are made
+lazily in whichever runtime asks, and each of the 81 ublk exports has its own
+(#522): a shared connection died with the first export runtime to stop. The
+ublk servers already drain their own in-flight requests before stopping.
+
+- [x] `drive::io_runtime`: every NVMe/TCP and iSCSI connection made on one
+  never-dropped runtime (`Conn::establish_owned`, iSCSI `session`/`connect`)
+- [x] `DriveError::is_runtime_shutdown`: not media, not a leg failure
+  (`mark_failed`), not a path down (`failed`)
+- [x] boot-local / adopt stop: records not written = `FATAL: … stop: DURABILITY`
+- [x] tests: `connections_outlive_the_runtime_that_made_them` (it/nvmeof),
+  `a_runtime_stopping_marks_no_leg_failed` (thin), the classification (drive)
+- [ ] sc-build `sh check.sh`; the test shown to fail without the fix; release
+- Not done: a scsi_debug runtime test (#628 ask 3): the failure was the
+  connection's runtime, not a slow local leg, and the in-process test
+  reproduces that mechanism; a local O_DIRECT leg has no shared socket.
+
 ## #573 — the layout laid on every drive: step 8 finished, verification (2026-11-16, P0)
 
 Steps 1–8 landed in v24.4.0 (and the fixes through v24.12.1). Seen working:

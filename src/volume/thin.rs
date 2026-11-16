@@ -1088,6 +1088,16 @@ impl ThinVolumeHandle {
     #[track_caller]
     fn mark_failed(&self, slab: SlabId, why: &DriveError) {
         let at = std::panic::Location::caller();
+        // The process stopping under the read (#628: a runtime dropped with
+        // reads in flight): the storage said nothing. Marking it would be
+        // written into the volume's record and survive the restart.
+        if why.is_runtime_shutdown() {
+            tracing::warn!(
+                volume = %self.id, slab = %slab, at = %format!("{}:{}", at.file(), at.line()),
+                "the I/O failed because this process is stopping, not the leg: not marked failed: {why}"
+            );
+            return;
+        }
         // A transport error (the network, after the device's own retries) is
         // never sticky on the only copy (#359): marking it would leave a
         // single-copy volume unreadable after one blip, its reads skipping
@@ -3818,6 +3828,21 @@ mod tests {
         for p in paths {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    /// #628: a read that failed because this process's runtime is stopping
+    /// marks no leg failed; a media error still does.
+    #[tokio::test]
+    async fn a_runtime_stopping_marks_no_leg_failed() {
+        let (handle, paths) = setup_test_volume(1024 * 1024).await;
+        let slab = SlabId::new();
+        let stopping = DriveError::Io(std::io::Error::other("A Tokio 1.x context was found, but it is being shutdown."));
+        handle.mark_failed(slab, &stopping);
+        assert!(!handle.is_failed(slab), "a runtime stopping is not a leg failure");
+        let media = DriveError::Io(std::io::Error::other("medium error"));
+        handle.mark_failed(slab, &media);
+        assert!(handle.is_failed(slab), "a media error still marks the leg");
+        cleanup(&paths);
     }
 
     #[tokio::test]
