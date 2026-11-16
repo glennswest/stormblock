@@ -104,6 +104,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.14.0] — 2026-11-16
+
+### Added
+- #627: the write-test matrix on a card's drive (`POST/GET /api/v1/storage/hba/{sas}/write-test`, `stormblock hba write-test`): WRPROTECT 0 and 1 at LBA 0 and the last LBA, each read back with RDPROTECT 0 and 1, the card's link after each step, mode and log pages before and after. A drive's details carry its mode pages, raw and said.
+
 ## [v24.13.2] — 2026-11-16
 
 ### Fixed
