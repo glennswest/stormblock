@@ -2,6 +2,19 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #630 — kernel 7.3.3-300.fc45: the initramfs for it (2026-11-16, P0)
+
+Nothing in the script names a kernel: it takes KVER, and stormcentral's
+`component initramfs` builds it for the release kernel. Built at 550b837b
+(v24.13.1): blob-5026abe91b4f3ea5, "initramfs for 7.3.3-300.fc45.x86_64",
+passed (the dependency closure is fatal). On x86_64 nothing checked the boot
+path's modules by name (aarch64 only, #514): a renamed driver would build.
+
+- [x] `boot_path_missing` on x86_64 (nvme, nvme-tcp, ublk_drv), aarch64 + r8169
+- [x] `ci-kernel-initramfs.sh <NVR>`: the image from Fedora's packages, the
+  boot path listed
+- [ ] sc-build it for 7.3.3-300.fc45; check.sh; the initramfs at the new head
+
 ## #628 / #613 — stops race in-flight I/O through dead connections (2026-11-16, P1)
 
 forge1 12.86 (#613) and 12.87 (#628): at boot-local's stop, reads on forge's

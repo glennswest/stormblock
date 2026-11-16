@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#630)
+- **fix:** #630 (kernel 7.3.3-200.fc44 -> 7.3.3-300.fc45): the initramfs checks its boot path by name on x86_64 too, not only on aarch64 (#514): `nvme`, `nvme-tcp` (the claim) and `ublk_drv` (the root) must be in the image or built into the kernel, or the build fails naming them; aarch64 adds `r8169`. A kernel move that drops or renames one fails the image, not the node's boot. The build says `boot path: … in the image or built in`.
+- **feat:** #630: `ci-kernel-initramfs.sh <NVR>` builds this repo's initramfs for a Fedora kernel the build host does not run, from Fedora's own packages (dnf, else Koji), each checked against that release's key, with `depmod` run on the unpacked tree; it lists the boot path's modules (ublk_drv, nvme-tcp, nvme, sd_mod, mpt3sas, virtio) as module, built in or ABSENT. `sc-build 'bash ci-kernel-initramfs.sh 7.3.3-300.fc45'`.
+
 ### 2026-11-16 (#628, after v24.13.1)
 - **docs:** #628/#613: work plan - v24.13.1 staged; the negative control (connections made in the caller's runtime) failed the new test with forge1's own error.
 

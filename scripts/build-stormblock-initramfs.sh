@@ -650,24 +650,27 @@ EOF
 echo "  modules:    $_mod_checked checked, all $TARGET_ARCH"
 
 # --- BEGIN boot path (covered by tests/initramfs-arch.sh)
-# What the Orion O6N boots through (#514), by name: a tree can lose a driver
-# and still look whole. In the image, or built into this kernel. r8169 is its
-# NIC, nvme its M.2 drives, nvme-tcp the claim, ublk_drv the root.
-boot_path_missing() { # module-dir -> the modules of the O6N's path that are absent
-    for _bp in net/ethernet/realtek/r8169 nvme/host/nvme nvme/host/nvme-tcp block/ublk_drv; do
+# What every node boots through, by name: a tree can lose a driver and still
+# look whole, and its dependency set close (#514; #630: checked on x86_64 too,
+# so a kernel move that drops or renames one fails the image, not the boot).
+# In the image, or built into this kernel. nvme is the drives, nvme-tcp the
+# claim, ublk_drv the root; the Orion O6N (aarch64) adds r8169, its NIC.
+boot_path_missing() { # module-dir [arch] -> the modules of the boot path that are absent
+    _bp_list="nvme/host/nvme nvme/host/nvme-tcp block/ublk_drv"
+    [ "${2:-aarch64}" = aarch64 ] && _bp_list="net/ethernet/realtek/r8169 $_bp_list"
+    for _bp in $_bp_list; do
         ls "$1/kernel/drivers/$_bp".ko* >/dev/null 2>&1 && continue
         grep -q "kernel/drivers/$_bp.ko" "$1/modules.builtin" 2>/dev/null && continue
         echo "$_bp"
     done
 }
 # --- END boot path
-if [ "$TARGET_ARCH" = aarch64 ]; then
-    _absent=$(boot_path_missing "$DEST")
-    if [ -n "$_absent" ]; then
-        echo "ERROR: the O6N's boot path needs these, absent from $MODDIR:" $_absent
-        exit 1
-    fi
+_absent=$(boot_path_missing "$DEST" "$TARGET_ARCH")
+if [ -n "$_absent" ]; then
+    echo "ERROR: the boot path ($TARGET_ARCH) needs these, absent from $MODDIR and not built into $KVER:" $_absent
+    exit 1
 fi
+echo "  boot path:  $(boot_path_missing /nonexistent "$TARGET_ARCH" | tr '\n' ' ')in the image or built in"
 
 printf '  modules:    %d files, %s (of %s; the rest is in the modules golden)\n' \
     "$(find "$DEST" -name '*.ko*' | wc -l)" \

@@ -59,6 +59,15 @@ echo "kernel/drivers/net/ethernet/realtek/r8169.ko" > "$M/modules.builtin"
 same "r8169 built in: there" "$(boot_path_missing "$M")" ""
 rm "$M/kernel/drivers/nvme/host/nvme-tcp.ko.xz" "$M/kernel/drivers/block/ublk_drv.ko.xz"
 same "two gone: both named" "$(boot_path_missing "$M" | tr '\n' ' ')" "nvme/host/nvme-tcp block/ublk_drv "
+# #630: x86_64 has the same path but its NIC is any: r8169 is not asked.
+: > "$M/kernel/drivers/nvme/host/nvme-tcp.ko.xz"; : > "$M/kernel/drivers/block/ublk_drv.ko.xz"
+rm -f "$M/modules.builtin"
+same "x86_64: no r8169 needed" "$(boot_path_missing "$M" x86_64)" ""
+same "aarch64 still asks for it" "$(boot_path_missing "$M" aarch64)" "net/ethernet/realtek/r8169"
+rm "$M/kernel/drivers/block/ublk_drv.ko.xz"
+same "x86_64: no ublk_drv: named" "$(boot_path_missing "$M" x86_64)" "block/ublk_drv"
+echo "kernel/drivers/block/ublk_drv.ko" > "$M/modules.builtin"
+same "x86_64: ublk_drv built in: there" "$(boot_path_missing "$M" x86_64)" ""
 
 # A foreign program is found by its header, wherever it is; firmware and scripts
 # are nobody's.
