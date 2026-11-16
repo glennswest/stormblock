@@ -2,6 +2,17 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #616 (again) — the record after a reboot (2026-11-16, P1)
+
+Reopened: pvetest2's record (12.90-flowsdn, an hour after a passed install)
+said `flow-over running`. /init writes `starting` and `flow-over running` on
+every boot into /run (tmpfs); the boot at 20:11 after the install was an
+ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
+- [x] `install_progress::settle` after the state restore: install boot →
+  kept in `<data-dir>/install-progress.kept`; other boots → kept put back;
+  engine appends keep the copy
+- [ ] check.sh; release; shipped with the same proof
+
 ## #625 (again) — a drive that left the link; the proof (2026-11-16, P0)
 
 Reopened: the proof was checked on pvetest2 (no storage:). pvetest3's 12.89

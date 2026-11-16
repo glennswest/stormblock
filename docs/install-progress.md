@@ -43,6 +43,29 @@ tmpfs that survives switch_root), so nothing keeps it in step by hand:
   event (`<epoch> <kind> <name> <state> <detail>`), appended by `/init`'s
   `progress` and by the engine (`laid`, `failed`, `booted`).
 
+### After the install: the record is kept (#616)
+
+`/run` is a tmpfs: a reboot loses it, and every boot's `/init` writes its own
+`starting` and `flow-over running` lines into a new events file. pvetest2's
+record said `flow-over running` an hour after its install passed: an
+ordinary boot after it had started a fresh record, and the install's own
+`laid` and `booted` were gone. So the node's engine (`adopt-ublk`), right
+after it restores its data directory from the state volume, settles which
+record this boot shows:
+
+- **An install boot** (the install ticket, `/run/stormblock/install.json`, is
+  there): `/init`'s events are the record, copied to
+  `<data-dir>/install-progress.kept`, which the state volume captures.
+- **Any other boot**: the kept record is put back as
+  `install-progress.events`, over what that boot's `/init` wrote. A node
+  installed before this has none kept, and its boot's own lines are dropped
+  (they are not an install's).
+
+From then on every event the engine appends (`laid`, `failed`, `booted`) is
+kept too. So `GET /api/v1/install/progress` on a running node is the last
+install's, through its reboots: `state` is `laid`, then `booted` after the
+first boot off the disk.
+
 ## The record
 
 ```json

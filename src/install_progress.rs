@@ -44,11 +44,77 @@ fn clean(s: &str) -> String {
 }
 
 /// Append one event (never fatal to the caller: the record is a view).
+/// Once the engine has [`settle`]d, the kept copy follows.
 pub fn append(run: &Path, kind: &str, name: &str, state: &str, detail: &str, at: u64) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(run)?;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(run.join(EVENTS))?;
-    writeln!(f, "{at}\t{}\t{}\t{}\t{}", clean(kind), clean(name), clean(state), clean(detail))
+    {
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(run.join(EVENTS))?;
+        writeln!(f, "{at}\t{}\t{}\t{}\t{}", clean(kind), clean(name), clean(state), clean(detail))?;
+    }
+    if let Some(dir) = KEEP_DIR.get() {
+        keep(run, dir)?;
+    }
+    Ok(())
+}
+
+/// The install's record, kept in the engine's data directory, which the
+/// state volume carries across reboots (#616: pvetest2's record said
+/// `flow-over running` an hour after its install passed: an ordinary boot
+/// after it had started a fresh one in `/run`, a tmpfs, and the install's own
+/// `laid` and `booted` were gone with the reboot).
+pub const KEPT: &str = "install-progress.kept";
+
+static KEEP_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn keep(run: &Path, dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{KEPT}"));
+    std::fs::copy(run.join(EVENTS), &tmp)?;
+    std::fs::rename(tmp, dir.join(KEPT))
+}
+
+/// What [`settle`] made of this boot's record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// An install boot: `/init`'s events are the record, and are kept.
+    Install,
+    /// Another boot: the last install's kept record is put back.
+    Kept,
+    /// Another boot, with no install record kept (installed before #616's
+    /// keeping): this boot's own events are not an install's, and go.
+    None,
+}
+
+/// At the engine's start, after the state is restored into `data_dir`: which
+/// record this boot shows. An install boot's `/init` events become the kept
+/// record; on any other boot the kept record replaces what that boot's
+/// `/init` wrote (a boot is no install, and its `flow-over running` would
+/// never end). From here every [`append`] keeps the copy too.
+pub fn settle(run: &Path, data_dir: &Path, install_boot: bool) -> std::io::Result<Settled> {
+    let out = settle_into(run, data_dir, install_boot)?;
+    let _ = KEEP_DIR.set(data_dir.to_path_buf());
+    Ok(out)
+}
+
+/// [`settle`] without making every later [`append`] keep the copy.
+fn settle_into(run: &Path, data_dir: &Path, install_boot: bool) -> std::io::Result<Settled> {
+    let live = run.join(EVENTS);
+    let kept = data_dir.join(KEPT);
+    let out = if install_boot {
+        if live.exists() {
+            keep(run, data_dir)?;
+        }
+        Settled::Install
+    } else if kept.exists() {
+        std::fs::create_dir_all(run)?;
+        std::fs::copy(&kept, &live)?;
+        Settled::Kept
+    } else {
+        let _ = std::fs::remove_file(&live);
+        Settled::None
+    };
+    Ok(out)
 }
 
 pub fn now() -> u64 {
@@ -471,6 +537,45 @@ pub fn router<S: Clone + Send + Sync + 'static>(run: PathBuf, root: bool) -> axu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #616: an install boot's record is kept; a later boot shows it, not
+    /// its own `flow-over running`; an engine's append keeps the copy.
+    #[test]
+    fn the_install_record_outlives_a_reboot() {
+        let w = tempfile::tempdir().unwrap();
+        let (run, dir) = (w.path().join("run"), w.path().join("engine"));
+        // The install boot: /init's events, then the engine settles.
+        append(&run, "stage", "flow-over", "running", "", 10).unwrap();
+        assert_eq!(settle_into(&run, &dir, true).unwrap(), Settled::Install);
+        assert!(std::fs::read_to_string(dir.join(KEPT)).unwrap().contains("flow-over"));
+        // The engine's own append after settling is kept too.
+        keep_after(&run, &dir, "step", "laid", "done", 20);
+        assert!(std::fs::read_to_string(dir.join(KEPT)).unwrap().contains("laid"));
+        // A reboot: /run is new, and that boot's /init wrote its own lines.
+        std::fs::remove_dir_all(&run).unwrap();
+        append(&run, "stage", "starting", "running", "", 30).unwrap();
+        append(&run, "stage", "flow-over", "running", "", 31).unwrap();
+        assert_eq!(settle_into(&run, &dir, false).unwrap(), Settled::Kept);
+        let r = record(&run, 40);
+        assert_eq!(r["started"], 10, "{r}");
+        let laid = r["layout"].as_array().unwrap().iter().find(|s| s["step"] == "laid").unwrap().clone();
+        assert_eq!(laid["state"], "done");
+        assert_eq!(r["state"], "laid", "{r}");
+        // What the proof reads (keys in order): `"started":10,"state":"laid"`.
+        assert!(r.to_string().contains("\"started\":10,\"state\":\"laid\""), "{r}");
+        // No record kept (a node installed before this): the boot's own
+        // events are not an install's.
+        let run2 = w.path().join("run2");
+        append(&run2, "stage", "flow-over", "running", "", 50).unwrap();
+        assert_eq!(settle_into(&run2, &w.path().join("none"), false).unwrap(), Settled::None);
+        assert!(!run2.join(EVENTS).exists());
+    }
+
+    /// [`append`] with the kept copy, without the process-wide directory.
+    fn keep_after(run: &Path, dir: &Path, kind: &str, name: &str, state: &str, at: u64) {
+        append(run, kind, name, state, "", at).unwrap();
+        keep(run, dir).unwrap();
+    }
 
     #[test]
     fn lines() {

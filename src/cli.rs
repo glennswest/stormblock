@@ -9825,6 +9825,24 @@ async fn handle_adopt_ublk(
         state_store_final = state_store.clone();
         data_dir_final = data_dir.map(str::to_owned);
 
+        // The install's record (#616): an install boot's `/init` events are
+        // kept in the data directory (which the state volume carries across
+        // reboots); any other boot shows the last install's, not its own.
+        if let Some(dir) = data_dir {
+            let install_boot = crate::drive::handover::InstallTicket::read(std::path::Path::new(
+                crate::drive::handover::INSTALL_TICKET_PATH,
+            ))
+            .is_some();
+            match crate::install_progress::settle(
+                std::path::Path::new(crate::install_progress::RUN),
+                std::path::Path::new(dir),
+                install_boot,
+            ) {
+                Ok(s) => tracing::info!("install record: {s:?} (#616)"),
+                Err(e) => tracing::warn!("install record not kept: {e} (#616)"),
+            }
+        }
+
         let slab_registry = mgr.registry().clone();
         let gem = mgr.gem().clone();
         let state = Arc::new(AppState::new(config.clone(), mgr, slab_registry, gem));

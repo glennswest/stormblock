@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#616, the record after a reboot)
+- **fix:** #616 (pvetest2 12.90: `GET /api/v1/install/progress` said `flow-over running` an hour after its install passed): every boot's `/init` writes `starting` and `flow-over running` into `/run`, a tmpfs, so an ordinary boot after an install started a fresh record that never ends, and the install's own `laid` and `booted` were lost with the reboot. The node's engine now settles the record after restoring its state. On an install boot (the install ticket is there) `/init`'s events are kept in `<data-dir>/install-progress.kept`, which the state volume captures. On any other boot the kept record is put back over that boot's own lines. Every event the engine appends is kept too. A running node's record is the last install's: `laid`, then `booted`.
+
 ### 2026-11-16 (#625, the loglevel on every install)
 - **fix:** #625 (ask 3: the kernel's messages on the console "during the install"): the console loglevel is raised to 7 on every install boot, one that `storage:` lays or one an install ticket asks for (a single drive, laid later by boot-local), and put back just before switch_root rather than after the `storage:` lay. The line is `install: console loglevel 7 (was N): the kernel's messages, SCSI sense included, on the console until switch_root (#625)`. An ordinary boot is untouched.
 
