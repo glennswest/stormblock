@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#595)
+- **docs:** #595: verified on forge1's consoles (three NOT READY drives formatted through the card; all four at 4096 + PI type1) and health (24.13.2: pi_type 1); shipped with a proof read from forge1. Work plan.
+
 ### 2026-11-16 (#618)
 - **feat:** #618 (owner: "a install screen/graphical ... showing progress. Not a log. Log can be another function key away. Make it look professional"; "an enterprise boot screen (As in trek)"): `stormblock screen` draws the install's record (#616, the same as the web page) full-screen on the machine's display through DRM (simpledrm over the firmware's framebuffer, a hand-rolled KMS modeset with a dumb buffer). The look is our own design in that spirit: elbow frames, pill bars, condensed capitals (Antonio Bold, OFL, bundled and pinned), large readouts. It shows a header (node, address, model and service tag, release, the big percent and ETA), one row per drive (slot, model, size, seen by, state pill, bar, percent, elapsed, ETA), the steps ticking, the health strip, and a red failure or blue finished panel. F2 shows `/init`'s log on tty2 and F1 brings the screen back; keys are read raw, so none reaches a shell. `/init` starts it on every boot and says its first line on the console. On an install boot it goes on past switch_root; on any other it gives the display back there. Headless: nothing drawn. `rd.stormblock.screen=off`. docs/screen.md.
 - **build:** #618: `ab_glyph` 0.2.32 (with `ab_glyph_rasterizer`, `owned_ttf_parser`, `ttf-parser`; Apache-2.0) for the glyphs.

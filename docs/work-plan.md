@@ -19,6 +19,16 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #595 — verified on forge1's metal (2026-11-16, P0)
+
+No code: the format path landed through v24.10.1 (and #611, #614). Seen on
+forge1's consoles: 15 Nov 23:35Z three NOT READY drives (no SCSI target)
+formatted through the card to 4096 + PI type1 (line 293); 16 Nov 15:06Z,
+15:15Z, 22:19Z all four read back `already 4096 + PI type1`, `STORAGE: 4
+drives, each formatted 4096 + PI type1`. forge1 health (24.13.2): the laid
+drives at 4096, pi_type 1. Shipped with a get: proof on forge1's health (the
+console proof could only be checked on pvetest3, whose storage: is 512/none).
+
 ## #618 — the graphical boot and install screen (2026-11-16, P1)
 
 Owner: "a install screen/graphical ... showing progress. Not a log. Log can
