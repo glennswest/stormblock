@@ -15,7 +15,9 @@ serial/bay, `integrity: none` for PI type 1 drives, `format` null after the
 reboot.
 - [x] the report: `serial`, `wwid`, `controller`, `bay` (card slot fallback),
   `pi_type`; the install's format kept in system-data and filled by WWID
-- [ ] sc-build `sh check.sh`; release; stage; close with forge1's report
+- [x] sc-build `sh check.sh` passed on a8ad932e; v24.13.0 (30bb8abe), stage
+  7ddbee6f856a requested; `shipped` with `get:` health ~ `pi_type`.
+  forge1's 3+1 waits on sdb (#626) and the join (#599), not on this.
 
 ## #625 — a drive that cannot be laid: explained, and not the whole install (2026-11-16, P0)
 
