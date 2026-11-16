@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (after v24.11.0)
+- **docs:** #616/#620: work plan - v24.11.0 staged; #616 shipped with its `get:` proof, #620 waits on forge1's console.
+
 ### 2026-11-16
 - **fix:** #620: the card path's minute line is the sg path's own wording, named by SAS address: `0x…: formatting (full) 1.2%, about 12h 40m left, 9m so far` (no `through the card` in it; the start and end lines still say so). One shape for both paths, for stormcentral's detector (stormcentral#1432) and the install record (#616).
 - **feat:** #616 (owner: "a web page with status, instead of primitive logging", "on host"): the install's page and progress record, served by the host itself. `/init` runs `stormblock install-status` on :9090 from the command line's parse until switch_root; the node's engine serves the same after (`GET /`, `/install`, `GET /api/v1/install/progress`, open, GET only). The record is built on each read from what `/init` writes: the inventory and the card's rows, each drive's format lines (percent, ETA, time so far, sg and card paths alike), the layout, the console's last lines, and the steps and stages `/init` and the engine append to `install-progress.events` (inventory, format, lay, set, system legs, flow-over, laid, booted; a rescue shell is `failed` with its FATAL/STOP line). The page shows one tile per drive with its bar, the steps, the card's raw rows, the stages and the console, in stormconsole's palette. `rd.stormblock.status=off|<addr:port>`. docs/install-progress.md.

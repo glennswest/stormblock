@@ -49,8 +49,12 @@ install screen (#618, a client of the same record).
 - [x] /init: `progress` events at inventory, format (sg + card), lay, set,
   system legs, flow-over, switch_root; rescue_shell = failed with its
   FATAL/STOP line; the engine: laid / failed / booted.
-- [ ] check.sh; stage; proof on forge1's next install:
-  `get:http://{node}:9090/api/v1/install/progress ~ "state":"laid"`.
+- [x] check.sh ALL PASS on 9f64d105 (1462 tests); v24.11.0 (3998b048),
+  stage build 47f7620bcfda. Shipped with the proof
+  `get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`
+  (the engine's :9090 is TLS on a node; keys are sorted, so `started` sits
+  before the top-level `state`; after the install's reboot it reads
+  `booted`).
 - Not here: the thermal strip (`health`, stormipmi#111); the graphical
   screen (#618); stormcentral's panel (stormcentral#1433).
 
