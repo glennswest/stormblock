@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (after v24.12.1)
+- **docs:** #625: work plan - v24.12.1 staged and shipped with its console proof; stormcentral#1439 filed for test machines' `on_drive_failure: continue`.
+
 ### 2026-11-16 (#625, after v24.12.0)
 - **fix:** #625: the console loglevel line is said on every install `storage:` lays, with the level found: `storage: console loglevel 7 (was 4): the kernel's messages, SCSI sense included, on the console until the drives are laid`, or `console loglevel 7: …` when it was already there, or `not raised` when /proc refused. v24.12.0 said it only when it raised the level.
 

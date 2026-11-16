@@ -15,7 +15,11 @@ no sense on the console. #626 is the same drive's failure (the master's copy).
 - [x] `storage.on_drive_failure: stop|continue` (default stop); /init drops
   the leg, a spare takes the place, the parity checked; record `drive failed`
 - [x] console loglevel 7 from the storage block to the end of the lay
-- [ ] sc-build `sh check.sh`; image; forge1's next install shows the block
+- [x] sc-build `sh check.sh` passed on a69e2819 and a4475b1c (v24.12.1), 0 warnings;
+  v24.12.0 image golden-stormblock-245f149cd462, v24.12.1 stage daa32140b99e
+  requested; `shipped` with the console proof (the loglevel line). forge1's
+  next install with sdb is where the block itself is read.
+- stormcentral#1439: test machines' install-configs get `on_drive_failure: continue`.
 - Not done here: re-formatting a drive whose sense says its format is
   corrupt (the hint says so; the runtime format is #621). The default
   `stop` vs `continue` per machine is set by whoever writes the
