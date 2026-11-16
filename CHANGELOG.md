@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#573, the proof)
+- **docs:** #573: the shipped proof failed on pvetest2, which has no `storage:` layout; the change is seen on pvetest3 (24.13.1); shipped again with the proof on pvetest3. Work plan.
+
 ### 2026-11-16 (#627)
 - **feat:** #627 (owner: NetApp shelves' format policy, answered on forge1 bay 3, a NETAPP X378 NA02 at 4096 + PI type 1 that drops its link on its first write): the write-test matrix. `POST /api/v1/storage/hba/{sas}/write-test` (admin, `confirm` = the SAS address; `GET` the last run) and `stormblock hba write-test --sas … --confirm …` write one block at LBA 0 and one at the last LBA with WRPROTECT 0, then WRPROTECT 1 (host PI: T10-DIF guard, reference tag = LBA). Each is read back with RDPROTECT 0 and 1, then TEST UNIT READY and the card's link state. Mode pages 0x03/0x08/0x0A/0x19/0x1A/0x1C and log pages 0x0E/0x15 are read before and after. The run stops when the drive no longer answers. Every line is logged at WARN. A drive with an open slab is refused.
 - **feat:** #627: `hba details` (and `GET …/hba/{sas}/details`) carry `mode_pages`: each page raw and what its bits say (caching WCE/RCD, control DPICZ/D_SENSE/QAM/SWP/ATO/TAS, power-condition timers, informational exceptions), so two drives compare page by page.

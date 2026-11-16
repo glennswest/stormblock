@@ -77,6 +77,10 @@ reboot.
 - [x] sc-build `sh check.sh` passed on a8ad932e; v24.13.0 (30bb8abe), stage
   7ddbee6f856a requested; `shipped` with `get:` health ~ `pi_type`.
   forge1's 3+1 waits on sdb (#626) and the join (#599), not on this.
+- [x] 2026-11-16 20:15Z the proof failed on pvetest2 (not laid by storage:,
+  no storage_layout): a bad proof target, not the code. Seen on pvetest3
+  (24.13.1): pi_type, controller, install format, set optimal 4, state ok.
+  Shipped again, proof on pvetest3's health (192.168.31.174:9090).
 
 ## #625 — a drive that cannot be laid: explained, and not the whole install (2026-11-16, P0)
 
