@@ -88,10 +88,18 @@ for _ in $(seq 1 240); do
 done
 grep -aE "screen-test|screen:|simpledrm|fb0|drm" "$W/serial.log" | head -12 || true
 grep -q SCREEN-SHOT-NOW "$W/serial.log" || { tail -30 "$W/serial.log"; echo "ERROR: the guest did not get as far as the screen"; exit 1; }
-python3 - "$W/mon" "$W/screen.ppm" <<'PY'
+# The screen, then F2 (the log on tty2), then F1 (the screen again): each
+# read back from the display.
+python3 - "$W/mon" "$W" <<'PY'
 import socket, sys, time
 s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3); s.recv(65536)
-s.sendall(("screendump %s\n" % sys.argv[2]).encode()); time.sleep(2); s.sendall(b"quit\n"); time.sleep(0.5)
+def cmd(c, wait): s.sendall((c + "\n").encode()); time.sleep(wait)
+cmd("screendump %s/screen.ppm" % sys.argv[2], 2)
+cmd("sendkey f2", 3)
+cmd("screendump %s/log.ppm" % sys.argv[2], 2)
+cmd("sendkey f1", 3)
+cmd("screendump %s/back.ppm" % sys.argv[2], 2)
+cmd("quit", 0.5)
 PY
 wait "$QPID" 2>/dev/null || :
 QPID=""
@@ -116,6 +124,25 @@ def chunk(k, v): return struct.pack('>I', len(v)) + k + v + struct.pack('>I', zl
 open(sys.argv[2], 'wb').write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
 ok = amber > w * h // 50 and lav > w * h // 50
 print("the screen is drawn: the frame's amber and lavender" if ok else "ERROR: the screen is not on the display")
+sys.exit(0 if ok else 1)
+PY
+# F2 shows the log: the frame's colours gone, text on the console. F1: the
+# screen again.
+python3 - "$W/log.ppm" "$W/back.ppm" <<'PY'
+import sys
+def counts(p):
+    d = open(p, 'rb').read().split(b'\n', 3)
+    w, h = map(int, d[1].split()); px = d[3]
+    amber = lit = 0
+    for i in range(0, w * h * 3, 3):
+        c = px[i:i+3]
+        if abs(c[0]-255) < 12 and abs(c[1]-153) < 12 and c[2] < 12: amber += 1
+        if c[0] + c[1] + c[2] > 60: lit += 1
+    return w * h, amber, lit
+n, a2, l2 = counts(sys.argv[1]); _, a3, l3 = counts(sys.argv[2])
+print(f"after F2: {a2} amber, {l2} lit (the log); after F1: {a3} amber, {l3} lit (the screen)")
+ok = a2 < n // 500 and l2 > 0 and a3 > n // 50
+print("F2 shows the log and F1 the screen again" if ok else "ERROR: F2/F1 did not switch between the screen and the log")
 sys.exit(0 if ok else 1)
 PY
 grep -aq "screen: drawing on /dev/dri/card" "$W/serial.log" || { echo "ERROR: no 'screen: drawing on' line"; exit 1; }
