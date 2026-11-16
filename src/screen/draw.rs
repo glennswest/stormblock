@@ -171,7 +171,7 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     c.fill_rect(x(24.0), y(196.0), lw(200.0), lh(6.0), BG);
     c.fill_rect(x(24.0), y(202.0), lw(200.0), lh(122.0), GREY);
     c.text(xf(214.0), yf(190.0), p(30.0), INK, Align::Right, kind);
-    c.text(xf(214.0), yf(316.0), p(30.0), INK, Align::Right, &format!("{}", info.release.to_uppercase()));
+    c.text(xf(214.0), yf(316.0), p(30.0), INK, Align::Right, &info.release.to_uppercase());
 
     // Who and where.
     let node = if info.node.is_empty() { "—".to_string() } else { info.node.to_uppercase() };
