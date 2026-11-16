@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16
+- **docs:** #611: closed, verified on forge1 12.87's console (the card lists 4 drives with slots, INQUIRY and TUR through the card; three formatting through it); v24.10.2 staged.
+
 ### 2026-11-15
 - **fix:** #611 (forge1 12.87): the inventory's controller line gives the card's count beside the kernel's when they differ, `mpt3sas, 4 drive(s) on the card, 1 with a Linux device`, not `1 drive(s)` over the card's four rows. The card's rows themselves were on forge1's console under the controller (SAS address, enclosure/slot, type, state, sd/sg or no target, INQUIRY and TEST UNIT READY through the card).
 - **docs:** #595: work plan - v24.10.1 staged (the card path's progress); the pvetest3 proof failure explained (its storage: asks 512, no PI); stormcentral#1432 filed for the console detector.
