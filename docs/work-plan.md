@@ -11,7 +11,8 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
 - [x] `install_progress::settle` after the state restore: install boot →
   kept in `<data-dir>/install-progress.kept`; other boots → kept put back;
   engine appends keep the copy
-- [ ] check.sh on cfc49dd5 was running when this was paused for the P0
+- [x] check.sh on cfc49dd5: ALL PASS (read 2026-11-16 during #618)
+- [ ] (was) check.sh on cfc49dd5 was running when this was paused for the P0
   #625 (2026-11-16): read its result (`sc-build 'sh check.sh'` again if
   unknown), then release (v24.14.2), stage, and `shipped` with the same proof
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
@@ -25,15 +26,16 @@ boot, "an enterprise boot screen (As in trek)": our own design in that
 spirit, nothing copied, nothing called LCARS. Branch `wip/618` until the
 check passes (a new dependency: ab_glyph; Cargo.lock resolved on a build VM).
 
-- [ ] `stormblock screen`: a process of its own started by /init, crossing
-  switch_root; DRM dumb buffer on the firmware's display (simpledrm/efifb);
-  headless = nothing drawn, nothing blocked; `rd.stormblock.screen=off`
-- [ ] `src/screen/`: canvas (bars, elbows, text from bundled Antonio Bold,
-  OFL), `render(record)` over #616's record: header, drive rows with bars,
-  the steps, the health strip, the finished and the failure panels
-- [ ] F2: the log on tty2 (the console fan-out writes there), F1 back
-- [ ] tests: PNG snapshots of the render (forge1's four drives formatting,
-  finished, failed), looked at; a QEMU boot with a display and a screendump
+- [x] `stormblock screen`: a process of its own started by /init; DRM dumb
+  buffer (hand-rolled KMS); headless = nothing drawn; `rd.stormblock.screen=off`;
+  install boots keep it past switch_root
+- [x] `src/screen/`: canvas, `render(record)`: header, drive rows with bars,
+  steps, health strip, failure and finished panels; any aspect filled
+- [x] F2: the log on tty2 (the screen follows init.log there), F1 back
+- [x] tests: PNG snapshots (looked at); `ci-screen-verify.sh`: QEMU with
+  simpledrm, screendump read back, F2/F1 pressed and read back (e5937421)
+- [ ] check.sh on the branch; fast-forward main; release; stage; shipped
+  with `console:screen: drawing on /dev/dri/card`
 - Not here: stormpump's stages after the hand-over (stormpump#237), the
   stormbootx panel's look, health values (stormipmi#111)
 

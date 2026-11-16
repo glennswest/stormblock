@@ -733,6 +733,12 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     on :9090 from the initramfs's network-up (`stormblock install-status`)
     and from the engine after switch_root.
     [docs/install-progress.md](docs/install-progress.md).
+  - The boot and install screen (#618): `stormblock screen` draws the same
+    record full-screen on the machine's display (DRM, simpledrm over the
+    firmware's framebuffer): drive rows with bars, the steps, the ETA, the
+    health strip, a red failure or a blue finished panel. F2 shows the log
+    on tty2, F1 the screen again. `/init` runs it on every boot;
+    `rd.stormblock.screen=off` runs none. [docs/screen.md](docs/screen.md).
   - `metadata` (#587): whether the volume record is kept, as
     `GET /api/v1/slabs/durability` (token) says it: `ok`, `stale` (slabs whose
     own region is full while the data directory's `metadata.v2` holds the

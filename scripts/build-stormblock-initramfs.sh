@@ -1114,6 +1114,13 @@ screen_start() {
     "$_scb" screen --run "${STORM_RUN:-/run/stormblock}" </dev/null \
         >>"${STORM_RUN:-/run/stormblock}/screen.log" 2>&1 &
     SCREEN_PID=$!
+    # Its first line on the console (and so to stormcentral and SOL): drawing
+    # on which display, or none. Up to 3 s; the boot never waits longer.
+    _scw=0
+    while [ ! -s "${STORM_RUN:-/run/stormblock}/screen.log" ] && [ "$_scw" -lt 30 ]; do
+        sleep 0.1; _scw=$((_scw + 1))
+    done
+    [ -s "${STORM_RUN:-/run/stormblock}/screen.log" ] && sed -n '1s/^/  /p' "${STORM_RUN:-/run/stormblock}/screen.log"
 }
 screen_switch_root() { # an install boot keeps it; any other gives the display back
     [ -n "$SCREEN_PID" ] || return 0
