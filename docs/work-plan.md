@@ -11,7 +11,11 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
 - [x] `install_progress::settle` after the state restore: install boot →
   kept in `<data-dir>/install-progress.kept`; other boots → kept put back;
   engine appends keep the copy
-- [ ] check.sh; release; shipped with the same proof
+- [ ] check.sh on cfc49dd5 was running when this was paused for the P0
+  #625 (2026-11-16): read its result (`sc-build 'sh check.sh'` again if
+  unknown), then release (v24.14.2), stage, and `shipped` with the same proof
+  (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
+  which holds on any installed node once the record is kept
 
 ## #625 (again) — a drive that left the link; the proof (2026-11-16, P0)
 
