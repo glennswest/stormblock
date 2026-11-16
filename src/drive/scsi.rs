@@ -1509,7 +1509,7 @@ mod tests {
         let d = Stopped { started: Default::default() };
         let r = ready_round(&d);
         assert!(!r.ready && r.started, "{r:?}");
-        assert_eq!(r.said(), "TEST UNIT READY NOT READY asc/ascq 0x04/0x02, START UNIT sent; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1");
+        assert_eq!(r.said(), "TEST UNIT READY NOT READY asc/ascq 0x04/0x02, START UNIT sent; READ CAPACITY 16 2441084928 blocks of 4096 + PI type 1");
         let r = ready_round(&d);
         assert!(r.ready && !r.started);
         assert!(r.said().starts_with("TEST UNIT READY good; "));
