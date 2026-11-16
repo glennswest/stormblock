@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#625)
+- **fix:** #625 (forge1 12.87: sdb, a NetApp X378 at 4096 + PI type 1, took no write at LBA 0 for 63 s and the whole install dropped to a shell, three laid drives with it, no sense on the console): `image storage-lay` lays every drive it can and explains each one it cannot, in one block on the console. The block holds TEST UNIT READY, REQUEST SENSE, the WP bit, READ CAPACITY 16's PI, and a READ(16) and WRITE(16) at LBA 0 with no PI sent, all through SG_IO on the drive's node. It also holds the drive's error counters, grown defects and SMART, the last `/dev/kmsg` lines about it, and a `so:` line reading the sense (a corrupt format, a format running, write protect, a PI tag check, a medium error, or the path when the plain write goes through). It prints `STORAGE_LAID`, `STORAGE_LAY_FAILED` and `STORAGE_LAY_WHY`, and fails only when no drive was laid.
+- **feat:** #625: `storage.on_drive_failure: stop|continue` in the install-config (`STORAGE_ON_DRIVE_FAILURE`). `stop` is the default: the install ends with the drive's `so:` line, naming the drives laid and the setting. `continue` goes on without the drive while the plan holds: its leg is dropped (one must be left), a spare takes its place, and the set stays at its parity. A failed drive is `failed` in the install record (#616).
+- **feat:** #625: the console loglevel is 7 while `storage:` formats and lays drives, so the kernel's SCSI sense lines reach the serial console; it is put back after the lay.
+
 ### 2026-11-16 (after v24.11.0)
 - **docs:** #616/#620: work plan - v24.11.0 staged; #616 shipped with its `get:` proof, #620 waits on forge1's console.
 

@@ -5405,6 +5405,16 @@ STEOF
     fi
     if [ -n "$STORAGE_FROM" ] && [ "$OVERRIDE" != recovery ] && [ "${ASSIMILATE:-}" != off ] \
        && [ "${ASSIMILATE:-}" != ambiguous ]; then
+        # The kernel's own words on the console while drives are formatted
+        # and laid (#625: forge1 sdb's write failed with no sense on the
+        # serial console). Console loglevel 7 shows KERN_INFO, where sd
+        # prints a failed command's sense; put back after the lay.
+        STORAGE_PRINTK="${STORM_PRINTK:-/proc/sys/kernel/printk}"
+        STORAGE_PRINTK_WAS=$(cut -f1 "$STORAGE_PRINTK" 2>/dev/null | tr -dc 0-9)
+        if [ -n "$STORAGE_PRINTK_WAS" ] && [ "$STORAGE_PRINTK_WAS" -lt 7 ]; then
+            echo 7 > "$STORAGE_PRINTK" 2>/dev/null \
+                && echo "  storage: the kernel's messages (SCSI sense) on the console until the drives are laid (#625)"
+        fi
         # The wipe word: rd.stormblock.assimilate=force on this boot's
         # command line, never the force an install ticket makes of ASSIMILATE
         # (#148). An install the appliance asks for keeps the data half
@@ -6365,7 +6375,49 @@ $1|$_svp|$3"
             storage_fail "laying the drives failed: $(tail -n 1 "$_st_dir/lay.log")"
         fi
         sed 's/^/  /' "$_st_dir/lay.log"
+        STORAGE_LAID=""; STORAGE_LAY_FAILED=""; STORAGE_LAY_WHY=""
         eval "$_sl_out"
+        # A drive that could not be laid (#625: forge1 sdb, EIO at LBA 0):
+        # the engine laid the others, explained it above (its sense, PI, a
+        # write without PI, the kernel's lines) and named it. The install
+        # stops on it unless storage.on_drive_failure is continue, and goes
+        # on without it only while the plan still holds: a system leg left,
+        # a spare taking its place, the set at its parity.
+        if [ -n "$STORAGE_LAY_FAILED" ]; then
+            for _dev in $STORAGE_LAY_FAILED; do
+                progress drive "$_dev" failed "not laid: $STORAGE_LAY_WHY" 2>/dev/null
+            done
+            if [ "${STORAGE_ON_DRIVE_FAILURE:-stop}" != continue ]; then
+                echo "  STOP: $STORAGE_LAY_FAILED could not be laid (its answers are above); $STORAGE_LAID laid."
+                echo "  storage.on_drive_failure: continue in this install's install-config lays the install"
+                echo "  without it while the plan still holds; or replace the drive, or leave it out of storage.drives."
+                storage_fail "laying $STORAGE_LAY_FAILED failed: $STORAGE_LAY_WHY"
+            fi
+            _sl_lost=0; _sl_legs=""
+            for _dev in $STORAGE_LAY_FAILED; do _sl_lost=$((_sl_lost + 1)); done
+            for _dev in $STORAGE_SYSTEM; do
+                case " $STORAGE_LAY_FAILED " in *" $_dev "*) ;; *) _sl_legs="$_sl_legs $_dev" ;; esac
+            done
+            _sl_legs=${_sl_legs# }
+            [ -n "$_sl_legs" ] || storage_fail "every system leg ($STORAGE_SYSTEM) failed to lay: $STORAGE_LAY_WHY"
+            _sl_left=0
+            for _dev in $STORAGE_LAID; do _sl_left=$((_sl_left + 1)); done
+            if [ "$STORAGE_RAID" = yes ] && [ "$_sl_left" -gt 1 ]; then
+                # A spare takes the lost drive's place: the set keeps its width.
+                _sl_sp=$(( ${STORAGE_SPARES:-0} - _sl_lost ))
+                [ "$_sl_sp" -ge 0 ] || _sl_sp=0
+                _sl_data=$((_sl_left - _sl_sp))
+                if [ "$_sl_data" -lt $(( ${STORAGE_PARITY:-1} + 1 )) ] || { [ "${STORAGE_PARITY:-1}" = 0 ] && [ "$_sl_data" -lt 2 ]; }; then
+                    storage_fail "without $STORAGE_LAY_FAILED, $_sl_left drive(s) cannot hold a parity ${STORAGE_PARITY:-1} set: $STORAGE_LAY_WHY"
+                fi
+                STORAGE_SPARES=$_sl_sp
+            fi
+            echo "  WARNING: storage: $STORAGE_LAY_FAILED left out (storage.on_drive_failure: continue): the install goes on"
+            echo "  with $STORAGE_LAID - legs: $_sl_legs$([ "$STORAGE_RAID" = yes ] && [ "$_sl_left" -gt 1 ] && echo ", the set $((_sl_left - STORAGE_SPARES - STORAGE_PARITY)) data + $STORAGE_PARITY parity$([ "$STORAGE_SPARES" -gt 0 ] && echo " + $STORAGE_SPARES spare")") (#625)"
+            [ "$_sl_left" = 1 ] && [ "$STORAGE_RAID" = yes ] && echo "  WARNING: one drive left: no set, the data half on its region alone"
+            STORAGE_DRIVES="$STORAGE_LAID"
+            STORAGE_SYSTEM="$_sl_legs"
+        fi
         echo "  every drive: a ${STORAGE_BOOT_AREA}-byte boot area, a ${STORAGE_SYSTEM_REGION}-byte system region, a ${STORAGE_REGION}-byte data region"
         # The partitions' nodes, from the tables just re-read.
         for _m in $STORAGE_MEMBERS; do
@@ -6427,6 +6479,9 @@ $1|$_svp|$3"
         FORCE_LOCAL=1
     fi
     # --- END storage lay
+    if [ -n "${STORAGE_PRINTK_WAS:-}" ] && [ "$STORAGE_PRINTK_WAS" -lt 7 ]; then
+        echo "$STORAGE_PRINTK_WAS" > "$STORAGE_PRINTK" 2>/dev/null || :
+    fi
 
     # --- BEGIN diskless refused (covered by tests/initramfs-diskless.sh)
     # A node never runs diskless by default (#427; owner, #344: the

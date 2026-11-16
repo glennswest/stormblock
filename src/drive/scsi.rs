@@ -145,6 +145,20 @@ pub mod cdb {
     pub fn format_param_immed() -> [u8; 4] {
         [0, 0x02, 0, 0]
     }
+    /// READ(16) of `blocks` at `lba`, RDPROTECT 0: the drive checks its own
+    /// protection information and sends none (#625).
+    pub fn read16(lba: u64, blocks: u32) -> [u8; 16] {
+        let l = lba.to_be_bytes();
+        let n = blocks.to_be_bytes();
+        [0x88, 0, l[0], l[1], l[2], l[3], l[4], l[5], l[6], l[7], n[0], n[1], n[2], n[3], 0, 0]
+    }
+    /// WRITE(16) of `blocks` at `lba`, WRPROTECT 0: no protection
+    /// information is sent; a drive formatted with PI makes its own (#625).
+    pub fn write16(lba: u64, blocks: u32) -> [u8; 16] {
+        let l = lba.to_be_bytes();
+        let n = blocks.to_be_bytes();
+        [0x8A, 0, l[0], l[1], l[2], l[3], l[4], l[5], l[6], l[7], n[0], n[1], n[2], n[3], 0, 0]
+    }
 }
 
 // ---- parsers ----
@@ -513,6 +527,191 @@ pub fn details(t: &dyn Transport) -> Details {
     d
 }
 
+// ---- a write that failed (#625) ----
+
+/// MODE SENSE(10)'s header: the device-specific parameter's WP bit.
+pub fn parse_write_protect(d: &[u8]) -> Option<bool> {
+    d.get(3).map(|b| b & 0x80 != 0)
+}
+
+/// What a drive says when a write to it failed (#625): its pending sense,
+/// whether it is write protected, and how a block at LBA 0 reads and
+/// writes with no protection information sent (the drive makes its own).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WriteProbe {
+    pub via: String,
+    pub ready: Option<String>,
+    /// REQUEST SENSE: what the drive has pending, `good` when nothing.
+    pub pending: Option<String>,
+    pub progress_pct: Option<f32>,
+    pub write_protect: Option<bool>,
+    pub capacity: Option<Capacity>,
+    /// READ(16) at LBA 0, one block, RDPROTECT 0.
+    pub read_lba0: Option<String>,
+    /// WRITE(16) at LBA 0, one block of zeros, WRPROTECT 0.
+    pub write_lba0: Option<String>,
+    /// (key, asc, ascq) of each answer above, for [`WriteProbe::hint`].
+    #[serde(skip)]
+    pub senses: Vec<(u8, u8, u8)>,
+    #[serde(skip)]
+    pub write_good: Option<bool>,
+}
+
+fn said_of(r: std::io::Result<Reply>, senses: &mut Vec<(u8, u8, u8)>) -> (String, Option<bool>) {
+    match r {
+        Ok(r) => {
+            if let Some(k) = r.key() {
+                senses.push(k);
+            }
+            (r.said(), Some(r.good()))
+        }
+        Err(e) => (format!("not sent: {e}"), None),
+    }
+}
+
+/// Ask the drive why a write failed. **Writes one block of zeros at LBA 0**:
+/// only for a drive being laid, whose front is cleared anyway.
+pub fn write_probe(t: &dyn Transport, block_size: u32) -> WriteProbe {
+    let mut p = WriteProbe { via: t.name(), ..Default::default() };
+    let mut senses = Vec::new();
+    p.ready = Some(said_of(t.run(&cdb::test_unit_ready(), Dir::None, &mut [], 30), &mut senses).0);
+    let mut s = vec![0u8; 96];
+    if let Ok(r) = t.run(&cdb::request_sense(96), Dir::In, &mut s, 30) {
+        if r.good() {
+            let s = &s[..r.len.min(96)];
+            p.progress_pct = progress_of(s).map(|x| x as f32 * 100.0 / 65536.0);
+            let k = crate::drive::mpt::parse_sense(s);
+            p.pending = Some(match k {
+                Some((0, 0, 0)) | None => "good".into(),
+                Some((k, a, q)) => {
+                    senses.push((k, a, q));
+                    format!("{} asc/ascq 0x{a:02x}/0x{q:02x}", crate::drive::mpt::sense_key_name(k))
+                }
+            });
+        } else {
+            p.pending = Some(r.said());
+        }
+    }
+    let mut m = vec![0u8; 64];
+    if let Ok(r) = t.run(&cdb::mode_sense10(0x3F, false, true, 64), Dir::In, &mut m, 30) {
+        if r.good() {
+            p.write_protect = parse_write_protect(&m[..r.len.min(64)]);
+        }
+    }
+    let mut c = vec![0u8; 32];
+    if let Ok(r) = t.run(&cdb::read_capacity16(32), Dir::In, &mut c, 30) {
+        if r.good() {
+            p.capacity = parse_capacity16(&c[..r.len.min(32)]);
+        }
+    }
+    let bs = p.capacity.as_ref().map(|c| c.block_size).filter(|b| *b >= 512).unwrap_or(block_size.max(512)) as usize;
+    let mut blk = vec![0u8; bs];
+    p.read_lba0 = Some(said_of(t.run(&cdb::read16(0, 1), Dir::In, &mut blk, 30), &mut senses).0);
+    let mut zeros = vec![0u8; bs];
+    let (w, good) = said_of(t.run(&cdb::write16(0, 1), Dir::Out, &mut zeros, 60), &mut senses);
+    p.write_lba0 = Some(w);
+    p.write_good = good;
+    p.senses = senses;
+    p
+}
+
+impl WriteProbe {
+    /// What the answers mean, in a line, when they say something.
+    pub fn hint(&self) -> Option<String> {
+        if self.write_protect == Some(true) {
+            return Some("the drive is write protected (WP in its mode header)".into());
+        }
+        for &(k, a, q) in &self.senses {
+            let h = match (k, a, q) {
+                (_, 0x31, _) => "the drive's format is corrupt (did not complete): it needs a FORMAT UNIT again (#595, #621)",
+                (2, 0x04, 0x04) => "a format is still running on the drive",
+                (2, 0x04, _) => "the drive is not ready",
+                (7, _, _) | (_, 0x27, _) => "the drive refuses writes (DATA PROTECT)",
+                (_, 0x10, 0x01) => "the drive rejects the protection information it was sent: guard check failed",
+                (_, 0x10, 0x02) => "the drive rejects the protection information it was sent: application tag check failed",
+                (_, 0x10, 0x03) => "the drive rejects the protection information it was sent: reference tag check failed",
+                (_, 0x10, _) => "the drive rejects the protection information it was sent",
+                (3, _, _) => "a medium error at the front of the drive",
+                (4, _, _) => "the drive reports a hardware error",
+                _ => continue,
+            };
+            return Some(h.into());
+        }
+        match self.write_good {
+            Some(true) => Some(
+                "a write with no protection information succeeds through SG_IO: the failure is in the path the \
+                 kernel's writes take (the PI the HBA adds, or the HBA itself)"
+                    .into(),
+            ),
+            Some(false) => Some("the drive refuses a plain write too".into()),
+            None => None,
+        }
+    }
+
+    /// The block for the console, a line each.
+    pub fn lines(&self) -> Vec<String> {
+        let o = |v: &Option<String>| v.clone().unwrap_or_else(|| "no answer".into());
+        let mut v = vec![
+            format!("asked through {}: TEST UNIT READY {}; REQUEST SENSE {}{}", self.via, o(&self.ready), o(&self.pending),
+                self.progress_pct.map(|p| format!(" ({p:.1}% of a format)")).unwrap_or_default()),
+            format!(
+                "format: {}; write protect: {}",
+                self.capacity.as_ref().map(|c| format!("{} blocks of {}{}", c.blocks, c.block_size,
+                    if c.prot_en { format!(" + PI type {}", c.pi_type) } else { " no PI".into() }))
+                    .unwrap_or_else(|| "READ CAPACITY 16 did not answer".into()),
+                match self.write_protect { Some(true) => "on", Some(false) => "off", None => "not read" }
+            ),
+            format!("READ(16) LBA 0, no PI: {}; WRITE(16) LBA 0, no PI: {}", o(&self.read_lba0), o(&self.write_lba0)),
+        ];
+        if let Some(h) = self.hint() {
+            v.push(format!("so: {h}"));
+        }
+        v
+    }
+}
+
+/// The kernel's last lines about `name` (`sdb`): its sense, its I/O
+/// errors, and the card's lines beside them (#625: the console carried
+/// none). Read from `/dev/kmsg`, at most `max`.
+#[cfg(target_os = "linux")]
+pub fn kernel_lines(name: &str, max: usize) -> Vec<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(mut f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open("/dev/kmsg") else {
+        return vec![];
+    };
+    let mut all = Vec::new();
+    let mut buf = vec![0u8; 8192];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => all.push(String::from_utf8_lossy(&buf[..n]).into_owned()),
+            // EPIPE: a record was overwritten while read; the next one follows.
+            Err(e) if e.raw_os_error() == Some(libc::EPIPE) => continue,
+            Err(_) => break,
+        }
+    }
+    kernel_lines_of(&all, name, max)
+}
+
+/// [`kernel_lines`] over records already read (`pri,seq,usec,flags;text`).
+pub fn kernel_lines_of(records: &[String], name: &str, max: usize) -> Vec<String> {
+    let marks = [format!("[{name}]"), format!("dev {name},"), format!("{name}:"), format!(" {name} ")];
+    let mut v: Vec<String> = records
+        .iter()
+        .filter_map(|r| {
+            let first = r.lines().next()?;
+            let text = first.split_once(';').map(|(_, t)| t).unwrap_or(first);
+            let t = format!(" {text} ");
+            (marks.iter().any(|m| t.contains(m.as_str())) || text.starts_with("mpt3sas") && text.contains("log_info"))
+                .then(|| text.trim().to_string())
+        })
+        .collect();
+    let n = v.len();
+    v.drain(..n.saturating_sub(max));
+    v
+}
+
 // ---- actions ----
 
 /// What can be done to a row.
@@ -859,6 +1058,84 @@ mod tests {
         fn name(&self) -> String {
             "fake".into()
         }
+    }
+
+    /// forge1 sdb, #625: formatted with PI, the format left corrupt.
+    struct Corrupt;
+    impl Transport for Corrupt {
+        fn run(&self, cdb: &[u8], _dir: Dir, data: &mut [u8], _t: u32) -> std::io::Result<Reply> {
+            let sense = |k: u8, a: u8, q: u8| {
+                let mut s = vec![0u8; 18];
+                s[0] = 0x70;
+                s[2] = k;
+                s[12] = a;
+                s[13] = q;
+                s
+            };
+            match cdb[0] {
+                0x00 => Ok(Reply::default()),
+                0x03 => Ok(Reply { len: 18, ..Default::default() }),
+                0x5A => {
+                    data[..8].copy_from_slice(&[0, 6, 0, 0, 0, 0, 0, 0]);
+                    Ok(Reply { len: 8, ..Default::default() })
+                }
+                0x9E => {
+                    data[..32].fill(0);
+                    data[..8].copy_from_slice(&0x917_FFFFFu64.to_be_bytes());
+                    data[8..12].copy_from_slice(&4096u32.to_be_bytes());
+                    data[12] = 0x01;
+                    Ok(Reply { len: 32, ..Default::default() })
+                }
+                0x88 => Ok(Reply::default()),
+                0x8A => Ok(Reply { status: 2, sense: sense(3, 0x31, 0), len: 0, transport: None }),
+                _ => Ok(Reply { status: 2, sense: sense(5, 0x20, 0), len: 0, transport: None }),
+            }
+        }
+        fn name(&self) -> String {
+            "sdb".into()
+        }
+    }
+
+    #[test]
+    fn a_write_that_fails_is_explained() {
+        assert_eq!(cdb::write16(0, 1), [0x8A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]);
+        assert_eq!(cdb::read16(0x0102, 2)[8..14], [0x01, 0x02, 0, 0, 0, 2]);
+        let p = write_probe(&Corrupt, 4096);
+        assert_eq!(p.pending.as_deref(), Some("good"));
+        assert_eq!(p.write_protect, Some(false));
+        assert_eq!(p.capacity.as_ref().map(|c| (c.block_size, c.pi_type)), Some((4096, 1)));
+        assert_eq!(p.read_lba0.as_deref(), Some("good"));
+        assert_eq!(p.write_lba0.as_deref(), Some("MEDIUM ERROR asc/ascq 0x31/0x00"));
+        assert!(p.hint().unwrap().contains("FORMAT UNIT again"));
+        let l = p.lines().join("\n");
+        assert!(l.contains("+ PI type 1") && l.contains("write protect: off") && l.contains("so: "), "{l}");
+        // A write that goes through: the path, not the drive.
+        let ok = WriteProbe { write_good: Some(true), ..Default::default() };
+        assert!(ok.hint().unwrap().contains("the path"));
+        let wp = WriteProbe { write_protect: Some(true), ..Default::default() };
+        assert!(wp.hint().unwrap().contains("write protected"));
+        let pi = WriteProbe { senses: vec![(0xB, 0x10, 0x03)], ..Default::default() };
+        assert!(pi.hint().unwrap().contains("reference tag"));
+    }
+
+    #[test]
+    fn the_kernels_lines_for_a_drive() {
+        let recs: Vec<String> = [
+            "6,100,1,-;sd 0:0:3:0: [sdb] tag#9 Sense Key : Medium Error [current]",
+            "6,101,1,-;sd 0:0:3:0: [sdb] tag#9 Add. Sense: Medium format corrupted",
+            "3,102,1,-;I/O error, dev sdb, sector 0 op 0x1:(WRITE) flags 0x8800 phys_seg 1 prio class 0",
+            "6,103,1,-;sd 0:0:2:0: [sdc] 2441609216 4096-byte logical blocks",
+            "4,104,1,-;mpt3sas_cm0: log_info(0x31110610): originator(PL), code(0x11), sub_code(0x0610)",
+            "6,105,1,-;sdba: sdba1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let v = kernel_lines_of(&recs, "sdb", 10);
+        assert_eq!(v.len(), 4, "{v:?}");
+        assert!(v[2].starts_with("I/O error, dev sdb"));
+        assert!(v[3].starts_with("mpt3sas_cm0: log_info"));
+        assert_eq!(kernel_lines_of(&recs, "sdb", 2).len(), 2);
     }
 
     #[test]

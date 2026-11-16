@@ -3678,8 +3678,19 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
     }))
     .await;
     let mut members = Vec::new();
+    let mut done = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
     for (r, d) in laid.into_iter().zip(drives) {
-        let r = r?;
+        // A drive that fails is explained and left out (#625): the others
+        // stay laid, and /init decides by `storage.on_drive_failure`.
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => {
+                let why = explain_lay_failure(d, &e.to_string()).await;
+                failed.push((d.clone(), why));
+                continue;
+            }
+        };
         eprintln!(
             "Storage: {d} laid in {} ms — {}, data region partition {} ({} bytes)",
             t.elapsed().as_millis(),
@@ -3691,12 +3702,100 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
             eprintln!("Storage: {d}: the kernel did not re-read its table ({e})");
         }
         members.push(local::partition_path(d, r.member_partition));
+        done.push(d.clone());
     }
+    if done.is_empty() {
+        anyhow::bail!(
+            "no drive could be laid: {}",
+            failed.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join("; ")
+        );
+    }
+    println!("STORAGE_LAID={}", sh_quote(&done.join(" ")));
+    println!(
+        "STORAGE_LAY_FAILED={}",
+        sh_quote(&failed.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>().join(" "))
+    );
+    println!(
+        "STORAGE_LAY_WHY={}",
+        sh_quote(&failed.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join("; "))
+    );
     println!("STORAGE_MEMBERS={}", sh_quote(&members.join(" ")));
     println!("STORAGE_REGION={}", regions.member_bytes);
     println!("STORAGE_SYSTEM_REGION={}", regions.system_bytes);
     println!("STORAGE_BOOT_AREA={}", regions.boot_bytes);
     Ok(())
+}
+
+/// A drive whose lay failed, explained (#625): the drive's own answers
+/// (its sense, write protect, PI, a write at LBA 0 with no PI sent, its
+/// error counters) and the kernel's lines about it, as one block on stderr
+/// (the console, through /init). Answers the error with what it means, in
+/// one line, for the FATAL or the warning.
+async fn explain_lay_failure(dev: &str, err: &str) -> String {
+    eprintln!("Storage: {dev}: NOT LAID: {err}");
+    let path = dev.to_string();
+    let block = tokio::task::spawn_blocking(move || lay_failure_block(&path)).await.unwrap_or_default();
+    let mut hint = None;
+    for (l, h) in block {
+        eprintln!("Storage: {dev}:   {l}");
+        if h {
+            hint = Some(l.trim_start_matches("so: ").to_string());
+        }
+    }
+    match hint {
+        Some(h) => format!("{err} ({h})"),
+        None => err.to_string(),
+    }
+}
+
+/// The lines of [`explain_lay_failure`]'s block, each with whether it is
+/// the hint.
+#[cfg(target_os = "linux")]
+fn lay_failure_block(dev: &str) -> Vec<(String, bool)> {
+    use crate::drive::scsi;
+    let mut v = Vec::new();
+    match scsi::Sg::open(std::path::Path::new(dev)) {
+        Ok(t) => {
+            let p = scsi::write_probe(&t, 4096);
+            for l in p.lines() {
+                let h = l.starts_with("so: ");
+                v.push((l, h));
+            }
+            let d = scsi::details(&t);
+            let n = |x: Option<u64>| x.map(|x| x.to_string()).unwrap_or_else(|| "-".into());
+            v.push((
+                format!(
+                    "{} {} {} serial {}: write uncorrected {}, read uncorrected {}, non-medium {}, grown defects {}, SMART {}{}",
+                    d.vendor.as_deref().unwrap_or("?"),
+                    d.product.as_deref().unwrap_or("?"),
+                    d.revision.as_deref().unwrap_or("?"),
+                    d.serial.as_deref().unwrap_or("?"),
+                    n(d.write_uncorrected),
+                    n(d.read_uncorrected),
+                    n(d.non_medium_errors),
+                    n(d.grown_defects.map(u64::from)),
+                    d.smart_asc_ascq.as_deref().unwrap_or("-"),
+                    if d.smart_trip == Some(true) { " (TRIPPED)" } else { "" }
+                ),
+                false,
+            ));
+        }
+        Err(e) => v.push((format!("SG_IO cannot be sent to it ({e}): no sense read"), false)),
+    }
+    let name = dev.rsplit('/').next().unwrap_or(dev);
+    let k = scsi::kernel_lines(name, 12);
+    if k.is_empty() {
+        v.push(("the kernel said nothing of it in /dev/kmsg".into(), false));
+    }
+    for l in k {
+        v.push((format!("kernel: {l}"), false));
+    }
+    v
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lay_failure_block(_dev: &str) -> Vec<(String, bool)> {
+    vec![("no SCSI pass-through on this OS".into(), false)]
 }
 
 async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> {

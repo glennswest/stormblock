@@ -2,6 +2,25 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+## #625 — a drive that cannot be laid: explained, and not the whole install (2026-11-16, P0)
+
+forge1 12.87: sdb (NetApp X378, 4096 + PI type 1 after its card format) took
+no write at LBA 0; `FATAL: laying the drives failed`, three laid drives lost,
+no sense on the console. #626 is the same drive's failure (the master's copy).
+
+- [x] `src/drive/scsi.rs`: `write_probe` (TUR, REQUEST SENSE, WP, READ CAPACITY
+  16, READ/WRITE(16) at LBA 0 with no PI), `hint`, `kernel_lines` from /dev/kmsg
+- [x] `image storage-lay` lays what it can, a block per failed drive, prints
+  `STORAGE_LAID` / `STORAGE_LAY_FAILED` / `STORAGE_LAY_WHY`, fails only if none laid
+- [x] `storage.on_drive_failure: stop|continue` (default stop); /init drops
+  the leg, a spare takes the place, the parity checked; record `drive failed`
+- [x] console loglevel 7 from the storage block to the end of the lay
+- [ ] sc-build `sh check.sh`; image; forge1's next install shows the block
+- Not done here: re-formatting a drive whose sense says its format is
+  corrupt (the hint says so; the runtime format is #621). The default
+  `stop` vs `continue` per machine is set by whoever writes the
+  install-config (stormcentral for test machines).
+
 ## #614 — the wipe word per install, `storage.wipe` in the install-config (2026-11-15, P0)
 
 After #609 only `rd.stormblock.assimilate=force` (the release's command line,

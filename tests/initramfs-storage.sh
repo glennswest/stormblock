@@ -25,6 +25,7 @@ grep -q 'END storage format tools' "$WORK/tools.sh" || { echo "FAIL: could not e
 # The install's progress events (#616), which the blocks below append to.
 sed -n '/# --- BEGIN install progress/,/# --- END install progress/p' "$GEN" >> "$WORK/tools.sh"
 grep -q 'END install progress' "$WORK/tools.sh" || { echo "FAIL: could not extract the install progress block"; exit 1; }
+sed -n '/# --- BEGIN install progress/,/# --- END install progress/p' "$GEN" > "$WORK/progress.sh"
 sed -n '/# --- BEGIN storage layout/,/# --- END storage layout/p' "$GEN" > "$WORK/layout.sh"
 grep -q 'END storage layout' "$WORK/layout.sh" || { echo "FAIL: could not extract the storage layout block"; exit 1; }
 sed -n '/# --- BEGIN storage format (/,/# --- END storage format$/p' "$GEN" > "$WORK/format.sh"
@@ -103,14 +104,25 @@ case "$1 $2" in
     for a in "$@"; do printf '%s\n' "$a"; done > "$W/lay.args"
     echo "Storage: laid" >&2
     [ -e "$W/lay.rc" ] && { echo "error: laying /dev/sdb: short write" >&2; exit 1; }
-    m=""; leg=""
+    # layfail.<name>: that drive cannot be laid (#625); the others are.
+    m=""; leg=""; laid=""; bad=""; why=""
     for a in "$@"; do
         [ -n "$leg" ] && { leg=""; continue; }
         case "$a" in
         --leg|--system-bytes) leg=1 ;;
-        /dev/sd*) m="$m $W/dev/${a##*/}3"; touch "$W/dev/${a##*/}3" ;;
+        /dev/sd*)
+            if [ -e "$W/layfail.${a##*/}" ]; then
+                bad="$bad $a"; why="$a: clearing the front of the drive: I/O error (its format is corrupt)"
+                echo "Storage: $a: NOT LAID: clearing the front of the drive: I/O error" >&2
+                continue
+            fi
+            laid="$laid $a"; m="$m $W/dev/${a##*/}3"; touch "$W/dev/${a##*/}3" ;;
         esac
     done
+    [ -n "$laid" ] || { echo "error: no drive could be laid" >&2; exit 1; }
+    echo "STORAGE_LAID='${laid# }'"
+    echo "STORAGE_LAY_FAILED='${bad# }'"
+    echo "STORAGE_LAY_WHY='$why'"
     echo "STORAGE_MEMBERS='${m# }'"
     echo "STORAGE_REGION=9000"; echo "STORAGE_SYSTEM_REGION=800"; echo "STORAGE_BOOT_AREA=100"
     exit 0 ;;
@@ -225,7 +237,7 @@ reset() {
            "$WORK"/sig.* "$WORK/format.log" "$WORK/skips" "$WORK/ldwrite" "$WORK/out" \
            "$WORK/install-config.yaml" "$WORK/dev" "$WORK"/lay.args "$WORK"/lay.rc \
            "$WORK"/raid.* "$WORK/serve.args" "$WORK"/slow.* "$WORK/report.args" \
-           "$WORK"/pt.* "$WORK"/card.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" "$WORK/scsi" "$WORK/sd-bind" \
+           "$WORK"/pt.* "$WORK"/layfail.* "$WORK"/card.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" "$WORK/scsi" "$WORK/sd-bind" \
            "${WORK:?}/plan.stderr" "${WORK:?}/sys/vda" "${WORK:?}/sys/vdb" "${WORK:?}/sys/ublkb65535" "${WORK:?}/sys/loop0"
     for d in sda sdb sdc sdd; do mkdisk "$d"; done
 }
@@ -275,6 +287,7 @@ lay() { # vars... -> runs the lay block
         echo 'STORAGE_FROM=/run/install-config.yaml STORAGE_SYSTEM_BYTES=0 STORAGE_RAID=yes STORAGE_PARITY=1 STORAGE_SPARES=0'
         echo 'LOCAL_DISK=/dev/sda4 SYSTEM_DISK=/dev/sdb PAIR_DISK=/dev/sdc INSTALL_KEEP="" INSTALL_FRESH=1 STORAGE_FORCE="" FORCE_LOCAL="" STORAGE_FORMATTED=""'
         for v in "$@"; do echo "$v"; done
+        cat "$WORK/progress.sh"
         echo 'storage_fail() { echo "FATAL: $1 (#573)"; ld_write failed "${LOCAL_DISK:-}" "storage: $1"; rescue_shell; }'
         cat "$WORK/lay.sh"
         cat <<'EOF'
@@ -284,6 +297,9 @@ echo "=SYSTEM_DISK_ID=$SYSTEM_DISK_ID"
 echo "=PAIR_DISK=$PAIR_DISK"
 echo "=FORCE_LOCAL=$FORCE_LOCAL"
 echo "=MEMBERS=$STORAGE_MEMBERS"
+echo "=DRIVES=$STORAGE_DRIVES"
+echo "=SYSTEM=$STORAGE_SYSTEM"
+echo "=LAID_LEGS=$STORAGE_LAID_LEGS"
 EOF
     } > "$WORK/run-lay.sh"
     sh "$WORK/run-lay.sh" > "$WORK/out" 2>&1 || echo "EXIT $?" >> "$WORK/out"
@@ -941,6 +957,64 @@ echo 1 > "$WORK/raid.rc"
 lay "$D4"
 has "create failed" "$WORK/out" "FATAL: stormraid create failed: stormraid: created node-data"
 check "not served" "no" "$([ -e "$WORK/serve.args" ] && echo yes || echo no)"
+
+echo "the lay: a drive that cannot be laid stops the install by default (#625)"
+reset
+touch "$WORK/layfail.sdb"
+lay "$D4"
+has "STOP names it" "$WORK/out" "STOP: /dev/sdb could not be laid"
+has "names the others laid" "$WORK/out" "/dev/sda /dev/sdc /dev/sdd laid"
+has "names the way on" "$WORK/out" "storage.on_drive_failure: continue"
+has "FATAL with why" "$WORK/out" "FATAL: laying /dev/sdb failed: /dev/sdb: clearing the front of the drive: I/O error (its format is corrupt)"
+has "the engine's block shown" "$WORK/out" "Storage: /dev/sdb: NOT LAID"
+has "rescue" "$WORK/out" "RESCUE"
+has "in the record" "$WORK/run/install-progress.events" "drive	/dev/sdb	failed	not laid: /dev/sdb: clearing"
+check "no set" "no" "$([ -e "$WORK/raid.args" ] && echo yes || echo no)"
+
+echo "the lay: on_drive_failure continue lays the install without it (#625)"
+reset
+touch "$WORK/layfail.sdb"
+lay "$D4" 'STORAGE_ON_DRIVE_FAILURE=continue'
+hasnt "no rescue" "$WORK/out" "RESCUE"
+has "warned" "$WORK/out" "WARNING: storage: /dev/sdb left out (storage.on_drive_failure: continue)"
+has "the set said" "$WORK/out" "legs: /dev/sda /dev/sdc /dev/sdd, the set 2 data + 1 parity (#625)"
+check "three members" "3" "$(grep -c "^$WORK/dev/sd.3$" "$WORK/raid.args")"
+hasnt "not sdb" "$WORK/raid.args" "sdb3"
+check "the drives" "/dev/sda /dev/sdc /dev/sdd" "$(val DRIVES)"
+check "the legs" "/dev/sda /dev/sdc /dev/sdd" "$(val SYSTEM)"
+check "the other legs" "/dev/sdc /dev/sdd" "$(val LAID_LEGS)"
+check "the data half on the set" "$WORK/dev/ublkb65535" "$(val LOCAL_DISK)"
+has "in the record" "$WORK/run/install-progress.events" "drive	/dev/sdb	failed"
+
+echo "the lay: continue - a spare takes the lost drive's place"
+reset
+touch "$WORK/layfail.sdb"
+lay "$D4" 'STORAGE_ON_DRIVE_FAILURE=continue' 'STORAGE_SPARES=1'
+check "three members" "3" "$(grep -c "^$WORK/dev/sd.3$" "$WORK/raid.args")"
+hasnt "no spare left" "$WORK/raid.args" "^--spare$"
+has "said" "$WORK/out" "the set 2 data + 1 parity (#625)"
+
+echo "the lay: continue - the first leg lost, the next takes the system half"
+reset
+touch "$WORK/layfail.sda"
+lay "$D4" 'STORAGE_ON_DRIVE_FAILURE=continue'
+check "system half" "/dev/sdb" "$(val SYSTEM_DISK)"
+hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the lay: continue - but not past the plan"
+reset
+touch "$WORK/layfail.sdb"
+lay "STORAGE_DRIVES='/dev/sda /dev/sdb /dev/sdc' STORAGE_SYSTEM='/dev/sdb'" 'STORAGE_ON_DRIVE_FAILURE=continue'
+has "the only leg lost" "$WORK/out" "FATAL: every system leg (/dev/sdb) failed to lay"
+reset
+touch "$WORK/layfail.sdb" "$WORK/layfail.sdc"
+lay "$D4" 'STORAGE_ON_DRIVE_FAILURE=continue' 'STORAGE_PARITY=2'
+has "the set cannot hold" "$WORK/out" "FATAL: without /dev/sdb /dev/sdc, 2 drive(s) cannot hold a parity 2 set"
+check "no set" "no" "$([ -e "$WORK/raid.args" ] && echo yes || echo no)"
+reset
+touch "$WORK/layfail.sda" "$WORK/layfail.sdb" "$WORK/layfail.sdc" "$WORK/layfail.sdd"
+lay "$D4" 'STORAGE_ON_DRIVE_FAILURE=continue'
+has "none laid is fatal" "$WORK/out" "FATAL: laying the drives failed: error: no drive could be laid"
 
 echo "the lay: no stormraid in the initramfs is fatal"
 reset

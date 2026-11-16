@@ -49,6 +49,7 @@ from the file and prints shell `/init` evaluates:
 | `STORAGE_SMALLEST` | the drive that sets the data region's size (ready drives only) |
 | `STORAGE_SAID` | the plan in words, for the console |
 | `STORAGE_WIPE` | the install-config's wipe word (`storage.wipe`, #614), said as where it came from; empty without it |
+| `STORAGE_ON_DRIVE_FAILURE` | `stop` (the default) or `continue`: `storage.on_drive_failure`, what a drive that cannot be laid does to the install (#625) |
 | `STORAGE_STOP` | refused: no drive is taken, the install stops naming why |
 
 It refuses by name a drive that `carries` something (another node's
@@ -189,6 +190,56 @@ numbers the release's volumes 0, 1, 2, … in the order `/init` mounts them, and
 12.84's 81 volumes reached the old 64. boot-local refuses to start, naming the
 device, when an id it would create is already live. Same rule as the format: only over drives this boot formatted,
 with the wipe word, on a fresh install, or over drives that carry nothing.
+
+### A drive that cannot be laid (#625)
+
+Every drive is laid at once, and one that fails does not undo the others
+(forge1 12.87: sdb, a NetApp X378 at 4096 + PI type 1, took no write at LBA
+0, and three laid drives were thrown away with the shell drop). The engine
+explains the drive in one block on the console, asked through SG_IO on its
+own node after the write failed (an example, for a drive whose format is corrupt):
+
+```
+Storage: /dev/sdb: NOT LAID: clearing the front of the drive: I/O error (os error 5)
+Storage: /dev/sdb:   asked through sdb: TEST UNIT READY good; REQUEST SENSE good
+Storage: /dev/sdb:   format: 2441609216 blocks of 4096 + PI type 1; write protect: off
+Storage: /dev/sdb:   READ(16) LBA 0, no PI: good; WRITE(16) LBA 0, no PI: MEDIUM ERROR asc/ascq 0x31/0x00
+Storage: /dev/sdb:   so: the drive's format is corrupt (did not complete): it needs a FORMAT UNIT again (#595, #621)
+Storage: /dev/sdb:   NETAPP X378_HLBRE10TA07 NA02 serial …: write uncorrected 0, read uncorrected 0, non-medium 0, grown defects 0, SMART 0x00/0x00
+Storage: /dev/sdb:   kernel: sd 0:0:3:0: [sdb] tag#9 Sense Key : Medium Error [current]
+```
+
+The write at LBA 0 is one block of zeros with WRPROTECT 0 (no protection
+information sent; the drive makes its own), so it tells a drive that refuses
+writes from a path that does not carry them: when it succeeds, the failure is
+in what the kernel's writes carry (the PI the HBA adds) or the HBA. The
+`so:` line reads the sense: a corrupt format (ASC 0x31), a format still
+running, write protect or DATA PROTECT, a PI guard / application / reference
+tag check, a medium or hardware error. The `kernel:` lines are the last of
+`/dev/kmsg` about the drive (`[sdb]`, `dev sdb,`) and the card's `log_info`.
+While drives are formatted and laid, the console loglevel is 7, so the
+kernel's own sense lines are on the console too; it is put back after the lay.
+
+The engine prints `STORAGE_LAID` (the drives laid), `STORAGE_LAY_FAILED` and
+`STORAGE_LAY_WHY` (each failure with its `so:` line), and exits non-zero only
+when no drive was laid. Each failed drive is `failed` in the install record
+(#616). Then `storage.on_drive_failure` decides:
+
+```yaml
+storage:
+  drives: all
+  on_drive_failure: continue   # stop (the default): the install ends with why
+```
+
+- `stop` (the default): `STOP:` names the drive, the drives laid and this
+  setting, then the FATAL with the drive's `so:` line.
+- `continue`: the install goes on without it while the plan still holds:
+  the failed drive's leg dropped (at least one leg must be left), a spare
+  taking its place in the set (the spares count goes down first), and the set
+  at its parity (`parity + 1` data members at least). Otherwise it stops as
+  `stop` does, saying which of these failed. The console says
+  `WARNING: storage: /dev/sdb left out (storage.on_drive_failure: continue)`
+  and the set it makes (`2 data + 1 parity`).
 
 ## Every boot: the set served
 

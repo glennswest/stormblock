@@ -2626,7 +2626,10 @@ only: a reboot boots what was laid (#598). On an install it formats a drive
 that holds something only with the wipe word: `storage.wipe: all` in that
 install's install-config (#614, written by stormcentral's `testhost install
 --force`) or `rd.stormblock.assimilate=force`; the install ticket is not it
-(#609).
+(#609). A drive that cannot be laid is explained on the console (its sense,
+PI, a write at LBA 0 without PI, the kernel's lines) and stops the install,
+or with `storage.on_drive_failure: continue` is left out while the plan still
+holds (#625, `docs/storage-layout.md`).
 Every system leg (the first `system_mirror` drives) carries a full copy of
 the system volumes: `/init` names the other legs to `boot-local` as
 `--system-leg DEV`, the handover record keeps them, and after the flow-over

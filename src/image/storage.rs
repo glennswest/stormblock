@@ -375,6 +375,27 @@ pub struct StorageSpec {
     /// is formatted and laid whatever it holds, as with
     /// `rd.stormblock.assimilate=force`. None: what a drive holds is kept.
     pub wipe: Option<Wipe>,
+    /// A drive that cannot be laid (#625): `stop` ends the install with
+    /// why; `continue` lays the others without it when the plan still holds
+    /// (fewer system legs, a spare in its place, the set one drive narrower).
+    pub on_drive_failure: OnDriveFailure,
+}
+
+/// `storage.on_drive_failure` (#625).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum OnDriveFailure {
+    #[default]
+    Stop,
+    Continue,
+}
+
+impl OnDriveFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OnDriveFailure::Stop => "stop",
+            OnDriveFailure::Continue => "continue",
+        }
+    }
 }
 
 /// Who asked for a wipe and why, as the install-config says (#614).
@@ -415,6 +436,7 @@ impl Default for StorageSpec {
             system_size: None,
             data_raid: Some(DataRaid { parity: 1, spares: 0 }),
             wipe: None,
+            on_drive_failure: OnDriveFailure::Stop,
         }
     }
 }
@@ -455,7 +477,7 @@ impl StorageSpec {
             Yaml::Str(s) if s.is_empty() => return Ok(spec),
             other => return Err(format!("storage is {}, not a mapping", other.kind())),
         };
-        keys_known(m, "storage", &["drives", "format", "system_mirror", "system_size", "data_raid", "wipe"])?;
+        keys_known(m, "storage", &["drives", "format", "system_mirror", "system_size", "data_raid", "wipe", "on_drive_failure"])?;
         for (k, v) in m {
             match k.as_str() {
                 "drives" => {
@@ -568,6 +590,14 @@ impl StorageSpec {
                             Some(d)
                         }
                         other => return Err(format!("storage.data_raid is {}: a mapping or none", other.kind())),
+                    };
+                }
+                "on_drive_failure" => {
+                    let w = scalar(v, "storage.on_drive_failure")?;
+                    spec.on_drive_failure = match w.to_ascii_lowercase().as_str() {
+                        "stop" | "" => OnDriveFailure::Stop,
+                        "continue" => OnDriveFailure::Continue,
+                        _ => return Err(format!("storage.on_drive_failure is '{w}': continue or stop")),
                     };
                 }
                 "wipe" => {
@@ -957,6 +987,7 @@ impl StoragePlan {
         // The wipe word from the install-config (#614): /init takes it as
         // STORAGE_FORCE for this install and says where it came from.
         let _ = writeln!(o, "STORAGE_WIPE={}", sh_quote(&self.spec.wipe.as_ref().map(|w| w.said()).unwrap_or_default()));
+        let _ = writeln!(o, "STORAGE_ON_DRIVE_FAILURE={}", self.spec.on_drive_failure.as_str());
         let _ = writeln!(o, "STORAGE_STOP=");
         o
     }
@@ -1167,6 +1198,20 @@ mod tests {
         let p = plan(&spec, &d, false).unwrap();
         let devs: Vec<&str> = p.drives.iter().map(|d| d.dev.as_str()).collect();
         assert_eq!(devs, ["/dev/sda", "/dev/sde"]);
+    }
+
+    /// #625: a drive that cannot be laid stops the install unless the
+    /// install-config says to go on without it.
+    #[test]
+    fn on_drive_failure() {
+        let sh = plan_from_config("storage:\n  drives: all\n", &forge1(), false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_ON_DRIVE_FAILURE=stop\n"), "{sh}");
+        let sh = plan_from_config("storage: {\"drives\":\"all\",\"on_drive_failure\":\"continue\"}\n", &forge1(), false)
+            .unwrap()
+            .unwrap();
+        assert!(sh.contains("STORAGE_ON_DRIVE_FAILURE=continue\n"), "{sh}");
+        let v = top_level("storage:\n  on_drive_failure: maybe\n", "storage").unwrap().unwrap();
+        assert!(StorageSpec::from_yaml(&v).unwrap_err().contains("continue or stop"));
     }
 
     #[test]
