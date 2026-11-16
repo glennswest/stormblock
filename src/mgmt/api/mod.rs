@@ -522,6 +522,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     // (`mgmt::auth::resolve`). A router built in-process with no resolution
     // enforces the config's own token, or nothing.
     let r = r.merge(crate::mgmt::debug::router(state.clone()));
+    // The install's page and record (#616), served by the node after the
+    // initramfs's `install-status` stops at switch_root: one view on the
+    // host for install and runtime. Open, GET only (`serve::api::is_public`).
+    // With the old web UI (feature `ui`) `/` stays its redirect.
+    let r = r.merge(crate::install_progress::router(
+        std::path::PathBuf::from(crate::install_progress::RUN),
+        !cfg!(feature = "ui"),
+    ));
     r.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         crate::mgmt::auth::require_token,

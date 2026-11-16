@@ -149,6 +149,13 @@ fn is_public(path: &str) -> bool {
             // no node token.
             | "/debug/stalls"
             | "/debug/locks"
+            // The install's page and record (#616; owner: "on host"): drive
+            // models, serials, progress and the install's console lines,
+            // what health's `storage_layout` already shows openly. GET only:
+            // nothing else is routed there.
+            | "/"
+            | "/install"
+            | "/api/v1/install/progress"
     )
 }
 

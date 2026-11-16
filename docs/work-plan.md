@@ -26,6 +26,25 @@ stormcentral's `testhost install --force`.
   (propose --after #1428 refused: #1428 waits on #614).
 - [ ] forge1's forced install console (only metal shows it).
 
+## #616 — the install's page and progress record, on the host (2026-11-16, P0)
+
+Owner: "a web page with status, instead of primitive logging"; "on host",
+no forge, no stormcentral (customer sites); "equal or more detail" than the
+install screen (#618, a client of the same record).
+
+- [x] `src/install_progress.rs`: the record, built on each read from
+  /run/stormblock (local-disk.json + card_rows, storage-format/*, layout,
+  init.log, install-progress.events); `install-status` serves it with the
+  page (`src/install_progress.html`) on :9090; the engine merges the same
+  router (open, GET only, `serve::api::is_public`).
+- [x] /init: `progress` events at inventory, format (sg + card), lay, set,
+  system legs, flow-over, switch_root; rescue_shell = failed with its
+  FATAL/STOP line; the engine: laid / failed / booted.
+- [ ] check.sh; stage; proof on forge1's next install:
+  `get:http://{node}:9090/api/v1/install/progress ~ "state":"laid"`.
+- Not here: the thermal strip (`health`, stormipmi#111); the graphical
+  screen (#618); stormcentral's panel (stormcentral#1433).
+
 ## #611 / #595 — the card's own inventory, then #595 on it (2026-11-15, P0)
 
 Owner (#595): "use a direct api the the sas card"; #611: "use the low level

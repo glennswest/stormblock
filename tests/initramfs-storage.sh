@@ -22,6 +22,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 sed -n '/# --- BEGIN storage format tools/,/# --- END storage format tools/p' "$GEN" > "$WORK/tools.sh"
 grep -q 'END storage format tools' "$WORK/tools.sh" || { echo "FAIL: could not extract the storage format tools block"; exit 1; }
+# The install's progress events (#616), which the blocks below append to.
+sed -n '/# --- BEGIN install progress/,/# --- END install progress/p' "$GEN" >> "$WORK/tools.sh"
+grep -q 'END install progress' "$WORK/tools.sh" || { echo "FAIL: could not extract the install progress block"; exit 1; }
 sed -n '/# --- BEGIN storage layout/,/# --- END storage layout/p' "$GEN" > "$WORK/layout.sh"
 grep -q 'END storage layout' "$WORK/layout.sh" || { echo "FAIL: could not extract the storage layout block"; exit 1; }
 sed -n '/# --- BEGIN storage format (/,/# --- END storage format$/p' "$GEN" > "$WORK/format.sh"
@@ -535,6 +538,8 @@ has "  the install record in formatting" "$WORK/report.args" "^formatting$"
 has "  with the card's progress" "$WORK/report.args" "0x5000cca268077301: formatting (full) 1.0%"
 has "  the end said" "$WORK/out" "storage: 0x5000cca268077301: formatted (full) through the card in 10m"
 has "  planned again" "$WORK/out" "STORAGE: 2 drives, planned again"
+has "  the page's record: the format running through the card (#616)" "$WORK/run/install-progress.events" "	step	format	running	0x5000cca268077301 through the card$"
+has "  and the stage" "$WORK/run/install-progress.events" "	stage	formatting	running	through the card: 0x5000cca268077301$"
 
 echo "the layout: a format through the card that fails fails the install, its words quoted (#595)"
 reset
@@ -544,6 +549,7 @@ inv_card_act() { echo "hba act: 0x5000cca268077301: FORMAT UNIT: CHECK CONDITION
 cardplans
 layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" "$CARDBAD"
 has "  failed, named with the sense" "$WORK/out" "the format through the card failed on 0x5000cca268077301(.*asc/ascq 0x24/0x00"
+has "  the page's record: the format failed (#616)" "$WORK/run/install-progress.events" "	step	format	failed	through the card: 0x5000cca268077301(.*0x24/0x00"
 
 reset
 printf 'storage:\n  drives: [sda]\n' > "$WORK/install-config.yaml"
@@ -646,6 +652,8 @@ has "the beat names each drive" "$WORK/out" "FORMAT: 0 min so far - sda: ended; 
 has "the state is formatting" "$WORK/ldwrite" "ldwrite formatting /dev/sda4 storage: formatting, 0 min so far - "
 has "the appliance told" "$WORK/report.args" "^formatting$"
 has "with the progress" "$WORK/report.args" "sdb: formatting (fast) 40%"
+has "the page's record: the format ran and ended (#616)" "$WORK/run/install-progress.events" "	step	format	running	/dev/sda /dev/sdb to 4096 + PI type1$"
+has "  done" "$WORK/run/install-progress.events" "	step	format	done	/dev/sda /dev/sdb$"
 check "the beat ended with the formats" "" "$(sed -n '/=FORMATTED=/,$p' "$WORK/out" | grep 'FORMAT: ' || true)"
 
 echo "the format: a drive already at 4096 + PI type1 is not formatted again, the rest are (#614)"

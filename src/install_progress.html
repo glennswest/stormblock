@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StormBlock install</title>
+<style>
+:root{--bg:#0b0f14;--panel:#131a22;--line:#243040;--text:#eef3f8;--dim:#8fa1b3;--accent:#5cc8ff;--ok:#4fd18b;--warn:#f2b84b;--bad:#ff6b6b;--before:#54657a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 24px;padding:16px 24px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{margin:0;font-size:18px;font-weight:600;letter-spacing:.2px}
+header .host{color:var(--dim)}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;border:1px solid currentColor}
+.s-formatting,.s-running{color:var(--accent)}.s-laid,.s-booted,.s-done,.s-formatted,.s-already,.s-optimal{color:var(--ok)}
+.s-failed{color:var(--bad)}.s-not-ready,.s-degraded{color:var(--warn)}.s-pending,.s-found,.s-starting{color:var(--dim)}
+.summary{display:flex;flex-wrap:wrap;gap:24px;margin-left:auto;color:var(--dim)}
+.summary b{color:var(--text);font-weight:600}
+nav{display:flex;gap:4px;padding:0 24px;border-bottom:1px solid var(--line);overflow-x:auto}
+nav button{background:none;border:0;border-bottom:2px solid transparent;color:var(--dim);padding:10px 14px;font:inherit;cursor:pointer;white-space:nowrap}
+nav button.on{color:var(--text);border-bottom-color:var(--accent)}
+main{padding:20px 24px;max-width:1400px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.tile{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.tile .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.tile .name{font-weight:600;font-size:15px;word-break:break-all}
+.tile .sub{color:var(--dim);font-size:12px;margin-top:2px;word-break:break-word}
+.bar{height:8px;background:var(--line);border-radius:4px;margin:12px 0 6px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent);transition:width .6s}
+.bar.done i{background:var(--ok)}.bar.bad i{background:var(--bad)}
+.nums{display:flex;justify-content:space-between;color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums}
+.nums b{color:var(--text)}
+.said{margin-top:8px;color:var(--bad);font-size:12px}
+.steps{list-style:none;margin:0;padding:0}
+.steps li{display:flex;gap:12px;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--line)}
+.steps .dot{width:10px;height:10px;border-radius:50%;flex:none;background:var(--before);margin-top:4px}
+.steps .done .dot{background:var(--ok)}.steps .running .dot{background:var(--accent)}.steps .failed .dot{background:var(--bad)}
+.steps .t{color:var(--dim);margin-left:auto;font-variant-numeric:tabular-nums;white-space:nowrap}
+.steps .d{color:var(--dim);font-size:12px}
+pre{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;color:var(--text);max-height:70vh}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--dim);font-weight:600}
+.wide{overflow-x:auto}
+.muted{color:var(--dim)}
+footer{padding:12px 24px;color:var(--dim);font-size:12px}
+@media (max-width:600px){header,nav,main,footer{padding-left:16px;padding-right:16px}.summary{margin-left:0}}
+</style>
+</head>
+<body>
+<header>
+  <h1>StormBlock install</h1><span class="host" id="host"></span>
+  <span class="pill s-starting" id="state">starting</span>
+  <div class="summary">
+    <span>Stage <b id="stage">—</b></span>
+    <span>Elapsed <b id="elapsed">—</b></span>
+    <span>ETA <b id="eta">—</b></span>
+  </div>
+</header>
+<nav id="tabs">
+  <button data-t="drives" class="on">Drives</button>
+  <button data-t="layout">Layout</button>
+  <button data-t="card">Card rows</button>
+  <button data-t="stages">Stages</button>
+  <button data-t="console">Console</button>
+  <button data-t="raw">Record</button>
+</nav>
+<main>
+  <section id="t-drives"><div class="grid" id="drives"></div></section>
+  <section id="t-layout" hidden><ul class="steps" id="steps"></ul><p class="muted" id="setline"></p></section>
+  <section id="t-card" hidden><div class="wide"><table id="card"></table></div></section>
+  <section id="t-stages" hidden><ul class="steps" id="stages"></ul></section>
+  <section id="t-console" hidden><pre id="console"></pre></section>
+  <section id="t-raw" hidden><pre id="raw"></pre></section>
+</main>
+<footer id="foot">Waiting for the installer…</footer>
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id)};
+  var esc=function(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})};
+  var cls=function(s){return 's-'+String(s||'').replace(/\s+/g,'-')};
+  var span=function(s){if(s==null)return'—';s=Math.max(0,Math.round(s));var h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?h+'h '+m+'m':m?m+'m':s+'s'};
+  var gb=function(b){return b?(b/1e12>=1?(b/1e12).toFixed(1)+' TB':(b/1e9).toFixed(0)+' GB'):''};
+  var when=function(t){return t?new Date(t*1000).toLocaleTimeString():''};
+  $('host').textContent=location.host;
+  document.querySelectorAll('#tabs button').forEach(function(b){b.onclick=function(){
+    document.querySelectorAll('#tabs button').forEach(function(x){x.classList.toggle('on',x===b)});
+    document.querySelectorAll('main section').forEach(function(s){s.hidden=s.id!=='t-'+b.dataset.t});
+    try{localStorage.setItem('tab',b.dataset.t)}catch(e){}
+  }});
+  try{var t=localStorage.getItem('tab');if(t){var b=document.querySelector('#tabs button[data-t="'+t+'"]');if(b)b.click()}}catch(e){}
+  function drives(ds){
+    if(!ds.length)return'<p class="muted">No drives reported yet.</p>';
+    return ds.map(function(d){
+      var p=d.percent==null?(d.state==='laid'||d.state==='formatted'||d.state==='already'?100:0):d.percent;
+      var bar=d.state==='failed'?'bad':(p>=100?'done':'');
+      var title=d.dev?d.dev:(d.sas||'drive');
+      var sub=[d.model,gb(d.bytes),d.sas&&d.dev?d.sas:'',d.slot?'slot '+d.slot:'',d.found==='card'?'seen by the card only':''].filter(Boolean).join(' · ');
+      var tur=d.card&&d.card.card_test_unit_ready?'<div class="sub">card: '+esc(d.card.card_test_unit_ready)+'</div>':'';
+      var fmt=d.format&&d.format.block_size?'<div class="sub">'+esc(d.format.block_size)+' + PI '+esc(d.format.pi||'none')+'</div>':'';
+      return '<div class="tile"><div class="top"><span class="name">'+esc(title)+'</span><span class="pill '+cls(d.state)+'">'+esc(d.state)+'</span></div>'+
+        '<div class="sub">'+esc(sub)+'</div>'+tur+fmt+
+        '<div class="bar '+bar+'"><i style="width:'+Math.min(100,p)+'%"></i></div>'+
+        '<div class="nums"><span><b>'+(d.percent==null?'—':Number(d.percent).toFixed(1)+'%')+'</b>'+(d.mode?' '+esc(d.mode):'')+'</span><span>'+span(d.elapsed_s)+' so far</span><span>'+(d.eta_s==null?'':'about '+span(d.eta_s)+' left')+'</span></div>'+
+        (d.said?'<div class="said">'+esc(d.said)+'</div>':'')+'</div>';
+    }).join('');
+  }
+  function steps(list,key){
+    return list.map(function(s){return '<li class="'+esc(s.state)+'"><span class="dot"></span><div><div>'+esc(s[key])+' <span class="pill '+cls(s.state)+'">'+esc(s.state)+'</span></div>'+(s.detail?'<div class="d">'+esc(s.detail)+'</div>':'')+'</div><span class="t">'+when(s.at)+'</span></li>'}).join('')||'<li class="muted">None yet.</li>';
+  }
+  function card(ds){
+    var rows=ds.filter(function(d){return d.card});
+    if(!rows.length)return'<tr><td class="muted">No SAS card rows (no mpt card, or not read yet).</td></tr>';
+    var cols=['sas_address','enclosure','slot','phy','link','kind','state','scsi','block','sg','card_inquiry','card_test_unit_ready'];
+    return '<tr>'+cols.map(function(c){return'<th>'+c+'</th>'}).join('')+'</tr>'+rows.map(function(d){return'<tr>'+cols.map(function(c){return'<td>'+esc(d.card[c])+'</td>'}).join('')+'</tr>'}).join('');
+  }
+  function show(r){
+    $('state').className='pill '+cls(r.state);$('state').textContent=r.state;
+    $('stage').textContent=r.stage&&r.stage.stage||'—';
+    $('elapsed').textContent=r.started?span(r.at-r.started):'—';
+    $('eta').textContent=r.eta?span(r.eta_s)+' ('+when(r.eta)+')':'—';
+    $('drives').innerHTML=drives(r.drives||[]);
+    $('steps').innerHTML=steps(r.layout||[],'step');
+    $('setline').textContent=r.set?('Data set '+(r.set.device||'')+': '+r.set.state+', parity '+r.set.parity+' over '+r.set.slots+' slots'):'';
+    $('card').innerHTML=card(r.drives||[]);
+    $('stages').innerHTML=steps((r.stages||[]).slice().reverse(),'stage');
+    $('console').textContent=(r.console||[]).join('\n');
+    $('raw').textContent=JSON.stringify(r,null,2);
+    $('foot').textContent='Updated '+when(r.at)+' · refreshed every 5 s from /api/v1/install/progress';
+  }
+  function poll(){
+    fetch('/api/v1/install/progress',{cache:'no-store'}).then(function(x){return x.json()}).then(show)
+      .catch(function(){$('foot').textContent='The installer is not answering (rebooting into the node?): trying again.'})
+      .finally(function(){setTimeout(poll,5000)});
+  }
+  poll();
+})();
+</script>
+</body>
+</html>

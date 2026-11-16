@@ -486,6 +486,17 @@ enum SubCommand {
     /// directly as `--slab`:
     ///
     ///   stormblock boot-local --slab "$(stormblock boot-claim --boothost URL)"
+    /// The install's page and progress record on this node (#616): `/` and
+    /// `/install` (the page), `GET /api/v1/install/progress` (the record,
+    /// built from what `/init` writes under `--run`). Read only, no token:
+    /// what an operator opens on the host while the installer runs. `/init`
+    /// runs it until switch_root; the node's engine serves the same after.
+    InstallStatus {
+        #[arg(long, default_value = "0.0.0.0:9090")]
+        listen: String,
+        #[arg(long, default_value = crate::install_progress::RUN)]
+        run: std::path::PathBuf,
+    },
     /// The initramfs's log over the network (#477): follow files from their
     /// start and send every line as a stormcast frame, to the group and to
     /// the syslog collector `stormpump.syslog=` or an install-config's
@@ -1403,6 +1414,9 @@ pub async fn run() -> anyhow::Result<()> {
                     slab, volumes, meta.as_deref(), api.as_deref(), data_dir.as_deref(),
                     &cli.config, *version_mismatch,
                 ).await;
+            }
+            SubCommand::InstallStatus { listen, run } => {
+                return crate::install_progress::serve(listen, run.clone()).await;
             }
             SubCommand::Logcast { follow, install_config, group, status, drain_secs, console_copy } => {
                 let mut opts = crate::logcast::Options {
@@ -8421,6 +8435,10 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             move |why: String| {
                 let install = install.clone();
                 async move {
+                    let _ = crate::install_progress::append(
+                        std::path::Path::new(crate::install_progress::RUN),
+                        "stage", "failed", "failed", &why, crate::install_progress::now(),
+                    );
                     if let Some(t) = install {
                         report_install_stage(&t, "failed", Some(&why)).await;
                     }
@@ -8458,6 +8476,17 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                     },
                     None => false,
                 };
+                // The install's record on this host (#616): whatever the
+                // appliance hears, the node's own page says it.
+                let run = std::path::Path::new(crate::install_progress::RUN);
+                let at = crate::install_progress::now();
+                if booted {
+                    let _ = crate::install_progress::append(run, "step", "flow-over", "done", "", at);
+                    let _ = crate::install_progress::append(run, "step", "laid", "done", "the disk boots on its own", at);
+                    let _ = crate::install_progress::append(run, "stage", "laid", "done", "", at);
+                } else if tried {
+                    let _ = crate::install_progress::append(run, "step", "laid", "failed", "the disk was laid and does not boot on its own", at);
+                }
                 match install {
                     // Laid: the intent goes back to local, and the report the
                     // first boot off the disk makes is left on the disk
@@ -10490,6 +10519,10 @@ pub(crate) async fn report_first_local_boot(dir: &std::path::Path) -> Option<Rep
     use crate::drive::handover::InstallReport;
     let mut rep = InstallReport::read(dir).filter(|r| r.state == "laid")?;
     println!("Install: this is the first boot off the disk laid from {}; telling {}", rep.ticket.volume, rep.ticket.boothost);
+    let _ = crate::install_progress::append(
+        std::path::Path::new(crate::install_progress::RUN),
+        "step", "booted", "done", "the first boot off the laid disk", crate::install_progress::now(),
+    );
     let outcome = report_installed(&rep.ticket, "booted").await;
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     match &outcome {

@@ -984,8 +984,24 @@ console_primary() {
     printf '%s\n' "$_last"
 }
 
+# --- BEGIN install progress (covered by tests/initramfs-storage.sh)
+# The install's progress as a record, not prose (#616; owner: "a web page
+# with status, instead of primitive logging", on the host itself). Each step
+# and stage is a line in install-progress.events; `stormblock install-status`
+# builds the record from it and from the files the format and lay already
+# write, and serves it with a page on :9090 until switch_root. The engine
+# serves the same after. Never fatal: the record is a view.
+progress() { # kind (step|stage|drive) name state [detail]
+    _pgf="${STORM_RUN:-/run/stormblock}/install-progress.events"
+    mkdir -p "${_pgf%/*}" 2>/dev/null || return 0
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" "$(printf '%s' "${4:-}" | tr '\t\n\r' '   ')" >> "$_pgf" 2>/dev/null || :
+}
+# --- END install progress
+
 rescue_shell() {
     echo "Dropping to shell..."
+    # The page says the install stopped, and why (#616).
+    progress stage failed failed "$(grep -a 'FATAL:\|STOP:' "${INIT_LOG:-/dev/null}" 2>/dev/null | tail -n 1)" 2>/dev/null
     console_restore
     _primary=$(console_primary)
     if command -v setsid >/dev/null 2>&1; then
@@ -1059,6 +1075,28 @@ logcast_stop() { # what is left is sent; at most STORM_LOGCAST_STOP (5) s
 logcast_start
 # --- END logcast
 
+# The install's page and record on the node's own address (#616), from now
+# (it answers once a NIC has an address) until switch_root, when the engine
+# takes :9090. `rd.stormblock.status=off` runs none; `=<addr:port>` moves it.
+STATUS_PID=""
+install_status_start() {
+    _isb="${STORM_STATUS_BIN:-/usr/sbin/stormblock}"
+    _isl="${STATUS_LISTEN:-}"
+    [ "$_isl" = off ] && return 0
+    [ -x "$_isb" ] || return 0
+    "$_isb" install-status --listen "${_isl:-0.0.0.0:9090}" --run "${STORM_RUN:-/run/stormblock}" \
+        </dev/null >>"${STORM_RUN:-/run/stormblock}/install-status.log" 2>&1 &
+    STATUS_PID=$!
+    _isp="${_isl:-0.0.0.0:9090}"
+    echo "  the install's page: http://<this node>:${_isp##*:}/ (#616)"
+    progress stage starting running "the installer's page on port ${_isp##*:}" 2>/dev/null
+}
+install_status_stop() {
+    [ -n "$STATUS_PID" ] || return 0
+    kill -TERM "$STATUS_PID" 2>/dev/null || :
+    STATUS_PID=""
+}
+
 # The engine's log is followed onto the console (#294), and a console drains
 # little: a 115200-baud port about sixty lines a second, server8's SOL three
 # (#476). /init's own lines go to the same consoles after the follower's, so
@@ -1127,6 +1165,7 @@ MOUNTS=""
 NTP_MODE=""
 SYSTEM_NAMED=""
 DECLARED_NET=""
+STATUS_LISTEN=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -1175,6 +1214,7 @@ for param in $(cat /proc/cmdline); do
         # handover instead of a nameless second initiator.
         rd.stormblock.hostnqn=*)     HOSTNQN="${param#*=}" ;;
         rd.stormblock.diskless=*)    DISKLESS_OK="${param#*=}" ;;
+        rd.stormblock.status=*)      STATUS_LISTEN="${param#*=}" ;;
         rd.stormblock.meta=*)        META="${param#*=}" ;;
         rd.stormblock.overlay=*)     OVERLAY="${param#*=}" ;;
         rd.stormblock.image-store=*) IMAGE_STORE="${param#*=}" ;;
@@ -1187,6 +1227,7 @@ for param in $(cat /proc/cmdline); do
         ip=*)                        IP_CONF="${param#*=}" ;;
     esac
 done
+install_status_start
 
 # The drive the command line names, before any probe replaces SLAB with a
 # claimed image: the one local drive an install may take (#273).
@@ -1316,6 +1357,7 @@ system_legs() {
     done
     LEG_ARGS="${LEG_ARGS# }"
     [ -n "$LEG_ARGS" ] && echo "storage: the other system legs: $(printf '%s\n' "$LEG_ARGS" | sed 's/--system-leg //g') (#573)"
+    progress step "system legs" done "$(echo $_sl_c)" 2>/dev/null
     return 0
 }
 # The layout, reported (#573, STORAGE-LAYOUT.md step 8: "drives, format
@@ -2659,6 +2701,7 @@ INV_CARD_ROWS=$(inv_card json | tail -n 1)
 case "$INV_CARD_ROWS" in "["*"]") ;; *) INV_CARD_ROWS="[]" ;; esac
 printf '{"state": "unknown", "drive": null, "reason": null, "from": "initramfs", "controllers": %s, "drives": %s, "card_rows": %s}\n' \
     "$INV_CONTROLLERS" "$INV_DRIVES" "$INV_CARD_ROWS" > "$INV_REPORT" 2>/dev/null || true
+progress step inventory done "$(printf '%s' "$INV_DRIVES" | grep -o '"name"' | wc -l | tr -d ' ') drive(s) with a Linux device$(_ipc=$(inv_card pending | grep -c . ); [ "${_ipc:-0}" -gt 0 ] && echo ", $_ipc more on the card only")" 2>/dev/null
 # --- END storage inventory
 
 # --- BEGIN storage watch (covered by tests/initramfs-storage-hotplug.sh)
@@ -5217,6 +5260,8 @@ if [ "$BOOT_MODE" = "local" ]; then
         if [ -n "$_sr_fmt" ]; then
             [ -x "$_st_tool" ] || storage_fail "storage: in ${STORAGE_FROM##*/} formats every drive, and this initramfs has no stormdrive ($_st_tool): it is built with STORMDRIVE_BIN (stormcentral#1335)"
             echo "  FORMAT: $_sr_fmt to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION ($STORAGE_METHOD), all at once - every byte on them is lost"
+            progress step format running "$_sr_fmt to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION" 2>/dev/null
+            progress stage formatting running "$_sr_fmt" 2>/dev/null
             _st_pids=""
             for _dev in $_sr_fmt; do storage_format "$_dev" & _st_pids="$_st_pids $!"; done
             storage_beat "$_sr_fmt" "$(date +%s)" &
@@ -5237,7 +5282,11 @@ if [ "$BOOT_MODE" = "local" ]; then
                echo "failed: $(storage_said "$_dev")" > "$_st_dir/${_dev##*/}.fmt" ;;
             esac
         done
-        [ -n "$_st_bad" ] && storage_fail "the format to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION failed on${_st_bad}; nothing is laid, and no other format is tried (#595)"
+        if [ -n "$_st_bad" ]; then
+            progress step format failed "failed on${_st_bad}" 2>/dev/null
+            storage_fail "the format to $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION failed on${_st_bad}; nothing is laid, and no other format is tried (#595)"
+        fi
+        progress step format done "${_sr_fmt:-none needed}${_sr_skip:+; already at the format:$_sr_skip}" 2>/dev/null
         # Each drive as the kernel reads it now: by its WWID, since sd may
         # make a new disk of it (a drive it had none for, or one of 0 bytes).
         _pt_want=$(storage_pi "$STORAGE_PROTECTION")
@@ -5426,6 +5475,8 @@ STEOF
                         done &
                         _st_cp="$_st_cp $!"
                     done
+                    progress step format running "$(echo $_st_cards) through the card" 2>/dev/null
+                    progress stage formatting running "through the card: $(echo $_st_cards)" 2>/dev/null
                     storage_beat "$_st_cards" "$(date +%s)" &
                     _st_beat=$!
                     for _p in $_st_cp; do wait "$_p" 2>/dev/null; done
@@ -5434,7 +5485,10 @@ STEOF
                     for _sc in $_st_cards; do
                         [ "$(cat "$_st_dir/$_sc.rc" 2>/dev/null || echo 1)" = 0 ] || _st_cbad="$_st_cbad $_sc($(storage_said "$_sc"))"
                     done
-                    [ -n "$_st_cbad" ] && storage_fail "the format through the card failed on$_st_cbad (#611); nothing is laid"
+                    if [ -n "$_st_cbad" ]; then
+                        progress step format failed "through the card:$_st_cbad" 2>/dev/null
+                        storage_fail "the format through the card failed on$_st_cbad (#611); nothing is laid"
+                    fi
                     # Found again: the card's rows each with a SCSI device.
                     _st_cw=0
                     while [ -n "$(inv_card pending)" ] && [ "$_st_cw" -lt "${STORAGE_FIND_SECS:-60}" ]; do
@@ -6303,6 +6357,8 @@ $1|$_svp|$3"
         _st_dir="${_st_dir:-${STORM_RUN:-/run/stormblock}/storage-format}"
         mkdir -p "$_st_dir"
         echo "  LAY: $STORAGE_DRIVES, all at once - legs: ${STORAGE_SYSTEM:-none}"
+        progress step lay running "$STORAGE_DRIVES" 2>/dev/null
+        progress stage laying running "$STORAGE_DRIVES" 2>/dev/null
         # shellcheck disable=SC2086
         if ! _sl_out=$("$SURVEY_SB" image storage-lay --system-bytes "${STORAGE_SYSTEM_BYTES:-0}" $_sl_legs $STORAGE_DRIVES 2>"$_st_dir/lay.log"); then
             sed 's/^/  /' "$_st_dir/lay.log"
@@ -6317,6 +6373,7 @@ $1|$_svp|$3"
             while [ ! -b "$_m" ] && [ "$_w" -lt 10 ]; do sleep 1; _w=$((_w + 1)); done
             [ -b "$_m" ] || storage_fail "$_m did not appear after its drive was laid"
         done
+        progress step lay done "ESP, system region and data region on $STORAGE_DRIVES" 2>/dev/null
         _sl_first=${STORAGE_MEMBERS%% *}
         _sl_n=$(printf '%s\n' $STORAGE_MEMBERS | grep -c .)
         if [ "$STORAGE_RAID" = yes ] && [ "$_sl_n" -gt 1 ]; then
@@ -6352,9 +6409,11 @@ $1|$_svp|$3"
                 storage_fail "the node-data set did not come up as $STORAGE_SET"
             fi
             echo "  the node-data set is $STORAGE_SET: the node's data half goes on it"
+            progress step set done "node-data $STORAGE_SET, parity $STORAGE_PARITY over $_sl_n" 2>/dev/null
             LOCAL_DISK="$STORAGE_SET"
         else
             [ "$_sl_n" -gt 1 ] && echo "  data_raid: none - the data half on $_sl_first; the other drives' data regions are left laid and empty"
+            progress step set skipped "no data_raid: the data half on $_sl_first" 2>/dev/null
             LOCAL_DISK="$_sl_first"
         fi
         LOCAL_DISK_ID=""
@@ -6417,6 +6476,8 @@ $1|$_svp|$3"
     : > "$ENGINE_LOG"
     system_legs
     storage_report
+    progress step flow-over running "the system onto ${SYSTEM_DISK:-${LOCAL_DISK:-this disk}}" 2>/dev/null
+    progress stage flow-over running "" 2>/dev/null
     # shellcheck disable=SC2086
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \
@@ -7258,6 +7319,9 @@ hotplug_stop
 
 # What is left of the boot's log goes out before the hand-over (#477).
 logcast_stop
+# The engine serves the install's page and record from here (#616).
+progress stage switch_root done "the node's engine serves this page from here" 2>/dev/null
+install_status_stop
 
 # The init that follows gets /dev/console, as it always did; the fan-out goes
 # on for as long as the engine writes to it.

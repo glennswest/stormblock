@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-16
+- **feat:** #616 (owner: "a web page with status, instead of primitive logging", "on host"): the install's page and progress record, served by the host itself. `/init` runs `stormblock install-status` on :9090 from the command line's parse until switch_root; the node's engine serves the same after (`GET /`, `/install`, `GET /api/v1/install/progress`, open, GET only). The record is built on each read from what `/init` writes: the inventory and the card's rows, each drive's format lines (percent, ETA, time so far, sg and card paths alike), the layout, the console's last lines, and the steps and stages `/init` and the engine append to `install-progress.events` (inventory, format, lay, set, system legs, flow-over, laid, booted; a rescue shell is `failed` with its FATAL/STOP line). The page shows one tile per drive with its bar, the steps, the card's raw rows, the stages and the console, in stormconsole's palette. `rd.stormblock.status=off|<addr:port>`. docs/install-progress.md.
 - **docs:** #609: closed, seen on pvetest3 12.87: an appliance-asked install with `storage:` and no wipe word STOPs before any write, with no format (forge1 12.86 formatted); the over-eager STOP is #615.
 - **docs:** #611: closed, verified on forge1 12.87's console (the card lists 4 drives with slots, INQUIRY and TUR through the card; three formatting through it); v24.10.2 staged.
 

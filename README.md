@@ -713,6 +713,13 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     `self_test_extended` or `format` (`block_size`, `pi`, `confirm` = the SAS
     address); a format is followed to its end and the kernel asked to look
     again. [docs/storage-layout.md](docs/storage-layout.md#the-cards-rows-611).
+  - The install's page and record (#616): `GET /` (or `/install`) is a page
+    and `GET /api/v1/install/progress` its record: every drive (found by
+    Linux or only by the card), its format state, percent and ETA, the
+    layout's steps, the stages, the console's last lines. Open and read only,
+    on :9090 from the initramfs's network-up (`stormblock install-status`)
+    and from the engine after switch_root.
+    [docs/install-progress.md](docs/install-progress.md).
   - `metadata` (#587): whether the volume record is kept, as
     `GET /api/v1/slabs/durability` (token) says it: `ok`, `stale` (slabs whose
     own region is full while the data directory's `metadata.v2` holds the
