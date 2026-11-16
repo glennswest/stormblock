@@ -60,6 +60,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.10.1] — 2026-11-15
+
+### Fixed
+- #595/#611: a format through the SAS card reports as the sg path does: a line a minute with %, ETA and time so far, echoed as it comes; the `FORMAT: N min so far` beat, local-disk.json and the install record in `formatting`; the card's rows printed before the format; unread progress said and asked again.
+
 ## [v24.10.0] — 2026-11-15
 
 ### Added
