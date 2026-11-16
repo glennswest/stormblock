@@ -76,6 +76,14 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.12.0] — 2026-11-16
+
+### Added
+- #625: `storage.on_drive_failure: stop|continue` in the install-config. `stop` (the default) ends the install with the drive's reason; `continue` lays the install without the drive while the plan holds (one leg left, a spare in its place, the set at its parity).
+
+### Fixed
+- #625: a drive that cannot be laid no longer throws away the drives that were. Each one is explained on the console: its sense, the WP bit, PI, a write at LBA 0 with no PI through SG_IO, its error counters, the kernel's lines, and a `so:` line. The console loglevel is 7 while drives are formatted and laid.
+
 ## [v24.11.0] — 2026-11-16
 
 ### Added
