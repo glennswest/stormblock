@@ -2560,7 +2560,17 @@ while read -r _p _cls _id _drv; do
         echo "  $_p [$_id] class $_cls: no driver bound"
         echo "WARNING: storage controller $_p [$_id] (class $_cls) has no driver bound - its drives cannot be seen (#345)"
     else
-        echo "  $_p [$_id] class $_cls: $_drv, $(echo $_ds | wc -w) drive(s)"
+        # The card's count beside the kernel's (#611, forge1 12.87: the line
+        # said "1 drive(s)" over the card's four rows): the card is the
+        # source of presence, Linux the second column.
+        _icn=$(echo $_ds | wc -w | tr -d ' ')
+        _icc=""
+        case "$_cls" in 0x0104*|0x0107*) _icc=$(inv_card count | sed -n "s/^$_p //p" | head -n 1) ;; esac
+        if [ -n "$_icc" ] && [ "$_icc" != "$_icn" ]; then
+            echo "  $_p [$_id] class $_cls: $_drv, $_icc drive(s) on the card, $_icn with a Linux device"
+        else
+            echo "  $_p [$_id] class $_cls: $_drv, $_icn drive(s)"
+        fi
         case "$_cls" in 0x0104*|0x0107*) inv_hba_view "$_p" "$_drv" ;; esac
     fi
     _seen="$_seen $_ds"

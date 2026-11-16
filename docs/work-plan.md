@@ -69,6 +69,13 @@ first, #595's format and layout on it.
   kernel never makes a target for; the rows in local-disk.json; the engine
   keeps them for the node's life (rescan, re-match, log changes); the
   per-row low-level details (VPD, READ CAPACITY 16, LOG/MODE SENSE, SES).
+- [x] forge1 12.87 (seen on metal, 23:42Z): the card lists all four drives
+  (`card: ioc 0 (mpt3ctl) 0000:c1:00.0 host1: 8 phys, 4 with a link, 4
+  drive(s)`), each row with slot, INQUIRY and TUR NOT READY 0x31/0x01 through
+  the card; the three formatted through the card. Master's gap 2 (rows not
+  printed): they were, under the controller; only the controller line said
+  `1 drive(s)`. Now `4 drive(s) on the card, 1 with a Linux device`. Gap 1
+  (progress) is v24.10.1 (#595). The pvetest3 proof failure: no card there.
 
 ## #609 — a keep-data reinstall formatted forge1's drive (2026-11-15, P1)
 forge1 12.86: the appliance asked an install, `/init` said "its data half is

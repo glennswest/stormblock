@@ -398,6 +398,7 @@ fi
 make_forge
 HBA=fake_hba SETTLE=1 PWAIT=3 inventory
 out=$(cat "$WORK/inv.out")
+contains "the controller line gives the card's count and Linux's (#611)" "0000:c1:00.0 [1000:0097] class 0x010700: mpt3sas, 4 drive(s) on the card, 1 with a Linux device" "$out"
 contains "a card's drive Linux never made a device of is a WARNING with its SAS address" \
     "WARNING: storage: the card on 0000:c1:00.0 lists 4 drive(s), the inventory has 1: Linux made no device of sas-0x5000cca26801b649 sas-0x5000cca26a819e69 sas-0x5000cca268077301 (#611" "$out"
 
