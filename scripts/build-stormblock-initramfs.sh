@@ -1100,6 +1100,31 @@ install_status_stop() {
     STATUS_PID=""
 }
 
+# The boot and install screen on the machine's display (#618): the same
+# record as the page, drawn through DRM on the firmware's framebuffer
+# (simpledrm), F2 the log on tty2, F1 back. From here until switch_root on
+# every boot; on an install boot it goes on after, to the finished or the
+# failure panel. No display: it says so and exits. `rd.stormblock.screen=off`
+# runs none. The serial console is not touched.
+SCREEN_PID=""
+screen_start() {
+    _scb="${STORM_SCREEN_BIN:-/usr/sbin/stormblock}"
+    [ "${SCREEN:-}" = off ] && return 0
+    [ -x "$_scb" ] || return 0
+    "$_scb" screen --run "${STORM_RUN:-/run/stormblock}" </dev/null \
+        >>"${STORM_RUN:-/run/stormblock}/screen.log" 2>&1 &
+    SCREEN_PID=$!
+}
+screen_switch_root() { # an install boot keeps it; any other gives the display back
+    [ -n "$SCREEN_PID" ] || return 0
+    if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
+        echo "  the install's screen stays up through the hand-over (#618)"
+        return 0
+    fi
+    kill -TERM "$SCREEN_PID" 2>/dev/null || :
+    SCREEN_PID=""
+}
+
 # The engine's log is followed onto the console (#294), and a console drains
 # little: a 115200-baud port about sixty lines a second, server8's SOL three
 # (#476). /init's own lines go to the same consoles after the follower's, so
@@ -1169,6 +1194,7 @@ NTP_MODE=""
 SYSTEM_NAMED=""
 DECLARED_NET=""
 STATUS_LISTEN=""
+SCREEN=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -1218,6 +1244,7 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.hostnqn=*)     HOSTNQN="${param#*=}" ;;
         rd.stormblock.diskless=*)    DISKLESS_OK="${param#*=}" ;;
         rd.stormblock.status=*)      STATUS_LISTEN="${param#*=}" ;;
+        rd.stormblock.screen=*)      SCREEN="${param#*=}" ;;
         rd.stormblock.meta=*)        META="${param#*=}" ;;
         rd.stormblock.overlay=*)     OVERLAY="${param#*=}" ;;
         rd.stormblock.image-store=*) IMAGE_STORE="${param#*=}" ;;
@@ -1231,6 +1258,7 @@ for param in $(cat /proc/cmdline); do
     esac
 done
 install_status_start
+screen_start
 
 # The drive the command line names, before any probe replaces SLAB with a
 # claimed image: the one local drive an install may take (#273).
@@ -7405,6 +7433,7 @@ logcast_stop
 # The engine serves the install's page and record from here (#616).
 progress stage switch_root done "the node's engine serves this page from here" 2>/dev/null
 install_status_stop
+screen_switch_root
 
 # The init that follows gets /dev/console, as it always did; the fan-out goes
 # on for as long as the engine writes to it.

@@ -517,6 +517,24 @@ enum SubCommand {
         #[arg(long, default_value = crate::install_progress::RUN)]
         run: std::path::PathBuf,
     },
+    /// The boot and install screen on the machine's own display (#618): the
+    /// install's record (#616, the same as the page on :9090) drawn every
+    /// second through DRM, F2 the log on tty2, F1 back. No display: nothing
+    /// drawn, and it exits. `/init` runs it; SIGTERM ends it and gives the
+    /// display back. `--snapshot FILE` draws the record once into a PNG.
+    Screen {
+        #[arg(long, default_value = crate::install_progress::RUN)]
+        run: std::path::PathBuf,
+        /// A DRM card (`/dev/dri/card0`); else the first with a display
+        #[arg(long)]
+        card: Option<std::path::PathBuf>,
+        #[arg(long)]
+        snapshot: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 1920)]
+        width: u32,
+        #[arg(long, default_value_t = 1080)]
+        height: u32,
+    },
     /// The initramfs's log over the network (#477): follow files from their
     /// start and send every line as a stormcast frame, to the group and to
     /// the syslog collector `stormpump.syslog=` or an install-config's
@@ -1437,6 +1455,10 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubCommand::InstallStatus { listen, run } => {
                 return crate::install_progress::serve(listen, run.clone()).await;
+            }
+            SubCommand::Screen { run, card, snapshot, width, height } => {
+                let o = crate::screen::Opts { run: run.clone(), card: card.clone(), snapshot: snapshot.clone(), width: *width, height: *height };
+                return tokio::task::spawn_blocking(move || crate::screen::run(&o)).await?;
             }
             SubCommand::Logcast { follow, install_config, group, status, drain_secs, console_copy } => {
                 let mut opts = crate::logcast::Options {
