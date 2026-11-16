@@ -1468,7 +1468,7 @@ mod tests {
                     Ok(Reply { len: 32, ..Default::default() })
                 }
                 0x12 => {
-                    let mut i = vec![0u8; 36];
+                    let mut i = [0u8; 36];
                     i[8..16].copy_from_slice(b"NETAPP  ");
                     i[16..32].copy_from_slice(b"X378_HLBRE10TA07");
                     i[32..36].copy_from_slice(b"NA02");
