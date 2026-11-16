@@ -125,6 +125,14 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.15.0] — 2026-11-16
+
+### Added
+- #618: the boot and install screen on the machine's display (`stormblock screen`, DRM): the install's record drawn as frames, drive rows with bars, steps, ETA, health strip, failure and finished panels; F2 the log, F1 back; started by `/init` on every boot, `rd.stormblock.screen=off`. docs/screen.md.
+
+### Fixed
+- #616: the install's record is kept across reboots: an ordinary boot shows the last install's (`laid`, `booted`), not its own `flow-over running`.
+
 ## [v24.14.1] — 2026-11-16
 
 ### Fixed

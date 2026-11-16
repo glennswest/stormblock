@@ -11,7 +11,8 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
 - [x] `install_progress::settle` after the state restore: install boot →
   kept in `<data-dir>/install-progress.kept`; other boots → kept put back;
   engine appends keep the copy
-- [x] check.sh on cfc49dd5: ALL PASS (read 2026-11-16 during #618)
+- [x] check.sh on cfc49dd5: ALL PASS (read 2026-11-16 during #618); it
+  ships in v24.15.0 with #618: release and stage done, `shipped` is left
 - [ ] (was) check.sh on cfc49dd5 was running when this was paused for the P0
   #625 (2026-11-16): read its result (`sc-build 'sh check.sh'` again if
   unknown), then release (v24.14.2), stage, and `shipped` with the same proof
@@ -34,8 +35,10 @@ check passes (a new dependency: ab_glyph; Cargo.lock resolved on a build VM).
 - [x] F2: the log on tty2 (the screen follows init.log there), F1 back
 - [x] tests: PNG snapshots (looked at); `ci-screen-verify.sh`: QEMU with
   simpledrm, screendump read back, F2/F1 pressed and read back (e5937421)
-- [ ] check.sh on the branch; fast-forward main; release; stage; shipped
-  with `console:screen: drawing on /dev/dri/card`
+- [x] check.sh passed on 18b9412e (1481, 0 warnings); main fast-forwarded;
+  v24.15.0 released and staged; shipped with `console:screen: drawing on /dev/dri/card`
+- Next: forge1's iDRAC (the owner's "done when"), stormpump#237 (after the
+  hand-over), a GPU driver taking simpledrm's place after switch_root
 - Not here: stormpump's stages after the hand-over (stormpump#237), the
   stormbootx panel's look, health values (stormipmi#111)
 
