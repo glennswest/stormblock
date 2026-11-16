@@ -228,6 +228,7 @@ ld_write() { echo "ldwrite $*" >> "$W/ldwrite"; }
 rescue_shell() { echo RESCUE; exit 0; }
 inv_card() { :; }
 inv_card_act() { return 1; }
+inv_card_ready() { echo "0x5000cca268077301: TEST UNIT READY good; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1; no Linux device yet"; return 2; }
 inv_rescan() { :; }
 inv_settling() { :; }
 EOF
@@ -582,6 +583,28 @@ has "  the end said" "$WORK/out" "storage: 0x5000cca268077301: formatted (full) 
 has "  planned again" "$WORK/out" "STORAGE: 2 drives, planned again"
 has "  the page's record: the format running through the card (#616)" "$WORK/run/install-progress.events" "	step	format	running	0x5000cca268077301 through the card$"
 has "  and the stage" "$WORK/run/install-progress.events" "	stage	formatting	running	through the card: 0x5000cca268077301$"
+
+echo "the layout: after a format through the card, Linux is waited for, never given up on (#620)"
+# forge1 12.87: 850 min of FORMAT UNIT, then FATAL 9 s later. Here the drive
+# stays without a SCSI device for five rounds, past STORAGE_FIND_SECS.
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+CARDWAIT='inv_card() { case "$1" in pending) [ -e "$W/card.found" ] || echo "0000:c1:00.0:sas-0x5000cca268077301" ;; view) echo "card: drive sas 0x5000cca268077301 slot 3, present: $([ -e "$W/card.found" ] && echo ready || echo no target)" ;; esac; }
+inv_card_act() { echo "0x5000cca268077301: formatted (full) through the card in 850m"; }
+inv_card_ready() { echo "$*" >> "$W/ready.args"; n=$(wc -l < "$W/ready.args"); [ "$n" -ge 5 ] && touch "$W/card.found"; echo "0x5000cca268077301: TEST UNIT READY good; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1; no Linux device yet; its host scanned, phy-1:3 link reset"; return 2; }'
+cardplans
+rm -f "$WORK/ready.args" "$WORK/card.found"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'STORAGE_KICK_SECS=1' 'STORAGE_BEAT_SECS=2' "$CARDWAIT"
+check "  asked and kicked each round until found" "5" "$(grep -c -- '--sas 0x5000cca268077301 --kick' "$WORK/ready.args")"
+has "  what the drive answers, on the console" "$WORK/out" "storage: 0x5000cca268077301: TEST UNIT READY good; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1; no Linux device yet; its host scanned, phy-1:3 link reset - waiting for Linux to find it"
+has "  the install record's beat while it waits" "$WORK/report.args" "waiting for Linux to find 0x5000cca268077301"
+has "  past STORAGE_FIND_SECS: the finding" "$WORK/out" "STORAGE: formatted through the card, and after 0 min Linux has no device for: 0x5000cca268077301 (#620)"
+has "  with the card's words" "$WORK/out" "^    card: drive sas 0x5000cca268077301 slot 3, present: no target"
+has "  and the way out" "$WORK/out" "Power-cycle the machine"
+has "  found again" "$WORK/out" "every drive the card formatted has a Linux device again"
+has "  and planned again" "$WORK/out" "STORAGE: 2 drives, planned again"
+hasnt "  no FATAL" "$WORK/out" "FATAL"
+hasnt "  no rescue" "$WORK/out" "RESCUE"
 
 echo "the layout: a format through the card that fails fails the install, its words quoted (#595)"
 reset

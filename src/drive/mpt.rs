@@ -562,6 +562,23 @@ pub fn with_drive<R>(dev: &Path, sys: &Path, sas: u64, f: impl FnOnce(&dyn crate
     Err(format!("no mpt card lists a drive with SAS address {}", hex_addr(sas)))
 }
 
+/// A link reset on the phy the card says the drive is on (#620): written to
+/// `/sys/class/sas_phy/phy-<host>:<phy>/link_reset`. Answers the phy's name.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn link_reset_for(dev: &Path, sys: &Path, sas: u64) -> Option<String> {
+    let (cards, _) = cards(dev, sys, false);
+    for c in &cards {
+        let Some(r) = c.drives().find(|r| r.device.sas_address == sas) else { continue };
+        let n = c.host.trim_start_matches("host");
+        let name = format!("phy-{n}:{}", r.device.phy);
+        let p = sys.join("class/sas_phy").join(&name).join("link_reset");
+        if std::fs::write(&p, "1").is_ok() {
+            return Some(name);
+        }
+    }
+    None
+}
+
 /// After a format (#611: "linux needs to find them without a reboot"):
 /// the kernel is asked to look at the drive again. Its SCSI device is
 /// rescanned when it has one (and deleted first when its disk reads 0

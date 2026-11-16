@@ -414,6 +414,25 @@ named drives, such a drive is a WARNING and is not taken.
   storage: 0x5000cca268077301: formatting 41.3%, 95m so far
 ```
 
+**After a card format, Linux is waited for (#620).** forge1 12.87's three
+drives took 850 min of FORMAT UNIT, and the install gave up on them 9 s
+later. Now, while the card lists a formatted drive with no SCSI device, the
+drive is asked through the card every 10 s (`stormblock hba ready --sas …
+--kick`). It gets TEST UNIT READY, START UNIT when it answers NOT READY
+04/02, and READ CAPACITY 16. Linux is asked to find it: its host is
+scanned and its phy's link reset (`/sys/class/sas_phy/phy-<host>:<phy>`).
+The console gets a line a minute with what the drive answered, and the
+install record a `formatting` beat. After 10 min (`STORAGE_FIND_SECS`, 600)
+a drive still without a Linux device is said with the card's rows and the
+kernel's lines about it, and the way out: a power cycle (the formats are
+kept, so the next install formats nothing, #614). The install goes on
+waiting; a finished format is never dropped to a shell.
+
+```
+  storage: 0x5000cca268077301: TEST UNIT READY good; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1; no Linux device yet; its host scanned, phy-1:6 link reset - waiting for Linux to find it (3 min) (#620)
+  storage: every drive the card formatted has a Linux device again, after 4 min (#620)
+```
+
 **On a running node.** The engine reads the cards again every 30 s and on
 every drive event, matches the rows to Linux again, and logs each change
 at WARN: a row appearing, a slot emptied, a state, link, access or device

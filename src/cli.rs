@@ -153,6 +153,22 @@ enum HbaAction {
         #[arg(long, default_value = "/dev")]
         dev: String,
     },
+    /// After a format (#620): one round of bringing the drive back. TEST
+    /// UNIT READY, START UNIT when it asks for one, READ CAPACITY 16, through
+    /// its sg node or the card; with `--kick`, Linux is asked to find it
+    /// (its host scanned, its phy's link reset). One line on stdout. Exit 0:
+    /// Linux has a device for it; 2: ready on the card, no Linux device yet;
+    /// 3: not ready; 1: the card does not list it.
+    Ready {
+        #[arg(long)]
+        sas: String,
+        #[arg(long)]
+        kick: bool,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
     /// The write-test matrix on a drive at the format it has (#627):
     /// WRITE(16) of one block at LBA 0 and at the last LBA with WRPROTECT 0
     /// (the drive makes the PI), then 1 (the host's, T10-DIF guard and the
@@ -10507,6 +10523,30 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
             let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba details: {sas} is no SAS address"))?;
             let d = mpt::with_drive(Path::new(dev), Path::new(sys), a, crate::drive::scsi::details).map_err(anyhow::Error::msg)?;
             println!("{}", serde_json::to_string_pretty(&d)?);
+        }
+        HbaAction::Ready { sas, kick, sys, dev } => {
+            use crate::drive::scsi;
+            let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba ready: {sas} is no SAS address"))?;
+            let (devp, sysp) = (Path::new(dev), Path::new(sys));
+            let r = match mpt::with_drive(devp, sysp, a, scsi::ready_round) {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("0x{a:016x}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let mut kicked = String::new();
+            if *kick {
+                mpt::rescan_for(sysp, a);
+                kicked.push_str("; its host scanned");
+                if let Some(phy) = mpt::link_reset_for(devp, sysp, a) {
+                    kicked.push_str(&format!(", {phy} link reset"));
+                }
+            }
+            let linux = mpt::match_linux(sysp, a);
+            let has = linux.block.as_deref().map(|b| format!("; Linux: {b}"));
+            println!("0x{a:016x}: {}{}{}", r.said(), has.clone().unwrap_or_else(|| "; no Linux device yet".into()), kicked);
+            std::process::exit(if has.is_some() { 0 } else if r.ready { 2 } else { 3 });
         }
         HbaAction::WriteTest { sas, confirm, json, sys, dev } => {
             use crate::drive::scsi;

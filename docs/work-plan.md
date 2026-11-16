@@ -19,6 +19,22 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #620 — after a card format, Linux waited for (2026-11-16, P0)
+
+The minute lines, the beat, the record and the controller line landed in
+v24.10.1–v24.11.0. The master's 14:42Z addition: forge1 12.87's three card
+formats (850 min) ended in a FATAL 9 s later (STORAGE_FIND_SECS 60, nothing
+asked of the drives).
+- [x] `scsi::ready_round` (TUR, START UNIT on 04/02, READ CAPACITY 16),
+  `hba ready --sas --kick` (rescan_for + `mpt::link_reset_for`)
+- [x] /init: wait while the card lists a formatted drive with no SCSI device,
+  asked every STORAGE_KICK_SECS (10), a line and the beat a minute, the
+  finding after STORAGE_FIND_SECS (600) with the way out; no FATAL
+- [x] forge1 16 Nov 22:19/22:36 consoles: the card's four rows under the
+  controller, all `present: ready` with sd/sg
+- [ ] check.sh; release; then behind #627 (sdb's replacement is the next card
+  format on forge1, where the minute lines and this wait show)
+
 ## #595 — verified on forge1's metal (2026-11-16, P0)
 
 No code: the format path landed through v24.10.1 (and #611, #614). Seen on

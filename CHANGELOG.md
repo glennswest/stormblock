@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#620)
+- **fix:** #620 (forge1 12.87: three drives formatted through the card for 850 min, then `FATAL: formatted through the card and still no SCSI device` 9 s later, the formats thrown away to a shell): after a card format the install waits for Linux for as long as the card lists the drive. Every 10 s each drive is asked through the card (`stormblock hba ready --sas … --kick`: TEST UNIT READY, START UNIT when it asks for one, READ CAPACITY 16) and Linux is asked to find it (its host scanned, its phy's link reset). A line a minute goes on the console and a `formatting` beat to the install record. After 10 min a drive still without a Linux device is said with the card's rows, the kernel's lines and the way out (power-cycle: the formats are kept, #614), and the install goes on waiting. It never drops a finished format to a shell.
+- **feat:** #620: `stormblock hba ready --sas … [--kick]`: one round of bringing a formatted drive back, one line. Exit 0: Linux has it; 2: ready on the card, no Linux device; 3: not ready; 1: not listed. `mpt::link_reset_for`.
+
 ### 2026-11-16 (#595)
 - **docs:** #595: verified on forge1's consoles (three NOT READY drives formatted through the card; all four at 4096 + PI type1) and health (24.13.2: pi_type 1); shipped with a proof read from forge1. Work plan.
 

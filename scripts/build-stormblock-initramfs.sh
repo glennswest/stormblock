@@ -2400,6 +2400,7 @@ inv_pending() { # -> "pci:what" for each drive the SAS layer knows and no block 
 INV_HBA="${STORM_INV_HBA:-${STORM_STORMBLOCK:-/usr/sbin/stormblock} hba}"
 inv_card() { $INV_HBA "$@" 2>/dev/null || true; }
 inv_card_act() { $INV_HBA act "$@"; } # its exit code and stderr are the format's
+inv_card_ready() { $INV_HBA ready "$@"; } # one round after a format (#620): one line; 0 Linux has it, 2 ready on the card, 3 not ready
 # A drive that answers and has no readable format (#595: forge1's three SAS
 # drives, left by an interrupted format, answer NOT READY / medium format
 # corrupted): a disk-type SCSI device with no block device, or one of 0
@@ -5551,13 +5552,50 @@ STEOF
                         progress step format failed "through the card:$_st_cbad" 2>/dev/null
                         storage_fail "the format through the card failed on$_st_cbad (#611); nothing is laid"
                     fi
-                    # Found again: the card's rows each with a SCSI device.
+                    # Found again (#620: forge1's three drives, 850 min of
+                    # FORMAT UNIT, and the install gave up 9 s later). A
+                    # format that succeeded is never thrown away: while the
+                    # card still lists a drive with no SCSI device, each is
+                    # asked through the card every 10 s (TEST UNIT READY,
+                    # START UNIT when it asks for one, READ CAPACITY 16) and
+                    # Linux asked to find it (its host scanned, its phy's link
+                    # reset). A line a minute and the install record's beat
+                    # while it waits; after STORAGE_FIND_SECS (600) a drive
+                    # ready on the card that Linux still has no device for is
+                    # said with the card's words and the kernel's, and the
+                    # install goes on waiting: a power cycle finds them, and
+                    # the next install formats nothing (#614).
                     _st_cw=0
-                    while [ -n "$(inv_card pending)" ] && [ "$_st_cw" -lt "${STORAGE_FIND_SECS:-60}" ]; do
-                        [ $((_st_cw % 10)) = 0 ] && inv_rescan "$(inv_settling)" >/dev/null
+                    _st_t0=$(date +%s)
+                    while [ -n "$(inv_card pending)" ]; do
+                        if [ $((_st_cw % ${STORAGE_KICK_SECS:-10})) = 0 ]; then
+                            inv_rescan "$(inv_settling)" >/dev/null
+                            _st_wait=""
+                            for _sc in $(inv_card pending | sed 's/^.*:sas-//'); do
+                                _sr=$(inv_card_ready --sas "$_sc" --kick 2>&1)
+                                _st_wait="$_st_wait $_sc"
+                                [ $((_st_cw % ${STORAGE_BEAT_SECS:-60})) = 0 ] && echo "  storage: ${_sr} - waiting for Linux to find it ($(( ($(date +%s) - _st_t0) / 60 )) min) (#620)"
+                            done
+                            if [ $((_st_cw % ${STORAGE_BEAT_SECS:-60})) = 0 ] && [ "$_st_cw" -gt 0 ]; then
+                                "$SURVEY_SB" install-report --stage formatting --detail "formatted through the card; waiting for Linux to find$_st_wait ($(( ($(date +%s) - _st_t0) / 60 )) min)" >/dev/null 2>&1 &
+                                progress stage formatting running "formatted; waiting for Linux to find$_st_wait" 2>/dev/null
+                            fi
+                        fi
+                        if [ "$_st_cw" -ge "${STORAGE_FIND_SECS:-600}" ] && [ $(( (_st_cw - ${STORAGE_FIND_SECS:-600}) % 600 )) = 0 ]; then
+                            echo "  STORAGE: formatted through the card, and after $(( ($(date +%s) - _st_t0) / 60 )) min Linux has no device for:$(echo " $(inv_card pending | sed 's/^.*:sas-//')") (#620)"
+                            echo "  what the card says now:"
+                            inv_card view | sed 's/^/    /'
+                            for _sc in $(inv_card pending | sed 's/^.*:sas-0x//'); do
+                                dmesg 2>/dev/null | grep -i "$_sc" | tail -n 4 | sed 's/^/    kernel: /'
+                            done
+                            echo "  The formats are kept. Power-cycle the machine: the card enumerates the drives from power-on,"
+                            echo "  and the next install finds them at $STORAGE_BLOCK_SIZE + PI $STORAGE_PROTECTION and formats nothing (#614)."
+                            echo "  This install waits for them; it never drops a finished format to a shell."
+                            progress stage formatting running "formatted; Linux has no device for$_st_wait: power-cycle (the formats are kept)" 2>/dev/null
+                        fi
                         sleep 1; _st_cw=$((_st_cw + 1))
                     done
-                    [ -n "$(inv_card pending)" ] && storage_fail "formatted through the card and still no SCSI device: $(echo $(inv_card pending)) (#611)"
+                    echo "  storage: every drive the card formatted has a Linux device again, after $(( ($(date +%s) - _st_t0) / 60 )) min (#620)"
                     inv_card view | sed 's/^/    /'
                     continue
                 fi

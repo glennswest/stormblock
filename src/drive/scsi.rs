@@ -719,6 +719,58 @@ pub fn kernel_lines_of(records: &[String], name: &str, extra: &[String], max: us
     v
 }
 
+// ---- after a format: the drive brought back (#620) ----
+
+/// One round of asking a drive that has just been formatted whether it is
+/// ready (#620: forge1's three drives, 850 min of FORMAT UNIT through the
+/// card, then 9 s of waiting before the install gave up on them).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReadyRound {
+    pub tur: String,
+    /// START UNIT was sent: the drive said it needs one (NOT READY, 04/02).
+    pub started: bool,
+    pub capacity: Option<Capacity>,
+    pub ready: bool,
+}
+
+/// TEST UNIT READY; START UNIT when the drive asks for one; READ CAPACITY 16.
+pub fn ready_round(t: &dyn Transport) -> ReadyRound {
+    let mut r = ReadyRound::default();
+    match t.run(&cdb::test_unit_ready(), Dir::None, &mut [], 30) {
+        Ok(rep) => {
+            r.tur = rep.said();
+            r.ready = rep.good();
+            // "not ready, initializing command required": spun down, or
+            // stopped after the format.
+            if rep.key() == Some((2, 0x04, 0x02)) {
+                r.started = t.run(&cdb::start_stop(true), Dir::None, &mut [], 60).is_ok_and(|x| x.good());
+            }
+        }
+        Err(e) => r.tur = format!("not sent: {e}"),
+    }
+    let mut c = vec![0u8; 32];
+    if let Ok(rep) = t.run(&cdb::read_capacity16(32), Dir::In, &mut c, 30) {
+        if rep.good() {
+            r.capacity = parse_capacity16(&c[..rep.len.min(32)]);
+        }
+    }
+    r
+}
+
+impl ReadyRound {
+    pub fn said(&self) -> String {
+        format!(
+            "TEST UNIT READY {}{}; READ CAPACITY 16 {}",
+            self.tur,
+            if self.started { ", START UNIT sent" } else { "" },
+            self.capacity
+                .as_ref()
+                .map(|c| format!("{} blocks of {}{}", c.blocks, c.block_size, if c.prot_en { format!(" + PI type {}", c.pi_type) } else { ", no PI".into() }))
+                .unwrap_or_else(|| "no answer".into())
+        )
+    }
+}
+
 // ---- the write-test matrix (#627) ----
 
 /// CRC-16 T10-DIF (polynomial 0x8BB7, no reflection, init 0): a block's
@@ -1420,6 +1472,47 @@ mod tests {
         assert!(wp.hint().unwrap().contains("write protected"));
         let pi = WriteProbe { senses: vec![(0xB, 0x10, 0x03)], ..Default::default() };
         assert!(pi.hint().unwrap().contains("reference tag"));
+    }
+
+    /// #620: a drive that needs START UNIT after its format gets one, and
+    /// says its new geometry.
+    struct Stopped {
+        started: std::cell::Cell<bool>,
+    }
+    impl Transport for Stopped {
+        fn run(&self, cdb: &[u8], _dir: Dir, data: &mut [u8], _t: u32) -> std::io::Result<Reply> {
+            let sense = |k: u8, a: u8, q: u8| vec![0x70, 0, k, 0, 0, 0, 0, 10, 0, 0, 0, 0, a, q];
+            match cdb[0] {
+                0x00 if self.started.get() => Ok(Reply::default()),
+                0x00 => Ok(Reply { status: 2, sense: sense(2, 0x04, 0x02), len: 0, transport: None }),
+                0x1B => {
+                    self.started.set(true);
+                    Ok(Reply::default())
+                }
+                0x9E => {
+                    data[..32].fill(0);
+                    data[..8].copy_from_slice(&0x917_FFFFFu64.to_be_bytes());
+                    data[8..12].copy_from_slice(&4096u32.to_be_bytes());
+                    data[12] = 1;
+                    Ok(Reply { len: 32, ..Default::default() })
+                }
+                _ => Ok(Reply { status: 2, sense: sense(5, 0x20, 0), len: 0, transport: None }),
+            }
+        }
+        fn name(&self) -> String {
+            "card".into()
+        }
+    }
+
+    #[test]
+    fn a_formatted_drive_brought_back() {
+        let d = Stopped { started: Default::default() };
+        let r = ready_round(&d);
+        assert!(!r.ready && r.started, "{r:?}");
+        assert_eq!(r.said(), "TEST UNIT READY NOT READY asc/ascq 0x04/0x02, START UNIT sent; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1");
+        let r = ready_round(&d);
+        assert!(r.ready && !r.started);
+        assert!(r.said().starts_with("TEST UNIT READY good; "));
     }
 
     #[test]
