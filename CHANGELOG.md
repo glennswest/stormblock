@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#625, the loglevel on every install)
+- **fix:** #625 (ask 3: the kernel's messages on the console "during the install"): the console loglevel is raised to 7 on every install boot, one that `storage:` lays or one an install ticket asks for (a single drive, laid later by boot-local), and put back just before switch_root rather than after the `storage:` lay. The line is `install: console loglevel 7 (was N): the kernel's messages, SCSI sense included, on the console until switch_root (#625)`. An ordinary boot is untouched.
+
 ### 2026-11-16 (#625, a drive that left the link)
 - **fix:** #625 (forge1's second attempt: the X378 left the SAS link on its first write and the kernel removed `/dev/sda` mid-lay): the lay's failure block reads each drive's SAS address before the lay. When the kernel has removed the drive, the first line says so: `so: the drive left the SAS link on the write: the kernel removed /dev/sda (SAS 0x…)`. It gives the card's own row for the drive (slot, link, state, present, Linux device, or not listed), asks the drive through the card by address when it has no Linux device, and matches the kernel's lines by the SAS address too (mpt3sas's `removing handle(…), sas_addr(…)` never names the disk). Before, it said only "SG_IO cannot be sent to it".
 - **docs:** #625: the shipped proof failed on pvetest2, which has no `storage:` section; pvetest3's 12.89 install console has the line (`storage: console loglevel 7: the kernel's messages, SCSI sense included, on the console (#625)`).

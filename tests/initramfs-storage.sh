@@ -318,6 +318,19 @@ check "raised" "7" "$(cat "$WORK/printk")"
 printf '7\t4\t1\t7\n' > "$WORK/printk"
 layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" "STORM_PRINTK=$WORK/printk" 'INSTALL_FRESH=1'
 has "already 7, said" "$WORK/out" "console loglevel 7: the kernel's messages, SCSI sense included"
+# Every install, not only a storage: one: an install ticket with no storage:
+# (a single drive, laid by boot-local later); an ordinary boot: nothing.
+rm -f "$WORK/install-config.yaml"
+printf '4\t4\t1\t7\n' > "$WORK/printk"
+: > "$WORK/ticket.json"
+layout "$BASE" "STORM_PRINTK=$WORK/printk" "STORM_INSTALL_TICKET=$WORK/ticket.json"
+has "an install with no storage: says it" "$WORK/out" "install: console loglevel 7 (was 4): the kernel's messages, SCSI sense included, on the console until switch_root"
+check "raised" "7" "$(cat "$WORK/printk")"
+rm -f "$WORK/ticket.json"
+printf '4\t4\t1\t7\n' > "$WORK/printk"
+layout "$BASE" "STORM_PRINTK=$WORK/printk" "STORM_INSTALL_TICKET=$WORK/ticket.json"
+hasnt "an ordinary boot says nothing" "$WORK/out" "console loglevel"
+check "untouched" "4" "$(cut -f1 "$WORK/printk")"
 rm -f "$WORK/printk"
 
 echo "the layout: no storage: changes nothing"

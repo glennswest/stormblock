@@ -5410,23 +5410,28 @@ STEOF
         echo "  storage: in ${STORAGE_FROM##*/} - this boot is no install: the drives are booted as laid, none is selected (#598)"
         STORAGE_FROM=""
     fi
-    if [ -n "$STORAGE_FROM" ] && [ "$OVERRIDE" != recovery ] && [ "${ASSIMILATE:-}" != off ] \
-       && [ "${ASSIMILATE:-}" != ambiguous ]; then
-        # The kernel's own words on the console while drives are formatted
-        # and laid (#625: forge1 sdb's write failed with no sense on the
-        # serial console). Console loglevel 7 shows KERN_INFO, where sd
-        # prints a failed command's sense; put back after the lay.
-        STORAGE_PRINTK="${STORM_PRINTK:-/proc/sys/kernel/printk}"
+    # The kernel's own words on the console while an install formats, lays
+    # and fills its drives (#625: forge1 sdb's write failed with no sense on
+    # the serial console). Every install: one that storage: lays, or one an
+    # install ticket asks for (a single drive, laid by boot-local later).
+    # Console loglevel 7 shows KERN_INFO, where sd prints a failed command's
+    # sense; put back just before switch_root. An ordinary boot: untouched.
+    STORAGE_PRINTK="${STORM_PRINTK:-/proc/sys/kernel/printk}"
+    STORAGE_PRINTK_WAS=""
+    if [ -n "$STORAGE_FROM" ] || [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ] || [ -n "${INSTALL_OVER:-}" ]; then
         STORAGE_PRINTK_WAS=$(cut -f1 "$STORAGE_PRINTK" 2>/dev/null | tr -dc 0-9)
         if [ -n "$STORAGE_PRINTK_WAS" ] && [ "$STORAGE_PRINTK_WAS" -lt 7 ]; then
             if echo 7 > "$STORAGE_PRINTK" 2>/dev/null; then
-                echo "  storage: console loglevel 7 (was $STORAGE_PRINTK_WAS): the kernel's messages, SCSI sense included, on the console until the drives are laid (#625)"
+                echo "  install: console loglevel 7 (was $STORAGE_PRINTK_WAS): the kernel's messages, SCSI sense included, on the console until switch_root (#625)"
             else
-                echo "  storage: console loglevel $STORAGE_PRINTK_WAS, not raised: the kernel's SCSI sense is not on the console (#625)"
+                echo "  install: console loglevel $STORAGE_PRINTK_WAS, not raised: the kernel's SCSI sense is not on the console (#625)"
             fi
         elif [ -n "$STORAGE_PRINTK_WAS" ]; then
-            echo "  storage: console loglevel $STORAGE_PRINTK_WAS: the kernel's messages, SCSI sense included, on the console (#625)"
+            echo "  install: console loglevel $STORAGE_PRINTK_WAS: the kernel's messages, SCSI sense included, on the console (#625)"
         fi
+    fi
+    if [ -n "$STORAGE_FROM" ] && [ "$OVERRIDE" != recovery ] && [ "${ASSIMILATE:-}" != off ] \
+       && [ "${ASSIMILATE:-}" != ambiguous ]; then
         # The wipe word: rd.stormblock.assimilate=force on this boot's
         # command line, never the force an install ticket makes of ASSIMILATE
         # (#148). An install the appliance asks for keeps the data half
@@ -6491,9 +6496,6 @@ $1|$_svp|$3"
         FORCE_LOCAL=1
     fi
     # --- END storage lay
-    if [ -n "${STORAGE_PRINTK_WAS:-}" ] && [ "$STORAGE_PRINTK_WAS" -lt 7 ]; then
-        echo "$STORAGE_PRINTK_WAS" > "$STORAGE_PRINTK" 2>/dev/null || :
-    fi
 
     # --- BEGIN diskless refused (covered by tests/initramfs-diskless.sh)
     # A node never runs diskless by default (#427; owner, #344: the
@@ -7278,6 +7280,10 @@ rm -f "${INSTALL_CONFIG_STAGED:-}" "$INSTALL_CONFIG_FORGE" 2>/dev/null
 
 stamp "root ready"
 echo "Switching to real root..."
+# The console loglevel an install raised (#625), as it was.
+if [ -n "${STORAGE_PRINTK_WAS:-}" ] && [ "$STORAGE_PRINTK_WAS" -lt 7 ]; then
+    echo "$STORAGE_PRINTK_WAS" > "$STORAGE_PRINTK" 2>/dev/null || :
+fi
 
 # The kernel's own drivers and firmware, from the golden that carries them.
 #

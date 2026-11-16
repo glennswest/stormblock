@@ -11,7 +11,10 @@ its write and the kernel removed it; the block said only "SG_IO cannot be
 sent to it".
 - [x] SAS address read before the lay; a gone drive said first (`so:`); the
   card's row; the probe through the card by address; kernel lines by address
-- [ ] check.sh; release; shipped with the proof on pvetest3's console
+- [x] the loglevel on every install (storage: or an install ticket), put
+  back before switch_root: ask 3 says "during the install", and the proof is
+  checked on whichever machine installs first (pvetest1/2 have no storage:)
+- [ ] check.sh; release; shipped with the console proof
 
 ## #627 — NetApp firmware and 4096 + PI: the write-test matrix (2026-11-16, P0)
 

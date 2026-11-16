@@ -228,9 +228,12 @@ in what the kernel's writes carry (the PI the HBA adds) or the HBA. The
 running, write protect or DATA PROTECT, a PI guard / application / reference
 tag check, a medium or hardware error. The `kernel:` lines are the last of
 `/dev/kmsg` about the drive (`[sdb]`, `dev sdb,`) and the card's `log_info`.
-While drives are formatted and laid, the console loglevel is 7, so the
-kernel's own sense lines are on the console too (`storage: console loglevel 7 (was 4): the kernel's
-messages, SCSI sense included, …`); it is put back after the lay.
+On every install (one `storage:` lays, or one an install ticket asks for:
+a single drive, laid later by boot-local) the console loglevel is 7, so the
+kernel's own sense lines are on the console too (`install: console loglevel
+7 (was 4): the kernel's messages, SCSI sense included, on the console until
+switch_root`). It is put back just before switch_root. An ordinary boot is
+untouched.
 
 The engine prints `STORAGE_LAID` (the drives laid), `STORAGE_LAY_FAILED` and
 `STORAGE_LAY_WHY` (each failure with its `so:` line), and exits non-zero only
