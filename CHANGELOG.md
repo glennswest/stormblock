@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#628, after v24.13.1)
+- **docs:** #628/#613: work plan - v24.13.1 staged; the negative control (connections made in the caller's runtime) failed the new test with forge1's own error.
+
 ### 2026-11-16 (#628, #613)
 - **fix:** #628, #613 (forge1 12.86 and 12.87: at boot-local's stop, reads on the appliance's clone failed with "A Tokio 1.x context was found, but it is being shutdown", a slab was marked failed for a volume, the volume records were not written; 12.86's stormcert then died by SIGBUS on EIO): NVMe/TCP and iSCSI connections are made on one initiator runtime of their own that is never dropped (`drive::io_runtime`). Before, a connection was made lazily in the runtime of whichever ublk export's request found none, shared by all 81 exports, and died with that export's runtime when the exports stopped one by one: every other export's in-flight reads and the records' flush after it failed through it.
 - **fix:** #628: an I/O that fails because this process's runtime is stopping is no leg failure (`DriveError::is_runtime_shutdown`): no slab marked failed for a volume, no media failure, no NVMe/TCP path marked down.
@@ -89,6 +92,11 @@
 
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
+
+## [v24.13.1] — 2026-11-16
+
+### Fixed
+- #628, #613: NVMe/TCP and iSCSI connections are made on one initiator runtime that is never dropped, so a ublk export's runtime stopping no longer kills the connections every other export and the records' flush use. A runtime stopping under an I/O is no leg failure and no path down. A stop whose volume records were not written says `FATAL: … stop: DURABILITY: …`, and boot-local exits non-zero.
 
 ## [v24.13.0] — 2026-11-16
 

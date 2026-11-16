@@ -18,7 +18,10 @@ ublk servers already drain their own in-flight requests before stopping.
 - [x] boot-local / adopt stop: records not written = `FATAL: … stop: DURABILITY`
 - [x] tests: `connections_outlive_the_runtime_that_made_them` (it/nvmeof),
   `a_runtime_stopping_marks_no_leg_failed` (thin), the classification (drive)
-- [ ] sc-build `sh check.sh`; the test shown to fail without the fix; release
+- [x] sc-build `sh check.sh` passed on 320417ae (1470 tests, 0 warnings); the
+  negative control (e651bceb, connections in the caller's runtime) failed the
+  new test with "read 0 after the other runtime stopped: … being shutdown";
+  v24.13.1 released and staged
 - Not done: a scsi_debug runtime test (#628 ask 3): the failure was the
   connection's runtime, not a slow local leg, and the in-process test
   reproduces that mechanism; a local O_DIRECT leg has no shared socket.
