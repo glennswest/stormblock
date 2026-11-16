@@ -14,7 +14,8 @@ sent to it".
 - [x] the loglevel on every install (storage: or an install ticket), put
   back before switch_root: ask 3 says "during the install", and the proof is
   checked on whichever machine installs first (pvetest1/2 have no storage:)
-- [ ] check.sh; release; shipped with the console proof
+- [x] check.sh passed on 275f6781 and ba5b8bda (1474, 0 warnings); v24.14.1
+  released and staged; shipped with the console proof
 
 ## #627 — NetApp firmware and 4096 + PI: the write-test matrix (2026-11-16, P0)
 

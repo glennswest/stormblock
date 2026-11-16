@@ -114,6 +114,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.14.1] — 2026-11-16
+
+### Fixed
+- #625: a drive that left the SAS link on its write is said so (`so: the drive left the SAS link on the write: the kernel removed /dev/sda (SAS 0x…)`). The block also gives the card's row for it and asks the drive through the card by SAS address, and the kernel's lines are matched by that address. The kernel's messages are on the console on every install, not only a `storage:` one, until switch_root.
+
 ## [v24.14.0] — 2026-11-16
 
 ### Added
