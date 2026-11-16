@@ -17,6 +17,26 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #618 — the graphical boot and install screen (2026-11-16, P1)
+
+Owner: "a install screen/graphical ... showing progress. Not a log. Log can
+be another function key away. Make it look professional", widened to every
+boot, "an enterprise boot screen (As in trek)": our own design in that
+spirit, nothing copied, nothing called LCARS. Branch `wip/618` until the
+check passes (a new dependency: ab_glyph; Cargo.lock resolved on a build VM).
+
+- [ ] `stormblock screen`: a process of its own started by /init, crossing
+  switch_root; DRM dumb buffer on the firmware's display (simpledrm/efifb);
+  headless = nothing drawn, nothing blocked; `rd.stormblock.screen=off`
+- [ ] `src/screen/`: canvas (bars, elbows, text from bundled Antonio Bold,
+  OFL), `render(record)` over #616's record: header, drive rows with bars,
+  the steps, the health strip, the finished and the failure panels
+- [ ] F2: the log on tty2 (the console fan-out writes there), F1 back
+- [ ] tests: PNG snapshots of the render (forge1's four drives formatting,
+  finished, failed), looked at; a QEMU boot with a display and a screendump
+- Not here: stormpump's stages after the hand-over (stormpump#237), the
+  stormbootx panel's look, health values (stormipmi#111)
+
 ## #625 (again) — a drive that left the link; the proof (2026-11-16, P0)
 
 Reopened: the proof was checked on pvetest2 (no storage:). pvetest3's 12.89
