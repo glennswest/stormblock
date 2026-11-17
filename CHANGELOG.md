@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-17 (#616, #625)
+- **fix:** #616 (seen on forge1 12.91's install page): the install's record took every `*.log` under `storage-format/` for a drive's, so the lay's own `lay.log` and `raid-create.log` were drive rows on the page and the screen (#618). Only a drive's log counts now: a kernel disk name or a card-only drive's SAS address.
+- **docs:** #625: closed by hand with its evidence (forge1 12.90's NOT LAID block, pvetest3 12.91's loglevel line); the shipped proof kept being checked on installs older than the fix (stormcentral#1443).
+
 ### 2026-11-17 (#616)
 - **docs:** #616: the kept install record seen on pvetest3 12.91 after its reboot (state booted, every step done); shipped. Work plan.
 

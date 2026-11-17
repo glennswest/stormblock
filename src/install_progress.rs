@@ -26,6 +26,29 @@ pub const EVENTS: &str = "install-progress.events";
 /// off as `/init` and the engine report it. A step not reported is pending.
 pub const STEPS: &[&str] = &["inventory", "format", "lay", "set", "system legs", "flow-over", "laid", "booted"];
 
+/// Whether `storage-format/<name>.log` is a drive's: a SAS address (a drive
+/// only the card lists, `0x` and 16 hex digits) or a kernel disk name.
+pub fn is_format_log(name: &str) -> bool {
+    if let Some(h) = name.strip_prefix("0x") {
+        return h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    let letters = |rest: &str| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_lowercase());
+    let digits = |rest: &str| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    for p in ["sd", "vd", "xvd", "hd"] {
+        if let Some(r) = name.strip_prefix(p) {
+            if letters(r) {
+                return true;
+            }
+        }
+    }
+    if let Some(r) = name.strip_prefix("nvme") {
+        if let Some((c, n)) = r.split_once('n') {
+            return digits(c) && digits(n);
+        }
+    }
+    name.strip_prefix("mmcblk").is_some_and(digits) || name.strip_prefix("sg").is_some_and(digits)
+}
+
 /// One line of the event log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
@@ -356,6 +379,10 @@ pub fn record(run: &Path, now: u64) -> Value {
         let mut names: Vec<String> = rd
             .flatten()
             .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".log")).map(str::to_string))
+            // A drive's own log only: the lay's `lay.log` and
+            // `raid-create.log` live here too, and were drive rows on
+            // forge1's page (12.91).
+            .filter(|n| is_format_log(n))
             .collect();
         names.sort();
         for name in names {
@@ -537,6 +564,17 @@ pub fn router<S: Clone + Send + Sync + 'static>(run: PathBuf, root: bool) -> axu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// forge1 12.91: `lay` and `raid-create` were drive rows.
+    #[test]
+    fn only_a_drives_log_is_a_drive() {
+        for n in ["sda", "sdab", "vdc", "nvme0n1", "nvme12n3", "mmcblk0", "sg3", "0x5000cca26801b649"] {
+            assert!(is_format_log(n), "{n}");
+        }
+        for n in ["lay", "raid-create", "plan", "beat", "sd", "sda1", "nvme0", "0x5000", "0xZZ00cca26801b649"] {
+            assert!(!is_format_log(n), "{n}");
+        }
+    }
 
     /// #616: an install boot's record is kept; a later boot shows it, not
     /// its own `flow-over running`; an engine's append keeps the copy.
