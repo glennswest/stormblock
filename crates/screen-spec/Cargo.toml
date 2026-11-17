@@ -1,0 +1,17 @@
+[package]
+name = "stormblock-screen-spec"
+version = "1.0.0"
+edition = "2021"
+authors = ["Glenn West"]
+description = "The boot and install screen's look as one no_std spec: palette, typeface, grid, frame and shapes (stormblock#637, for stormblock's screen and stormbootx's panel)"
+repository = "https://github.com/glennswest/stormblock"
+license = "TBD"
+rust-version = "1.75"
+
+[dependencies]
+# Glyphs drawn the same on both sides: no_std with libm, no allocator.
+ab_glyph = { version = "0.2", default-features = false, features = ["libm"] }
+libm = "0.2"
+
+[dev-dependencies]
+sha2 = "0.10"

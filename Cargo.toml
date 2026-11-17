@@ -2,7 +2,7 @@
 # The pallet format's decode side is its own crate so firmware and the engine
 # can share one reader rather than maintaining two that must stay
 # bit-compatible forever (#53).
-members = ["crates/pallet-format", "crates/nvmeof-target", "tests-runtime", "benches"]
+members = ["crates/pallet-format", "crates/nvmeof-target", "crates/screen-spec", "tests-runtime", "benches"]
 
 [package]
 name = "stormblock"
@@ -57,10 +57,9 @@ hex = "0.4"
 hyper = "1"
 tower = "0.5"
 
-# The boot and install screen (#618): glyphs from the bundled typeface
-# (src/screen/fonts), drawn on the firmware's display. Three small crates
-# (ab_glyph, ab_glyph_rasterizer, owned_ttf_parser/ttf-parser), Apache-2.0.
-ab_glyph = "0.2"
+# The boot and install screen's look (#618, #637): palette, typeface, grid,
+# frame and shapes, one no_std spec that stormbootx's panel builds from too.
+stormblock-screen-spec = { path = "crates/screen-spec" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

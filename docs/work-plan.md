@@ -35,11 +35,28 @@ stormblock's half of stormpump#237 (stormpump ada0ad5).
 - [x] check.sh passed on the head (1486; closed build-failure #639);
   v24.17.0 released and staged; shipped with the console line
 
-## #637 — the screen's look as a shared no_std spec (2026-11-17, P2, PAUSED)
+## #637 — the screen's look as a shared no_std spec (2026-11-17, P2, in progress on wip/637)
 
-Paused for the P0 #625. The work and its full plan are on branch `wip/637`
-(cdca19bf: crates/screen-spec with palette, font, grid; it does not build
-yet). Resume there: `git checkout wip/637`, read this section on that branch.
+stormbootx#220 builds its boot panel from the same spec as #618's screen.
+Paused for the P0 #625 on branch `wip/637` (does not build yet). Done there:
+`crates/screen-spec` (workspace member; Cargo.toml: ab_glyph no_std+libm,
+libm; dev sha2), fonts moved from src/screen/fonts, `lib.rs`, `palette.rs`
+(colours + meanings), `font.rs` (FONT bytes, SOURCE, SHA256, sizes,
+text_width, fit), `grid.rs` (Grid, frame measures). Root Cargo.toml: the
+crate replaces the direct ab_glyph dependency.
+Left:
+- [ ] `surface.rs`: Surface over &mut [u32] + stride + PixelFormat
+  (Xrgb8888 = DRM and GOP BGRx; Xbgr8888 = GOP RGBx): fill_rect, round_rect,
+  elbow, pill, bar, text, text_fit (from src/screen/canvas.rs)
+- [ ] `frame.rs`: the static frame (elbows, title cut, end caps, side blocks,
+  keys line) from src/screen/draw.rs
+- [ ] src/screen: Canvas a thin owner (+ png), draw.rs on the spec (no
+  palette/font/grid copies left)
+- [ ] no flash: Display::open without SETCRTC; first frame into the buffer,
+  tty1 graphics + cursor off, then SETCRTC
+- [ ] tests (font sha256; pixel formats; shapes), Cargo.lock via a build VM
+  (`cargo fetch`), build for x86_64-unknown-uefi, ci-screen-verify.sh,
+  check.sh; merge to main; release; comment for stormbootx's pin
 
 ## #635 — the power button in the initramfs (2026-11-16, P2)
 
