@@ -533,6 +533,14 @@ enum SubCommand {
         #[arg(long, default_value = crate::install_progress::RUN)]
         run: std::path::PathBuf,
     },
+    /// The power button while the initramfs runs (#635): a press (a
+    /// person's, or a BMC's soft off) stops the storage engine and the
+    /// screen, syncs and powers off, instead of nothing until the power is
+    /// cut. `/init` runs it until switch_root.
+    PowerButton {
+        #[arg(long, default_value = crate::install_progress::RUN)]
+        run: std::path::PathBuf,
+    },
     /// The boot and install screen on the machine's own display (#618): the
     /// install's record (#616, the same as the page on :9090) drawn every
     /// second through DRM, F2 the log on tty2, F1 back. No display: nothing
@@ -1471,6 +1479,10 @@ pub async fn run() -> anyhow::Result<()> {
             }
             SubCommand::InstallStatus { listen, run } => {
                 return crate::install_progress::serve(listen, run.clone()).await;
+            }
+            SubCommand::PowerButton { run } => {
+                let r = run.clone();
+                return tokio::task::spawn_blocking(move || crate::powerbutton::run(&r)).await?;
             }
             SubCommand::Screen { run, card, snapshot, width, height } => {
                 let o = crate::screen::Opts { run: run.clone(), card: card.clone(), snapshot: snapshot.clone(), width: *width, height: *height };

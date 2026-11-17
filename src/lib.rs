@@ -24,6 +24,7 @@ pub mod logging;
 pub mod logcast;
 pub mod install_progress;
 pub mod screen;
+pub mod powerbutton;
 pub mod lockwatch;
 pub mod fglat;
 #[cfg(test)]

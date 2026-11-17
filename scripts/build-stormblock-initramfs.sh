@@ -1100,6 +1100,31 @@ install_status_stop() {
     STATUS_PID=""
 }
 
+# The power button (#635): forge1 was cut hard seven times on 2026-11-16,
+# each time at the rescue shell after a FATAL, because nothing here acted on
+# the ACPI button (a BMC's soft off) and stormcentral cut the power 120 s
+# later. From here until switch_root a press stops the storage engine and
+# the screen, syncs and powers off; the node's own init takes the button
+# after switch_root. Its first line goes on the console.
+POWERBUTTON_PID=""
+power_button_start() {
+    _pbb="${STORM_POWERBUTTON_BIN:-/usr/sbin/stormblock}"
+    [ -x "$_pbb" ] || return 0
+    "$_pbb" power-button --run "${STORM_RUN:-/run/stormblock}" </dev/null \
+        >>"${STORM_RUN:-/run/stormblock}/power-button.log" 2>&1 &
+    POWERBUTTON_PID=$!
+    _pbw=0
+    while [ ! -s "${STORM_RUN:-/run/stormblock}/power-button.log" ] && [ "$_pbw" -lt 20 ]; do
+        sleep 0.1; _pbw=$((_pbw + 1))
+    done
+    [ -s "${STORM_RUN:-/run/stormblock}/power-button.log" ] && sed -n '1s/^/  /p' "${STORM_RUN:-/run/stormblock}/power-button.log"
+}
+power_button_stop() {
+    [ -n "$POWERBUTTON_PID" ] || return 0
+    kill -TERM "$POWERBUTTON_PID" 2>/dev/null || :
+    POWERBUTTON_PID=""
+}
+
 # The boot and install screen on the machine's display (#618): the same
 # record as the page, drawn through DRM on the firmware's framebuffer
 # (simpledrm), F2 the log on tty2, F1 back. From here until switch_root on
@@ -1265,6 +1290,7 @@ for param in $(cat /proc/cmdline); do
     esac
 done
 install_status_start
+power_button_start
 screen_start
 
 # The drive the command line names, before any probe replaces SLAB with a
@@ -7479,6 +7505,7 @@ logcast_stop
 progress stage switch_root done "the node's engine serves this page from here" 2>/dev/null
 install_status_stop
 screen_switch_root
+power_button_stop
 
 # The init that follows gets /dev/console, as it always did; the fan-out goes
 # on for as long as the engine writes to it.
