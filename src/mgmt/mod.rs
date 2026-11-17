@@ -20,6 +20,7 @@ pub mod boot_mounts;
 pub mod slab_report;
 pub mod storage_layout;
 pub mod link;
+pub mod format_job;
 pub mod tls;
 pub mod plain;
 pub mod boot_listen;

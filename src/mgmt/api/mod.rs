@@ -161,6 +161,10 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// Left out on an ordinary boot.
         #[serde(skip_serializing_if = "Option::is_none")]
         mode: Option<&'static str>,
+        /// Runtime formats running or failed (#621), in brief: each drive's
+        /// state, percent, ETA and format. Left out when none.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        formats: Vec<serde_json::Value>,
         /// Whether the volume record is kept (#587), as
         /// `/api/v1/slabs/durability` says it: `ok`, the slabs whose own
         /// region is `stale` (the data directory holds the record) and those
@@ -305,6 +309,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         storage_layout,
         drive_links,
         mode: crate::boot_mode::mode(),
+        formats: super::format_job::summary(),
         metadata,
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
         #[cfg(target_os = "linux")]
@@ -396,7 +401,11 @@ struct HbaActionRequest {
 /// `POST /api/v1/storage/hba/{sas}/action` (#611; admin only, #274):
 /// spin_up, spin_down, self_test, self_test_extended, format. A format
 /// starts (IMMED) and runs on: its progress is in the details.
-async fn hba_action(axum::extract::Path(sas): axum::extract::Path<String>, Json(req): Json<HbaActionRequest>) -> Response {
+async fn hba_action(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(sas): axum::extract::Path<String>,
+    Json(req): Json<HbaActionRequest>,
+) -> Response {
     let a = match hba_addr(&sas) {
         Ok(a) => a,
         Err(r) => return r,
@@ -415,9 +424,216 @@ async fn hba_action(axum::extract::Path(sas): axum::extract::Path<String>, Json(
         )
             .into_response();
     }
+    if matches!(act, crate::drive::scsi::Action::Format { .. }) {
+        if let Some(r) = in_use(&state, &[a]).await.into_iter().next() {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("{r}: not formatted")}))).into_response();
+        }
+    }
     tracing::warn!(drive = %want, action = %req.action, "an action on the card's drive (#611)");
     match tokio::task::spawn_blocking(move || super::hba::act(a, act)).await {
         Ok(Ok(said)) => Json(serde_json::json!({"sas_address": want, "said": said})).into_response(),
+        Ok(Err(e)) => (StatusCode::CONFLICT, Json(serde_json::json!({"sas_address": want, "error": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// The drives among `drives` this engine has a slab open on, each said
+/// (`0x… is /dev/sdb, which holds a slab this engine has open`).
+async fn in_use(state: &AppState, drives: &[u64]) -> Vec<String> {
+    let rows = super::hba::report()["rows"].as_array().cloned().unwrap_or_default();
+    let reg = state.slab_registry.read().await;
+    let mut out = Vec::new();
+    for a in drives {
+        let want = format!("0x{a:016x}");
+        let Some(b) = rows.iter().find(|r| r["sas_address"] == want.as_str()).and_then(|r| r["block"].as_str()) else { continue };
+        let dev = format!("/dev/{b}");
+        if reg.iter().any(|(_, s)| crate::mgmt::storage_layout::on_drive(&s.device().id().path, &dev)) {
+            out.push(format!("{want} is {dev}, which holds a slab this engine has open"));
+        }
+    }
+    out
+}
+
+#[derive(serde::Deserialize, Default)]
+struct FormatRequest {
+    /// `4096+pi1` (the default, the storage policy's), `4096` or `512`.
+    format: Option<String>,
+    /// Formats to fall back to when the drive's firmware refuses writes at
+    /// the one before; default `["4096"]` (4096 without PI).
+    fallback: Option<Vec<String>>,
+    /// The write test after each format (default true).
+    test: Option<bool>,
+    /// A shelf: one drive first (default: when any drive is NetApp's).
+    canary: Option<bool>,
+    /// The drive's SAS address, or the enclosure's id for a shelf.
+    confirm: Option<String>,
+}
+
+fn format_opts(req: &FormatRequest, canary_default: bool) -> Result<super::format_job::Opts, String> {
+    let want = match &req.format {
+        Some(f) => super::format_job::Want::parse(f)?,
+        None => super::format_job::POLICY,
+    };
+    let fallback = match &req.fallback {
+        Some(v) => v.iter().map(|f| super::format_job::Want::parse(f)).collect::<Result<Vec<_>, _>>()?,
+        None if want == super::format_job::POLICY => vec![super::format_job::Want { block_size: 4096, pi_type: 0 }],
+        None => vec![],
+    };
+    Ok(super::format_job::Opts { want, fallback, test: req.test.unwrap_or(true), canary: req.canary.unwrap_or(canary_default) })
+}
+
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn start_format(drives: Vec<(u64, Option<String>, Option<u64>)>, opts: super::format_job::Opts) -> Result<Vec<String>, String> {
+    super::format_job::start(&super::format_job::Card, drives, opts)
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn start_format(_drives: Vec<(u64, Option<String>, Option<u64>)>, _opts: super::format_job::Opts) -> Result<Vec<String>, String> {
+    Err("no mpt card here".into())
+}
+
+fn row_of(sas: &str) -> Option<serde_json::Value> {
+    super::hba::report()["rows"].as_array().and_then(|rows| rows.iter().find(|r| r["sas_address"] == sas).cloned())
+}
+
+/// `POST /api/v1/storage/hba/{sas}/format` (#621; admin only, #274): the
+/// runtime format of one drive as a job, followed to its end: rescanned,
+/// write-tested, falling back as asked; its progress in the row's
+/// `format_job` and `GET /api/v1/storage/formats`. `confirm`: its SAS
+/// address. A drive this engine has a slab open on is refused.
+async fn hba_format(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(sas): axum::extract::Path<String>,
+    Json(req): Json<FormatRequest>,
+) -> Response {
+    let a = match hba_addr(&sas) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let want = format!("0x{a:016x}");
+    if req.confirm.as_deref().and_then(crate::drive::mpt::parse_addr) != Some(a) {
+        return (
+            StatusCode::PRECONDITION_FAILED,
+            Json(serde_json::json!({"error": format!("a format loses every byte on {want}: confirm with its SAS address"), "confirm": want})),
+        )
+            .into_response();
+    }
+    let opts = match format_opts(&req, false) {
+        Ok(o) => o,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let Some(row) = row_of(&want) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("no card lists {want}")}))).into_response();
+    };
+    if let Some(r) = in_use(&state, &[a]).await.into_iter().next() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("{r}: not formatted")}))).into_response();
+    }
+    tracing::warn!(drive = %want, format = %opts.want.said(), "a runtime format (#621)");
+    let at = (row["enclosure"].as_str().map(str::to_string), row["slot"].as_u64());
+    match tokio::task::spawn_blocking(move || start_format(vec![(a, at.0, at.1)], opts)).await {
+        Ok(Ok(v)) => (StatusCode::ACCEPTED, Json(serde_json::json!({"started": v}))).into_response(),
+        Ok(Err(e)) => (StatusCode::CONFLICT, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// `POST /api/v1/storage/enclosures/{id}/format` (#621; admin only): every
+/// present drive the card lists in that enclosure (a shelf), as jobs.
+/// `confirm`: the enclosure's id. Drives this engine has a slab open on are
+/// left out, said; a drive already at the format is not formatted again.
+/// A shelf with a NetApp-firmware drive has one drive first (`canary`).
+async fn enclosure_format(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<FormatRequest>,
+) -> Response {
+    let Some(e) = crate::drive::mpt::parse_addr(&id) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("{id} is no enclosure id")}))).into_response();
+    };
+    let enc = format!("0x{e:016x}");
+    if req.confirm.as_deref().and_then(crate::drive::mpt::parse_addr) != Some(e) {
+        return (
+            StatusCode::PRECONDITION_FAILED,
+            Json(serde_json::json!({"error": format!("a shelf format loses every byte on every drive of enclosure {enc}: confirm with its id"), "confirm": enc})),
+        )
+            .into_response();
+    }
+    let rows = super::hba::report()["rows"].as_array().cloned().unwrap_or_default();
+    let mut shelf: Vec<&serde_json::Value> = rows.iter().filter(|r| r["enclosure"] == enc.as_str() && r["present"] == true).collect();
+    shelf.sort_by_key(|r| r["slot"].as_u64().unwrap_or(u64::MAX));
+    if shelf.is_empty() {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": format!("no card lists a drive in enclosure {enc}")}))).into_response();
+    }
+    let netapp = shelf.iter().any(|r| r["vendor"].as_str().is_some_and(|v| v.trim().eq_ignore_ascii_case("NETAPP")));
+    let opts = match format_opts(&req, netapp) {
+        Ok(o) => o,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    };
+    let addrs: Vec<u64> = shelf.iter().filter_map(|r| r["sas_address"].as_str().and_then(crate::drive::mpt::parse_addr)).collect();
+    let busy = in_use(&state, &addrs).await;
+    let drives: Vec<(u64, Option<String>, Option<u64>)> = shelf
+        .iter()
+        .filter_map(|r| r["sas_address"].as_str().and_then(crate::drive::mpt::parse_addr).map(|a| (a, Some(enc.clone()), r["slot"].as_u64())))
+        .filter(|(a, _, _)| !busy.iter().any(|b| b.starts_with(&format!("0x{a:016x}"))))
+        .collect();
+    tracing::warn!(enclosure = %enc, drives = drives.len(), format = %opts.want.said(), canary = opts.canary, "a shelf format (#621)");
+    match tokio::task::spawn_blocking(move || start_format(drives, opts)).await {
+        Ok(Ok(v)) => (StatusCode::ACCEPTED, Json(serde_json::json!({"started": v, "left_out": busy, "canary": netapp || req.canary.unwrap_or(false)}))).into_response(),
+        Ok(Err(e)) => (StatusCode::CONFLICT, Json(serde_json::json!({"error": e, "left_out": busy}))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// `GET /api/v1/storage/formats` (#621): every runtime format job, newest
+/// first: state, format, percent, ETA, elapsed, its lines.
+async fn storage_formats() -> Response {
+    Json(serde_json::json!({"jobs": super::format_job::all()})).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct FirmwareQuery {
+    confirm: Option<String>,
+    /// WRITE BUFFER mode: `0x0e` (deferred, then activated; the default) or `0x07`.
+    mode: Option<String>,
+}
+
+/// `POST /api/v1/storage/hba/{sas}/firmware?confirm=<sas>` (#621; admin
+/// only): the body is the vendor's microcode image, downloaded with WRITE
+/// BUFFER through sg or the card; the revision read before and after. A
+/// drive in use or being formatted is refused. Never another vendor's image:
+/// the drive refuses what it does not take, and that is said.
+async fn hba_firmware(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Path(sas): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<FirmwareQuery>,
+    body: axum::body::Bytes,
+) -> Response {
+    let a = match hba_addr(&sas) {
+        Ok(a) => a,
+        Err(r) => return r,
+    };
+    let want = format!("0x{a:016x}");
+    if q.confirm.as_deref().and_then(crate::drive::mpt::parse_addr) != Some(a) {
+        return (
+            StatusCode::PRECONDITION_FAILED,
+            Json(serde_json::json!({"error": format!("a firmware download replaces {want}'s microcode: confirm with its SAS address"), "confirm": want})),
+        )
+            .into_response();
+    }
+    let mode = match q.mode.as_deref().unwrap_or("0x0e").trim_start_matches("0x") {
+        "0e" | "e" => 0x0E,
+        "07" | "7" => 0x07,
+        m => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("mode {m}: 0x0e or 0x07")}))).into_response(),
+    };
+    if super::format_job::running(a) {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("{want} is being formatted")}))).into_response();
+    }
+    if let Some(r) = in_use(&state, &[a]).await.into_iter().next() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("{r}: no firmware download")}))).into_response();
+    }
+    tracing::warn!(drive = %want, bytes = body.len(), "a drive firmware download (#621)");
+    match tokio::task::spawn_blocking(move || super::hba::firmware(a, &body, mode)).await {
+        Ok(Ok(lines)) => Json(serde_json::json!({"sas_address": want, "lines": lines})).into_response(),
         Ok(Err(e)) => (StatusCode::CONFLICT, Json(serde_json::json!({"sas_address": want, "error": e}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
     }
@@ -503,7 +719,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/v1/storage/layout", axum::routing::get(storage_layout).with_state(state.clone()))
         .route("/api/v1/storage/hba", axum::routing::get(hba_rows))
         .route("/api/v1/storage/hba/{sas}/details", axum::routing::get(hba_details))
-        .route("/api/v1/storage/hba/{sas}/action", axum::routing::post(hba_action))
+        .route("/api/v1/storage/hba/{sas}/action", axum::routing::post(hba_action).with_state(state.clone()))
+        .route("/api/v1/storage/hba/{sas}/format", axum::routing::post(hba_format).with_state(state.clone()))
+        .route(
+            "/api/v1/storage/hba/{sas}/firmware",
+            axum::routing::post(hba_firmware).with_state(state.clone()).layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
+        .route("/api/v1/storage/enclosures/{id}/format", axum::routing::post(enclosure_format).with_state(state.clone()))
+        .route("/api/v1/storage/formats", axum::routing::get(storage_formats))
         .route(
             "/api/v1/storage/hba/{sas}/write-test",
             axum::routing::post(hba_write_test).get(hba_write_test_last).with_state(state.clone()),

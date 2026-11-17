@@ -22,6 +22,17 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #621 — the runtime format (2026-11-17, P0)
+
+- [x] scsi: `Ident`/`ident`, `Matrix::passed`, WRITE BUFFER microcode
+- [x] mgmt::format_job (skip, format, follow, rescan, test, fallback,
+  canary); rows' ident, `format_job`, `offered`; `/format`,
+  `/enclosures/{id}/format`, `/formats`, `/firmware`; health `formats`;
+  `hba firmware`
+- [ ] check.sh; release; stormdrive (Drive CR `format`/`firmware` actions,
+  status) and stormconsole (bars, buttons) issues; proof on forge1 with a
+  drive set back to 512
+
 ## #629 — the diagnostic boot, `mode: diagnostic` (2026-11-17, P0)
 
 The install-config's top-level `mode: diagnostic` (media's, else forge's

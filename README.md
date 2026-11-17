@@ -719,13 +719,31 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     caching), cached with `read_at` (`?fresh=1` reads again). `POST
     …/hba/{sas}/action` (admin) runs `spin_up`, `spin_down`, `self_test`,
     `self_test_extended` or `format` (`block_size`, `pi`, `confirm` = the SAS
-    address); a format is followed to its end and the kernel asked to look
-    again. `POST …/hba/{sas}/write-test` (admin, `confirm`, #627) runs the
+    address); a format runs as a format job (below). `POST …/hba/{sas}/write-test` (admin, `confirm`, #627) runs the
     write-test matrix (WRPROTECT 0/1 at LBA 0 and the last LBA, read back
     with RDPROTECT 0/1, the card's link after each step, the mode and log
     pages before and after; two blocks overwritten, a drive with an open
     slab refused); `GET` answers the last run. The details carry the mode
     pages (`mode_pages`). [docs/storage-layout.md](docs/storage-layout.md#the-cards-rows-611).
+  - The runtime format (#621): `POST …/hba/{sas}/format` (admin, `confirm` =
+    the SAS address) and `POST /api/v1/storage/enclosures/{id}/format`
+    (admin, `confirm` = the enclosure id: every present drive of a shelf)
+    format on the running node as jobs. Each job: `format` (`4096+pi1` by
+    default, `4096`, `512`), `fallback` (default `["4096"]`), `test`
+    (default on), `canary` (one drive first; the default for a shelf with a
+    NetApp-firmware drive). A drive already at the format is skipped. Each
+    drive is followed to its end, then rescanned until Linux has it, then
+    write-tested; when its firmware refuses writes, it is formatted again at
+    the next fallback. Hotplug then offers it. Progress (percent, ETA,
+    elapsed, its lines) is in the row's `format_job`, in `GET
+    /api/v1/storage/formats` and in health's `formats`. Drives with an open
+    slab are refused or left out. Each row has `vendor`, `product`,
+    `revision`, `block_size`, `pi_type` (read each minute) and `offered`
+    (`format` for a NOT READY or wrong-format drive). `POST
+    …/hba/{sas}/firmware?confirm=<sas>` (admin; the body is the vendor's
+    image) and `stormblock hba firmware` download drive microcode with WRITE
+    BUFFER, the revision read before and after.
+    [docs/storage-layout.md](docs/storage-layout.md#the-runtime-format-621).
   - The install's page and record (#616): `GET /` (or `/install`) is a page
     and `GET /api/v1/install/progress` its record: every drive (found by
     Linux or only by the card), its format state, percent and ETA, the

@@ -470,6 +470,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if *method == Method::POST && seg.len() == 7 && seg[3] == "storage" && seg[4] == "hba" && seg[6] == "write-test" {
         return true;
     }
+    // The runtime format and the firmware download (#621): a drive's or a
+    // shelf's every byte, a drive's microcode.
+    if *method == Method::POST && seg.len() == 7 && seg[3] == "storage" && matches!(seg[4], "hba" | "enclosures") && matches!(seg[6], "format" | "firmware") {
+        return true;
+    }
     false
 }
 
@@ -1933,6 +1938,10 @@ mod tests {
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26801b649/details", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Destructive);
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Ordinary);
+        assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/format", None), Class::Destructive);
+        assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/firmware", None), Class::Destructive);
+        assert_eq!(classify(&Method::POST, "/api/v1/storage/enclosures/0x500a098012345678/format", None), Class::Destructive);
+        assert_eq!(classify(&Method::GET, "/api/v1/storage/formats", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/drives", None), Class::Ordinary);
     }
 

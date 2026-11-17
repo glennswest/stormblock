@@ -153,6 +153,25 @@ enum HbaAction {
         #[arg(long, default_value = "/dev")]
         dev: String,
     },
+    /// A drive's firmware (#621): the vendor's microcode image downloaded with
+    /// WRITE BUFFER (mode 0x0e then activate, or `--mode 0x07`) through sg or
+    /// the card, the revision by INQUIRY before and after. `--confirm` is the
+    /// drive's SAS address. Never another vendor's image (a vendor-locked
+    /// drive, a NetApp X378, takes NetApp's `.LOD` packages only).
+    Firmware {
+        #[arg(long)]
+        sas: String,
+        #[arg(long)]
+        file: String,
+        #[arg(long)]
+        confirm: String,
+        #[arg(long, default_value = "0x0e")]
+        mode: String,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long = "devdir", default_value = "/dev")]
+        devdir: String,
+    },
     /// The link-rate policy (#642): hold the HBA phy facing a drive at a
     /// maximum rate (`--max 6`, Gbit/s) and reset its link; `--max hw` gives
     /// it back what the hardware can. For a marginal link, at the owner's
@@ -10624,6 +10643,24 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
             let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba details: {sas} is no SAS address"))?;
             let d = mpt::with_drive(Path::new(dev), Path::new(sys), a, crate::drive::scsi::details).map_err(anyhow::Error::msg)?;
             println!("{}", serde_json::to_string_pretty(&d)?);
+        }
+        HbaAction::Firmware { sas, file, confirm, mode, sys, devdir } => {
+            let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba firmware: {sas} is no SAS address"))?;
+            if mpt::parse_addr(confirm) != Some(a) {
+                anyhow::bail!("hba firmware: --confirm must be the drive's SAS address (0x{a:016x})");
+            }
+            let m = match mode.trim_start_matches("0x") {
+                "0e" | "e" => 0x0E,
+                "07" | "7" => 0x07,
+                m => anyhow::bail!("hba firmware: --mode {m}: 0x0e or 0x07"),
+            };
+            let image = std::fs::read(file).map_err(|e| anyhow::anyhow!("hba firmware: {file}: {e}"))?;
+            let lines = mpt::with_drive(Path::new(devdir), Path::new(sys), a, |t| crate::drive::scsi::download_microcode(t, &image, m))
+                .map_err(anyhow::Error::msg)?
+                .map_err(|e| anyhow::anyhow!("hba firmware: 0x{a:016x}: {e}"))?;
+            for l in lines {
+                println!("0x{a:016x}: {l}");
+            }
         }
         HbaAction::Linkrate { sas, dev, max, sys, devdir } => {
             let a = match (sas, dev) {

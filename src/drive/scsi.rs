@@ -190,7 +190,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 /// READ CAPACITY 16.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Capacity {
     pub blocks: u64,
     pub block_size: u32,
@@ -1301,6 +1301,16 @@ pub fn write_matrix(t: &dyn Transport, link: &dyn Fn() -> Option<String>) -> Mat
 }
 
 impl Matrix {
+    /// Every write and read good, nothing stopped: the drive takes writes at
+    /// its format (#621: the canary's verdict, a fallback's reason).
+    pub fn passed(&self) -> bool {
+        self.stopped.is_none()
+            && !self.steps.is_empty()
+            && self.steps.iter().all(|s| {
+                s.write == "good" && s.read0.starts_with("good, the data as written") && (s.read1.starts_with("good, data and PI") || s.read1 == "no PI on this format")
+            })
+    }
+
     /// The run as console lines (and the issue's table rows).
     pub fn lines(&self) -> Vec<String> {
         let mut v = vec![format!(
@@ -1429,6 +1439,132 @@ pub fn act(t: &dyn Transport, a: Action) -> Result<String, String> {
             Ok(format!("FORMAT UNIT to {block_size}{} started (IMMED)", if pi_type == 1 { " with PI type 1" } else { "" }))
         }
     }
+}
+
+// ---- what a drive is, cheaply (#621) ----
+
+/// A drive's identity and format, from INQUIRY and READ CAPACITY 16: what
+/// the card's rows carry (#621: "show the firmware revision in the row").
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Ident {
+    pub vendor: Option<String>,
+    pub product: Option<String>,
+    pub revision: Option<String>,
+    pub capacity: Option<Capacity>,
+}
+
+impl Ident {
+    /// Whether the drive is at `block_size` with PI `pi_type` (0 none).
+    pub fn at(&self, block_size: u32, pi_type: u8) -> bool {
+        self.capacity.as_ref().is_some_and(|c| c.block_size == block_size && (if pi_type == 0 { !c.prot_en } else { c.prot_en && c.pi_type == pi_type }))
+    }
+    /// NetApp firmware (#621, #627): built for 520/4160-byte sectors and its
+    /// own checksums; a shelf of it is formatted one drive first.
+    pub fn netapp(&self) -> bool {
+        self.vendor.as_deref().is_some_and(|v| v.trim().eq_ignore_ascii_case("NETAPP"))
+    }
+}
+
+/// INQUIRY and READ CAPACITY 16, now (a drive not ready answers no capacity).
+pub fn ident(t: &dyn Transport) -> Ident {
+    let mut e = Vec::new();
+    let mut i = Ident::default();
+    if let Some(d) = ask(t, &cdb::inquiry(None, 96), 96, "INQUIRY", &mut e) {
+        if d.len() >= 36 {
+            i.vendor = Some(text(&d[8..16]));
+            i.product = Some(text(&d[16..32]));
+            i.revision = Some(text(&d[32..36]));
+        }
+    }
+    i.capacity = ask(t, &cdb::read_capacity16(32), 32, "READ CAPACITY 16", &mut e).and_then(|c| parse_capacity16(&c));
+    i
+}
+
+// ---- drive firmware (#621: "can we update the drive firmware") ----
+
+/// READ BUFFER (10), mode 0x03: the descriptor of buffer `id`.
+pub fn cdb_read_buffer_descriptor(id: u8) -> [u8; 10] {
+    [0x3C, 0x03, id, 0, 0, 0, 0, 0, 4, 0]
+}
+
+/// WRITE BUFFER (10): `mode` (0x07 download with offsets, save and activate;
+/// 0x0E with offsets, save, defer activate; 0x0F activate deferred), the
+/// buffer offset and the parameter list length.
+pub fn cdb_write_buffer(mode: u8, id: u8, offset: u32, len: u32) -> [u8; 10] {
+    let o = offset.to_be_bytes();
+    let l = len.to_be_bytes();
+    [0x3B, mode & 0x1F, id, o[1], o[2], o[3], l[1], l[2], l[3], 0]
+}
+
+/// The chunks a microcode image goes down in: at most `capacity` and 64 KiB
+/// (what the card's pass-through takes), a multiple of the drive's offset
+/// boundary (2^`boundary`; 0xFF: none asked).
+pub fn microcode_chunk(capacity: u32, boundary: u8) -> u32 {
+    let cap = if capacity == 0 { 64 * 1024 } else { capacity.min(64 * 1024) };
+    if boundary == 0xFF || boundary >= 31 {
+        return cap;
+    }
+    let b = 1u32 << boundary;
+    (cap / b * b).max(b)
+}
+
+/// Download microcode (#621): the vendor's image, through sg or the card,
+/// in offset chunks (mode 0x0E, then 0x0F to activate; or 0x07, which
+/// activates when the last chunk is in). The revision is read before and
+/// after (INQUIRY). Never another vendor's image: the drive refuses one it
+/// does not take, and that refusal is said.
+pub fn download_microcode(t: &dyn Transport, image: &[u8], mode: u8) -> Result<Vec<String>, String> {
+    if image.is_empty() {
+        return Err("the firmware image is empty".into());
+    }
+    if image.len() > 0x00FF_FFFF {
+        return Err(format!("the firmware image is {} bytes: WRITE BUFFER (10) offsets reach 16 MiB", image.len()));
+    }
+    if mode != 0x07 && mode != 0x0E {
+        return Err(format!("WRITE BUFFER mode 0x{mode:02x}: 0x07 or 0x0e"));
+    }
+    let before = ident(t);
+    let mut out = vec![format!(
+        "firmware: {} {} revision {} before, through {}",
+        before.vendor.as_deref().unwrap_or("?"), before.product.as_deref().unwrap_or("?"),
+        before.revision.as_deref().unwrap_or("?"), t.name()
+    )];
+    let mut d = [0u8; 4];
+    let (boundary, capacity) = match t.run(&cdb_read_buffer_descriptor(0), Dir::In, &mut d, 30) {
+        Ok(r) if r.good() => (d[0], u32::from_be_bytes([0, d[1], d[2], d[3]])),
+        Ok(r) => {
+            out.push(format!("firmware: READ BUFFER descriptor: {} (64 KiB chunks)", r.said()));
+            (0xFF, 0)
+        }
+        Err(e) => {
+            out.push(format!("firmware: READ BUFFER descriptor not sent: {e} (64 KiB chunks)"));
+            (0xFF, 0)
+        }
+    };
+    let chunk = microcode_chunk(capacity, boundary) as usize;
+    out.push(format!("firmware: {} bytes in {} chunk(s) of {} (mode 0x{mode:02x})", image.len(), image.len().div_ceil(chunk), chunk));
+    let mut off = 0usize;
+    while off < image.len() {
+        let n = chunk.min(image.len() - off);
+        let mut part = image[off..off + n].to_vec();
+        match t.run(&cdb_write_buffer(mode, 0, off as u32, n as u32), Dir::Out, &mut part, 300) {
+            Ok(r) if r.good() => {}
+            Ok(r) => return Err(format!("{}; WRITE BUFFER at offset {off}: {}", out.join("; "), r.said())),
+            Err(e) => return Err(format!("{}; WRITE BUFFER at offset {off}: not sent: {e}", out.join("; "))),
+        }
+        off += n;
+    }
+    if mode == 0x0E {
+        must(t.run(&cdb_write_buffer(0x0F, 0, 0, 0), Dir::None, &mut [], 300), "WRITE BUFFER (activate deferred microcode)")
+            .map_err(|e| format!("{}; {e}", out.join("; ")))?;
+    }
+    let after = ident(t);
+    out.push(format!(
+        "firmware: revision {} after{}",
+        after.revision.as_deref().unwrap_or("? (the drive did not answer INQUIRY yet)"),
+        if after.revision.is_some() && after.revision == before.revision { " - the same: the drive may activate it at its next power cycle" } else { "" }
+    ));
+    Ok(out)
 }
 
 /// A format's state: `Some(pct)` while it runs, `None` when the drive
@@ -1806,6 +1942,18 @@ mod tests {
         let r = ready_round(&d);
         assert!(r.ready && !r.started);
         assert!(r.said().starts_with("TEST UNIT READY good; "));
+    }
+
+    #[test]
+    fn microcode_chunks_and_cdbs() {
+        assert_eq!(microcode_chunk(0, 0xFF), 65536);
+        assert_eq!(microcode_chunk(32768, 9), 32768);
+        assert_eq!(microcode_chunk(1_000_000, 9), 65536);
+        assert_eq!(microcode_chunk(1000, 9), 512);
+        assert_eq!(cdb_write_buffer(0x0E, 0, 0x012345, 0x8000), [0x3B, 0x0E, 0, 0x01, 0x23, 0x45, 0, 0x80, 0, 0]);
+        assert_eq!(cdb_read_buffer_descriptor(0), [0x3C, 0x03, 0, 0, 0, 0, 0, 0, 4, 0]);
+        let i = Ident { vendor: Some("NETAPP".into()), capacity: Some(Capacity { block_size: 4096, prot_en: true, pi_type: 1, ..Default::default() }), ..Default::default() };
+        assert!(i.netapp() && i.at(4096, 1) && !i.at(4096, 0) && !i.at(512, 0));
     }
 
     /// A log page 0x18 with one SAS port parameter and two phys (SPL), the

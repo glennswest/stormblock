@@ -47,6 +47,9 @@ struct State {
     details: HashMap<String, Value>,
     /// The last write-test matrix run on each drive (#627).
     tests: HashMap<String, Value>,
+    /// Each drive's INQUIRY and READ CAPACITY 16, read each minute (#621:
+    /// the firmware revision and the format in the row).
+    idents: HashMap<String, crate::drive::scsi::Ident>,
     poked: bool,
 }
 
@@ -149,13 +152,31 @@ pub fn report() -> Value {
             "watching": s.watching,
             "read_at": s.read_at,
             "every_secs": RESCAN.as_secs(),
-            // Each row with its drive's link (#642).
+            // Each row with its drive's link (#642), what it is and its
+            // format, its format job and the actions offered on it (#621).
             "rows": s.rows.iter().map(|r| {
                 let mut r = r.clone();
                 let sas = r.get("sas_address").and_then(Value::as_str).map(str::to_string);
-                if let (Some(sas), Some(o)) = (sas, r.as_object_mut()) {
-                    if let Some(l) = super::link::get(&sas) {
-                        o.insert("link".into(), l);
+                if let Some(sas) = sas {
+                    let id = s.idents.get(&sas).cloned();
+                    let job = super::format_job::get(&sas);
+                    let offered = offered(&r, id.as_ref(), job.as_ref());
+                    let link = super::link::get(&sas);
+                    if let Some(o) = r.as_object_mut() {
+                        if let Some(l) = link {
+                            o.insert("link".into(), l);
+                        }
+                        if let Some(i) = id {
+                            o.insert("vendor".into(), serde_json::json!(i.vendor));
+                            o.insert("product".into(), serde_json::json!(i.product));
+                            o.insert("revision".into(), serde_json::json!(i.revision));
+                            o.insert("block_size".into(), serde_json::json!(i.capacity.as_ref().map(|c| c.block_size)));
+                            o.insert("pi_type".into(), serde_json::json!(i.capacity.as_ref().map(|c| if c.prot_en { c.pi_type } else { 0 })));
+                        }
+                        if let Some(j) = job {
+                            o.insert("format_job".into(), j);
+                        }
+                        o.insert("offered".into(), serde_json::json!(offered));
                     }
                 }
                 r
@@ -164,6 +185,24 @@ pub fn report() -> Value {
             "errors": s.errors,
         })
     })
+}
+
+/// The actions a row offers (#621): `format` for a drive that is NOT READY
+/// or not at the storage policy's format (4096 + PI type 1), unless a format
+/// job runs on it; nothing formats by itself. Details and the write test are
+/// always there.
+pub fn offered(row: &Value, id: Option<&crate::drive::scsi::Ident>, job: Option<&Value>) -> Vec<&'static str> {
+    let mut v = vec!["details", "write_test"];
+    if row.get("present") != Some(&Value::Bool(true)) {
+        return vec![];
+    }
+    let running = job.is_some_and(|j| j.get("ended").is_none_or(Value::is_null));
+    let p = super::format_job::POLICY;
+    let wrong = row.get("state").and_then(Value::as_str) != Some("ready") || id.is_some_and(|i| i.capacity.is_some() && !i.at(p.block_size, p.pi_type));
+    if wrong && !running {
+        v.push("format");
+    }
+    v
 }
 
 pub fn cached_details(sas: &str) -> Option<Value> {
@@ -220,6 +259,7 @@ pub fn write_test(sas: u64) -> Result<Value, String> {
         o.insert("at".into(), serde_json::json!(now()));
         o.insert("link_before".into(), serde_json::json!(before));
         o.insert("lines".into(), serde_json::json!(lines));
+        o.insert("passed".into(), serde_json::json!(m.passed()));
     }
     with(|s| {
         s.tests.insert(format!("0x{sas:016x}"), v.clone());
@@ -227,6 +267,28 @@ pub fn write_test(sas: u64) -> Result<Value, String> {
     });
     poke();
     Ok(v)
+}
+
+/// A drive's firmware download (#621, blocking): its lines; the rows and
+/// details read again after.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn firmware(sas: u64, image: &[u8], mode: u8) -> Result<Vec<String>, String> {
+    use std::path::Path;
+    let r = crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), sas, |t| crate::drive::scsi::download_microcode(t, image, mode))?;
+    for l in r.as_deref().unwrap_or(&[]) {
+        tracing::warn!("storage: 0x{sas:016x}: {l} (#621)");
+    }
+    with(|s| {
+        s.details.remove(&format!("0x{sas:016x}"));
+        s.idents.remove(&format!("0x{sas:016x}"));
+    });
+    poke();
+    r
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+pub fn firmware(_sas: u64, _image: &[u8], _mode: u8) -> Result<Vec<String>, String> {
+    Err("no mpt card here".into())
 }
 
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
@@ -241,7 +303,7 @@ pub fn keep_details(sas: &str, v: Value) {
 }
 
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-fn read() -> (Vec<Value>, Vec<String>) {
+pub(crate) fn read() -> (Vec<Value>, Vec<String>) {
     use std::path::Path;
     let (cards, errs) = crate::drive::mpt::cards(Path::new("/dev"), Path::new("/sys"), true);
     (cards.iter().flat_map(|c| c.rows_json()).collect(), errs)
@@ -271,6 +333,26 @@ fn sample_links(rows: &[Value]) {
     }
 }
 
+/// Every present drive's INQUIRY and READ CAPACITY 16 (#621), but not one
+/// a format job is formatting.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn sample_idents(rows: &[Value]) {
+    use std::path::Path;
+    for r in rows {
+        if r.get("present") != Some(&Value::Bool(true)) {
+            continue;
+        }
+        let Some(sas) = r.get("sas_address").and_then(Value::as_str) else { continue };
+        let Some(a) = crate::drive::mpt::parse_addr(sas) else { continue };
+        if super::format_job::running(a) {
+            continue;
+        }
+        if let Ok(i) = crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), a, crate::drive::scsi::ident) {
+            with(|s| s.idents.insert(sas.to_string(), i));
+        }
+    }
+}
+
 /// Keep the rows for as long as the engine runs, on a thread of its own.
 /// Nothing is started on a node with no mpt card.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
@@ -287,6 +369,7 @@ pub fn spawn() {
             if now().saturating_sub(last_link) >= super::link::EVERY_SECS {
                 last_link = now();
                 sample_links(&rows);
+                sample_idents(&rows);
             }
             take(rows, errs, now());
             let g = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -323,39 +406,18 @@ pub fn read_details(_sas: u64) -> Result<Value, String> {
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 pub fn act(sas: u64, a: crate::drive::scsi::Action) -> Result<String, String> {
     use std::path::Path;
+    // A format is a job (#621): followed, rescanned, tested, in the rows.
+    if let crate::drive::scsi::Action::Format { block_size, pi_type } = a {
+        let want = super::format_job::Want { block_size, pi_type };
+        let row = read().0.into_iter().find(|r| r["sas_address"] == format!("0x{sas:016x}").as_str());
+        let at = row.as_ref().map(|r| (r["enclosure"].as_str().map(str::to_string), r["slot"].as_u64())).unwrap_or((None, None));
+        super::format_job::start(&super::format_job::Card, vec![(sas, at.0, at.1)], super::format_job::Opts { want, fallback: vec![], test: true, canary: false })?;
+        return Ok(format!("a format to {} started as a job: its progress is in the row's format_job", want.said()));
+    }
     let r = crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), sas, |t| crate::drive::scsi::act(t, a))?;
     with(|s| s.details.remove(&format!("0x{sas:016x}")));
     poke();
-    if r.is_ok() && matches!(a, crate::drive::scsi::Action::Format { .. }) {
-        follow_format(sas);
-    }
     r
-}
-
-/// A format started here is followed to its end (#611: "once drive formats
-/// complete linux needs to find them without a reboot"): then the kernel is
-/// asked to look at the drive again and the rows are read again.
-#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
-fn follow_format(sas: u64) {
-    use std::path::Path;
-    let _ = std::thread::Builder::new().name("hba-format".into()).spawn(move || {
-        let start = std::time::Instant::now();
-        loop {
-            std::thread::sleep(RESCAN);
-            match crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), sas, crate::drive::scsi::format_progress) {
-                Ok(Ok(Some(_))) => continue,
-                Ok(Ok(None)) => {
-                    tracing::warn!("storage: the card's drive 0x{sas:016x}: the format ended after {}m; the kernel asked to look again (#611)", start.elapsed().as_secs() / 60);
-                    crate::drive::mpt::rescan_for(Path::new("/sys"), sas);
-                }
-                Ok(Err(e)) => tracing::warn!("storage: the card's drive 0x{sas:016x}: the format: {e} (#611)"),
-                Err(e) => tracing::warn!("storage: the card's drive 0x{sas:016x}: no longer reached: {e} (#611)"),
-            }
-            with(|s| s.details.remove(&format!("0x{sas:016x}")));
-            poke();
-            return;
-        }
-    });
 }
 
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]

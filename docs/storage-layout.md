@@ -547,6 +547,60 @@ protected write and read was good. Nobody read the counter.
   for a marginal drive until it is replaced, never set automatically; the
   level still watches it. `--max hw` gives the phy back its hardware maximum.
 
+### The runtime format (#621)
+
+The owner, 2026-11-15: "the new 'format' needs to be implemented in running
+system too. As we will need it for netapp shelves as well". The install's
+card-path format is a job on the running node, with no reboot. It runs on
+one drive (`POST /api/v1/storage/hba/{sas}/format`, `confirm` = its SAS
+address) or every present drive of an enclosure (`POST
+/api/v1/storage/enclosures/{id}/format`, `confirm` = the enclosure id). A
+drive this engine has a slab open on is refused, or on a shelf left out and
+named. Nothing formats by itself. `action: format` on `…/hba/{sas}/action`
+runs the same job at the format asked, with no fallback.
+
+Each drive, on a thread of its own (`src/mgmt/format_job.rs`):
+1. **Skipped** when already at the format (#614).
+2. **Formatted:** MODE SELECT, then FORMAT UNIT (IMMED), through its sg node
+   or the card, followed every 30 s. The row's `format_job` carries the
+   state, `pct`, `eta_secs` and `elapsed_secs`; a line a minute goes on the
+   console. Twenty unread progress answers in a row end it as `failed`.
+3. **Rescanned:** the kernel is asked to look again by SAS address, every
+   minute up to 10 minutes, until Linux has the disk at its new size. Hotplug
+   (#593) then offers it as a `replacement`, `spare` or `system_leg`.
+4. **Write-tested** (#627's matrix; `test: false` skips it). A drive whose
+   firmware refuses writes at the format is formatted again at the next
+   format in `fallback`, and that is said. The default asks 4096 + PI type 1
+   and falls back to 4096 without PI; `512` can be listed after it.
+5. **`ready`** at the format it ended at, or **`failed`** with why.
+
+**A shelf with NetApp firmware** (a row's `vendor` `NETAPP`; forge1's X378
+took 4096 + PI and then refused its first write) has one drive formatted and
+tested first, the **canary** (`canary` on by default for such a shelf). The
+rest wait (`waiting`) and then start together, at the format the canary
+ended at. A canary that fails formats nothing else.
+
+**The rows** carry each drive's `vendor`, `product`, `revision` (the
+firmware, to compare a shelf's drives), `block_size` and `pi_type`, read
+each minute except while a format runs. They also carry `offered`:
+`details`, `write_test`, and `format` for a drive that is NOT READY or not
+at 4096 + PI type 1, unless a job runs on it. `GET /api/v1/storage/formats`
+lists every job; health's `formats` lists the running and failed ones in
+brief.
+
+**Drive firmware:** `POST /api/v1/storage/hba/{sas}/firmware?confirm=<sas>`
+(the body is the image) or `stormblock hba firmware --sas … --file …
+--confirm …`. It runs READ BUFFER (the descriptor: the offset boundary and
+buffer size), then WRITE BUFFER mode 0x0e (download with offsets, save,
+defer activate) in chunks of at most 64 KiB, then mode 0x0f (activate); or
+mode 0x07 (`mode=0x07`). INQUIRY's revision is read before and after. A
+drive in use or being formatted is refused. Use only the drive's own vendor
+image: a NetApp X378 takes NetApp's `.LOD` disk packages, and the drive
+refuses an image it does not take.
+
+The Drive CR's `format` action, its status and the console's bars are
+stormdrive's and stormconsole's, reading these rows and jobs.
+
 ### NetApp-firmware drives (#627)
 
 forge1's bay 3 is a NETAPP `X378_HLBRE10TA07` fw `NA02` (an HGST He10 with
