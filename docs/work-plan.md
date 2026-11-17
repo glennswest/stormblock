@@ -22,6 +22,18 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #636 — a drive's pages, every VPD page and the mode pages (2026-11-17, P0)
+
+Owner: "lets get the mode pages. and any way to parse vpd pages". The Drive
+object and DriveOperation are stormdrive's CRDs (deploy/crds.yaml), the drive
+page stormconsole's: asks 2 and 4 and the console are theirs (filed).
+- [x] scsi: `vpd_all` (every listed page, whole), `vpd_said` (0x00 0x80 0x83
+  0x86 0x8F 0x90 0x91 0xB0 0xB1 0xB2 0xB7), vendor pages raw + `ascii_strings`,
+  mode pages' changeable values (`mode_sense10_pc`), QERR; `Details.vpd`
+- [x] `compare_pages`, `stormblock hba pages [--compare] [--json]`
+- [ ] check.sh; release; stormdrive/stormconsole issues; behind stormdrive's
+  (the proof is forge1's Drive objects carrying their pages)
+
 ## #638 — the boot screen through stormpump's steps (2026-11-17, P1)
 
 stormblock's half of stormpump#237 (stormpump ada0ad5).

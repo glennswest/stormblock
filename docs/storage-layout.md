@@ -470,10 +470,32 @@ ready (#611)`). The API:
   (409). Every line goes to the log at WARN, and `GET …/write-test` answers
   the last run. On a shell: `stormblock hba write-test --sas 0x… --confirm
   0x… [--json]`.
-- `…/details` carries `mode_pages` too: each page raw (`hex`) and what its
-  bits say (`said`): caching WCE/RCD, control DPICZ/D_SENSE/QAM/SWP/ATO/TAS,
-  the power-condition timers, informational exceptions. Two drives can be
-  compared page by page.
+- `…/details` carries `mode_pages` too: each page's current values
+  (`hex`), its changeable values (`changeable`: the bits MODE SELECT may set,
+  #636) and what its bits say (`said`): caching WCE/RCD, control
+  DPICZ/D_SENSE/QAM/QERR/SWP/ATO/TAS, the power-condition timers,
+  informational exceptions.
+- …and `vpd` (#636): every VPD page the drive lists in page 0x00, each read
+  whole (up to 4 KiB), as `hex`. The standard ones are said: 0x00, 0x80,
+  0x83, **0x86** (extended INQUIRY: ACTIVATE_MICROCODE, SPT, **GRD_CHK
+  APP_CHK REF_CHK**, the task-attribute bits, WU/CRD/NV/V_SUP), 0x8F/0x90/0x91
+  (named, raw), 0xB0, 0xB1, 0xB2, 0xB7 (named, raw). A vendor page (0xC0 and
+  up: Sun/HGST 0xC0/0xC1, NetApp 0xD1–0xD3) is raw with its printable
+  `strings`; its layout is the vendor's, so nothing in it is interpreted or
+  trusted beyond display.
+- `stormblock hba pages [--compare] [--json] <sas>…`: those pages from a
+  shell, through sg or the card. With several drives they are side by side:
+  a page the same on every drive is one line (`= on every drive` and what it
+  says); one that differs gives each drive's bytes in rows of 16, the bytes
+  that differ from the first drive's in brackets.
+  ```
+  vpd 0x86  DIFFERS
+    0x5000cca26801b649 (HGST H7210A521SUN010T B3Y1): extended INQUIRY: ACTIVATE_MICROCODE 1 SPT 1 GRD_CHK 1 APP_CHK 0 REF_CHK 1 …
+    0x5000cca26a819e69 (NETAPP X378_HLBRE10TA07 NA02) 0000: 00 86 00 3c [0c] …
+  mode 0x0a  = on every drive: control: DPICZ 0 D_SENSE 0 QAM 0 QERR 0 SWP 0 ATO 0 TAS 0
+  ```
+  (an example of the shape, not forge1's answers). The Drive object carries
+  the same pages through stormdrive.
 
 ### NetApp-firmware drives (#627)
 

@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-17 (#636)
+- **feat:** #636 (owner, on forge1's NetApp X378 against the Sun HGSTs: "lets get the mode pages. and any way to parse vpd pages"): a drive's details (`stormblock hba details`, `GET /api/v1/storage/hba/{sas}/details`) carry `vpd`, every VPD page the drive lists in 0x00, each read whole as `hex`. The standard pages are said (0x86's GRD_CHK/APP_CHK/REF_CHK and ACTIVATE_MICROCODE among them); vendor pages (0xC0 and up: Sun 0xC0/0xC1, NetApp 0xD1–0xD3) are raw with their printable strings and never interpreted. The mode pages carry their changeable values beside the current ones, and the control page names QERR too.
+- **feat:** #636: `stormblock hba pages [--compare] [--json] <sas>…` shows those pages for several drives side by side: one line for a page the same on every drive, each drive's bytes for one that differs, the differing bytes bracketed. The Drive object's `status.pages` and a `details` DriveOperation are stormdrive's (filed), the console's drive page stormconsole's (filed).
+
 ### 2026-11-17 (#637)
 - **feat:** #637 (stormbootx#220: the boot panel and the screen from "one shared spec, both build from, so they never drift"): `crates/screen-spec` (`stormblock-screen-spec`), a `no_std`, `core`-only crate with no allocator. It holds the palette (colours and what each state is drawn in), the typeface (Antonio Bold by bytes, its pin, sha256, licence and sizes), the 1920 × 1080 grid and its scale rule, the frame the screen draws first (`frame::draw`), and the shapes and text over a plain `&mut [u32]` with a stride and a pixel format (`Xrgb8888`: DRM and the GOP's BGRx; `Xbgr8888`: the GOP's RGBx). It builds for `x86_64-unknown-uefi`. `stormblock screen` draws through it: `src/screen` keeps no palette, font, grid or shape of its own, and the font moved to `crates/screen-spec/fonts`.
 - **change:** #637: no flash when the screen takes the display. Its first frame is drawn into the dumb buffer before `SETCRTC`, and fbcon's cursor blink is turned off.

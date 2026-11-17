@@ -153,6 +153,25 @@ enum HbaAction {
         #[arg(long, default_value = "/dev")]
         dev: String,
     },
+    /// A drive's pages (#636): every VPD page it lists (standard ones said,
+    /// vendor ones raw with their strings) and the mode pages 0x03 0x08 0x0A
+    /// 0x19 0x1A 0x1C (current and changeable values, the control page's
+    /// bits named). Several drives (or `--compare`): side by side, the bytes
+    /// that differ from the first drive's in brackets. Read only.
+    Pages {
+        /// SAS addresses (`0x5000cca2…`)
+        #[arg(required = true)]
+        sas: Vec<String>,
+        #[arg(long)]
+        compare: bool,
+        /// Each drive's pages as JSON instead
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
     /// After a format (#620): one round of bringing the drive back. TEST
     /// UNIT READY, START UNIT when it asks for one, READ CAPACITY 16, through
     /// its sg node or the card; with `--kick`, Linux is asked to find it
@@ -10535,6 +10554,55 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
             let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba details: {sas} is no SAS address"))?;
             let d = mpt::with_drive(Path::new(dev), Path::new(sys), a, crate::drive::scsi::details).map_err(anyhow::Error::msg)?;
             println!("{}", serde_json::to_string_pretty(&d)?);
+        }
+        HbaAction::Pages { sas, compare, json, sys, dev } => {
+            use crate::drive::scsi;
+            let (devp, sysp) = (Path::new(dev), Path::new(sys));
+            let mut drives = Vec::new();
+            for s in sas {
+                let a = mpt::parse_addr(s).ok_or_else(|| anyhow::anyhow!("hba pages: {s} is no SAS address"))?;
+                let d = mpt::with_drive(devp, sysp, a, scsi::details).map_err(anyhow::Error::msg)?;
+                drives.push((format!("0x{a:016x}"), d));
+            }
+            if *json {
+                let v: Vec<serde_json::Value> = drives
+                    .iter()
+                    .map(|(a, d)| serde_json::json!({"sas_address": a, "vendor": d.vendor, "product": d.product, "revision": d.revision, "vpd": d.vpd, "mode_pages": d.mode_pages}))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(());
+            }
+            let rows: Vec<(String, Vec<(String, String, Option<String>)>)> = drives
+                .iter()
+                .map(|(a, d)| {
+                    let mut ps = Vec::new();
+                    for v in &d.vpd {
+                        let said = v.said.clone().or_else(|| (!v.strings.is_empty()).then(|| format!("strings: {}", v.strings.join(" | ")))).or(v.error.clone());
+                        ps.push((format!("vpd {}", v.page), v.hex.clone(), said));
+                    }
+                    for m in &d.mode_pages {
+                        ps.push((format!("mode {}", m.page), m.hex.clone(), m.said.clone()));
+                        if !m.changeable.is_empty() {
+                            ps.push((format!("mode {} changeable", m.page), m.changeable.clone(), None));
+                        }
+                    }
+                    let who = format!("{a} ({} {} {})", d.vendor.as_deref().unwrap_or("?"), d.product.as_deref().unwrap_or("?"), d.revision.as_deref().unwrap_or("?"));
+                    (who, ps)
+                })
+                .collect();
+            if rows.len() > 1 || *compare {
+                for l in scsi::compare_pages(&rows) {
+                    println!("{l}");
+                }
+            } else {
+                for (who, ps) in &rows {
+                    println!("{who}");
+                    for (k, h, said) in ps {
+                        println!("  {k}: {}", said.as_deref().unwrap_or(""));
+                        println!("    {h}");
+                    }
+                }
+            }
         }
         HbaAction::Ready { sas, kick, sys, dev } => {
             use crate::drive::scsi;

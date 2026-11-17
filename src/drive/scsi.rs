@@ -114,6 +114,13 @@ pub mod cdb {
         [0x4D, 0, 0x40 | (page & 0x3F), sub, 0, 0, 0, hi, lo, 0]
     }
     /// Current values; `llbaa` asks for a long block descriptor.
+    /// MODE SENSE(10) with the page-control field (#636): 0 current values,
+    /// 1 changeable (a mask of what MODE SELECT may set), 2 default, 3 saved.
+    pub fn mode_sense10_pc(page: u8, pc: u8, dbd: bool, alloc: u16) -> [u8; 10] {
+        let mut c = mode_sense10(page, false, dbd, alloc);
+        c[2] = ((pc & 0x03) << 6) | (page & 0x3F);
+        c
+    }
     pub fn mode_sense10(page: u8, llbaa: bool, dbd: bool, alloc: u16) -> [u8; 10] {
         let [hi, lo] = alloc.to_be_bytes();
         [0x5A, (if llbaa { 0x10 } else { 0 }) | (if dbd { 0x08 } else { 0 }), page & 0x3F, 0, 0, 0, 0, hi, lo, 0]
@@ -369,6 +376,8 @@ pub struct Details {
     pub wwid: Option<String>,
     pub designators: Vec<Designator>,
     pub vpd_pages: Vec<String>,
+    /// Every page `vpd_pages` lists, read whole (#636).
+    pub vpd: Vec<VpdPage>,
     /// VPD 0xB1: 1 = non-rotating (SSD), else rpm.
     pub rotation_rate: Option<u16>,
     pub form_factor: Option<String>,
@@ -526,6 +535,8 @@ pub fn details(t: &dyn Transport) -> Details {
             d.read_cache_disabled = Some(rcd);
         }
     }
+    let list: Vec<u8> = if pages.len() >= 4 { pages[4..(4 + pages[3] as usize).min(pages.len())].to_vec() } else { vec![] };
+    d.vpd = vpd_all(t, &list);
     d.mode_pages = mode_pages(t);
     d.errors = e;
     d
@@ -806,7 +817,11 @@ pub fn cdb_rw16_protect(write: bool, protect: u8, lba: u64, blocks: u32) -> [u8;
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct ModePage {
     pub page: String,
+    /// The current values.
     pub hex: String,
+    /// The changeable values (#636): the bits MODE SELECT may set.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub changeable: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub said: Option<String>,
 }
@@ -830,8 +845,8 @@ pub fn mode_page_said(p: &[u8]) -> Option<String> {
     Some(match b(0) & 0x3F {
         0x08 => format!("caching: WCE {} RCD {}", (b(2) >> 2) & 1, b(2) & 1),
         0x0A => format!(
-            "control: DPICZ {} D_SENSE {} QAM {} SWP {} ATO {} TAS {}",
-            (b(2) >> 2) & 1, (b(2) >> 3) & 1, b(3) >> 4, (b(4) >> 3) & 1, b(5) >> 7, (b(5) >> 6) & 1
+            "control: DPICZ {} D_SENSE {} QAM {} QERR {} SWP {} ATO {} TAS {}",
+            (b(2) >> 2) & 1, (b(2) >> 3) & 1, b(3) >> 4, (b(3) >> 1) & 3, (b(4) >> 3) & 1, b(5) >> 7, (b(5) >> 6) & 1
         ),
         0x1A => format!(
             "power condition: IDLE_A {} STANDBY_Z {} idle_a {} standby_z {} (100 ms units)",
@@ -842,6 +857,161 @@ pub fn mode_page_said(p: &[u8]) -> Option<String> {
         0x03 => format!("format device: {} bytes a sector", be16(p, 12)),
         _ => return None,
     })
+}
+
+// ---- every VPD page (#636) ----
+
+/// A VPD page as the drive answered it: raw always, what it says when the
+/// layout is a standard one, and the printable strings in it (a vendor
+/// page's layout is the vendor's; its bytes are shown, never trusted).
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct VpdPage {
+    pub page: String,
+    pub hex: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub strings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub said: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Runs of four or more printable ASCII characters (a vendor page's
+/// firmware names, part numbers).
+pub fn ascii_strings(b: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for &c in b {
+        if (0x20..0x7F).contains(&c) {
+            cur.push(c as char);
+        } else {
+            if cur.trim().len() >= 4 {
+                out.push(cur.trim().to_string());
+            }
+            cur.clear();
+        }
+    }
+    if cur.trim().len() >= 4 {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// What a standard VPD page says (SPC-5 / SBC-4 layouts).
+pub fn vpd_said(d: &[u8]) -> Option<String> {
+    let b = |i: usize| d.get(i).copied().unwrap_or(0);
+    let body = || d.get(4..(4 + be16(d, 2) as usize).min(d.len())).unwrap_or(&[]);
+    Some(match b(1) {
+        0x00 => format!("pages: {}", body().iter().map(|p| format!("0x{p:02x}")).collect::<Vec<_>>().join(" ")),
+        0x80 => format!("serial: {}", text(body())),
+        0x83 => {
+            let ds = parse_vpd83(d);
+            format!("{} designator(s){}", ds.len(), wwid_of(&ds).map(|w| format!(", {w}")).unwrap_or_default())
+        }
+        0x86 => format!(
+            "extended INQUIRY: ACTIVATE_MICROCODE {} SPT {} GRD_CHK {} APP_CHK {} REF_CHK {} UASK_SUP {} GROUP_SUP {} PRIOR_SUP {} HEADSUP {} ORDSUP {} SIMPSUP {} WU_SUP {} CRD_SUP {} NV_SUP {} V_SUP {}",
+            b(4) >> 6, (b(4) >> 3) & 7, (b(4) >> 2) & 1, (b(4) >> 1) & 1, b(4) & 1,
+            (b(5) >> 5) & 1, (b(5) >> 4) & 1, (b(5) >> 3) & 1, (b(5) >> 2) & 1, (b(5) >> 1) & 1, b(5) & 1,
+            (b(6) >> 3) & 1, (b(6) >> 2) & 1, (b(6) >> 1) & 1, b(6) & 1
+        ),
+        0x8F => "third-party copy (raw)".into(),
+        0x90 => "protocol-specific logical unit information (raw)".into(),
+        0x91 => "protocol-specific port information (raw)".into(),
+        0xB0 => format!("block limits: maximum transfer {} blocks, optimal {} blocks", be32(d, 8), be32(d, 12)),
+        0xB1 => format!("block device characteristics: rotation {} (1 = non-rotating), form factor code {}", be16(d, 4), b(7) & 0x0F),
+        0xB2 => format!("logical block provisioning: LBPU {} LBPWS {} LBPWS10 {}", b(5) >> 7, (b(5) >> 6) & 1, (b(5) >> 5) & 1),
+        0xB7 => "block limits extension (raw)".into(),
+        _ => return None,
+    })
+}
+
+/// Every VPD page `list` names, each read whole (up to 4 KiB).
+pub fn vpd_all(t: &dyn Transport, list: &[u8]) -> Vec<VpdPage> {
+    list.iter()
+        .map(|&pg| {
+            let page = format!("0x{pg:02x}");
+            let mut buf = vec![0u8; 255];
+            let first = t.run(&cdb::inquiry(Some(pg), 255), Dir::In, &mut buf, 30);
+            let got = match first {
+                Ok(r) if r.good() => {
+                    buf.truncate(r.len.min(255));
+                    let want = 4 + be16(&buf, 2) as usize;
+                    if want > buf.len() && want <= 4096 {
+                        let mut big = vec![0u8; want];
+                        match t.run(&cdb::inquiry(Some(pg), want as u16), Dir::In, &mut big, 30) {
+                            Ok(r) if r.good() => {
+                                big.truncate(r.len.min(want));
+                                Ok(big)
+                            }
+                            _ => Ok(buf),
+                        }
+                    } else {
+                        Ok(buf)
+                    }
+                }
+                Ok(r) => Err(r.said()),
+                Err(e) => Err(format!("not sent: {e}")),
+            };
+            match got {
+                Ok(d) => VpdPage { page, hex: hex(&d), strings: if pg >= 0xC0 { ascii_strings(&d) } else { vec![] }, said: vpd_said(&d), error: None },
+                Err(e) => VpdPage { page, error: Some(e), ..Default::default() },
+            }
+        })
+        .collect()
+}
+
+fn unhex(h: &str) -> Vec<u8> {
+    (0..h.len() / 2).filter_map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok()).collect()
+}
+
+/// Several drives' pages side by side (#636): for each page any of them
+/// has, `=` and what it says when it is the same on every drive, else each
+/// drive's bytes in rows of 16 with the bytes that differ from the first
+/// drive's in brackets, and what each says.
+pub fn compare_pages(drives: &[(String, Vec<(String, String, Option<String>)>)]) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for (_, pages) in drives {
+        for (k, _, _) in pages {
+            if !keys.contains(k) {
+                keys.push(k.clone());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for k in keys {
+        let got: Vec<(&String, Option<&(String, String, Option<String>)>)> =
+            drives.iter().map(|(d, ps)| (d, ps.iter().find(|(pk, _, _)| *pk == k))).collect();
+        let hexes: Vec<Option<&str>> = got.iter().map(|(_, p)| p.map(|p| p.1.as_str())).collect();
+        if hexes.iter().all(|h| *h == hexes[0]) && hexes[0].is_some() {
+            let said = got[0].1.and_then(|p| p.2.clone()).unwrap_or_default();
+            out.push(format!("{k}  = on every drive{}", if said.is_empty() { String::new() } else { format!(": {said}") }));
+            continue;
+        }
+        out.push(format!("{k}  DIFFERS"));
+        let first: Vec<u8> = hexes.iter().flatten().next().map(|h| unhex(h)).unwrap_or_default();
+        for (d, p) in &got {
+            let Some((_, h, said)) = p else {
+                out.push(format!("  {d}: not on this drive"));
+                continue;
+            };
+            if let Some(s) = said {
+                out.push(format!("  {d}: {s}"));
+            }
+            let bytes = unhex(h);
+            for (row, chunk) in bytes.chunks(16).enumerate() {
+                let cells: Vec<String> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        let at = row * 16 + i;
+                        if first.get(at) == Some(b) { format!("{b:02x}") } else { format!("[{b:02x}]") }
+                    })
+                    .collect();
+                out.push(format!("  {d} {:04x}: {}", row * 16, cells.join(" ")));
+            }
+        }
+    }
+    out
 }
 
 /// The pages #627 reads before and after each step.
@@ -855,14 +1025,24 @@ pub fn mode_pages(t: &dyn Transport) -> Vec<ModePage> {
         .map(|&pg| {
             let mut m = vec![0u8; 252];
             let page = format!("0x{pg:02x}");
-            match t.run(&cdb::mode_sense10(pg, false, true, 252), Dir::In, &mut m, 30) {
+            let mut mp = match t.run(&cdb::mode_sense10(pg, false, true, 252), Dir::In, &mut m, 30) {
                 Ok(r) if r.good() => match mode_page_of(&m[..r.len.min(252)]) {
-                    Some(p) => ModePage { page, hex: hex(p), said: mode_page_said(p) },
-                    None => ModePage { page, hex: String::new(), said: Some("an answer with no page in it".into()) },
+                    Some(p) => ModePage { page, hex: hex(p), said: mode_page_said(p), ..Default::default() },
+                    None => ModePage { page, said: Some("an answer with no page in it".into()), ..Default::default() },
                 },
-                Ok(r) => ModePage { page, hex: String::new(), said: Some(format!("refused: {}", r.said())) },
-                Err(e) => ModePage { page, hex: String::new(), said: Some(format!("not sent: {e}")) },
+                Ok(r) => ModePage { page, said: Some(format!("refused: {}", r.said())), ..Default::default() },
+                Err(e) => ModePage { page, said: Some(format!("not sent: {e}")), ..Default::default() },
+            };
+            // What may be changed (#636), for a page the drive has.
+            if !mp.hex.is_empty() {
+                let mut c = vec![0u8; 252];
+                if let Ok(r) = t.run(&cdb::mode_sense10_pc(pg, 1, true, 252), Dir::In, &mut c, 30) {
+                    if r.good() {
+                        mp.changeable = mode_page_of(&c[..r.len.min(252)]).map(hex).unwrap_or_default();
+                    }
+                }
             }
+            mp
         })
         .collect()
 }
@@ -1513,6 +1693,28 @@ mod tests {
         let r = ready_round(&d);
         assert!(r.ready && !r.started);
         assert!(r.said().starts_with("TEST UNIT READY good; "));
+    }
+
+    /// #636: a page's words and its bytes, side by side across drives.
+    #[test]
+    fn vpd_pages_said_and_compared() {
+        // 0x86: ACTIVATE_MICROCODE 1, SPT 1, GRD_CHK 1, APP_CHK 0, REF_CHK 1.
+        let ext = [0x00, 0x86, 0x00, 0x3C, 0x4D, 0x07, 0x01, 0x00];
+        let s = vpd_said(&ext).unwrap();
+        assert!(s.contains("ACTIVATE_MICROCODE 1 SPT 1 GRD_CHK 1 APP_CHK 0 REF_CHK 1"), "{s}");
+        assert!(vpd_said(&[0x00, 0x00, 0x00, 0x03, 0x00, 0x86, 0xD1]).unwrap().ends_with("0x00 0x86 0xd1"));
+        assert_eq!(vpd_said(&[0, 0xD1, 0, 0]), None, "a vendor page has no said");
+        assert_eq!(ascii_strings(b"\x00\x01NA02\x00X378_HLBRE10TA07\x05ab"), vec!["NA02", "X378_HLBRE10TA07"]);
+        let cmp = compare_pages(&[
+            ("bay0".into(), vec![("vpd 0x86".into(), "00863c4d".into(), Some("GRD_CHK 1".into())), ("mode 0x0a".into(), "0a0a".into(), None)]),
+            ("bay3".into(), vec![("vpd 0x86".into(), "00863c4c".into(), Some("GRD_CHK 0".into())), ("mode 0x0a".into(), "0a0a".into(), None), ("vpd 0xd3".into(), "00d3".into(), None)]),
+        ]);
+        let all = cmp.join("\n");
+        assert!(all.contains("vpd 0x86  DIFFERS"), "{all}");
+        assert!(all.contains("bay3 0000: 00 86 3c [4c]"), "{all}");
+        assert!(all.contains("mode 0x0a  = on every drive"), "{all}");
+        assert!(all.contains("bay0: not on this drive"), "{all}");
+        assert_eq!(cdb::mode_sense10_pc(0x0A, 1, true, 252)[2], 0x4A);
     }
 
     #[test]
