@@ -184,12 +184,21 @@ pub fn run(o: &Opts) -> anyhow::Result<()> {
         t.activate(SCREEN_VT);
         t.graphics(true);
     }
-    let _ = display.acquire();
+    // No blinking cursor on the console while the screen holds the display.
+    let _ = std::fs::write("/sys/class/graphics/fbcon/cursor_blink", "0");
     let mut c = canvas::Canvas::new(display.width, display.height, draw::BG);
     let mut log = vt::Follow::default();
     let mut showing_log = false;
-    let mut last_draw = std::time::Instant::now() - std::time::Duration::from_secs(10);
     let mut inf = info(&o.run);
+    // The first frame goes into the buffer before it is scanned out (#637:
+    // the hand-over from stormbootx's panel with no black frame between).
+    {
+        let rec = crate::install_progress::record(&o.run, inf.now);
+        draw::render(&mut c, &rec, &inf);
+        display.present(&c.px);
+    }
+    let _ = display.acquire();
+    let mut last_draw = std::time::Instant::now();
     let mut last_info = std::time::Instant::now();
     let init_log = o.run.join("init.log");
     let mut root = Root::Initramfs;

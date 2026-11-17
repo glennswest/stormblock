@@ -193,7 +193,8 @@ pub struct Display {
 unsafe impl Send for Display {}
 
 impl Display {
-    /// The first card under `/dev/dri` with a connected display, set up;
+    /// The first card under `/dev/dri` with a connected display, its buffer
+    /// ready but not scanned out until [`Display::acquire`];
     /// `None` when there is none (headless: nothing drawn, nothing blocked).
     pub fn open(card: Option<&std::path::Path>) -> std::io::Result<Option<Display>> {
         let cards: Vec<std::path::PathBuf> = match card {
@@ -318,7 +319,10 @@ impl Display {
                 mode,
                 said: format!("{} connector {cid} crtc {crtc_id} {name} ({w}x{h})", path.display()),
             };
-            d.show()?;
+            // Not scanned out yet (#637): the caller draws its first frame
+            // into the buffer, then `acquire`s, so the display goes from the
+            // firmware's last picture to the screen's first with no empty
+            // buffer between.
             return Ok(Some(d));
         }
         Ok(None)
