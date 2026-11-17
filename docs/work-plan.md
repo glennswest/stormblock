@@ -99,10 +99,12 @@ sent to it".
   checked on whichever machine installs first (pvetest1/2 have no storage:)
 - [x] check.sh passed on 275f6781 and ba5b8bda (1474, 0 warnings); v24.14.1
   released and staged; shipped with the console proof
-- [ ] 21:22Z reopened again: the checker re-used pvetest2-1794859347 (it
+- [x] 21:22Z reopened again: the checker re-used pvetest2-1794859347 (it
   carries a4475b1c, before the fix) as "the change" (stormcentral#1443).
-  Waits `--after-install stormblock>=ba5b8bda`; then `shipped` again with
-  `console:console loglevel [0-9]+.*the kernel's messages, SCSI sense included`
+  Waited `--after-install stormblock>=ba5b8bda`.
+- [x] 2026-11-17: seen on forge1 12.90 (NOT LAID, the so: line, three legs)
+  and pvetest3 12.91 (passed; the loglevel line, console line 187); shipped
+  again with the console proof
 
 ## #627 — NetApp firmware and 4096 + PI: the write-test matrix (2026-11-16, P0)
 

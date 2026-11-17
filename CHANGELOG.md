@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-17 (#625)
+- **docs:** #625: seen on forge1 12.90 (the NOT LAID block and its `so:` line, the install going on with three legs) and on pvetest3 12.91 (the loglevel line on a passed install); shipped again. Work plan.
+
 ### 2026-11-16 (#635)
 - **fix:** #635 (forge1 cut hard seven times on 2026-11-16: every failed install sat at the rescue shell, the BMC's soft off was ignored, and stormcentral cut the power 120 s later): `stormblock power-button` watches the kernel's "Power Button" input device (the ACPI button: a BMC's soft off, a person's press). On a press it says so on the console, names a format a power-off would cut short, stops the storage engine and the screen (SIGTERM, up to 20 s), syncs and powers off. `/init` starts it early, through every phase and the rescue shell, says its first line on the console, and stops it at switch_root, where the node's init takes the button.
 - **test:** #635: `ci-powerbutton-verify.sh` boots the build host's kernel in QEMU, presses the ACPI button with `system_powerdown`, and requires the press said, the engine stopped and the guest powered off. `ci-kernel-initramfs.sh` lists `acpi/button`, `input/evdev` and `simpledrm` (#618) too.
