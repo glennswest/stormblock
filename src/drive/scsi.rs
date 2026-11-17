@@ -1811,7 +1811,7 @@ mod tests {
     /// A log page 0x18 with one SAS port parameter and two phys (SPL), the
     /// first at 12 Gbit with forge1 bay 3's counters.
     pub fn sas_port_page(sync0: u32, sync1: u32) -> Vec<u8> {
-        let mut desc = |phy: u8, rate: u8, inv: u32, disp: u32, sync: u32, reset: u32| {
+        let desc = |phy: u8, rate: u8, inv: u32, disp: u32, sync: u32, reset: u32| {
             let mut v = vec![0u8; 48];
             v[1] = phy;
             v[3] = 44;
