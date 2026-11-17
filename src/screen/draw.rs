@@ -10,17 +10,11 @@
 
 use serde_json::Value;
 
-use super::canvas::{rgb, Align, Canvas, Corners, Rgb};
-
-pub const BG: Rgb = rgb(0, 0, 0);
-pub const AMBER: Rgb = rgb(255, 153, 0);
-pub const LAVENDER: Rgb = rgb(204, 153, 204);
-pub const BLUE: Rgb = rgb(153, 204, 255);
-pub const PEACH: Rgb = rgb(255, 204, 153);
-pub const GREY: Rgb = rgb(170, 160, 150);
-pub const RED: Rgb = rgb(221, 68, 68);
-pub const TRACK: Rgb = rgb(52, 46, 40);
-pub const INK: Rgb = rgb(0, 0, 0);
+use super::canvas::{Align, Canvas, Corners, Rgb};
+// The palette, the grid and the frame are the shared spec's (#637), the same
+// as stormbootx's boot panel; nothing of them is kept here.
+pub use stormblock_screen_spec::palette::{AMBER, BG, BLUE, GREY, INK, LAVENDER, PEACH, RED, TRACK};
+use stormblock_screen_spec::{frame, Grid};
 
 /// What the screen knows of the machine, beside the record.
 #[derive(Debug, Clone, Default)]
@@ -140,20 +134,17 @@ fn wrap(c: &Canvas, text: &str, px: f32, max: f32) -> Vec<String> {
 /// The whole screen.
 pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     c.clear(BG);
-    // Laid out on 1920 × 1080 and stretched to the display, across and down
-    // apart (a BMC's 4:3 or 5:4 console is filled, not letterboxed); type
-    // and corners take the smaller scale, so nothing is distorted.
-    let (kx, ky) = (c.w as f32 / 1920.0, c.h as f32 / 1080.0);
-    let k = kx.min(ky);
-    let x = |v: f32| (v * kx) as i64;
-    let y = |v: f32| (v * ky) as i64;
-    let xf = |v: f32| v * kx;
-    let yf = |v: f32| v * ky;
-    // Lengths across (lw), down (lh), and radii (l).
-    let lw = |v: f32| (v * kx) as i64;
-    let lh = |v: f32| (v * ky) as i64;
-    let l = |v: f32| (v * k) as i64;
-    let p = |v: f32| v * k;
+    // The spec's grid (#637): 1920 × 1080 stretched across and down apart,
+    // type and corners at the smaller scale.
+    let g = Grid::new(c.w, c.h);
+    let x = |v: f32| g.x(v);
+    let y = |v: f32| g.y(v);
+    let xf = |v: f32| g.xf(v);
+    let yf = |v: f32| g.yf(v);
+    let lw = |v: f32| g.lw(v);
+    let lh = |v: f32| g.lh(v);
+    let l = |v: f32| g.l(v);
+    let p = |v: f32| g.p(v);
 
     let state = s(rec, "state");
     // stormpump's end (#638): ready, or not ready with its words.
@@ -164,21 +155,14 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     let finished = (info.install && (state == "laid" || state == "booted")) || boot_ready;
     let kind = if info.install { "INSTALL" } else { "BOOT" };
 
-    // ---- the header frame ----
-    let head = if failed { RED } else { AMBER };
-    c.elbow(x(24.0), y(24.0), lw(1872.0), lh(300.0), lw(200.0), lh(44.0), l(70.0), l(28.0), true, head);
-    // The title, cut into the bar.
+    // ---- the frame: the spec's (#637) ----
     let title = format!("{}  {kind}", if info.product.is_empty() { "STORMCOS" } else { info.product.as_str() });
-    let tw = c.text_width(&title, p(54.0));
-    c.fill_rect(x(1896.0) - tw as i64 - lw(48.0), y(24.0), tw as i64 + lw(24.0), lh(44.0), BG);
-    c.text(xf(1896.0 - 36.0), yf(66.0), p(54.0), head, Align::Right, &title);
-    // The end cap of the bar.
-    c.round_rect(x(1896.0) - lw(16.0), y(24.0), lw(16.0), lh(44.0), l(8.0), Corners::RIGHT, head);
-    // Side blocks of the header's vertical bar.
-    c.fill_rect(x(24.0), y(196.0), lw(200.0), lh(6.0), BG);
-    c.fill_rect(x(24.0), y(202.0), lw(200.0), lh(122.0), GREY);
-    c.text(xf(214.0), yf(190.0), p(30.0), INK, Align::Right, kind);
-    c.text(xf(214.0), yf(316.0), p(30.0), INK, Align::Right, &info.release.to_uppercase());
+    let release = info.release.to_uppercase();
+    frame::draw(
+        &mut c.surface(),
+        &g,
+        &frame::Frame { title: &title, kind, release: &release, failed, ..Default::default() },
+    );
 
     // Who and where.
     let node = if info.node.is_empty() { "—".to_string() } else { info.node.to_uppercase() };
@@ -220,18 +204,6 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     let now_said = rec.get("stage").map(|v| s(v, "detail").to_string()).unwrap_or_default();
     if !now_said.is_empty() && !failed && !finished {
         c.text(xf(1880.0), yf(304.0), p(26.0), GREY, Align::Right, &c.fit(&now_said.to_uppercase(), p(26.0), p(760.0)));
-    }
-
-    // ---- the lower frame ----
-    let frame = if failed { RED } else { LAVENDER };
-    c.elbow(x(24.0), y(348.0), lw(1872.0), lh(708.0), lw(200.0), lh(36.0), l(70.0), l(28.0), false, frame);
-    c.round_rect(x(1896.0) - lw(16.0), y(1020.0), lw(16.0), lh(36.0), l(8.0), Corners::RIGHT, frame);
-    // Side blocks: DRIVES, STEPS, HEALTH.
-    let blocks: [(f32, f32, Rgb, &str); 3] = [(348.0, 328.0, BLUE, "DRIVES"), (682.0, 186.0, AMBER, "STEPS"), (874.0, 108.0, PEACH, "HEALTH")];
-    for (top, h, col, label) in blocks {
-        c.fill_rect(x(24.0), y(top), lw(200.0), lh(h), col);
-        c.fill_rect(x(24.0), y(top + h), lw(200.0), lh(6.0), BG);
-        c.text(xf(214.0), yf(top + h - 12.0), p(30.0), INK, Align::Right, label);
     }
 
     // ---- the drives ----
@@ -409,11 +381,6 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
             c.text(xf(1880.0), yf(966.0), p(24.0), GREY, Align::Right, "SENSORS NOT READ YET");
         }
     }
-    // The key line along the bottom bar.
-    let keys = "F2  LOG    F1  THIS SCREEN";
-    let kw = c.text_width(keys, p(26.0));
-    c.fill_rect(x(1896.0) - kw as i64 - lw(60.0), y(1020.0), kw as i64 + lw(24.0), lh(36.0), BG);
-    c.text(xf(1896.0 - 48.0), yf(1050.0), p(26.0), frame, Align::Right, keys);
 }
 
 #[cfg(test)]

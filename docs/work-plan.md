@@ -45,13 +45,9 @@ libm; dev sha2), fonts moved from src/screen/fonts, `lib.rs`, `palette.rs`
 text_width, fit), `grid.rs` (Grid, frame measures). Root Cargo.toml: the
 crate replaces the direct ab_glyph dependency.
 Left:
-- [ ] `surface.rs`: Surface over &mut [u32] + stride + PixelFormat
-  (Xrgb8888 = DRM and GOP BGRx; Xbgr8888 = GOP RGBx): fill_rect, round_rect,
-  elbow, pill, bar, text, text_fit (from src/screen/canvas.rs)
-- [ ] `frame.rs`: the static frame (elbows, title cut, end caps, side blocks,
-  keys line) from src/screen/draw.rs
-- [ ] src/screen: Canvas a thin owner (+ png), draw.rs on the spec (no
-  palette/font/grid copies left)
+- [x] `surface.rs` (Surface over &mut [u32] + stride + PixelFormat;
+  shapes, text, text_fit), `frame.rs` (the static frame), `tests.rs`
+- [x] src/screen: Canvas a thin owner (+ png), draw.rs on the spec
 - [ ] no flash: Display::open without SETCRTC; first frame into the buffer,
   tty1 graphics + cursor off, then SETCRTC
 - [ ] tests (font sha256; pixel formats; shapes), Cargo.lock via a build VM

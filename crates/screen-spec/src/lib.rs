@@ -31,3 +31,6 @@ pub mod surface;
 pub use grid::Grid;
 pub use palette::Rgb;
 pub use surface::{Align, Corners, PixelFormat, Surface};
+
+#[cfg(test)]
+mod tests;
