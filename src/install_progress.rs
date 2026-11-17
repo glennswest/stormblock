@@ -145,7 +145,13 @@ pub fn now() -> u64 {
 }
 
 pub fn events(run: &Path) -> Vec<Event> {
-    let Ok(text) = std::fs::read_to_string(run.join(EVENTS)) else { return vec![] };
+    events_in(&run.join(EVENTS))
+}
+
+/// The events of any file in this line format (stormpump's
+/// `/run/stormpump/boot-progress.events` is one, #638).
+pub fn events_in(path: &Path) -> Vec<Event> {
+    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
     text.lines()
         .filter_map(|l| {
             let mut f = l.splitn(5, '\t');

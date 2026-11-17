@@ -49,4 +49,32 @@ has "the screen's line" "^  screen: drawing on /dev/dri/card0"
 has "the power button's line" "^  power button: watching /dev/input/event0 (Power Button)"
 hasnt "never the start-up line" "StormBlock starting"
 
+# The hand-over (#638): the screen is told (SIGUSR1) and stays up when it
+# answers (screen.follow); one that does not answer is stopped.
+cat > "$W/follow" <<'SB'
+#!/bin/sh
+echo "screen: drawing on /dev/dri/card0 (#618)"
+[ "${NO_ANSWER:-}" = 1 ] && trap '' USR1 || trap 'echo armed > "$RUN/screen.follow"' USR1
+while :; do sleep 0.1; done
+SB
+chmod +x "$W/follow"
+handover() { # env -> console in out, the screen's pid in pid
+    {
+        echo "STORM_RUN=$W/run STORM_SCREEN_BIN=$W/follow STORM_INSTALL_TICKET=$W/none RUN=$W/run export RUN $1"
+        cat "$W/block.sh"
+        echo 'screen_start; P=$SCREEN_PID; screen_switch_root; echo "$P" > "'"$W"'/pid"; echo "=AFTER=$SCREEN_PID"'
+    } > "$W/ho.sh"
+    rm -rf "$W/run"; mkdir -p "$W/run"
+    sh "$W/ho.sh" > "$W/out" 2>&1
+}
+echo "screen start: the hand-over"
+handover "NO_ANSWER=0 export NO_ANSWER"
+has "it answers: it stays up into stormpump's steps" "the screen stays up through the hand-over, into stormpump's steps until Ready"
+if kill -0 "$(cat "$W/pid")" 2>/dev/null; then echo "  ok    and runs on"; kill "$(cat "$W/pid")"; else echo "  FAIL  it was stopped"; fail=1; fi
+handover "NO_ANSWER=1 export NO_ANSWER"
+has "it does not answer: stopped, the display given back" "the screen did not answer the hand-over: stopped"
+has "  and forgotten" "^=AFTER=$"
+sleep 0.3
+if kill -0 "$(cat "$W/pid")" 2>/dev/null; then echo "  FAIL  it still runs"; fail=1; kill -9 "$(cat "$W/pid")"; else echo "  ok    and is gone"; fi
+
 [ "$fail" = 0 ] && echo "initramfs-screen-start: all ok" || { echo "initramfs-screen-start: FAILED"; exit 1; }

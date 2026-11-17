@@ -104,6 +104,9 @@ fn step_colour(state: &str) -> Rgb {
 
 /// The step names as the screen says them.
 fn step_name(step: &str) -> String {
+    if let Some(b) = step.strip_prefix("boot:") {
+        return super::boot::step_name(b);
+    }
     match step {
         "flow-over" => "HAND-OVER".into(),
         "set" => "DATA SET".into(),
@@ -153,8 +156,12 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     let p = |v: f32| v * k;
 
     let state = s(rec, "state");
-    let failed = state == "failed";
-    let finished = info.install && (state == "laid" || state == "booted");
+    // stormpump's end (#638): ready, or not ready with its words.
+    let outcome = rec.get("boot").and_then(|b| b.get("outcome")).filter(|o| !o.is_null());
+    let boot_failed = outcome.is_some_and(|o| s(o, "state") == "failed");
+    let boot_ready = outcome.is_some_and(|o| s(o, "state") == "done");
+    let failed = state == "failed" || boot_failed;
+    let finished = (info.install && (state == "laid" || state == "booted")) || boot_ready;
     let kind = if info.install { "INSTALL" } else { "BOOT" };
 
     // ---- the header frame ----
@@ -190,8 +197,12 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     // The big readout: percent while drives format, else the state.
     let drives: Vec<Value> = rec.get("drives").and_then(Value::as_array).cloned().unwrap_or_default();
     let formatting: Vec<&Value> = drives.iter().filter(|d| s(d, "state") == "formatting").collect();
-    let big = if failed {
+    let big = if boot_failed {
+        "NOT READY".to_string()
+    } else if failed {
         "STOPPED".to_string()
+    } else if boot_ready {
+        "READY".to_string()
     } else if finished {
         "COMPLETE".to_string()
     } else if !formatting.is_empty() {
@@ -276,9 +287,37 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     if failed || finished {
         let col = if failed { RED } else { BLUE };
         c.round_rect(x(260.0), y(700.0), lw(1636.0), lh(296.0), l(36.0), Corners::ALL, col);
-        let head = if failed { format!("{kind} STOPPED") } else { "INSTALL COMPLETE".to_string() };
+        let install_done = info.install && (state == "laid" || state == "booted");
+        let head = if boot_failed {
+            "NODE NOT READY".to_string()
+        } else if failed {
+            format!("{kind} STOPPED")
+        } else if boot_ready && !install_done {
+            "NODE READY".to_string()
+        } else {
+            "INSTALL COMPLETE".to_string()
+        };
         c.text(xf(300.0), yf(776.0), p(64.0), INK, Align::Left, &head);
-        let words = if failed {
+        let bootv = rec.get("boot").cloned().unwrap_or(Value::Null);
+        let failed_units: Vec<String> = bootv
+            .get("failed")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().map(|f| format!("{}: {}", s(f, "unit"), s(f, "said"))).collect())
+            .unwrap_or_default();
+        let words = if boot_failed {
+            let mut w = outcome.map(|o| s(o, "said").to_string()).unwrap_or_default();
+            if !failed_units.is_empty() {
+                w = format!("{w}.   FAILED: {}", failed_units.join("; "));
+            }
+            w
+        } else if boot_ready && !install_done {
+            format!(
+                "{} AT {} IS READY.   {}",
+                if info.node.is_empty() { "THIS NODE".into() } else { info.node.to_uppercase() },
+                if info.address.is_empty() { "ITS ADDRESS".into() } else { info.address.clone() },
+                outcome.map(|o| s(o, "said").to_string()).unwrap_or_default()
+            )
+        } else if failed {
             let st = rec.get("stage").map(|v| s(v, "detail").to_string()).unwrap_or_default();
             let step = rec
                 .get("layout")
@@ -307,15 +346,26 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
             .filter(|st| info.install || s(st, "state") != "pending")
             .collect();
         let started = u(rec, "started");
-        let n = steps.len().max(1) as f32;
+        // One row of pills, or two when stormpump's steps follow the
+        // initramfs's (#638): shorter pills, no time line under them.
+        let two = steps.len() > 9;
+        let per = if two { steps.len().div_ceil(2) } else { steps.len().max(1) };
+        let n = per as f32;
         let w = ((1636.0 - (n - 1.0) * 14.0) / n).min(260.0);
         for (i, st) in steps.iter().enumerate() {
-            let sx = 260.0 + i as f32 * (w + 14.0);
+            let (row, col_i) = (i / per, i % per);
+            let sx = 260.0 + col_i as f32 * (w + 14.0);
+            let sy = if two { 700.0 + row as f32 * 60.0 } else { 712.0 };
+            let ph = if two { 48.0 } else { 56.0 };
             let state = s(st, "state");
             let col = step_colour(state);
-            c.pill(x(sx), y(712.0), lw(w), lh(56.0), col);
+            c.pill(x(sx), y(sy), lw(w), lh(ph), col);
             let ink = if col == TRACK { GREY } else { INK };
-            c.text(xf(sx + w / 2.0), yf(752.0), p(30.0), ink, Align::Center, &c.fit(&step_name(s(st, "step")), p(30.0), p(w - 20.0)));
+            let tp = if two { 26.0 } else { 30.0 };
+            c.text(xf(sx + w / 2.0), yf(sy + ph / 2.0 + tp * 0.36), p(tp), ink, Align::Center, &c.fit(&step_name(s(st, "step")), p(tp), p(w - 20.0)));
+            if two {
+                continue;
+            }
             let when = match (state, u(st, "at"), started) {
                 ("done", Some(a), Some(s0)) => format!("+{}", span(a.saturating_sub(s0))),
                 ("running", Some(a), _) => format!("{} SO FAR", span(info.now.saturating_sub(a))),
@@ -324,6 +374,16 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
                 _ => String::new(),
             };
             c.text(xf(sx + w / 2.0), yf(806.0), p(26.0), if state == "running" { AMBER } else { GREY }, Align::Center, &when);
+        }
+        // stormpump's services (#638), under two rows of steps.
+        if let Some(b) = rec.get("boot") {
+            let nf = b.get("failed").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+            let mut line = format!("SERVICES   {} READY   ·   {} STARTED", u(b, "ready").unwrap_or(0), u(b, "started").unwrap_or(0));
+            if nf > 0 {
+                let first = &b["failed"][0];
+                line.push_str(&format!("   ·   {nf} FAILED: {} ({})", s(first, "unit").to_uppercase(), s(first, "said")));
+            }
+            c.text(xf(260.0), yf(850.0), p(26.0), if nf > 0 { RED } else { GREY }, Align::Left, &c.fit(&line, p(26.0), p(1620.0)));
         }
         // The health strip (stormipmi#111): values when the record has them.
         let hv = rec.get("health").cloned().unwrap_or(Value::Null);
@@ -445,5 +505,36 @@ mod tests {
         let mut c4 = Canvas::new(1024, 768, 0);
         render(&mut c4, &boot, &Info { install: false, node: "pvetest2".into(), address: "192.168.31.173".into(), now: 1010, ..Default::default() });
         snap("pvetest2-boot-1024.png", &c4);
+
+        // #638: an ordinary boot after the hand-over: the initramfs's steps,
+        // then stormpump's, two rows, the services line; then READY.
+        let pump = |at: u64, kind: &str, name: &str, state: &str, detail: &str| crate::install_progress::Event {
+            at, kind: kind.into(), name: name.into(), state: state.into(), detail: detail.into(),
+        };
+        let mut evs = vec![
+            pump(1010, "step", "pid1", "done", ""), pump(1011, "step", "early", "done", ""),
+            pump(1012, "step", "install-config", "done", ""), pump(1013, "step", "modules", "done", ""),
+            pump(1014, "step", "coldplug-units", "done", ""), pump(1015, "step", "network", "done", "192.168.31.203"),
+            pump(1016, "step", "boot-manifest", "done", ""), pump(1017, "step", "coldplug", "done", ""),
+            pump(1018, "step", "all-running", "running", ""),
+            pump(1019, "service", "stormblock", "ready", ""), pump(1019, "service", "rustkube-apiserver", "started", ""),
+            pump(1020, "service", "stormcert", "failed", "exit 1: no CA yet, restarting"),
+        ];
+        let before = vec![json!({"step": "inventory", "state": "done", "at": 1002}), json!({"step": "flow-over", "state": "done", "at": 1005})];
+        let mut r5 = boot.clone();
+        super::super::boot::merge(&mut r5, before.clone(), &super::super::boot::read(&evs));
+        let mut c5 = Canvas::new(1920, 1080, 0);
+        let i5 = Info { install: false, node: "forge1".into(), address: "192.168.31.203".into(), now: 1030, ..Default::default() };
+        render(&mut c5, &r5, &i5);
+        snap("forge1-boot-services.png", &c5);
+        assert_eq!(c5.get(260 + 30, 700 + 24), BLUE, "the first step done, first row");
+        assert!(c5.px.iter().any(|p| *p == RED), "the failed service said in red");
+        evs.push(pump(1040, "step", "ready", "done", "console http://192.168.31.203:9094/"));
+        let mut r6 = boot.clone();
+        super::super::boot::merge(&mut r6, before, &super::super::boot::read(&evs));
+        let mut c6 = Canvas::new(1920, 1080, 0);
+        render(&mut c6, &r6, &i5);
+        snap("forge1-boot-ready.png", &c6);
+        assert!(c6.px.iter().filter(|p| **p == BLUE).count() > 200_000, "the READY panel");
     }
 }

@@ -1155,14 +1155,24 @@ screen_start() {
     done
     grep '^screen:' "$_scl" 2>/dev/null | head -n 1 | sed 's/^/  /'
 }
-screen_switch_root() { # an install boot keeps it; any other gives the display back
+screen_switch_root() { # every boot: the screen follows into the node's root (#638)
     [ -n "$SCREEN_PID" ] || return 0
-    if [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
-        echo "  the install's screen stays up through the hand-over (#618)"
-        return 0
+    kill -0 "$SCREEN_PID" 2>/dev/null || { SCREEN_PID=""; return 0; }
+    # It holds /sysroot and says so (screen.follow); stormpump ends it at
+    # Ready (SIGTERM, stormpump#237). Not holding it: it is stopped here and
+    # the display is given back, as before.
+    _ssf="${STORM_RUN:-/run/stormblock}/screen.follow"
+    rm -f "$_ssf"
+    kill -USR1 "$SCREEN_PID" 2>/dev/null || :
+    _ssw=0
+    while [ ! -e "$_ssf" ] && [ "$_ssw" -lt 20 ]; do sleep 0.1; _ssw=$((_ssw + 1)); done
+    if [ -e "$_ssf" ]; then
+        echo "  the screen stays up through the hand-over, into stormpump's steps until Ready (#638)"
+    else
+        kill -TERM "$SCREEN_PID" 2>/dev/null || :
+        echo "  the screen did not answer the hand-over: stopped, the display given back (#638)"
+        SCREEN_PID=""
     fi
-    kill -TERM "$SCREEN_PID" 2>/dev/null || :
-    SCREEN_PID=""
 }
 # --- END screen start
 
@@ -7474,6 +7484,13 @@ if [ -z "${ROOT_RO:-}" ] && [ -d "$_nh_root/etc" ]; then
 fi
 # --- END network handoff
 
+# The engine serves the install's page and record from here (#616): said
+# while /run is still this root's (after the move below it is not).
+progress stage switch_root done "the node's engine serves this page from here" 2>/dev/null
+# The screen follows into the node's root (#638), told while /run and /sysroot
+# are both still where it can see them.
+screen_switch_root
+
 # Move virtual filesystems
 mount --move /proc /sysroot/proc
 mount --move /sys /sysroot/sys
@@ -7510,10 +7527,7 @@ hotplug_stop
 
 # What is left of the boot's log goes out before the hand-over (#477).
 logcast_stop
-# The engine serves the install's page and record from here (#616).
-progress stage switch_root done "the node's engine serves this page from here" 2>/dev/null
 install_status_stop
-screen_switch_root
 power_button_stop
 
 # The init that follows gets /dev/console, as it always did; the fan-out goes

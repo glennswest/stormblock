@@ -14,6 +14,7 @@
 //! - [`draw`]: the screen as a function of the record.
 //! - `drm` and `vt` (Linux): the display and the terminals.
 
+pub mod boot;
 pub mod canvas;
 pub mod draw;
 #[cfg(target_os = "linux")]
@@ -120,6 +121,38 @@ extern "C" fn on_term(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// `/init` is about to switch_root (#638): follow it to the node's root.
+#[cfg(target_os = "linux")]
+static FOLLOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "linux")]
+extern "C" fn on_usr1(_: libc::c_int) {
+    FOLLOW.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The VTs (#638): the screen on tty7 and the log on tty8, clear of the
+/// gettys the node runs on tty1-tty4 (stormcos#218) and of stormpump's tty6.
+pub const SCREEN_VT: u32 = 7;
+pub const LOG_VT: u32 = 8;
+
+/// After the switch: stormpump ends the screen at Ready (SIGTERM, within
+/// `stormpump.screen.max=`, 600 s). A stormpump that never writes its
+/// events (older than stormpump#237) is not waited for past this; and no
+/// screen holds the display past the cap.
+pub const NO_PUMP_SECS: u64 = 120;
+pub const CAP_AFTER_SWITCH_SECS: u64 = 900;
+
+/// Where the screen is against `/init`'s switch_root.
+#[derive(Debug)]
+enum Root {
+    /// In the initramfs.
+    Initramfs,
+    /// `/sysroot` held, waiting for the switch.
+    Armed(std::os::fd::OwnedFd),
+    /// In the node's root since then.
+    Node(std::time::Instant),
+}
+
 /// The screen, until SIGTERM. No display: said once, and nothing else.
 #[cfg(target_os = "linux")]
 pub fn run(o: &Opts) -> anyhow::Result<()> {
@@ -131,6 +164,7 @@ pub fn run(o: &Opts) -> anyhow::Result<()> {
     unsafe {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_term as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGUSR1, on_usr1 as *const () as libc::sighandler_t);
     }
     let display = match drm::Display::open(o.card.as_deref()) {
         Ok(Some(d)) => d,
@@ -144,10 +178,10 @@ pub fn run(o: &Opts) -> anyhow::Result<()> {
         }
     };
     println!("screen: drawing on {} (#618)", display.said);
-    let mut tty1 = vt::Term::open(1).ok();
-    let mut tty2 = vt::Term::open(2).ok();
+    let mut tty1 = vt::Term::open(SCREEN_VT).ok();
+    let mut tty2 = vt::Term::open(LOG_VT).ok();
     if let Some(t) = &tty1 {
-        t.activate(1);
+        t.activate(SCREEN_VT);
         t.graphics(true);
     }
     let _ = display.acquire();
@@ -158,7 +192,51 @@ pub fn run(o: &Opts) -> anyhow::Result<()> {
     let mut inf = info(&o.run);
     let mut last_info = std::time::Instant::now();
     let init_log = o.run.join("init.log");
+    let mut root = Root::Initramfs;
+    // The boot's own steps as they were before the switch: on an ordinary
+    // boot the engine puts the last install's record back (#616), and those
+    // are not this boot's.
+    let mut before: Vec<serde_json::Value> = Vec::new();
     while !STOP.load(Ordering::SeqCst) {
+        // Follow /init's switch_root (#638).
+        if matches!(root, Root::Initramfs) && FOLLOW.load(Ordering::SeqCst) {
+            match follow_arm(&o.run) {
+                Ok(fd) => {
+                    let rec = crate::install_progress::record(&o.run, crate::install_progress::now());
+                    before = rec["layout"]
+                        .as_array()
+                        .map(|a| a.iter().filter(|s| s["state"] != "pending").cloned().collect())
+                        .unwrap_or_default();
+                    root = Root::Armed(fd);
+                }
+                Err(e) => {
+                    println!("screen: cannot hold /sysroot to follow the switch ({e}): stopping at switch_root (#638)");
+                    break;
+                }
+            }
+        }
+        if let Root::Armed(fd) = &root {
+            if switched() {
+                match follow_enter(fd) {
+                    Ok(()) => {
+                        println!("screen: following the node's root after switch_root (#638)");
+                        root = Root::Node(std::time::Instant::now());
+                    }
+                    Err(e) => {
+                        println!("screen: switch_root seen, cannot enter the node's root ({e}): stopping (#638)");
+                        break;
+                    }
+                }
+            }
+        }
+        if let Root::Node(since) = &root {
+            let s = since.elapsed().as_secs();
+            let pump = Path::new(boot::EVENTS).exists();
+            if (!pump && s >= NO_PUMP_SECS) || s >= CAP_AFTER_SWITCH_SECS {
+                println!("screen: {} after switch_root: giving the display back (#638)", if pump { "the cap" } else { "no word from stormpump" });
+                break;
+            }
+        }
         let mut keys = Vec::new();
         for t in [&mut tty1, &mut tty2].into_iter().flatten() {
             keys.extend(t.keys());
@@ -172,13 +250,13 @@ pub fn run(o: &Opts) -> anyhow::Result<()> {
                         t.graphics(false);
                     }
                     if let Some(t) = &tty2 {
-                        t.activate(2);
+                        t.activate(LOG_VT);
                     }
                 }
                 vt::KEY_F1 if showing_log => {
                     showing_log = false;
                     if let Some(t) = &tty1 {
-                        t.activate(1);
+                        t.activate(SCREEN_VT);
                         t.graphics(true);
                     }
                     let _ = display.acquire();
@@ -194,13 +272,24 @@ pub fn run(o: &Opts) -> anyhow::Result<()> {
                 t.write(&new);
             }
         }
-        if !showing_log && last_draw.elapsed() >= std::time::Duration::from_secs(1) {
+        // Armed: /init moves /run and /proc into /sysroot before the switch;
+        // the last frame stays up until the node's root is entered.
+        if !showing_log && !matches!(root, Root::Armed(_)) && last_draw.elapsed() >= std::time::Duration::from_secs(1) {
             if last_info.elapsed() >= std::time::Duration::from_secs(5) {
                 inf = info(&o.run);
                 last_info = std::time::Instant::now();
             }
             inf.now = crate::install_progress::now();
-            let rec = crate::install_progress::record(&o.run, inf.now);
+            let mut rec = crate::install_progress::record(&o.run, inf.now);
+            if matches!(root, Root::Node(_)) {
+                let b = boot::read_file(Path::new(boot::EVENTS));
+                let mine = if inf.install {
+                    rec["layout"].as_array().cloned().unwrap_or_default()
+                } else {
+                    before.clone()
+                };
+                boot::merge(&mut rec, mine, &b);
+            }
             draw::render(&mut c, &rec, &inf);
             display.present(&c.px);
             last_draw = std::time::Instant::now();
@@ -211,6 +300,38 @@ pub fn run(o: &Opts) -> anyhow::Result<()> {
     display.release();
     drop(tty2);
     drop(tty1);
+    Ok(())
+}
+
+/// Hold `/sysroot` before /init's switch_root moves it to `/`, and say so
+/// (`screen.follow` under the run directory, which /init waits for).
+#[cfg(target_os = "linux")]
+fn follow_arm(run: &Path) -> std::io::Result<std::os::fd::OwnedFd> {
+    let f = std::fs::File::open("/sysroot")?;
+    std::fs::write(run.join("screen.follow"), b"armed\n")?;
+    Ok(f.into())
+}
+
+/// Whether the switch happened: `/sysroot`, in the initramfs's root this
+/// process still has, is no longer the node's root (its mount moved to `/`).
+#[cfg(target_os = "linux")]
+fn switched() -> bool {
+    match std::fs::read_dir("/sysroot") {
+        Ok(mut d) => d.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+/// Into the node's root, through the held directory.
+#[cfg(target_os = "linux")]
+fn follow_enter(fd: &std::os::fd::OwnedFd) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: fchdir/chroot/chdir on a directory fd this process holds.
+    unsafe {
+        if libc::fchdir(fd.as_raw_fd()) != 0 || libc::chroot(c".".as_ptr()) != 0 || libc::chdir(c"/".as_ptr()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
     Ok(())
 }
 
