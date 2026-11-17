@@ -31,8 +31,10 @@ page stormconsole's: asks 2 and 4 and the console are theirs (filed).
   0x86 0x8F 0x90 0x91 0xB0 0xB1 0xB2 0xB7), vendor pages raw + `ascii_strings`,
   mode pages' changeable values (`mode_sense10_pc`), QERR; `Details.vpd`
 - [x] `compare_pages`, `stormblock hba pages [--compare] [--json]`
-- [ ] check.sh; release; stormdrive/stormconsole issues; behind stormdrive's
-  (the proof is forge1's Drive objects carrying their pages)
+- [x] check.sh passed (1486; closed build-failure #641); v24.19.0 released
+  and staged; stormdrive#147 (status.pages, op: details), stormconsole#338
+- [ ] behind stormdrive#147: the proof is forge1's Drive objects carrying
+  their pages (bay 3's control page and 0x86 against bay 0's)
 
 ## #638 — the boot screen through stormpump's steps (2026-11-17, P1)
 

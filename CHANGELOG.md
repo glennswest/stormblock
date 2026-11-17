@@ -164,6 +164,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.19.0] — 2026-11-17
+
+### Added
+- #636: a drive's details carry every VPD page it lists (standard ones said, 0x86's PI bits among them; vendor pages raw with their strings) and the mode pages' changeable values; `stormblock hba pages [--compare] <sas>…` shows several drives' pages side by side, differing bytes bracketed.
+
 ## [v24.18.0] — 2026-11-17
 
 ### Added
