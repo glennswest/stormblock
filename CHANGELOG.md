@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-17 (#637)
+- **feat:** #637 (stormbootx#220: the boot panel and the screen from "one shared spec, both build from, so they never drift"): `crates/screen-spec` (`stormblock-screen-spec`), a `no_std`, `core`-only crate with no allocator. It holds the palette (colours and what each state is drawn in), the typeface (Antonio Bold by bytes, its pin, sha256, licence and sizes), the 1920 × 1080 grid and its scale rule, the frame the screen draws first (`frame::draw`), and the shapes and text over a plain `&mut [u32]` with a stride and a pixel format (`Xrgb8888`: DRM and the GOP's BGRx; `Xbgr8888`: the GOP's RGBx). It builds for `x86_64-unknown-uefi`. `stormblock screen` draws through it: `src/screen` keeps no palette, font, grid or shape of its own, and the font moved to `crates/screen-spec/fonts`.
+- **change:** #637: no flash when the screen takes the display. Its first frame is drawn into the dumb buffer before `SETCRTC`, and fbcon's cursor blink is turned off.
+- **build:** #637: `ab_glyph` comes in through the spec with `default-features = false, features = ["libm"]` (adds `core_maths`); stormblock has no direct `ab_glyph` dependency.
+
 ### 2026-11-17 (#638)
 - **feat:** #638 (stormpump#237: "an enterprise boot screen", "all the steps"): the boot screen follows switch_root on every boot. `/init` sends it SIGUSR1 before the mounts move. It holds `/sysroot`, says so (`screen.follow`), keeps its last frame up through the moves and the switch, then `fchdir` + `chroot` into the node's root (`screen: following the node's root after switch_root`). There it draws stormpump's steps from `/run/stormpump/boot-progress.events` after the initramfs's own (two rows), a services line (ready, started, failed with words), and the end: NODE READY with stormpump's console address, or NODE NOT READY in red with its words. stormpump ends it with SIGTERM at Ready; without stormpump's file it gives the display back 120 s after the switch, never later than 900 s. A screen that does not answer the hand-over is stopped as before.
 - **change:** #638: the screen is on tty7 and its log (F2) on tty8, clear of the node's gettys on tty1–tty4.

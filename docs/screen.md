@@ -4,12 +4,17 @@ Owner, 2026-11-15: "I really want a install screen/graphical on the install
 screen showing progress. Not a log. Log can be another function key away.
 Make it look professional", and "an enterprise boot screen (As in trek)".
 
+Its look (the palette, the typeface, the grid, the frame and the shapes)
+is `crates/screen-spec` (`stormblock-screen-spec`, #637), a `no_std` crate
+that stormbootx's boot panel builds from too. `src/screen` keeps no copy of
+them.
+
 `stormblock screen` draws the install's progress full-screen on the
 machine's own display: VGA, or a BMC's virtual console. Its look is in the
 spirit of a starship bridge status display, but it is our own design: a
 black field, rounded elbow frames and pill bars in amber, lavender, pale
 blue, peach and warm grey, condensed capitals (Antonio Bold, OFL 1.1,
-bundled: `src/screen/fonts/README.md`) and large numeric readouts. Nothing
+bundled: `crates/screen-spec/fonts/README.md`) and large numeric readouts. Nothing
 is copied and nothing is named after anyone else's.
 
 ![forge1 formatting](screen-forge1-formatting.png)
@@ -79,6 +84,16 @@ smaller scale.
   display back with QEMU's `screendump`. It checks that the frame is drawn,
   that F2 shows the log (no frame colours, text) and that F1 brings the
   screen back.
+
+**No flash at the start (#637).** The display is opened without being
+scanned out, tty7 is put in graphics mode, the first frame is drawn into the
+buffer, and only then is it set on the CRTC. So the display goes from the
+firmware's last picture (stormbootx's panel, the same frame) to the screen's
+first with no empty frame between. fbcon's cursor blink is turned off while
+the screen holds the display. The kernel's own text can still show on the
+framebuffer before the screen starts. `vt.global_cursor_default=0` on the
+kernel line hides its cursor; keeping fbcon off the display entirely would
+also take away the log on F2.
 
 ## After switch_root: stormpump's steps until Ready (#638)
 
