@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.22.0] — 2026-11-17
+
+### Added
+- #621: the runtime format: a drive (`…/hba/{sas}/format`) or a shelf (`…/enclosures/{id}/format`) formatted on the running node as jobs, followed, rescanned, write-tested, falling back when the firmware refuses writes, a NetApp shelf's canary first; progress in the rows, `/api/v1/storage/formats` and health. The rows carry the firmware revision and the format. Drive firmware download (`…/firmware`, `hba firmware`).
+
 ### 2026-11-17 (#621)
 - **feat:** #621 (owner, 2026-11-15: "the new 'format' needs to be implemented in running system too. As we will need it for netapp shelves as well"): the runtime format. `POST /api/v1/storage/hba/{sas}/format` (one drive) and `POST /api/v1/storage/enclosures/{id}/format` (a shelf) run format jobs on the running node. Each drive is skipped when already at the format, otherwise formatted (FORMAT UNIT IMMED through sg or the card), followed (percent, ETA, elapsed in the row's `format_job`, `GET /api/v1/storage/formats`, health's `formats`), rescanned until Linux has it (hotplug offers it), and write-tested. It falls back to 4096 without PI (or as asked) when its firmware refuses writes. A NetApp-firmware shelf has a canary drive first. Drives with an open slab are refused. `action: format` runs the same job.
 - **feat:** #621: the card's rows carry `vendor`, `product`, `revision`, `block_size`, `pi_type` (read each minute) and `offered` (`format` for a NOT READY or wrong-format drive).

@@ -29,9 +29,10 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   canary); rows' ident, `format_job`, `offered`; `/format`,
   `/enclosures/{id}/format`, `/formats`, `/firmware`; health `formats`;
   `hba firmware`
-- [ ] check.sh; release; stormdrive (Drive CR `format`/`firmware` actions,
-  status) and stormconsole (bars, buttons) issues; proof on forge1 with a
-  drive set back to 512
+- [x] check.sh ALL PASS (9282107); v24.22.0; stormdrive#150 (the Drive CR's
+  format/firmware on these jobs), stormconsole#340 (buttons, bars)
+- [ ] proof on forge1: a drive set back to 512 (an owner's word: it is a
+  laid node's drive), formatted from the running node, ready at 4096 + PI
 
 ## #629 — the diagnostic boot, `mode: diagnostic` (2026-11-17, P0)
 
