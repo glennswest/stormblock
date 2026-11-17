@@ -65,7 +65,8 @@ depmod -b "$MODROOT" "$KVER"
 
 echo "== the boot path in $KVER"
 for m in block/ublk_drv nvme/host/nvme-tcp nvme/host/nvme nvme/host/nvme-fabrics nvme/host/nvme-core \
-         scsi/sd_mod scsi/mpt3sas/mpt3sas virtio/virtio_pci block/virtio_blk; do
+         scsi/sd_mod scsi/mpt3sas/mpt3sas virtio/virtio_pci block/virtio_blk \
+         acpi/button input/evdev gpu/drm/tiny/simpledrm; do
     f=$(ls "$MODROOT/lib/modules/$KVER/kernel/drivers/$m".ko* 2>/dev/null | head -1 || true)
     if [ -n "$f" ]; then echo "   $m: module"
     elif grep -q "kernel/drivers/$m.ko" "$MODROOT/lib/modules/$KVER/modules.builtin" 2>/dev/null; then echo "   $m: built in"

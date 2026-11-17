@@ -19,6 +19,20 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #635 — the power button in the initramfs (2026-11-16, P2)
+
+forge1: seven hard cuts on 11-16, each at the rescue shell after a FATAL;
+nothing in the initramfs acted on the ACPI button.
+- [x] `src/powerbutton.rs`, `stormblock power-button`: "Power Button" evdev,
+  KEY_POWER press → said, engine (boot-local/adopt-ublk) and screen SIGTERM'd
+  (20 s), sync, reboot(POWER_OFF); a running format named
+- [x] /init: started before the screen, first line on the console, stopped
+  at switch_root
+- [x] ci-powerbutton-verify.sh (a16f8091): QEMU system_powerdown → said,
+  engine stopped in 0.4 s, guest off 1 s after the button
+- [ ] the release kernel (fc45): acpi/button, input/evdev built in
+  (ci-kernel-initramfs.sh); check.sh; release; shipped
+
 ## #620 — after a card format, Linux waited for (2026-11-16, P0)
 
 The minute lines, the beat, the record and the controller line landed in

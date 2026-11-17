@@ -739,6 +739,11 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     health strip, a red failure or a blue finished panel. F2 shows the log
     on tty2, F1 the screen again. `/init` runs it on every boot;
     `rd.stormblock.screen=off` runs none. [docs/screen.md](docs/screen.md).
+  - The power button (#635): from early in `/init` until switch_root,
+    `stormblock power-button` acts on the ACPI "Power Button" (a BMC's soft
+    off): the storage engine and the screen stopped, a sync, a clean power
+    off, said on the console. The rescue shell after a FATAL is covered too:
+    a failed install is no longer ended by a hard cut.
   - `metadata` (#587): whether the volume record is kept, as
     `GET /api/v1/slabs/durability` (token) says it: `ok`, `stale` (slabs whose
     own region is full while the data directory's `metadata.v2` holds the

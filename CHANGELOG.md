@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-16 (#635)
+- **fix:** #635 (forge1 cut hard seven times on 2026-11-16: every failed install sat at the rescue shell, the BMC's soft off was ignored, and stormcentral cut the power 120 s later): `stormblock power-button` watches the kernel's "Power Button" input device (the ACPI button: a BMC's soft off, a person's press). On a press it says so on the console, names a format a power-off would cut short, stops the storage engine and the screen (SIGTERM, up to 20 s), syncs and powers off. `/init` starts it early, through every phase and the rescue shell, says its first line on the console, and stops it at switch_root, where the node's init takes the button.
+- **test:** #635: `ci-powerbutton-verify.sh` boots the build host's kernel in QEMU, presses the ACPI button with `system_powerdown`, and requires the press said, the engine stopped and the guest powered off. `ci-kernel-initramfs.sh` lists `acpi/button`, `input/evdev` and `simpledrm` (#618) too.
+
 ### 2026-11-16 (#620)
 - **fix:** #620 (forge1 12.87: three drives formatted through the card for 850 min, then `FATAL: formatted through the card and still no SCSI device` 9 s later, the formats thrown away to a shell): after a card format the install waits for Linux for as long as the card lists the drive. Every 10 s each drive is asked through the card (`stormblock hba ready --sas … --kick`: TEST UNIT READY, START UNIT when it asks for one, READ CAPACITY 16) and Linux is asked to find it (its host scanned, its phy's link reset). A line a minute goes on the console and a `formatting` beat to the install record. After 10 min a drive still without a Linux device is said with the card's rows, the kernel's lines and the way out (power-cycle: the formats are kept, #614), and the install goes on waiting. It never drops a finished format to a shell.
 - **feat:** #620: `stormblock hba ready --sas … [--kick]`: one round of bringing a formatted drive back, one line. Exit 0: Linux has it; 2: ready on the card, no Linux device; 3: not ready; 1: not listed. `mpt::link_reset_for`.
