@@ -35,7 +35,7 @@ stormblock's half of stormpump#237 (stormpump ada0ad5).
 - [x] check.sh passed on the head (1486; closed build-failure #639);
   v24.17.0 released and staged; shipped with the console line
 
-## #637 — the screen's look as a shared no_std spec (2026-11-17, P2, in progress on wip/637)
+## #637 — the screen's look as a shared no_std spec (2026-11-17, P2)
 
 stormbootx#220 builds its boot panel from the same spec as #618's screen.
 Paused for the P0 #625 on branch `wip/637` (does not build yet). Done there:
@@ -52,9 +52,9 @@ Left:
   then SETCRTC; cursor blink off
 - [x] 2ea00fe9 on a build VM: spec tests 6/6, screen tests 6/6 (pictures
   unchanged), built for x86_64-unknown-uefi; Cargo.lock (+core_maths)
-- [ ] tests (font sha256; pixel formats; shapes), Cargo.lock via a build VM
-  (`cargo fetch`), build for x86_64-unknown-uefi, ci-screen-verify.sh,
-  check.sh; merge to main; release; comment for stormbootx's pin
+- [x] check.sh passed (1485, closed build-failure #640); ci-screen-verify.sh
+  and ci-screen-handover-verify.sh passed on the spec; merged to main;
+  v24.18.0 released and staged; stormbootx#220 told the commit to pin
 
 ## #635 — the power button in the initramfs (2026-11-16, P2)
 

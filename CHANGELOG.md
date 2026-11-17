@@ -160,6 +160,14 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.18.0] — 2026-11-17
+
+### Added
+- #637: `crates/screen-spec` (`stormblock-screen-spec`), the screen's look as one `no_std` crate (palette with meanings, the pinned typeface and sizes, the grid, the frame, the shapes and text over any `&mut [u32]` with a stride and a pixel format). stormbootx's boot panel builds from it; stormblock's screen draws through it.
+
+### Changed
+- #637: the screen draws its first frame into the buffer before taking the display (no flash), and turns fbcon's cursor blink off.
+
 ## [v24.17.0] — 2026-11-17
 
 ### Added
