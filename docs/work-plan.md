@@ -22,6 +22,24 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #629 — the diagnostic boot, `mode: diagnostic` (2026-11-17, P0)
+
+The install-config's top-level `mode: diagnostic` (media's, else forge's
+claim's): /init boots the claimed image and touches no local drive
+(ASSIMILATE=off; the node-data set not served, let go if the word came with
+the claim), the install ticket, `storage:` and the wipe word said ignored.
+An unknown mode is taken as diagnostic, the safe side, and said. The mode
+reaches the node as `/run/stormblock/mode`. The engine says it in health,
+refuses a flow-over, and the screen's title reads DIAGNOSTIC. The Node
+object's label is the kubelet's: an issue for rustkube-node. The lab side is
+stormcentral#1441.
+- [ ] /init: diag_read (media early, forge after the claim), the claim
+  forced, recovery-style boot of the claimed image, storage_serve skipped
+  or let go, the said lines; tests/initramfs-diagnostic.sh
+- [ ] engine: crate::boot_mode, health `mode`, the flow-over refused; the
+  screen's kind
+- [ ] docs, CHANGELOG, check.sh, release, rustkube-node issue, shipped
+
 ## #642 — the SAS link, both sides, every minute (2026-11-17, P0)
 
 forge1 bay 3: loss of DWORD sync climbing at 12 Gbit, frozen at 6; the
