@@ -528,7 +528,7 @@ mod tests {
         render(&mut c5, &r5, &i5);
         snap("forge1-boot-services.png", &c5);
         assert_eq!(c5.get(260 + 30, 700 + 24), BLUE, "the first step done, first row");
-        assert!(c5.px.iter().any(|p| *p == RED), "the failed service said in red");
+        assert!(c5.px.contains(&RED), "the failed service said in red");
         evs.push(pump(1040, "step", "ready", "done", "console http://192.168.31.203:9094/"));
         let mut r6 = boot.clone();
         super::super::boot::merge(&mut r6, before, &super::super::boot::read(&evs));
