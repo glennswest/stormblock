@@ -33,10 +33,10 @@ reaches the node as `/run/stormblock/mode`. The engine says it in health,
 refuses a flow-over, and the screen's title reads DIAGNOSTIC. The Node
 object's label is the kubelet's: an issue for rustkube-node. The lab side is
 stormcentral#1441.
-- [ ] /init: diag_read (media early, forge after the claim), the claim
+- [x] /init: diag_read (media early, forge after the claim), the claim
   forced, recovery-style boot of the claimed image, storage_serve skipped
-  or let go, the said lines; tests/initramfs-diagnostic.sh
-- [ ] engine: crate::boot_mode, health `mode`, the flow-over refused; the
+  or let go, the ticket set aside; tests in initramfs-boot-hook.sh
+- [x] engine: crate::boot_mode, health `mode`, the flow-over refused; the
   screen's kind
 - [ ] docs, CHANGELOG, check.sh, release, rustkube-node issue, shipped
 

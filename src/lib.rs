@@ -23,6 +23,7 @@ pub mod http;
 pub mod logging;
 pub mod logcast;
 pub mod install_progress;
+pub mod boot_mode;
 pub mod screen;
 pub mod powerbutton;
 pub mod lockwatch;

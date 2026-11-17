@@ -993,6 +993,25 @@ in the node's `system-data` boot and install records (`install_config`), and in
 the `installed` report, so forge's host record says it
 (`install.install_config`); never the bytes.
 
+**The diagnostic boot (#629).** A top-level `mode: diagnostic` in the
+install-config boots the claimed image (NVMe/TCP from forge) as a full node
+and touches no local drive, for drive diagnostics, shelf bring-up and test
+goldens: no layout, no node-data set served, no flow-over, no reboot to
+local. The ticket is set aside (`install.json.diagnostic`); `storage:`,
+`system_drive` and the wipe word are not acted on (`/init` runs as
+`rd.stormblock.assimilate=off` does, said as `mode: diagnostic`). The claim
+is made even when the local disk would boot, a boot hook decided or the
+kernel line says `assimilate=off`. The media's install-config is read before
+any drive is looked at. Forge's is read at the claim; a node-data set served
+by then is let go. A `mode` this initramfs does not know is taken as
+diagnostic, the side that writes nothing; `mode: install` (or none) is an
+ordinary boot. The node is told in `/run/stormblock/mode`: health says
+`"mode": "diagnostic"`, the boot screen reads `STORMCOS  DIAGNOSTIC`, and
+the engine refuses a flow-over. The runtime drive actions (details, pages,
+write test, format, link rate) stay available. A boot whose install-config
+has no `mode` clears it. With no appliance to claim from, the boot says so
+and runs from its slab as it is.
+
 ## How it ships
 
 stormblock is a **`special`** component in stormcentral's component registry

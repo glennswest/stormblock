@@ -8706,6 +8706,12 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
     ) {
         use crate::drive::slab::SlabId;
 
+        // A diagnostic boot touches no local drive (#629). /init laid none,
+        // so no hand-over should name a flow-over; if one does, it is not run.
+        if let Some(why) = crate::boot_mode::refuses("the flow-over") {
+            tracing::error!("flow-over onto {}: {why}", flow.disk);
+            return;
+        }
         let Ok(dest) = uuid::Uuid::parse_str(&flow.system_slab).map(SlabId) else {
             tracing::warn!(
                 "flow-over: the handover names system slab {} on {}, which is not a uuid — \

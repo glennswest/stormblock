@@ -40,6 +40,10 @@ grep -q 'END system drive' "$WORK/survey.sh" || { echo "FAIL: could not extract 
 [ -s "$WORK/survey.sh" ] || { echo "FAIL: could not extract the assimilate survey"; exit 1; }
 sed -n '/# --- BEGIN boothost claim/,/# --- END boothost claim/p' "$GEN" > "$WORK/claim.sh"
 [ -s "$WORK/claim.sh" ] || { echo "FAIL: could not extract the boothost claim"; exit 1; }
+# The install-config and the diagnostic mode (#629): read before the probe.
+sed -n '/# --- BEGIN install config read/,/# --- END install config read/p' "$GEN" > "$WORK/diag.sh"
+sed -n '/# --- BEGIN diagnostic mode/,/# --- END diagnostic mode/p' "$GEN" >> "$WORK/diag.sh"
+grep -q 'END diagnostic mode' "$WORK/diag.sh" || { echo "FAIL: could not extract the diagnostic mode block"; exit 1; }
 sed -n '/# --- BEGIN boot identity/,/# --- END boot identity/p' "$GEN" > "$WORK/identity.sh"
 [ -s "$WORK/identity.sh" ] || { echo "FAIL: could not extract the boot identity block"; exit 1; }
 GUID=$(sed -n 's/^STORMBOOT_GUID="\(.*\)"$/\1/p' "$WORK/identity.sh")
@@ -239,6 +243,8 @@ cat > "$STUB" <<'STUBEOF'
 #!/bin/sh
 # $1 = slab, $2 = list|volumes|holds, $3 = device; or $1 = boot-claim
 if [ "$1" = boot-claim ]; then
+    # forge's install-config for this host, staged by the claim (#459, #629).
+    [ -n "${STUB_CLAIM_CONFIG:-}" ] && cp "$STUB_CLAIM_CONFIG" "$STORM_RUN/install-config.forge.yaml"
     [ -n "${STUB_CLAIM:-}" ] && echo "$STUB_CLAIM"
     exit 0
 fi
@@ -281,9 +287,20 @@ probe() { # slab-path [VOLUME] [META] -> the SLAB the probe leaves behind
         STORM_EFIVARS="$NOVARS"; STORM_DMI="$DMI"
         STORM_INSTALL_TICKET="${TICKET:-$WORK/no-ticket}"; export STORM_INSTALL_TICKET
         STORM_BOOT_OVERRIDE="${OVR:-$WORK/no-override}"; export STORM_BOOT_OVERRIDE
+        ASSIMILATE="${ASSIM:-${ASSIMILATE:-}}"
+        STORAGE_SERVE_PID="${SERVED_T:-}"
+        [ -n "${HOOK_T:-}" ] && HOOK_DECIDED=1
+        STORM_RUN="$WORK/run.probe"; rm -rf "$STORM_RUN"; mkdir -p "$STORM_RUN"; export STORM_RUN
+        [ -n "${MEDIA_CONFIG:-}" ] && cp "$MEDIA_CONFIG" "$STORM_RUN/install-config.forge.yaml"
+        storage_unserve() { [ -n "${STORAGE_SERVE_PID:-}" ] || return 0; echo "unserved: $*" >> "$STORM_RUN/unserve"; }
         . "$WORK/identity.sh" >/dev/null 2>&1
+        . "$WORK/diag.sh" >/dev/null 2>&1
         . "$WORK/claim.sh" >/dev/null 2>&1
         . "$WORK/probe.sh" >/dev/null 2>&1
+        if [ -n "${SHOW_DIAG:-}" ]; then
+            echo "$SLAB|$(cat "$STORM_RUN/mode" 2>/dev/null)|$([ -s "$STORM_RUN/unserve" ] && echo unserved)"
+            return
+        fi
         if [ -n "${SHOW_HANDED:-}" ]; then
             # What boot-local is handed for finishing a flow-over (#259).
             echo "${STORMBLOCK_BOOT_TAG:-}|${STORMBLOCK_RESUME_SOURCE:-}"
@@ -387,6 +404,34 @@ TICKET=""
 echo recovery > "$WORK/override"
 check "override recovery: the claimed image boots, nothing installed over the disk" "$URI" \
     "$(OVR="$WORK/override" STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+
+# #629: the diagnostic boot. forge's install-config, staged by the claim,
+# says `mode: diagnostic`: the claimed image boots whatever the disk holds,
+# the node-data set is let go, the mode is handed to the node.
+printf 'pullSecret: x\nmode: diagnostic   # drive tests\nstorage:\n  drives: all\n' > "$WORK/diag.yaml"
+check "diagnostic (forge's install-config): the claimed image boots, the disk is not touched" "$URI|diagnostic|unserved" \
+    "$(SHOW_DIAG=1 SERVED_T=1 STUB_CLAIM_CONFIG="$WORK/diag.yaml" STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
+check "diagnostic wins over an install ticket" "$URI|diagnostic|unserved" \
+    "$(SHOW_DIAG=1 SERVED_T=1 STUB_CLAIM_CONFIG="$WORK/diag.yaml" STUB_CLAIM="$URI" STUB_HOLDS=1 probe "$part")"
+check "the ticket set aside" "gone|kept" "$([ -e "$TICKET" ] && echo there || echo gone)|$([ -e "$TICKET.diagnostic" ] && echo kept)"
+rm -f "$TICKET.diagnostic"; TICKET=""
+echo local > "$WORK/override"
+check "diagnostic wins over an override local" "$URI|diagnostic|unserved" \
+    "$(SHOW_DIAG=1 SERVED_T=1 OVR="$WORK/override" STUB_CLAIM_CONFIG="$WORK/diag.yaml" STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+check "diagnostic known before the probe (the media's): a hook's local decision does not stop the claim" "$URI|diagnostic|" \
+    "$(SHOW_DIAG=1 HOOK_T=1 MEDIA_CONFIG="$WORK/diag.yaml" STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+check "diagnostic known before the probe: rd.stormblock.assimilate=off does not stop the claim" "$URI|diagnostic|" \
+    "$(SHOW_DIAG=1 ASSIM=off MEDIA_CONFIG="$WORK/diag.yaml" STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+printf 'mode: install\n' > "$WORK/diag-install.yaml"
+check "mode: install is an ordinary boot" "$part||" \
+    "$(SHOW_DIAG=1 SERVED_T=1 STUB_CLAIM_CONFIG="$WORK/diag-install.yaml" STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+printf "mode: 'diagnostics'\n" > "$WORK/diag-typo.yaml"
+check "a mode it does not know is taken as diagnostic, the side that writes nothing" "$URI|diagnostic|unserved" \
+    "$(SHOW_DIAG=1 SERVED_T=1 STUB_CLAIM_CONFIG="$WORK/diag-typo.yaml" STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
+printf 'storage:\n  mode: diagnostic\n' > "$WORK/diag-nested.yaml"
+check "only the top-level key counts" "$part||" \
+    "$(SHOW_DIAG=1 SERVED_T=1 STUB_CLAIM_CONFIG="$WORK/diag-nested.yaml" STUB_CLAIM="$URI" STUB_HOLDS=0 probe "$part")"
 
 # #402: the node on two drives. The SSD holds the system half (the root),
 # the HDD the data half; either may be the one the command line names.
@@ -593,6 +638,9 @@ survey() { # policy slab-list-output... -> the LOCAL_DISK the survey leaves behi
         STORM_EFIVARS="$NOVARS"
         . "$WORK/identity.sh" >/dev/null 2>&1
         BOOTTAG_FROM="${FROM:-firmware}"
+        STORM_RUN="$WORK/run.survey"; rm -rf "$STORM_RUN"; mkdir -p "$STORM_RUN"; export STORM_RUN
+        [ -n "${DIAG_CONFIG:-}" ] && cp "$DIAG_CONFIG" "$STORM_RUN/install-config.forge.yaml"
+        . "$WORK/diag.sh" > "$WORK/diag.out" 2>&1
         . "$WORK/survey.sh" >/dev/null 2>&1
         echo "$LOCAL_DISK${FORCE_LOCAL:+ force}"
     )
@@ -625,6 +673,12 @@ TICKET="$WORK/install.json"; echo '{}' > "$TICKET"
 check "override recovery wins over an install ticket" "" \
     "$(OVR="$WORK/override-s" CLAIMED_T="$URI" BOOTING="$URI" survey any "$DATA_ONLY" "$SYS_HALF")"
 TICKET=""
+# #629: a diagnostic boot takes no drive, whatever the drives carry.
+check "diagnostic: a takeable layout is left alone" "" \
+    "$(DIAG_CONFIG="$WORK/diag.yaml" CLAIMED_T="$URI" BOOTING="$URI" survey any "$DATA_ONLY" "$SYS_HALF")"
+check "diagnostic: a blank drive is left alone" "" \
+    "$(DIAG_CONFIG="$WORK/diag.yaml" survey any "/dev/sda: not a slab (bad slab magic)")"
+check "diagnostic: said" "1" "$(grep -c '^DIAGNOSTIC BOOT: mode: diagnostic in the install-config (install-config.forge.yaml, #629)' "$WORK/diag.out")"
 check "'force' over a lone data slab: taken, never forced (#311; boot-local refuses it)" "/dev/sda" "$(survey force "$DATA_ONLY")"
 
 # An install the appliance asked for (#148) is `force` only over a drive with

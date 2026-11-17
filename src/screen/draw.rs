@@ -21,6 +21,8 @@ use stormblock_screen_spec::{frame, Grid};
 pub struct Info {
     /// An install boot (the ticket is there), else an ordinary boot.
     pub install: bool,
+    /// A diagnostic boot (#629): `/run/stormblock/mode`.
+    pub diagnostic: bool,
     pub product: String,
     pub release: String,
     pub node: String,
@@ -153,7 +155,13 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
     let boot_ready = outcome.is_some_and(|o| s(o, "state") == "done");
     let failed = state == "failed" || boot_failed;
     let finished = (info.install && (state == "laid" || state == "booted")) || boot_ready;
-    let kind = if info.install { "INSTALL" } else { "BOOT" };
+    let kind = if info.diagnostic {
+        "DIAGNOSTIC"
+    } else if info.install {
+        "INSTALL"
+    } else {
+        "BOOT"
+    };
 
     // ---- the frame: the spec's (#637) ----
     let title = format!("{}  {kind}", if info.product.is_empty() { "STORMCOS" } else { info.product.as_str() });
@@ -407,10 +415,23 @@ mod tests {
             "health": null,
         });
         let info = Info {
-            install: true, product: "STORMCOS".into(), release: "12.91".into(), node: "forge1".into(),
+            install: true, diagnostic: false, product: "STORMCOS".into(), release: "12.91".into(), node: "forge1".into(),
             address: "192.168.31.203".into(), model: "Dell PowerEdge R7525".into(), service_tag: "C2NR0Q2".into(), now: 4600,
         };
         (rec, info)
+    }
+
+    /// #629: a diagnostic boot says so in the title and the header's block,
+    /// the word fitting the block (the spec's 200 px bar, 10 px each side).
+    #[test]
+    fn a_diagnostic_boot_says_so() {
+        assert!(stormblock_screen_spec::font::text_width("DIAGNOSTIC", 30.0) < 180.0);
+        let mut c = Canvas::new(1920, 1080, 0);
+        let i = Info { diagnostic: true, install: true, node: "forge1".into(), now: 1000, ..Default::default() };
+        render(&mut c, &json!({"state": "booting", "drives": [], "layout": []}), &i);
+        let mut b = Canvas::new(1920, 1080, 0);
+        render(&mut b, &json!({"state": "booting", "drives": [], "layout": []}), &Info { diagnostic: false, ..i.clone() });
+        assert_ne!(c.px, b.px, "the frame's words differ from an install's");
     }
 
     #[test]

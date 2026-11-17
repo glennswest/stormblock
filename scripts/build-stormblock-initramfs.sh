@@ -1336,6 +1336,10 @@ STORAGE_SET_STATE=""
 STORAGE_PLAIN=""
 STORAGE_PLAIN_DISKS=""
 storage_serve() {
+    if [ -n "${DIAGNOSTIC:-}" ]; then
+        echo "storage: no node-data set is served: a diagnostic boot touches no local drive (#629)"
+        return 0
+    fi
     _ss_sys="${STORM_SYS_BLOCK:-/sys/block}"
     _ss_dev="${STORAGE_DEV:-/dev}"
     # Far above every id the engine numbers (#605): see the lay below.
@@ -1408,7 +1412,7 @@ storage_serve() {
 # Before a format or a lay over the same drives: the set is let go first.
 storage_unserve() {
     [ -n "$STORAGE_SERVE_PID" ] || return 0
-    echo "storage: letting go of the node-data set ($STORAGE_SERVED) before the drives are laid again"
+    echo "storage: letting go of the node-data set ($STORAGE_SERVED) ${1:-before the drives are laid again}"
     kill "$STORAGE_SERVE_PID" 2>/dev/null
     _ss_w=0
     while kill -0 "$STORAGE_SERVE_PID" 2>/dev/null && [ "$_ss_w" -lt 10 ]; do sleep 1; _ss_w=$((_ss_w + 1)); done
@@ -1771,6 +1775,60 @@ install_config_source() {
     fi
 }
 # --- END install config read
+
+# --- BEGIN diagnostic mode (covered by tests/initramfs-boot-hook.sh)
+# The diagnostic boot (#629; owner, 2026-11-16: "can you get the stormcos
+# that can boot just on nvme over tcp but not do flow over. So we can do
+# drive diagnostics without install/flow over. A install config could select
+# that."). The install-config's top-level `mode: diagnostic` boots the
+# claimed image as a full node and touches no local drive: no layout, no
+# flow-over, no node-data set served, no reboot to local. The install ticket
+# is moved aside (`install.json.diagnostic`), so nothing after reads this boot
+# as an install; `storage:`, `system_drive` and the wipe word are not acted
+# on (ASSIMILATE=off, below). The boot's install-config is the one
+# install_config_source names: the media's, read before any drive is looked
+# at, else forge's, read once the claim has staged it. Only this key is read
+# (#275). A value this initramfs does not know is taken as diagnostic, the
+# side that writes nothing, and said. `${STORM_RUN}/mode` tells the node.
+DIAGNOSTIC=""
+OFF_WHY="rd.stormblock.assimilate=off"
+mode_of() { # install-config -> the value of its top-level mode
+    awk -v q="'" '/^mode:/ {
+        v = $0; sub(/^mode:[ \t]*/, "", v); sub(/[ \t]+#.*$/, "", v); sub(/^#.*$/, "", v); sub(/[ \t]+$/, "", v)
+        if (v ~ /^".*"$/ || v ~ ("^" q ".*" q "$")) v = substr(v, 2, length(v) - 2)
+        print v; exit }' "$1" 2>/dev/null
+}
+diag_read() { # -> 0 when this is a diagnostic boot
+    if [ -z "$DIAGNOSTIC" ]; then
+        case "$(install_config_source)" in
+        media) _dmf="$INSTALL_CONFIG_STAGED" ;;
+        forge) _dmf="$INSTALL_CONFIG_FORGE" ;;
+        *) return 1 ;;
+        esac
+        _dm=$(mode_of "$_dmf")
+        case "$_dm" in
+        ''|install) return 1 ;;
+        diagnostic) echo "DIAGNOSTIC BOOT: mode: diagnostic in the install-config (${_dmf##*/}, #629)" ;;
+        *) echo "DIAGNOSTIC BOOT: mode: '$_dm' in the install-config (${_dmf##*/}) is none this initramfs knows"
+           echo "  (diagnostic, install): taken as diagnostic, the side that touches no drive (#629)" ;;
+        esac
+        DIAGNOSTIC=1
+        OFF_WHY="mode: diagnostic"
+        echo "  the claimed image boots as a full node and no local drive is touched: no layout,"
+        echo "  no flow-over, no reboot to local; storage:, system_drive and the wipe word are not acted on."
+        echo "  To install, clear the mode and boot again."
+        mkdir -p "${STORM_RUN:-/run/stormblock}"
+        echo diagnostic > "${STORM_RUN:-/run/stormblock}/mode"
+    fi
+    _dmt="${STORM_INSTALL_TICKET:-/run/stormblock/install.json}"
+    if [ -e "$_dmt" ]; then
+        mv -f "$_dmt" "$_dmt.diagnostic" 2>/dev/null || rm -f "$_dmt"
+        echo "  DIAGNOSTIC: the appliance's install ticket is set aside: no install this boot (#629)"
+    fi
+    return 0
+}
+diag_read || :
+# --- END diagnostic mode
 
 # --- BEGIN mount list (covered by tests/initramfs-mounts.sh)
 # Which volumes this init mounts, and where (#262).
@@ -4472,8 +4530,9 @@ if [ "$BOOT_MODE" = "local" ]; then
     # boots the disk: the network this kernel came over is not a reason to
     # drop a node that can boot to a shell.
     INSTALL_OVER=""
-    if [ -z "$HOOK_DECIDED" ] && [ -n "$SLAB" ] && [ -n "$BOOTHOST" ] \
-       && [ "${ASSIMILATE:-}" != off ]; then
+    # A diagnostic boot (#629) always asks: it boots the claimed image.
+    if [ -n "$SLAB" ] && [ -n "$BOOTHOST" ] \
+       && { [ -n "${DIAGNOSTIC:-}" ] || { [ -z "$HOOK_DECIDED" ] && [ "${ASSIMILATE:-}" != off ]; }; }; then
         case "$SLAB" in
         *://*) ;;
         *)
@@ -4483,7 +4542,13 @@ if [ "$BOOT_MODE" = "local" ]; then
                 # boots this disk whatever release it holds; recovery boots
                 # the claimed image and touches no local drive.
                 OVERRIDE=$(cat "${STORM_BOOT_OVERRIDE:-/run/stormblock/override}" 2>/dev/null)
-                if [ "$OVERRIDE" = local ]; then
+                # The diagnostic word may have come with the claim (forge's
+                # install-config): read again, before anything is decided.
+                if diag_read; then
+                    storage_unserve "now: a diagnostic boot touches no local drive (#629)"
+                    echo "  DIAGNOSTIC: booting the claimed image; $SLAB is not touched"
+                    HELD_RC=recovery
+                elif [ "$OVERRIDE" = local ]; then
                     echo "  a boot override says local: booting $SLAB, no install"
                     HELD_RC=0
                 elif [ "$OVERRIDE" = recovery ]; then
@@ -4590,6 +4655,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         fi
         SLAB="$CLAIMED"
         echo "  slab: $SLAB"
+        diag_read || :
     fi
 
     # A fabric URI is not a path and will never appear as one. stormblock
@@ -4759,6 +4825,16 @@ if [ "$BOOT_MODE" = "local" ]; then
     if identity_guessed 2>/dev/null; then
         GUESSED=1
     fi
+    # A diagnostic boot (#629): every local drive left alone, as
+    # rd.stormblock.assimilate=off leaves them.
+    if [ -n "${DIAGNOSTIC:-}" ]; then
+        ASSIMILATE=off
+        case "$SLAB" in
+        *://*) echo "  DIAGNOSTIC: booting $SLAB; every local drive is left alone (#629)" ;;
+        *) echo "  WARNING: DIAGNOSTIC, but no appliance gave this boot an image: booting $SLAB as it is;"
+           echo "  every other local drive is left alone (#629)" ;;
+        esac
+    fi
     # A boot override's recovery (#354): every local drive left alone.
     OVERRIDE=$(cat "${STORM_BOOT_OVERRIDE:-/run/stormblock/override}" 2>/dev/null)
     if [ "$OVERRIDE" = recovery ]; then
@@ -4769,7 +4845,7 @@ if [ "$BOOT_MODE" = "local" ]; then
         ASSIMILATE=blank
     elif [ -e "${STORM_INSTALL_TICKET:-/run/stormblock/install.json}" ]; then
         if [ "${ASSIMILATE:-}" = off ]; then
-            echo "  an install was requested, and rd.stormblock.assimilate=off says no"
+            echo "  an install was requested, and ${OFF_WHY:-rd.stormblock.assimilate=off} says no"
         else
             ASSIMILATE=force
             echo "  an install was requested: the local disk is taken whatever it carries"
@@ -5830,8 +5906,8 @@ STEOF
         fi
     elif [ -n "${CLAIMED:-}" ] && [ "$SLAB" = "$CLAIMED" ]; then
         if [ "${ASSIMILATE:-}" = off ]; then
-            echo "  booting the claimed image, and rd.stormblock.assimilate=off: no local drive is touched"
-            KEPT=$(local_data_slab) && ld_refused "$KEPT" "rd.stormblock.assimilate=off"
+            echo "  booting the claimed image, and ${OFF_WHY:-rd.stormblock.assimilate=off}: no local drive is touched"
+            KEPT=$(local_data_slab) && ld_refused "$KEPT" "${OFF_WHY:-rd.stormblock.assimilate=off}"
         elif [ -n "${INSTALL_OVER:-}" ] && has_data_slab "$INSTALL_OVER"; then
             install_keeping "$INSTALL_OVER" "does not hold the claimed release"
         elif [ -n "${INSTALL_OVER:-}" ]; then
@@ -5878,7 +5954,7 @@ STEOF
         ASSIMILATE=held
     fi
     case "${ASSIMILATE:-any}" in
-    off) echo "  rd.stormblock.assimilate=off: leaving every local drive alone" ;;
+    off) echo "  ${OFF_WHY:-rd.stormblock.assimilate=off}: leaving every local drive alone" ;;
     held) echo "  leaving every local drive alone this boot; writes stay on the appliance (#261)" ;;
     ambiguous) echo "  the system drive is not known: every local drive is left alone (#351)" ;;
     blank|any|force)
@@ -6654,7 +6730,7 @@ $1|$_svp|$3"
     *://*)
         if [ -z "$LOCAL_DISK" ]; then
             if [ "${ASSIMILATE:-}" = off ]; then
-                echo "  DISKLESS, as rd.stormblock.assimilate=off asks: nothing written survives a reboot"
+                echo "  DISKLESS, as ${OFF_WHY:-rd.stormblock.assimilate=off} asks: nothing written survives a reboot"
             elif [ "${DISKLESS_OK:-}" = 1 ]; then
                 echo "  DISKLESS, as rd.stormblock.diskless=1 asks: nothing written survives a reboot"
             else

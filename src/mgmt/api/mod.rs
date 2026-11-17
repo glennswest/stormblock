@@ -156,6 +156,11 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// `/api/v1/storage/hba` and on `/metrics`. Left out with no card.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         drive_links: Vec<serde_json::Value>,
+        /// The boot's mode (#629): `diagnostic` when the install-config said
+        /// so; this node runs from its image and lays and flows over nothing.
+        /// Left out on an ordinary boot.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mode: Option<&'static str>,
         /// Whether the volume record is kept (#587), as
         /// `/api/v1/slabs/durability` says it: `ok`, the slabs whose own
         /// region is `stale` (the data directory holds the record) and those
@@ -299,6 +304,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         slabs,
         storage_layout,
         drive_links,
+        mode: crate::boot_mode::mode(),
         metadata,
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
         #[cfg(target_os = "linux")]

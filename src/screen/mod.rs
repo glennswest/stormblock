@@ -93,6 +93,7 @@ pub fn info(run: &Path) -> draw::Info {
     let model = [vendor, product].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" ");
     draw::Info {
         install: run.join("install.json").exists(),
+        diagnostic: crate::boot_mode::read_in(run).as_deref() == Some("diagnostic"),
         product: "STORMCOS".into(),
         release,
         node,
