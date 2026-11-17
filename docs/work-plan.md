@@ -55,6 +55,9 @@ nothing in the initramfs acted on the ACPI button.
 - [x] the release kernel 7.3.3-300.fc45: acpi/button, input/evdev built in
   (and simpledrm, at drivers/gpu/drm/sysfb, for #618); check.sh passed on
   1f1159e5; v24.16.0 released and staged; shipped with the console line
+- [ ] 02:47Z reopened on pvetest3 12.91 (no `power button:` line: /init
+  echoed the start-up line, fixed in v24.16.2 450bfc79); waits
+  `--after-install stormblock>=450bfc79`, then shipped again
 
 ## #620 — after a card format, Linux waited for (2026-11-16, P0)
 
