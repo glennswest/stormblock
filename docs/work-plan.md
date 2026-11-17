@@ -32,8 +32,10 @@ asked of the drives).
   finding after STORAGE_FIND_SECS (600) with the way out; no FATAL
 - [x] forge1 16 Nov 22:19/22:36 consoles: the card's four rows under the
   controller, all `present: ready` with sd/sg
-- [ ] check.sh; release; then behind #627 (sdb's replacement is the next card
-  format on forge1, where the minute lines and this wait show)
+- [x] check.sh passed on 11635ecb (1482, closed build-failure #634);
+  v24.15.1 released and staged
+- [ ] behind #627: sdb's replacement is forge1's next card format, where the
+  minute lines and this wait show on metal; then shipped with that console
 
 ## #595 — verified on forge1's metal (2026-11-16, P0)
 

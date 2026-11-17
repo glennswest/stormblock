@@ -132,6 +132,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.15.1] — 2026-11-16
+
+### Fixed
+- #620: after a format through the card, the install waits for Linux as long as the card lists the drive. Each round asks the drive through the card (`hba ready`: TEST UNIT READY, START UNIT, READ CAPACITY 16) and asks Linux to find it (host scan, phy link reset). A line a minute and the record's beat go out while it waits; after 10 min a finding is said with the way out. A finished format is never dropped to a shell.
+
 ## [v24.15.0] — 2026-11-16
 
 ### Added
