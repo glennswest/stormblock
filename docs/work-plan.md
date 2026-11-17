@@ -35,8 +35,10 @@ console.
 - [x] the write test and the lay: the link before and after
 - [x] linkRate: storage.drives entries, STORAGE_LINKRATE, /init's
   storage_linkrate, `hba linkrate`, the engine's kept policy every boot
-- [ ] check.sh; release; shipped (proof: forge1's /metrics with bay 3's
-  storm_drive_link_loss_of_sync_total on the drive side)
+- [x] check.sh passed (9e04b7a; closed build-failure #643); health's
+  `drive_links`; stormdrive#149 (status.link, condition, column,
+  spec.linkRate, recommendation); v24.20.0 (c609d13)
+- [ ] shipped: proof is forge1's health `drive_links` with bay 3's level
 
 ## #636 — a drive's pages, every VPD page and the mode pages (2026-11-17, P0)
 

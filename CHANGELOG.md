@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.20.0] — 2026-11-17
+
+### Added
+- #642: every drive on a card has its SAS link sampled every minute on both sides: the drive's log page 0x18 and the HBA phy facing it. Each sample carries rates per minute and a level (`ok`, `degraded`, `failing`; a change logged at WARN). It is in `/api/v1/storage/hba` rows, health's `drive_links` and `/metrics` (`storm_drive_link_*`). The write test and the lay say what moved on the link. The link-rate policy: `storage.drives[].linkRate` and `stormblock hba linkrate`.
+
 ### 2026-11-17 (#642)
 - **feat:** #642 (owner, on forge1 bay 3: "We need to monitor the sas metrics on the sas buss", "alarms when something is not normal, instead of when writes fail"): every drive on a card has its SAS link sampled every minute on both sides. The drive's side is log page 0x18 through sg or the card; the host's is the HBA phy facing it, `/sys/class/sas_phy`. Each sample carries the rate per minute (saturated or reset counters give none) and a level: `settling`, `ok`, `degraded` (anything moving), `failing` (loss of sync or phy resets moving two samples running). A change of level is logged at WARN. It is in `GET /api/v1/storage/hba` (each row's `link`) and on `/metrics`: `storm_drive_link_{invalid_dwords,disparity_errors,loss_of_sync,phy_resets}_total` and `storm_drive_link_rate_mbps` by node, drive, bay, shelf, side and phy, plus `storm_drive_link_level`.
 - **feat:** #642: the write test (`hba write-test`, #627) reads the link before and after on both sides and says what moved (`link (the drive's side): phy 0 at 12000 Mbit/s: loss of sync +300 during the test`); a drive the lay could not lay (#625) has the same for the lay in its block.
