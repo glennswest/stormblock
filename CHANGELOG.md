@@ -146,6 +146,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.16.1] — 2026-11-17
+
+### Fixed
+- #616: the install's record (and the screen, #618) no longer shows the lay's `lay.log` and `raid-create.log` as drives; only a drive's own log is a drive.
+
 ## [v24.16.0] — 2026-11-16
 
 ### Added

@@ -114,6 +114,8 @@ sent to it".
 - [x] 2026-11-17: seen on forge1 12.90 (NOT LAID, the so: line, three legs)
   and pvetest3 12.91 (passed; the loglevel line, console line 187); shipped
   again with the console proof
+- [x] 02:47Z reopened a third time on pvetest1's 12.90 (older than the fix):
+  closed by hand with the evidence quoted; the master told (stormcentral#1443)
 
 ## #627 — NetApp firmware and 4096 + PI: the write-test matrix (2026-11-16, P0)
 
