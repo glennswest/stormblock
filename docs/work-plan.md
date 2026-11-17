@@ -30,8 +30,9 @@ nothing in the initramfs acted on the ACPI button.
   at switch_root
 - [x] ci-powerbutton-verify.sh (a16f8091): QEMU system_powerdown → said,
   engine stopped in 0.4 s, guest off 1 s after the button
-- [ ] the release kernel (fc45): acpi/button, input/evdev built in
-  (ci-kernel-initramfs.sh); check.sh; release; shipped
+- [x] the release kernel 7.3.3-300.fc45: acpi/button, input/evdev built in
+  (and simpledrm, at drivers/gpu/drm/sysfb, for #618); check.sh passed on
+  1f1159e5; v24.16.0 released and staged; shipped with the console line
 
 ## #620 — after a card format, Linux waited for (2026-11-16, P0)
 

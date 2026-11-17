@@ -136,6 +136,11 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.16.0] — 2026-11-16
+
+### Added
+- #635: the power button in the initramfs (`stormblock power-button`): a press, or a BMC's soft off, stops the storage engine and the screen, syncs and powers off, said on the console, from early in `/init` (the rescue shell included) until switch_root. Failed installs no longer end in a hard cut.
+
 ## [v24.15.1] — 2026-11-16
 
 ### Fixed
