@@ -4,6 +4,12 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-17 (#638)
+- **feat:** #638 (stormpump#237: "an enterprise boot screen", "all the steps"): the boot screen follows switch_root on every boot. `/init` sends it SIGUSR1 before the mounts move. It holds `/sysroot`, says so (`screen.follow`), keeps its last frame up through the moves and the switch, then `fchdir` + `chroot` into the node's root (`screen: following the node's root after switch_root`). There it draws stormpump's steps from `/run/stormpump/boot-progress.events` after the initramfs's own (two rows), a services line (ready, started, failed with words), and the end: NODE READY with stormpump's console address, or NODE NOT READY in red with its words. stormpump ends it with SIGTERM at Ready; without stormpump's file it gives the display back 120 s after the switch, never later than 900 s. A screen that does not answer the hand-over is stopped as before.
+- **change:** #638: the screen is on tty7 and its log (F2) on tty8, clear of the node's gettys on tty1–tty4.
+- **fix:** #616: the `switch_root` stage is written before `/run` moves into the node's root; it was written after and lost.
+- **test:** #638: `ci-screen-handover-verify.sh` (QEMU: the hand-over as `/init` does it, then stormpump-style events in the new root; the READY panel read back from the display); `tests/initramfs-screen-start.sh` covers `screen_switch_root`.
+
 ### 2026-11-17 (#618, #635)
 - **fix:** #618 (pvetest3 12.91: the screen started, and its `screen: drawing on …` line never reached the console, so the shipped proof failed): `/init` echoed the first line of `screen.log`, which is the binary's start-up line (`StormBlock starting, config: …`). It now waits up to 3 s for the screen's own `screen:` line and echoes that. The same for the power button's `power button:` line (#635). `tests/initramfs-screen-start.sh` covers both.
 

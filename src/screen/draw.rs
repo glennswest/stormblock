@@ -312,9 +312,9 @@ pub fn render(c: &mut Canvas, rec: &Value, info: &Info) {
             w
         } else if boot_ready && !install_done {
             format!(
-                "{} AT {} IS READY.   {}",
+                "{}{} IS READY.   {}",
                 if info.node.is_empty() { "THIS NODE".into() } else { info.node.to_uppercase() },
-                if info.address.is_empty() { "ITS ADDRESS".into() } else { info.address.clone() },
+                if info.address.is_empty() { String::new() } else { format!(" AT {}", info.address) },
                 outcome.map(|o| s(o, "said").to_string()).unwrap_or_default()
             )
         } else if failed {

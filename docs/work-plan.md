@@ -22,6 +22,18 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #638 — the boot screen through stormpump's steps (2026-11-17, P1)
+
+stormblock's half of stormpump#237 (stormpump ada0ad5).
+- [x] /init: SIGUSR1 before the mount moves, wait for screen.follow; no kill
+- [x] the screen: /sysroot held, last frame kept, fchdir+chroot after the
+  switch; stormpump's events merged (screen::boot); NODE READY / NOT READY;
+  120 s without stormpump's file, 900 s cap; tty7/tty8
+- [x] tests: boot::tests, draw pictures (forge1-boot-services, -ready);
+  tests/initramfs-screen-start.sh (the hand-over); ci-screen-handover-verify.sh
+  (5c502a4c: SCREEN-FOLLOWS, following the node's root, READY read back)
+- [ ] check.sh; release; ship (proof: `console:the screen stays up through the hand-over`)
+
 ## #637 — the screen's look as a shared no_std spec (2026-11-17, P2, PAUSED)
 
 Paused for the P0 #625. The work and its full plan are on branch `wip/637`
