@@ -340,6 +340,25 @@ fn apply_one(sas: u64, g: f32) {
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
 fn apply_one(_sas: u64, _g: f32) {}
 
+/// Every drive's link in brief (#642, for health): its SAS address, level,
+/// since when, and the drive side's loss-of-sync rate per minute.
+pub fn summary() -> Vec<Value> {
+    let mut v: Vec<Value> = with(|m| {
+        m.values()
+            .map(|l| {
+                let sync: Option<f64> = l.drive.rates.iter().filter_map(|r| r.loss_of_sync).reduce(|a, b| a + b);
+                serde_json::json!({
+                    "sas_address": l.sas_address, "level": l.level.as_str(), "since": l.since,
+                    "loss_of_sync_per_min": sync,
+                    "rate_mbps": l.drive.phys.iter().map(|p| p.rate_mbps).max(),
+                })
+            })
+            .collect()
+    });
+    v.sort_by(|a, b| a["sas_address"].as_str().cmp(&b["sas_address"].as_str()));
+    v
+}
+
 /// The last sample of a drive's link, for the card's rows.
 pub fn get(sas: &str) -> Option<Value> {
     with(|m| m.get(sas).and_then(|l| serde_json::to_value(l).ok()))

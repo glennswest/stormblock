@@ -150,6 +150,12 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// `state` says `degraded`.
         #[serde(skip_serializing_if = "Option::is_none")]
         storage_layout: Option<serde_json::Value>,
+        /// The SAS link of each drive on a card (#642), in brief: its level
+        /// and since when, and the drive side's loss-of-sync rate. Open, so
+        /// the alarm reads without a token; the whole sample is in
+        /// `/api/v1/storage/hba` and on `/metrics`. Left out with no card.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        drive_links: Vec<serde_json::Value>,
         /// Whether the volume record is kept (#587), as
         /// `/api/v1/slabs/durability` says it: `ok`, the slabs whose own
         /// region is `stale` (the data directory holds the record) and those
@@ -267,6 +273,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     let lost_status: Option<&'static str> = None;
     let slabs = super::slab_report::for_health(&state);
     let storage_layout = super::storage_layout::report(slabs.as_ref());
+    let drive_links = super::link::summary();
     let metadata = crate::mgmt::api::slabs::summary_for_health(&state).await;
     let boot_mounts = crate::mgmt::boot_mounts::read();
     let mounts_failed = boot_mounts.as_ref().is_some_and(|m| !m.failed.is_empty());
@@ -291,6 +298,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         flow_over_stalled: state.flow_over_stalled.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         slabs,
         storage_layout,
+        drive_links,
         metadata,
         ublk_stuck: crate::drive::ublk::stuck(UBLK_STUCK_AFTER),
         #[cfg(target_os = "linux")]

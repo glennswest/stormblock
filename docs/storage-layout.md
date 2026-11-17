@@ -525,7 +525,9 @@ protected write and read was good. Nobody read the counter.
   `storm_drive_link_disparity_errors_total`, `storm_drive_link_loss_of_sync_total`,
   `storm_drive_link_phy_resets_total` (counters) and `storm_drive_link_rate_mbps`
   (gauge), labelled `node, drive, bay, shelf, side=drive|host, phy`, and
-  `storm_drive_link_level` (-1 settling, 0 ok, 1 degraded, 2 failing). The
+  `storm_drive_link_level` (-1 settling, 0 ok, 1 degraded, 2 failing).
+  Health (open, no token) has `drive_links`: each drive's level, since when,
+  the drive side's loss-of-sync rate and its rate in Mbit/s. The
   trend and the alert rules are ironprom's (ironprom#49), the Drive object's
   `status.link` and its condition stormdrive's, the console's view
   stormconsole's (#339).
