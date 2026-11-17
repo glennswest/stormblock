@@ -1738,7 +1738,7 @@ mod tests {
         d[..2].copy_from_slice(&len.to_be_bytes());
         let p = mode_page_of(&d).unwrap();
         assert_eq!(p.len(), 12);
-        assert_eq!(mode_page_said(p).unwrap(), "control: DPICZ 1 D_SENSE 0 QAM 1 SWP 1 ATO 1 TAS 0");
+        assert_eq!(mode_page_said(p).unwrap(), "control: DPICZ 1 D_SENSE 0 QAM 1 QERR 0 SWP 1 ATO 1 TAS 0");
         assert_eq!(mode_page_said(&[0x08, 0x12, 0x05]).unwrap(), "caching: WCE 1 RCD 1");
     }
 
