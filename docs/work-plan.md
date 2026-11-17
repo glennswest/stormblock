@@ -22,6 +22,12 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #637 — the screen's look as a shared no_std spec (2026-11-17, P2, PAUSED)
+
+Paused for the P0 #625. The work and its full plan are on branch `wip/637`
+(cdca19bf: crates/screen-spec with palette, font, grid; it does not build
+yet). Resume there: `git checkout wip/637`, read this section on that branch.
+
 ## #635 — the power button in the initramfs (2026-11-16, P2)
 
 forge1: seven hard cuts on 11-16, each at the rescue shell after a FATAL;
