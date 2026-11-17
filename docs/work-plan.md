@@ -38,7 +38,10 @@ stormcentral#1441.
   or let go, the ticket set aside; tests in initramfs-boot-hook.sh
 - [x] engine: crate::boot_mode, health `mode`, the flow-over refused; the
   screen's kind
-- [ ] docs, CHANGELOG, check.sh, release, rustkube-node issue, shipped
+- [x] docs, CHANGELOG, check.sh (ALL PASS), v24.21.0, rustkube-node#371
+  (the Node's label)
+- [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
+  `testhost install … --diagnostic` (stormcentral#1441)
 
 ## #642 — the SAS link, both sides, every minute (2026-11-17, P0)
 

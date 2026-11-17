@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.21.0] — 2026-11-17
+
+### Added
+- #629: the diagnostic boot. `mode: diagnostic` in the install-config boots the claimed image over NVMe/TCP as a full node and touches no local drive (no layout, no node-data set, no flow-over, no reboot to local); the install ticket is set aside; health's `mode`, the screen's `STORMCOS  DIAGNOSTIC`, the engine refuses a flow-over.
+
 ### 2026-11-17 (#629)
 - **feat:** #629 (owner, 2026-11-16: "boot just on nvme over tcp but not do flow over ... A install config could select that"): the diagnostic boot. A top-level `mode: diagnostic` in the install-config boots the claimed image as a full node and touches no local drive: no layout, no node-data set served, no flow-over, no reboot to local. `/init` reads it from the media's install-config before the drives are looked at, else from forge's at the claim, where an already-served node-data set is let go. The claim is made whatever the local disk holds, and wins over an override `local` and the install ticket. The ticket is set aside (`install.json.diagnostic`); `storage:`, `system_drive` and the wipe word are not acted on. An unknown `mode` is taken as diagnostic. The node gets `/run/stormblock/mode`: health's `mode`, the screen's `STORMCOS  DIAGNOSTIC`, and the engine refuses a flow-over (`crate::boot_mode`).
 
