@@ -155,6 +155,17 @@
 ### 2026-11-07
 - **docs:** #558: a claim on a cluster worker waits ~318 s for the worker's pod network (its Cilium agent not answering CNI ADD), not for storage: bound 0 s, attach and mount 0.0 s (stormcentral's cluster test b8a2d7f96a). Filed on stormcluster#103; work plan.
 
+## [v24.17.0] — 2026-11-17
+
+### Added
+- #638: the boot screen follows switch_root on every boot (SIGUSR1, `/sysroot` held, chroot into the node's root, no redraw in between) and draws stormpump's steps from `/run/stormpump/boot-progress.events`: the services line, NODE READY with the console address, NODE NOT READY with stormpump's words. stormpump ends it at Ready.
+
+### Changed
+- #638: the screen on tty7, its log on tty8 (the node's gettys hold tty1–tty4).
+
+### Fixed
+- #616: the `switch_root` stage is written while `/run` is still the initramfs's.
+
 ## [v24.16.2] — 2026-11-17
 
 ### Fixed

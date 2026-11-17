@@ -32,7 +32,8 @@ stormblock's half of stormpump#237 (stormpump ada0ad5).
 - [x] tests: boot::tests, draw pictures (forge1-boot-services, -ready);
   tests/initramfs-screen-start.sh (the hand-over); ci-screen-handover-verify.sh
   (5c502a4c: SCREEN-FOLLOWS, following the node's root, READY read back)
-- [ ] check.sh; release; ship (proof: `console:the screen stays up through the hand-over`)
+- [x] check.sh passed on the head (1486; closed build-failure #639);
+  v24.17.0 released and staged; shipped with the console line
 
 ## #637 — the screen's look as a shared no_std spec (2026-11-17, P2, PAUSED)
 
