@@ -48,8 +48,10 @@ Left:
 - [x] `surface.rs` (Surface over &mut [u32] + stride + PixelFormat;
   shapes, text, text_fit), `frame.rs` (the static frame), `tests.rs`
 - [x] src/screen: Canvas a thin owner (+ png), draw.rs on the spec
-- [ ] no flash: Display::open without SETCRTC; first frame into the buffer,
-  tty1 graphics + cursor off, then SETCRTC
+- [x] no flash: Display::open without SETCRTC; first frame into the buffer,
+  then SETCRTC; cursor blink off
+- [x] 2ea00fe9 on a build VM: spec tests 6/6, screen tests 6/6 (pictures
+  unchanged), built for x86_64-unknown-uefi; Cargo.lock (+core_maths)
 - [ ] tests (font sha256; pixel formats; shapes), Cargo.lock via a build VM
   (`cargo fetch`), build for x86_64-unknown-uefi, ci-screen-verify.sh,
   check.sh; merge to main; release; comment for stormbootx's pin

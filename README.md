@@ -740,8 +740,9 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     on tty8, F1 the screen again (the screen is on tty7). `/init` runs it on
     every boot; it follows switch_root into the node's root and draws
     stormpump's steps (`/run/stormpump/boot-progress.events`) until stormpump
-    ends it at Ready (#638). `rd.stormblock.screen=off` runs none.
-    [docs/screen.md](docs/screen.md).
+    ends it at Ready (#638). `rd.stormblock.screen=off` runs none. Its look
+    is `crates/screen-spec`, a `no_std` crate stormbootx's panel builds from
+    too (#637). [docs/screen.md](docs/screen.md).
   - The power button (#635): from early in `/init` until switch_root,
     `stormblock power-button` acts on the ACPI "Power Button" (a BMC's soft
     off): the storage engine and the screen stopped, a sync, a clean power
