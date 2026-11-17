@@ -1100,6 +1100,7 @@ install_status_stop() {
     STATUS_PID=""
 }
 
+# --- BEGIN screen start (covered by tests/initramfs-screen-start.sh)
 # The power button (#635): forge1 was cut hard seven times on 2026-11-16,
 # each time at the rescue shell after a FATAL, because nothing here acted on
 # the ACPI button (a BMC's soft off) and stormcentral cut the power 120 s
@@ -1113,11 +1114,14 @@ power_button_start() {
     "$_pbb" power-button --run "${STORM_RUN:-/run/stormblock}" </dev/null \
         >>"${STORM_RUN:-/run/stormblock}/power-button.log" 2>&1 &
     POWERBUTTON_PID=$!
+    # Its own `power button:` line, not the binary's start-up line (#618's
+    # screen echoed the wrong one on 12.91).
+    _pbl="${STORM_RUN:-/run/stormblock}/power-button.log"
     _pbw=0
-    while [ ! -s "${STORM_RUN:-/run/stormblock}/power-button.log" ] && [ "$_pbw" -lt 20 ]; do
+    while ! grep -q '^power button:' "$_pbl" 2>/dev/null && [ "$_pbw" -lt 20 ]; do
         sleep 0.1; _pbw=$((_pbw + 1))
     done
-    [ -s "${STORM_RUN:-/run/stormblock}/power-button.log" ] && sed -n '1s/^/  /p' "${STORM_RUN:-/run/stormblock}/power-button.log"
+    grep '^power button:' "$_pbl" 2>/dev/null | head -n 1 | sed 's/^/  /'
 }
 power_button_stop() {
     [ -n "$POWERBUTTON_PID" ] || return 0
@@ -1139,13 +1143,17 @@ screen_start() {
     "$_scb" screen --run "${STORM_RUN:-/run/stormblock}" </dev/null \
         >>"${STORM_RUN:-/run/stormblock}/screen.log" 2>&1 &
     SCREEN_PID=$!
-    # Its first line on the console (and so to stormcentral and SOL): drawing
-    # on which display, or none. Up to 3 s; the boot never waits longer.
+    # Its own line on the console (and so to stormcentral and SOL): drawing
+    # on which display, or none. Its `screen:` line, not the log's first:
+    # that is the binary's start-up line (12.91 on pvetest3 echoed it, and the
+    # screen's own line never reached the console). Up to 3 s; the boot never
+    # waits longer.
+    _scl="${STORM_RUN:-/run/stormblock}/screen.log"
     _scw=0
-    while [ ! -s "${STORM_RUN:-/run/stormblock}/screen.log" ] && [ "$_scw" -lt 30 ]; do
+    while ! grep -q '^screen:' "$_scl" 2>/dev/null && [ "$_scw" -lt 30 ]; do
         sleep 0.1; _scw=$((_scw + 1))
     done
-    [ -s "${STORM_RUN:-/run/stormblock}/screen.log" ] && sed -n '1s/^/  /p' "${STORM_RUN:-/run/stormblock}/screen.log"
+    grep '^screen:' "$_scl" 2>/dev/null | head -n 1 | sed 's/^/  /'
 }
 screen_switch_root() { # an install boot keeps it; any other gives the display back
     [ -n "$SCREEN_PID" ] || return 0
@@ -1156,6 +1164,7 @@ screen_switch_root() { # an install boot keeps it; any other gives the display b
     kill -TERM "$SCREEN_PID" 2>/dev/null || :
     SCREEN_PID=""
 }
+# --- END screen start
 
 # The engine's log is followed onto the console (#294), and a console drains
 # little: a 115200-baud port about sixty lines a second, server8's SOL three

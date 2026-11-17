@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-17 (#618, #635)
+- **fix:** #618 (pvetest3 12.91: the screen started, and its `screen: drawing on …` line never reached the console, so the shipped proof failed): `/init` echoed the first line of `screen.log`, which is the binary's start-up line (`StormBlock starting, config: …`). It now waits up to 3 s for the screen's own `screen:` line and echoes that. The same for the power button's `power button:` line (#635). `tests/initramfs-screen-start.sh` covers both.
+
 ### 2026-11-17 (#616, #625)
 - **fix:** #616 (seen on forge1 12.91's install page): the install's record took every `*.log` under `storage-format/` for a drive's, so the lay's own `lay.log` and `raid-create.log` were drive rows on the page and the screen (#618). Only a drive's log counts now: a kernel disk name or a card-only drive's SAS address.
 - **docs:** #625: closed by hand with its evidence (forge1 12.90's NOT LAID block, pvetest3 12.91's loglevel line); the shipped proof kept being checked on installs older than the fix (stormcentral#1443).

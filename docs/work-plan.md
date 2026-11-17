@@ -91,6 +91,9 @@ check passes (a new dependency: ab_glyph; Cargo.lock resolved on a build VM).
   v24.15.0 released and staged; shipped with `console:screen: drawing on /dev/dri/card`
 - Next: forge1's iDRAC (the owner's "done when"), stormpump#237 (after the
   hand-over), a GPU driver taking simpledrm's place after switch_root
+- [x] 2026-11-17 reopened: pvetest3 12.91's console had no `screen:` line.
+  /init echoed screen.log's first line, the binary's start-up line; now the
+  `screen:` (and `power button:`) line, tests/initramfs-screen-start.sh
 - Not here: stormpump's stages after the hand-over (stormpump#237), the
   stormbootx panel's look, health values (stormipmi#111)
 
