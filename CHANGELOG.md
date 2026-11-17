@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-17 (#616)
+- **docs:** #616: the kept install record seen on pvetest3 12.91 after its reboot (state booted, every step done); shipped. Work plan.
+
 ### 2026-11-17 (#625)
 - **docs:** #625: seen on forge1 12.90 (the NOT LAID block and its `so:` line, the install going on with three legs) and on pvetest3 12.91 (the loglevel line on a passed install); shipped again. Work plan.
 

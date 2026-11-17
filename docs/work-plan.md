@@ -13,6 +13,9 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   engine appends keep the copy
 - [x] check.sh on cfc49dd5: ALL PASS (read 2026-11-16 during #618); it
   ships in v24.15.0 with #618: release and stage done, `shipped` is left
+- [x] 2026-11-17: seen on pvetest3 12.91 (24.16.0): after its install and the
+  reboot, the record is the install's (state booted, every step done);
+  shipped with a get: proof on pvetest3's record (stormcentral#1443)
 - [ ] (was) check.sh on cfc49dd5 was running when this was paused for the P0
   #625 (2026-11-16): read its result (`sc-build 'sh check.sh'` again if
   unknown), then release (v24.14.2), stage, and `shipped` with the same proof
