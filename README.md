@@ -743,6 +743,15 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     ends it at Ready (#638). `rd.stormblock.screen=off` runs none. Its look
     is `crates/screen-spec`, a `no_std` crate stormbootx's panel builds from
     too (#637). [docs/screen.md](docs/screen.md).
+  - The SAS link (#642): every drive on a card, both sides (the drive's
+    log page 0x18, the HBA phy facing it), sampled every minute, with the
+    rate per minute and a level (`ok`, `degraded`, `failing`; a change logged
+    at WARN). It is in each row of `GET /api/v1/storage/hba` and on
+    `/metrics` as `storm_drive_link_*` (counters by side and phy, the rate,
+    the level). The write test and the lay read it before and after.
+    `linkRate` on a `storage.drives` entry, or `stormblock hba linkrate`,
+    holds a marginal drive's link at a rate.
+    [docs/storage-layout.md](docs/storage-layout.md#the-sas-link-both-sides-every-minute-642).
   - The power button (#635): from early in `/init` until switch_root,
     `stormblock power-button` acts on the ACPI "Power Button" (a BMC's soft
     off): the storage engine and the screen stopped, a sync, a clean power

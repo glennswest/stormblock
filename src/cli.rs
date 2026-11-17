@@ -153,6 +153,23 @@ enum HbaAction {
         #[arg(long, default_value = "/dev")]
         dev: String,
     },
+    /// The link-rate policy (#642): hold the HBA phy facing a drive at a
+    /// maximum rate (`--max 6`, Gbit/s) and reset its link; `--max hw` gives
+    /// it back what the hardware can. For a marginal link, at the owner's
+    /// word, until the drive is replaced. `--dev /dev/sdb` (or an sg node)
+    /// or `--sas`.
+    Linkrate {
+        #[arg(long)]
+        sas: Option<String>,
+        #[arg(long)]
+        dev: Option<String>,
+        #[arg(long)]
+        max: String,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long = "devdir", default_value = "/dev")]
+        devdir: String,
+    },
     /// A drive's pages (#636): every VPD page it lists (standard ones said,
     /// vendor ones raw with their strings) and the mode pages 0x03 0x08 0x0A
     /// 0x19 0x1A 0x1C (current and changeable values, the control page's
@@ -3758,6 +3775,12 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
     // X378 left the SAS link on its first write, and the kernel removed its
     // device; the card and the kernel's lines still know it by address).
     let sas_of: Vec<Option<u64>> = drives.iter().map(|d| drive_sas_address(d)).collect();
+    // Each drive's link counters before the lay (#642), so a failure says
+    // what moved on the link meanwhile.
+    let link_before: Vec<Option<Vec<crate::drive::scsi::PhyLink>>> = {
+        let s = sas_of.clone();
+        tokio::task::spawn_blocking(move || s.iter().map(|a| a.and_then(link_sample)).collect()).await.unwrap_or_default()
+    };
     let smallest = devs.iter().map(|d| d.capacity_bytes()).min().unwrap_or(0);
     let regions = local::storage_regions(smallest, system_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
     let t = std::time::Instant::now();
@@ -3773,13 +3796,13 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
     let mut members = Vec::new();
     let mut done = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
-    for ((r, d), sas) in laid.into_iter().zip(drives).zip(sas_of) {
+    for (((r, d), sas), lb) in laid.into_iter().zip(drives).zip(sas_of).zip(link_before.into_iter().chain(std::iter::repeat(None))) {
         // A drive that fails is explained and left out (#625): the others
         // stay laid, and /init decides by `storage.on_drive_failure`.
         let r = match r {
             Ok(r) => r,
             Err(e) => {
-                let why = explain_lay_failure(d, &e.to_string(), sas).await;
+                let why = explain_lay_failure(d, &e.to_string(), sas, lb).await;
                 failed.push((d.clone(), why));
                 continue;
             }
@@ -3824,10 +3847,32 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
 /// error counters) and the kernel's lines about it, as one block on stderr
 /// (the console, through /init). Answers the error with what it means, in
 /// one line, for the FATAL or the warning.
-async fn explain_lay_failure(dev: &str, err: &str, sas: Option<u64>) -> String {
+async fn explain_lay_failure(dev: &str, err: &str, sas: Option<u64>, link_before: Option<Vec<crate::drive::scsi::PhyLink>>) -> String {
     eprintln!("Storage: {dev}: NOT LAID: {err}");
     let path = dev.to_string();
-    let block = tokio::task::spawn_blocking(move || lay_failure_block(&path, sas)).await.unwrap_or_default();
+    let block = tokio::task::spawn_blocking(move || {
+        let mut b = lay_failure_block(&path, sas);
+        // What moved on the link during the lay (#642): the first thing to
+        // read, before any guess at the PI path.
+        if let (Some(a), Some(before)) = (sas, link_before) {
+            match link_sample(a) {
+                Some(after) => {
+                    let moved = crate::drive::scsi::link_moved(&before, &after);
+                    let lines: Vec<String> = if moved.is_empty() {
+                        vec!["link (the drive's side): nothing moved during the lay".into()]
+                    } else {
+                        moved.into_iter().map(|l| format!("link (the drive's side): {l} during the lay")).collect()
+                    };
+                    let at = usize::from(b.first().is_some_and(|(_, h)| *h));
+                    for (i, l) in lines.into_iter().enumerate() {
+                        b.insert(at + i, (l, false));
+                    }
+                }
+                None => b.insert(0, ("link: the drive no longer answers LOG SENSE 0x18 (it left the link?)".into(), false)),
+            }
+        }
+        b
+    }).await.unwrap_or_default();
     // The first hint is the one: a drive that is gone says so before what
     // the card's path then made of it.
     let mut hint = None;
@@ -3841,6 +3886,20 @@ async fn explain_lay_failure(dev: &str, err: &str, sas: Option<u64>) -> String {
         Some(h) => format!("{err} ({h})"),
         None => err.to_string(),
     }
+}
+
+/// A drive's own link counters (log page 0x18), through sg or the card (#642).
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn link_sample(sas: u64) -> Option<Vec<crate::drive::scsi::PhyLink>> {
+    crate::drive::mpt::with_drive(std::path::Path::new("/dev"), std::path::Path::new("/sys"), sas, crate::drive::scsi::sas_phys)
+        .ok()
+        .and_then(|r| r.ok())
+        .filter(|v| !v.is_empty())
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn link_sample(_sas: u64) -> Option<Vec<crate::drive::scsi::PhyLink>> {
+    None
 }
 
 /// A disk's SAS address from sysfs (`/sys/block/sdb/device/sas_address`),
@@ -9902,6 +9961,11 @@ async fn handle_adopt_ublk(
                 crate::drive::handover::INSTALL_TICKET_PATH,
             ))
             .is_some();
+            crate::mgmt::link::apply_policy(
+                std::path::Path::new(crate::install_progress::RUN),
+                std::path::Path::new(dir),
+                install_boot,
+            );
             match crate::install_progress::settle(
                 std::path::Path::new(crate::install_progress::RUN),
                 std::path::Path::new(dir),
@@ -10554,6 +10618,19 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
             let a = mpt::parse_addr(sas).ok_or_else(|| anyhow::anyhow!("hba details: {sas} is no SAS address"))?;
             let d = mpt::with_drive(Path::new(dev), Path::new(sys), a, crate::drive::scsi::details).map_err(anyhow::Error::msg)?;
             println!("{}", serde_json::to_string_pretty(&d)?);
+        }
+        HbaAction::Linkrate { sas, dev, max, sys, devdir } => {
+            let a = match (sas, dev) {
+                (Some(s), _) => mpt::parse_addr(s).ok_or_else(|| anyhow::anyhow!("hba linkrate: {s} is no SAS address"))?,
+                (None, Some(d)) => crate::mgmt::link::sas_of_dev(Path::new(sys), d).ok_or_else(|| anyhow::anyhow!("hba linkrate: {d} has no SAS address in sysfs"))?,
+                (None, None) => anyhow::bail!("hba linkrate: --sas or --dev"),
+            };
+            let g = match max.as_str() {
+                "hw" | "max" | "clear" => None,
+                m => Some(m.parse::<f32>().map_err(|_| anyhow::anyhow!("hba linkrate: --max {m}: Gbit/s (6, 12) or hw"))?),
+            };
+            let said = mpt::set_max_linkrate(Path::new(devdir), Path::new(sys), a, g).map_err(anyhow::Error::msg)?;
+            println!("0x{a:016x}: {said} (#642)");
         }
         HbaAction::Pages { sas, compare, json, sys, dev } => {
             use crate::drive::scsi;

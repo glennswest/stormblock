@@ -562,6 +562,54 @@ pub fn with_drive<R>(dev: &Path, sys: &Path, sas: u64, f: impl FnOnce(&dyn crate
     Err(format!("no mpt card lists a drive with SAS address {}", hex_addr(sas)))
 }
 
+/// The HBA phy that faces the drive with SAS address `sas` (#642): its
+/// `sas_phy` name (`phy-1:2`) and its counters, from the card's row.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn host_phy(dev: &Path, sys: &Path, sas: u64) -> Option<(String, crate::drive::scsi::PhyLink, String)> {
+    let (cards, _) = cards(dev, sys, false);
+    for c in &cards {
+        let Some(r) = c.drives().find(|r| r.device.sas_address == sas) else { continue };
+        let name = format!("phy-{}:{}", c.host.trim_start_matches("host"), r.device.phy);
+        let base = sys.join("class/sas_phy").join(&name);
+        let num = |f: &str| std::fs::read_to_string(base.join(f)).ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
+        let rate = std::fs::read_to_string(base.join("negotiated_linkrate")).unwrap_or_default();
+        let max = std::fs::read_to_string(base.join("maximum_linkrate")).unwrap_or_default().trim().to_string();
+        let link = crate::drive::scsi::PhyLink {
+            phy: r.device.phy,
+            rate_mbps: linkrate_mbps(&rate),
+            attached_sas: Some(hex_addr(sas)),
+            invalid_dwords: num("invalid_dword_count"),
+            disparity_errors: num("running_disparity_error_count"),
+            loss_of_sync: num("loss_of_dword_sync_count"),
+            phy_resets: num("phy_reset_problem_count"),
+        };
+        return Some((name, link, max));
+    }
+    None
+}
+
+/// `12.0 Gbit` (a sas_phy's negotiated_linkrate) as Mbit/s; 0 for anything
+/// else (`Unknown`, `Phy disabled`).
+pub fn linkrate_mbps(s: &str) -> u32 {
+    s.split_whitespace().next().and_then(|n| n.parse::<f32>().ok()).map(|g| (g * 1000.0) as u32).unwrap_or(0)
+}
+
+/// The link-rate policy (#642): the HBA phy facing the drive held at `gbit`
+/// (`maximum_linkrate`), or back to what the hardware can (`None`), then the
+/// link reset so it is negotiated again. Answers what was done.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn set_max_linkrate(dev: &Path, sys: &Path, sas: u64, gbit: Option<f32>) -> Result<String, String> {
+    let (name, _, _) = host_phy(dev, sys, sas).ok_or_else(|| format!("no mpt card lists a drive with SAS address {}", hex_addr(sas)))?;
+    let base = sys.join("class/sas_phy").join(&name);
+    let want = match gbit {
+        Some(g) => format!("{g:.1} Gbit"),
+        None => std::fs::read_to_string(base.join("maximum_hw_linkrate")).map(|v| v.trim().to_string()).map_err(|e| format!("{name}: maximum_hw_linkrate: {e}"))?,
+    };
+    std::fs::write(base.join("maximum_linkrate"), &want).map_err(|e| format!("{name}: maximum_linkrate {want}: {e}"))?;
+    std::fs::write(base.join("link_reset"), "1").map_err(|e| format!("{name}: link_reset: {e}"))?;
+    Ok(format!("{name}: maximum {want}, link reset"))
+}
+
 /// A link reset on the phy the card says the drive is on (#620): written to
 /// `/sys/class/sas_phy/phy-<host>:<phy>/link_reset`. Answers the phy's name.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]

@@ -361,6 +361,10 @@ pub struct DataRaid {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StorageSpec {
     pub drives: DriveSel,
+    /// `linkRate` on a `storage.drives` entry (#642): (the entry's index,
+    /// Gbit/s). The HBA phy facing that drive is held at it, at the owner's
+    /// word, for a marginal link until the drive is replaced.
+    pub link_rates: Vec<(usize, f32)>,
     pub block_size: u32,
     pub protection: Protection,
     /// auto | fast | full | none (stormdrive format's --method).
@@ -437,6 +441,7 @@ impl Default for StorageSpec {
             data_raid: Some(DataRaid { parity: 1, spares: 0 }),
             wipe: None,
             on_drive_failure: OnDriveFailure::Stop,
+            link_rates: Vec::new(),
         }
     }
 }
@@ -490,10 +495,19 @@ impl StorageSpec {
                                 match it {
                                     Yaml::Str(s) if !s.is_empty() => out.push(vec![("any".into(), s.clone())]),
                                     Yaml::Map(m) => {
-                                        keys_known(m, "a storage.drives entry", &["serial", "wwn", "shelf", "bay"])?;
+                                        keys_known(m, "a storage.drives entry", &["serial", "wwn", "shelf", "bay", "linkRate"])?;
                                         let mut e = Vec::new();
                                         for (k, v) in m {
-                                            e.push((k.clone(), scalar(v, &format!("storage.drives' {k}"))?.to_string()));
+                                            let t = scalar(v, &format!("storage.drives' {k}"))?;
+                                            if k == "linkRate" {
+                                                let g: f32 = t.parse().map_err(|_| format!("storage.drives' linkRate is '{t}': 1.5, 3, 6, 12 or 22.5"))?;
+                                                if ![1.5f32, 3.0, 6.0, 12.0, 22.5].contains(&g) {
+                                                    return Err(format!("storage.drives' linkRate is '{t}': 1.5, 3, 6, 12 or 22.5"));
+                                                }
+                                                spec.link_rates.push((out.len(), g));
+                                                continue;
+                                            }
+                                            e.push((k.clone(), t.to_string()));
                                         }
                                         if e.is_empty() {
                                             return Err("a storage.drives entry is empty".into());
@@ -781,6 +795,8 @@ pub struct StoragePlan {
     pub raid: Option<DataRaid>,
     /// What the plan says on the console, a line each.
     pub said: Vec<String>,
+    /// The link-rate policy (#642): (the drive, Gbit/s).
+    pub link_rates: Vec<(String, f32)>,
 }
 
 /// Choose the drives and check the section against them. `force` is the
@@ -791,6 +807,7 @@ pub struct StoragePlan {
 pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<StoragePlan, String> {
     let force = force || spec.wipe.is_some();
     let mut said = Vec::new();
+    let mut link_rates: Vec<(String, f32)> = Vec::new();
     let mut taken: Vec<SeenDrive> = Vec::new();
     match &spec.drives {
         DriveSel::All => {
@@ -833,7 +850,7 @@ pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<Stora
             }
         }
         DriveSel::Listed(entries) => {
-            for e in entries {
+            for (ei, e) in entries.iter().enumerate() {
                 let said_e = e.iter().map(|(k, v)| if k == "any" { v.clone() } else { format!("{k}={v}") })
                     .collect::<Vec<_>>().join(" ");
                 let m: Vec<&SeenDrive> = seen.iter().filter(|d| (d.bytes > 0 || d.unready) && d.matches(e)).collect();
@@ -848,6 +865,10 @@ pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<Stora
                         }
                         if !d.carries.is_empty() {
                             said.push(format!("{} carries {}: taken, storage.drives names it", d.said(), d.carries));
+                        }
+                        if let Some((_, g)) = spec.link_rates.iter().find(|(i, _)| *i == ei) {
+                            said.push(format!("{}: its link held at {g} Gbit (storage.drives' linkRate, #642)", d.said()));
+                            link_rates.push((d.dev.clone(), *g));
                         }
                         taken.push((*d).clone());
                     }
@@ -919,7 +940,7 @@ pub fn plan(spec: &StorageSpec, seen: &[SeenDrive], force: bool) -> Result<Stora
             (largest - smallest) / 1_000_000_000
         ));
     }
-    Ok(StoragePlan { spec: spec.clone(), drives: taken, system, raid, said })
+    Ok(StoragePlan { spec: spec.clone(), drives: taken, system, raid, said, link_rates })
 }
 
 /// `'...'` for sh: the value as one word, `'` written `'\''`.
@@ -988,6 +1009,8 @@ impl StoragePlan {
         // STORAGE_FORCE for this install and says where it came from.
         let _ = writeln!(o, "STORAGE_WIPE={}", sh_quote(&self.spec.wipe.as_ref().map(|w| w.said()).unwrap_or_default()));
         let _ = writeln!(o, "STORAGE_ON_DRIVE_FAILURE={}", self.spec.on_drive_failure.as_str());
+        let lr: Vec<String> = self.link_rates.iter().map(|(d, g)| format!("{d}={g}")).collect();
+        let _ = writeln!(o, "STORAGE_LINKRATE={}", sh_quote(&lr.join(" ")));
         let _ = writeln!(o, "STORAGE_STOP=");
         o
     }
@@ -1212,6 +1235,20 @@ mod tests {
         assert!(sh.contains("STORAGE_ON_DRIVE_FAILURE=continue\n"), "{sh}");
         let v = top_level("storage:\n  on_drive_failure: maybe\n", "storage").unwrap().unwrap();
         assert!(StorageSpec::from_yaml(&v).unwrap_err().contains("continue or stop"));
+    }
+
+    /// #642: `linkRate` on an entry is that drive's link policy, not a key
+    /// to match it by.
+    #[test]
+    fn a_drives_link_rate() {
+        let doc = "storage:\n  drives:\n    - bay: 0\n    - {bay: 1, linkRate: 6}\n";
+        let sh = plan_from_config(doc, &forge1(), false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_LINKRATE='/dev/sdb=6'\n"), "{sh}");
+        assert!(sh.contains("its link held at 6 Gbit"), "{sh}");
+        let sh = plan_from_config("storage:\n  drives: all\n", &forge1(), false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_LINKRATE=''\n"), "{sh}");
+        let v = top_level("storage:\n  drives:\n    - {bay: 1, linkRate: 7}\n", "storage").unwrap().unwrap();
+        assert!(StorageSpec::from_yaml(&v).unwrap_err().contains("1.5, 3, 6, 12 or 22.5"));
     }
 
     #[test]

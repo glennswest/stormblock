@@ -229,6 +229,7 @@ rescue_shell() { echo RESCUE; exit 0; }
 inv_card() { :; }
 inv_card_act() { return 1; }
 inv_card_ready() { echo "0x5000cca268077301: TEST UNIT READY good; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1; no Linux device yet"; return 2; }
+inv_card_linkrate() { echo "$*" >> "$W/linkrate.args"; echo "phy-1:2: maximum 6.0 Gbit, link reset"; }
 inv_rescan() { :; }
 inv_settling() { :; }
 EOF
@@ -341,6 +342,23 @@ layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'NAMED_DISK=sdb
 check "no storage: keeps the named drive" "sdb" "$(val NAMED_DISK)"
 check "no storage: keeps how it was chosen" "named" "$(val CHOSEN_BY)"
 check "no storage: never asks the engine" "no" "$([ -e "$WORK/plan.args" ] && echo yes || echo no)"
+
+echo "the layout: a drive's link held at its linkRate before anything is formatted (#642)"
+reset
+rm -f "$WORK/linkrate.args"
+printf 'storage:\n  drives:\n    - bay: 0\n    - {bay: 1, linkRate: 6}\n' > "$WORK/install-config.yaml"
+cat > "$WORK/plan.out" <<'EOF'
+STORAGE_DRIVES='/dev/sda /dev/sdb'
+STORAGE_SYSTEM='/dev/sda /dev/sdb'
+STORAGE_SAID='STORAGE: 2 drives'
+STORAGE_LINKRATE='/dev/sdb=6'
+EOF
+echo 0x5000cca26a819e69 > "$SYS/sdb/device/sas_address"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml"
+check "the card told" "--dev /dev/sdb --max 6" "$(cat "$WORK/linkrate.args")"
+has "said" "$WORK/out" "storage: /dev/sdb: phy-1:2: maximum 6.0 Gbit, link reset"
+check "kept for the engine" "0x5000cca26a819e69 6" "$(cat "$WORK/run/link-policy")"
+rm -f "$SYS/sdb/device/sas_address" "$WORK/linkrate.args"
 
 echo "the layout: a plan takes the drives"
 reset

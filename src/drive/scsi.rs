@@ -859,6 +859,104 @@ pub fn mode_page_said(p: &[u8]) -> Option<String> {
     })
 }
 
+// ---- the SAS link's counters (#642) ----
+
+/// One phy's link counters, from the drive's log page 0x18 or the HBA's
+/// `sas_phy` (SPL: SAS phy log descriptor). Lifetime totals, which saturate
+/// at 2^32 - 1 on an old drive: the rate between samples is what says now.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct PhyLink {
+    pub phy: u8,
+    /// Negotiated logical link rate in Mbit/s (0 when not up).
+    pub rate_mbps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attached_sas: Option<String>,
+    pub invalid_dwords: u32,
+    pub disparity_errors: u32,
+    pub loss_of_sync: u32,
+    pub phy_resets: u32,
+}
+
+/// A SAS negotiated-link-rate code as Mbit/s (SPL: 8 = 1.5, 9 = 3, 0xA = 6,
+/// 0xB = 12, 0xC = 22.5 Gbit/s).
+pub fn sas_rate_mbps(code: u8) -> u32 {
+    match code & 0x0F {
+        0x8 => 1500,
+        0x9 => 3000,
+        0xA => 6000,
+        0xB => 12000,
+        0xC => 22500,
+        _ => 0,
+    }
+}
+
+/// Log page 0x18 (protocol-specific port, SAS): each phy's counters.
+pub fn parse_sas_port_log(d: &[u8]) -> Vec<PhyLink> {
+    let mut out = Vec::new();
+    for (_, p) in log_params(d) {
+        // A SAS port parameter: protocol (bits 3-0 of byte 0) 6 = SAS, the
+        // number of phys at byte 3, then a descriptor each.
+        if p.len() < 4 || p[0] & 0x0F != 6 {
+            continue;
+        }
+        let mut o = 4;
+        for _ in 0..p[3] {
+            let Some(desc) = p.get(o..) else { break };
+            if desc.len() < 48 {
+                break;
+            }
+            let len = 4 + desc[3] as usize;
+            out.push(PhyLink {
+                phy: desc[1],
+                rate_mbps: sas_rate_mbps(desc[5]),
+                attached_sas: Some(format!("0x{:016x}", be64(desc, 16))).filter(|a| a != "0x0000000000000000"),
+                invalid_dwords: be32(desc, 32),
+                disparity_errors: be32(desc, 36),
+                loss_of_sync: be32(desc, 40),
+                phy_resets: be32(desc, 44),
+            });
+            o += len.max(48);
+        }
+    }
+    out
+}
+
+/// The drive's own phys, read now (LOG SENSE 0x18, cumulative values).
+pub fn sas_phys(t: &dyn Transport) -> Result<Vec<PhyLink>, String> {
+    let mut e = Vec::new();
+    match ask(t, &cdb::log_sense(0x18, 0, 1024), 1024, "LOG SENSE 0x18", &mut e) {
+        Some(d) => Ok(parse_sas_port_log(&d)),
+        None => Err(e.join("; ")),
+    }
+}
+
+/// What moved between two samples of the same phys, in words (#642: the
+/// write test and the lay say `link: loss of sync +N` instead of guessing
+/// at the PI path). Empty when nothing moved.
+pub fn link_moved(before: &[PhyLink], after: &[PhyLink]) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in after {
+        let Some(b) = before.iter().find(|b| b.phy == a.phy) else { continue };
+        let d = |x: u32, y: u32| y.wrapping_sub(x);
+        let mut parts = Vec::new();
+        for (name, x, y) in [
+            ("loss of sync", b.loss_of_sync, a.loss_of_sync),
+            ("invalid dwords", b.invalid_dwords, a.invalid_dwords),
+            ("disparity errors", b.disparity_errors, a.disparity_errors),
+            ("phy resets", b.phy_resets, a.phy_resets),
+        ] {
+            // A saturated counter (2^32 - 1) says nothing now.
+            if x != u32::MAX && y > x {
+                parts.push(format!("{name} +{}", d(x, y)));
+            }
+        }
+        if !parts.is_empty() {
+            out.push(format!("phy {} at {} Mbit/s: {}", a.phy, a.rate_mbps, parts.join(", ")));
+        }
+    }
+    out
+}
+
 // ---- every VPD page (#636) ----
 
 /// A VPD page as the drive answered it: raw always, what it says when the
@@ -1096,6 +1194,10 @@ pub struct Matrix {
     pub mode_after: Vec<ModePage>,
     pub log_after: Vec<(String, String)>,
     pub capacity_after: Option<Capacity>,
+    /// The drive's own link counters (log page 0x18) before and after
+    /// (#642: forge1 bay 3's failures were the link, not the PI path).
+    pub link_before: Vec<PhyLink>,
+    pub link_after: Vec<PhyLink>,
     /// Why the run stopped short, when it did.
     pub stopped: Option<String>,
 }
@@ -1126,6 +1228,7 @@ pub fn write_matrix(t: &dyn Transport, link: &dyn Fn() -> Option<String>) -> Mat
     m.capacity = ask(t, &cdb::read_capacity16(32), 32, "READ CAPACITY 16", &mut e).and_then(|c| parse_capacity16(&c));
     m.mode_before = mode_pages(t);
     m.log_before = log_pages(t);
+    m.link_before = sas_phys(t).unwrap_or_default();
     let Some(cap) = m.capacity.clone() else {
         m.stopped = Some(format!("READ CAPACITY 16 did not answer: {}", e.join("; ")));
         return m;
@@ -1191,6 +1294,7 @@ pub fn write_matrix(t: &dyn Transport, link: &dyn Fn() -> Option<String>) -> Mat
     }
     m.mode_after = mode_pages(t);
     m.log_after = log_pages(t);
+    m.link_after = sas_phys(t).unwrap_or_default();
     let mut e2 = Vec::new();
     m.capacity_after = ask(t, &cdb::read_capacity16(32), 32, "READ CAPACITY 16", &mut e2).and_then(|c| parse_capacity16(&c));
     m
@@ -1236,6 +1340,15 @@ impl Matrix {
         for ((pg, b), (_, a)) in self.log_before.iter().zip(&self.log_after) {
             if b != a {
                 v.push(format!("log page {pg} after: {a}"));
+            }
+        }
+        if !self.link_before.is_empty() {
+            let moved = link_moved(&self.link_before, &self.link_after);
+            if moved.is_empty() {
+                v.push("link (the drive's side): nothing moved during the test".into());
+            }
+            for l in moved {
+                v.push(format!("link (the drive's side): {l} during the test"));
             }
         }
         if self.capacity_after != self.capacity {
@@ -1693,6 +1806,49 @@ mod tests {
         let r = ready_round(&d);
         assert!(r.ready && !r.started);
         assert!(r.said().starts_with("TEST UNIT READY good; "));
+    }
+
+    /// A log page 0x18 with one SAS port parameter and two phys (SPL), the
+    /// first at 12 Gbit with forge1 bay 3's counters.
+    pub fn sas_port_page(sync0: u32, sync1: u32) -> Vec<u8> {
+        let mut desc = |phy: u8, rate: u8, inv: u32, disp: u32, sync: u32, reset: u32| {
+            let mut v = vec![0u8; 48];
+            v[1] = phy;
+            v[3] = 44;
+            v[5] = rate;
+            v[8..16].copy_from_slice(&0x5000cca26a819e69u64.to_be_bytes());
+            v[16..24].copy_from_slice(&0x52cea7f04e8aa500u64.to_be_bytes());
+            v[32..36].copy_from_slice(&inv.to_be_bytes());
+            v[36..40].copy_from_slice(&disp.to_be_bytes());
+            v[40..44].copy_from_slice(&sync.to_be_bytes());
+            v[44..48].copy_from_slice(&reset.to_be_bytes());
+            v
+        };
+        let mut param = vec![0x06, 0, 0, 2];
+        param.extend(desc(0, 0xB, u32::MAX, u32::MAX, sync0, 0));
+        param.extend(desc(1, 0x0, 0, 0, sync1, 0));
+        let mut p = vec![0x18, 0, 0, 0];
+        p.extend_from_slice(&[0, 1, 0x03, param.len() as u8]);
+        p.extend(param);
+        let n = (p.len() - 4) as u16;
+        p[2..4].copy_from_slice(&n.to_be_bytes());
+        p
+    }
+
+    #[test]
+    fn the_sas_link_counters() {
+        let v = parse_sas_port_log(&sas_port_page(73_506_628, 0));
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].rate_mbps, 12000);
+        assert_eq!(v[0].attached_sas.as_deref(), Some("0x52cea7f04e8aa500"));
+        assert_eq!(v[0].invalid_dwords, u32::MAX);
+        assert_eq!(v[0].loss_of_sync, 73_506_628);
+        assert_eq!(v[1].rate_mbps, 0);
+        let after = parse_sas_port_log(&sas_port_page(73_506_928, 0));
+        // The saturated counters say nothing; loss of sync moved by 300.
+        assert_eq!(link_moved(&v, &after), vec!["phy 0 at 12000 Mbit/s: loss of sync +300".to_string()]);
+        assert!(link_moved(&v, &v).is_empty());
+        assert_eq!(sas_rate_mbps(0xA), 6000);
     }
 
     /// #636: a page's words and its bytes, side by side across drives.

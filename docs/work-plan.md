@@ -22,6 +22,22 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   (`get:https://{node}:9090/api/v1/install/progress ~ "started":[0-9]+,"state":"(laid|booted)"`),
   which holds on any installed node once the record is kept
 
+## #642 — the SAS link, both sides, every minute (2026-11-17, P0)
+
+forge1 bay 3: loss of DWORD sync climbing at 12 Gbit, frozen at 6; the
+writes failed on the link, not the PI path. The Drive object (status.link,
+its condition and event, the kubectl column, the recommendation) is
+stormdrive's (filed); ironprom#49 the alerts and trend; stormconsole#339 the
+console.
+- [x] scsi: log page 0x18 (`parse_sas_port_log`, `sas_phys`, `link_moved`);
+  mpt: `host_phy`, `set_max_linkrate`; mgmt::link: the sampler (rates, level,
+  WARN on change), `/metrics` storm_drive_link_*, rows' `link`
+- [x] the write test and the lay: the link before and after
+- [x] linkRate: storage.drives entries, STORAGE_LINKRATE, /init's
+  storage_linkrate, `hba linkrate`, the engine's kept policy every boot
+- [ ] check.sh; release; shipped (proof: forge1's /metrics with bay 3's
+  storm_drive_link_loss_of_sync_total on the drive side)
+
 ## #636 — a drive's pages, every VPD page and the mode pages (2026-11-17, P0)
 
 Owner: "lets get the mode pages. and any way to parse vpd pages". The Drive

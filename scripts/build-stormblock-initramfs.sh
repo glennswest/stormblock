@@ -2445,6 +2445,7 @@ inv_pending() { # -> "pci:what" for each drive the SAS layer knows and no block 
 INV_HBA="${STORM_INV_HBA:-${STORM_STORMBLOCK:-/usr/sbin/stormblock} hba}"
 inv_card() { $INV_HBA "$@" 2>/dev/null || true; }
 inv_card_act() { $INV_HBA act "$@"; } # its exit code and stderr are the format's
+inv_card_linkrate() { $INV_HBA linkrate "$@"; } # the link-rate policy (#642): its line on stdout
 inv_card_ready() { $INV_HBA ready "$@"; } # one round after a format (#620): one line; 0 Linux has it, 2 ready on the card, 3 not ready
 # A drive that answers and has no readable format (#595: forge1's three SAS
 # drives, left by an interrupted format, answer NOT READY / medium format
@@ -5417,6 +5418,29 @@ if [ "$BOOT_MODE" = "local" ]; then
     # each drive is and does what it prints. Only `storage:` and
     # `system_drive:` are read from the file, never printed (#275).
     STORAGE_FROM=""; STORAGE_DRIVES=""; STORAGE_SYSTEM=""; STORAGE_STOP=""; STORAGE_SAID=""
+    STORAGE_LINKRATE=""
+    # The link-rate policy (#642): `linkRate` on a storage.drives entry holds
+    # the HBA phy facing that drive at that rate (a marginal link, at the
+    # owner's word, until the drive is replaced), set before anything is
+    # formatted or laid, and kept for the node's engine, which applies it
+    # again on every boot (a sysfs write does not persist).
+    storage_linkrate() {
+        _slp="${STORM_RUN:-/run/stormblock}/link-policy"
+        rm -f "$_slp" 2>/dev/null
+        for _slr in ${STORAGE_LINKRATE:-}; do
+            _sld=${_slr%%=*}; _slg=${_slr#*=}
+            case "$_sld" in
+                */sg*) _sls=$(cat "${STORM_INV_SG:-/sys/class/scsi_generic}/${_sld##*/}/device/sas_address" 2>/dev/null) ;;
+                *) _sls=$(cat "$SURVEY_SYS/${_sld##*/}/device/sas_address" 2>/dev/null) ;;
+            esac
+            if _slo=$(inv_card_linkrate --dev "$_sld" --max "$_slg" 2>&1); then
+                echo "  storage: $_sld: $_slo"
+            else
+                echo "  WARNING: storage: $_sld: its link not held at $_slg Gbit: $_slo (#642)"
+            fi
+            [ -n "$_sls" ] && { mkdir -p "${_slp%/*}"; echo "$_sls $_slg" >> "$_slp"; }
+        done
+    }
     STORAGE_FORCE=""; STORAGE_WIPE=""
     for _icf in "${INSTALL_CONFIG_STAGED:-}" "${INSTALL_CONFIG_FORGE:-${STORM_RUN:-/run/stormblock}/install-config.forge.yaml}"; do
         [ -n "$_icf" ] && [ -f "$_icf" ] || continue
@@ -5670,6 +5694,7 @@ STEOF
             NAMED_DISK=""
         elif [ -n "$STORAGE_DRIVES" ]; then
             printf '%s\n' "$STORAGE_SAID" | sed 's/^/  /'
+            storage_linkrate
             _st_first=${STORAGE_SYSTEM%% *}
             if [ -n "$NAMED_DISK" ] && [ "/dev/$NAMED_DISK" != "$_st_first" ]; then
                 echo "  rd.stormblock.slab= names /dev/$NAMED_DISK; storage: lays every drive, $_st_first first (#573)"

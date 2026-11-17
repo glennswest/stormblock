@@ -149,7 +149,17 @@ pub fn report() -> Value {
             "watching": s.watching,
             "read_at": s.read_at,
             "every_secs": RESCAN.as_secs(),
-            "rows": s.rows,
+            // Each row with its drive's link (#642).
+            "rows": s.rows.iter().map(|r| {
+                let mut r = r.clone();
+                let sas = r.get("sas_address").and_then(Value::as_str).map(str::to_string);
+                if let (Some(sas), Some(o)) = (sas, r.as_object_mut()) {
+                    if let Some(l) = super::link::get(&sas) {
+                        o.insert("link".into(), l);
+                    }
+                }
+                r
+            }).collect::<Vec<_>>(),
             "changes": s.changes,
             "errors": s.errors,
         })
@@ -187,8 +197,19 @@ pub fn write_test(sas: u64) -> Result<Value, String> {
         link_word(&rows, sas)
     };
     let before = link();
+    let host_before = crate::drive::mpt::host_phy(Path::new("/dev"), Path::new("/sys"), sas);
     let m = crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), sas, |t| crate::drive::scsi::write_matrix(t, &link))?;
-    let lines = m.lines();
+    let mut lines = m.lines();
+    // The host's side of the link too (#642): the HBA phy facing the drive.
+    if let (Some((name, b, _)), Some((_, a, _))) = (host_before, crate::drive::mpt::host_phy(Path::new("/dev"), Path::new("/sys"), sas)) {
+        let moved = crate::drive::scsi::link_moved(std::slice::from_ref(&b), std::slice::from_ref(&a));
+        if moved.is_empty() {
+            lines.push(format!("link (the host's side, {name}): nothing moved during the test"));
+        }
+        for l in moved {
+            lines.push(format!("link (the host's side, {name}): {l} during the test"));
+        }
+    }
     tracing::warn!("storage: 0x{sas:016x}: write test (#627), link before: {}", before.as_deref().unwrap_or("?"));
     for l in &lines {
         tracing::warn!("storage: 0x{sas:016x}: write test: {l} (#627)");
@@ -226,6 +247,30 @@ fn read() -> (Vec<Value>, Vec<String>) {
     (cards.iter().flat_map(|c| c.rows_json()).collect(), errs)
 }
 
+/// A sample of every listed drive's link (#642): the drive's log page 0x18
+/// through its sg node or the card, the HBA phy facing it.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn sample_links(rows: &[Value]) {
+    use std::path::Path;
+    let node = std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_default();
+    for r in rows {
+        if r.get("present") != Some(&Value::Bool(true)) {
+            continue;
+        }
+        let Some(sas) = r.get("sas_address").and_then(Value::as_str) else { continue };
+        let Some(a) = crate::drive::mpt::parse_addr(sas) else { continue };
+        let drive = crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), a, crate::drive::scsi::sas_phys).and_then(|x| x);
+        let host = crate::drive::mpt::host_phy(Path::new("/dev"), Path::new("/sys"), a);
+        let labels = super::link::Labels {
+            node: node.clone(),
+            drive: r.get("block").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| sas.to_string()),
+            bay: word(r, "slot"),
+            shelf: word(r, "enclosure"),
+        };
+        super::link::record(sas, &labels, drive, host, now());
+    }
+}
+
 /// Keep the rows for as long as the engine runs, on a thread of its own.
 /// Nothing is started on a node with no mpt card.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
@@ -235,8 +280,14 @@ pub fn spawn() {
     }
     let r = std::thread::Builder::new().name("hba".into()).spawn(|| {
         with(|s| s.watching = true);
+        let mut last_link = 0u64;
         loop {
             let (rows, errs) = read();
+            // Each drive's link, both sides, once a minute (#642).
+            if now().saturating_sub(last_link) >= super::link::EVERY_SECS {
+                last_link = now();
+                sample_links(&rows);
+            }
             take(rows, errs, now());
             let g = STATE.lock().unwrap_or_else(|e| e.into_inner());
             let (mut g, _) = WAKE

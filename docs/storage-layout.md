@@ -497,6 +497,54 @@ ready (#611)`). The API:
   (an example of the shape, not forge1's answers). The Drive object carries
   the same pages through stormdrive.
 
+### The SAS link, both sides, every minute (#642)
+
+forge1's bay 3 "failed writes" for a week while its own phy counters said
+why: log page 0x18 had loss of DWORD sync at 73 million and climbing about
+500 a minute idle at 12 Gbit, the invalid DWORD and disparity counters
+saturated, and the HBA's side at 0. At 6 Gbit the counter froze and every
+protected write and read was good. Nobody read the counter.
+
+- **Sampled every minute** by the card's thread: for every drive the card
+  lists, the drive's side (log page 0x18 through its sg node or the card:
+  each phy's negotiated rate, attached address, invalid DWORDs, running
+  disparity errors, loss of DWORD sync, phy reset problems) and the host's
+  side (the HBA phy facing it, `/sys/class/sas_phy/phy-<host>:<phy>`, and its
+  `maximum_linkrate`). Not yet: an expander's phy (SMP REPORT PHY ERROR LOG).
+- **The rate per minute** is what counts. The totals are history:
+  saturated at 2^32 − 1 on an old shelf drive, and reset by a re-plug. A
+  saturated or reset counter gives no rate for that pair.
+- **The level:** `settling` (one sample), `ok` (nothing moving),
+  `degraded` (any counter moving), `failing` (loss of sync or phy resets
+  moving in two samples running). A change is logged at WARN:
+  `storage: drive 0x5000cca26a819e69 (bay 3): link ok -> failing at 12
+  Gbit: drive phy 0 loss of sync 500/min (#642)`.
+- **Where:** each row of `GET /api/v1/storage/hba` carries `link` (both
+  sides' phys, their rates, the host phy and its maximum, the level and
+  since when). `/metrics` has `storm_drive_link_invalid_dwords_total`,
+  `storm_drive_link_disparity_errors_total`, `storm_drive_link_loss_of_sync_total`,
+  `storm_drive_link_phy_resets_total` (counters) and `storm_drive_link_rate_mbps`
+  (gauge), labelled `node, drive, bay, shelf, side=drive|host, phy`, and
+  `storm_drive_link_level` (-1 settling, 0 ok, 1 degraded, 2 failing). The
+  trend and the alert rules are ironprom's (ironprom#49), the Drive object's
+  `status.link` and its condition stormdrive's, the console's view
+  stormconsole's (#339).
+- **The write test and the lay read it before and after.** `hba write-test`
+  ends with `link (the drive's side): phy 0 at 12000 Mbit/s: loss of sync
+  +300 during the test` and the host side's line. A drive the lay could not
+  lay (#625) has `link (the drive's side): … during the lay` in its block,
+  ahead of any reading of the PI path.
+- **The link-rate policy:** `linkRate: 6` on a `storage.drives` entry (`{bay:
+  3, linkRate: 6}`; 1.5, 3, 6, 12 or 22.5) holds the HBA phy facing that drive
+  at that rate. `/init` sets it before anything is formatted or laid
+  (`stormblock hba linkrate --dev /dev/sdb --max 6`: `maximum_linkrate`, then
+  `link_reset`) and writes `/run/stormblock/link-policy`. The node's engine
+  keeps that in its data directory (the state volume) and applies it again at
+  every start, since a sysfs write does not persist. Until the engine starts,
+  a later boot runs the link at what it negotiates. It is the owner's word
+  for a marginal drive until it is replaced, never set automatically; the
+  level still watches it. `--max hw` gives the phy back its hardware maximum.
+
 ### NetApp-firmware drives (#627)
 
 forge1's bay 3 is a NETAPP `X378_HLBRE10TA07` fw `NA02` (an HGST He10 with
