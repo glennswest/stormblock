@@ -39,6 +39,7 @@ fn shapes_land_where_asked_in_either_format() {
     for format in [PixelFormat::Xrgb8888, PixelFormat::Xbgr8888] {
         let (w, h, stride) = (200u32, 100u32, 256u32);
         let mut px = vec![0xDEAD_BEEFu32; (stride * h) as usize];
+        {
         let mut s = Surface::new(&mut px, w, h, stride, format);
         s.clear(palette::BG);
         s.fill_rect(10, 10, 20, 20, palette::RED);
@@ -51,7 +52,7 @@ fn shapes_land_where_asked_in_either_format() {
         assert_eq!(s.get(30, 65), palette::AMBER);
         assert_eq!(s.get(90, 65), palette::TRACK);
         s.fill_rect(150, 0, 500, 5, palette::PEACH);
-        drop(s);
+        }
         assert_eq!(px[(stride * 2 + w + 3) as usize], 0xDEAD_BEEF, "past the width is the stride's padding, untouched");
     }
 }
