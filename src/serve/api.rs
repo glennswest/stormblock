@@ -380,6 +380,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
         if matches!(p, "/api/v1/slabs" | "/api/v1/arrays" | "/api/v1/spares") {
             return true;
         }
+        // A ship sends a snapshot's bytes to another engine (#400), as a
+        // live mirror does (#295).
+        if seg.len() == 5 && seg[1] == "v1" && seg[2] == "snapshots" && seg[4] == "ship" {
+            return true;
+        }
         // A live mirror sends a volume's bytes to another engine (#295).
         if seg.len() == 6 && seg[3] == "volumes" && seg[5] == "mirror" {
             return true;
@@ -1943,6 +1948,10 @@ mod tests {
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26801b649/details", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Destructive);
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Ordinary);
+        // #400: a ship sends a snapshot's bytes off the engine: the admin's.
+        assert_eq!(classify(&Method::POST, "/v1/snapshots/snap-1/ship", None), Class::Destructive);
+        assert_eq!(classify(&Method::GET, "/v1/snapshots/snap-1/changes", None), Class::Ordinary);
+        assert_eq!(classify(&Method::GET, "/v1/ship-jobs/ship-1", None), Class::Ordinary);
         // #656: a Replication writes volumes from its peer: the admin's.
         assert_eq!(classify(&Method::POST, "/apis/storage.storm.io/v1/replications", None), Class::Destructive);
         assert_eq!(classify(&Method::DELETE, "/apis/storage.storm.io/v1/replications/forge", None), Class::Destructive);

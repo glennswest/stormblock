@@ -2637,6 +2637,103 @@ async fn delete_snapshot(
     Ok(Json(serde_json::json!({})))
 }
 
+/// A snapshot or volume by the #130 rule, as the engine volume that holds
+/// it: a `/v1` snapshot, a `/v1` volume, or an engine volume by id or name
+/// (on a head a promote moved the array to, only the names came across).
+async fn resolve_engine(state: &AppState, key: &str) -> Result<EngineVolumeId, V1Error> {
+    {
+        let v1 = state.v1.lock().await;
+        if let Some(s) = v1.snapshots.get(key) {
+            return s.local_id.map(EngineVolumeId).ok_or_else(|| V1Error::Conflict(format!("snapshot {key} has no data on this node")));
+        }
+        if let Some(v) = v1.volumes.get(key) {
+            return v.local_id.map(EngineVolumeId).ok_or_else(|| V1Error::Conflict(format!("volume {key} has no data on this node")));
+        }
+    }
+    state.volume_manager.lock().await.find_volume(key).await.ok_or_else(|| V1Error::NotFound(format!("snapshot {key}")))
+}
+
+#[derive(Deserialize)]
+struct ChangesQuery {
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    page: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /v1/snapshots/{id}/changes?base=…` (#399, stormstorage#46): the
+/// ranges of `{id}` that differ from `base` (every allocated one without
+/// it); `zero` where `base` maps an extent `{id}` does not. The extent
+/// maps only, never the data. Paged by range (`page`, `limit`, 65536 by
+/// default).
+async fn snapshot_changes(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ChangesQuery>,
+) -> V1Result<serde_json::Value> {
+    let snap = resolve_engine(&state, &id).await?;
+    let base = match q.base.as_deref() {
+        Some(b) => Some(resolve_engine(&state, b).await?),
+        None => None,
+    };
+    let (extent, size, changed) = state
+        .volume_manager
+        .lock()
+        .await
+        .changes(snap, base)
+        .await
+        .map_err(|e| V1Error::Conflict(e.to_string()))?;
+    let ranges = crate::volume::snapshot::changed_ranges(&changed, extent, size);
+    let changed_bytes: u64 = ranges.iter().filter(|r| !r.zero).map(|r| r.length).sum();
+    let zero_bytes: u64 = ranges.iter().filter(|r| r.zero).map(|r| r.length).sum();
+    let limit = q.limit.unwrap_or(65536).clamp(1, 1 << 20);
+    let page = q.page.unwrap_or(0);
+    let total = ranges.len();
+    let slice: Vec<_> = ranges.into_iter().skip(page.saturating_mul(limit)).take(limit).collect();
+    let next = ((page + 1).saturating_mul(limit) < total).then_some(page + 1);
+    Ok(Json(serde_json::json!({
+        "extent_size_bytes": extent,
+        "size_bytes": size,
+        "changed_bytes": changed_bytes,
+        "zero_bytes": zero_bytes,
+        "ranges_total": total,
+        "page": page,
+        "next_page": next,
+        "ranges": slice,
+    })))
+}
+
+/// `POST /v1/snapshots/{id}/ship` (#400): the changed ranges sent to a
+/// remote volume as a background job; 202 with the job.
+async fn ship_snapshot(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::mgmt::ship::Request>,
+) -> Result<axum::response::Response, V1Error> {
+    let snap = resolve_engine(&state, &id).await?;
+    if state.volume_manager.lock().await.is_secret(&snap) {
+        return Err(V1Error::Conflict(format!("{id} is a secret volume: it is never copied off this engine")));
+    }
+    let base = match req.base.as_deref() {
+        Some(b) => Some((b.to_string(), resolve_engine(&state, b).await?)),
+        None => None,
+    };
+    let job = crate::mgmt::ship::start(state.clone(), id, snap, base, req).map_err(V1Error::BadRequest)?;
+    Ok((StatusCode::ACCEPTED, Json(job)).into_response())
+}
+
+/// `GET /v1/ship-jobs/{id}` (#400).
+async fn get_ship_job(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> V1Result<crate::mgmt::ship::Job> {
+    crate::mgmt::ship::get(&state, &id).map(Json).ok_or_else(|| V1Error::NotFound(format!("ship job {id}")))
+}
+
+/// `DELETE /v1/ship-jobs/{id}` (#400): cancel it; the job is kept, `failed`.
+async fn cancel_ship_job(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> V1Result<crate::mgmt::ship::Job> {
+    crate::mgmt::ship::cancel(&state, &id).map(Json).ok_or_else(|| V1Error::NotFound(format!("ship job {id}")))
+}
+
 #[derive(Deserialize)]
 struct CreateGroupSnapshotRequest {
     name: String,
@@ -2828,6 +2925,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/volumes/{id}/dual-attach/close", post(close_dual_attach))
         .route("/snapshots", post(create_snapshot).get(list_snapshots))
         .route("/snapshots/{id}", get(get_snapshot).delete(delete_snapshot))
+        .route("/snapshots/{id}/changes", get(snapshot_changes))
+        .route("/snapshots/{id}/ship", post(ship_snapshot))
+        .route("/ship-jobs/{id}", get(get_ship_job).delete(cancel_ship_job))
         .route(
             "/group-snapshots",
             post(create_group_snapshot).get(list_group_snapshots),

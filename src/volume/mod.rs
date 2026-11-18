@@ -2647,6 +2647,34 @@ impl VolumeManager {
         Ok(stats)
     }
 
+    /// What changed in `id` against `base` (#399, stormstorage#46): its
+    /// extent size, its size, and the changed extents (`zero`: `base` maps
+    /// it and `id` does not). The extent maps only, never the data; both
+    /// held in memory while compared.
+    pub async fn changes(&self, id: VolumeId, base: Option<VolumeId>) -> Result<(u64, u64, Vec<(u64, bool)>), VolumeError> {
+        let h = self.volumes.get(&id).ok_or(VolumeError::VolumeNotFound(id))?;
+        let (extent_size, size) = (h.extent_size(), h.capacity_bytes());
+        if let Some(b) = base {
+            let bh = self.volumes.get(&b).ok_or(VolumeError::VolumeNotFound(b))?;
+            if bh.extent_size() != extent_size {
+                return Err(VolumeError::InvalidSize(format!(
+                    "{} has {}-byte extents and the base {} {}: they are not snapshots of one volume",
+                    id.0,
+                    extent_size,
+                    b.0,
+                    bh.extent_size()
+                )));
+            }
+        }
+        let _pin = self.gem.read().await.pin();
+        let mine = placed(&self.gem, id).await?;
+        let theirs = match base {
+            Some(b) => Some(placed(&self.gem, b).await?),
+            None => None,
+        };
+        Ok((extent_size, size, snapshot::changed_extents(&mine, theirs.as_ref())))
+    }
+
     /// Get a volume handle as a `BlockDevice` for target protocols.
     pub fn get_volume(&self, id: &VolumeId) -> Option<Arc<dyn BlockDevice>> {
         self.volumes.get(id).map(|h| h.clone() as Arc<dyn BlockDevice>)
@@ -4684,6 +4712,15 @@ async fn mapped_extents(
     let g = map.read().await;
     let extents = g.volume_extents(&id).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default();
     Ok((pin, extents))
+}
+
+/// A volume's map reduced to what a diff compares (#399), loaded first.
+async fn placed(map: &crate::lockwatch::TrackedRwLock<GlobalExtentMap>, id: VolumeId) -> Result<snapshot::Placed, VolumeError> {
+    gem::ensure_resident(map, id).await.map_err(|e| {
+        VolumeError::Drive(DriveError::Io(std::io::Error::other(format!("volume {}: loading its extent map: {e}", id.0))))
+    })?;
+    let g = map.read().await;
+    Ok(g.volume_extents(&id).map(|it| it.map(|(i, l)| (i, (l.slab_id, l.slot_idx))).collect()).unwrap_or_default())
 }
 
 /// The slab most of a volume's extents are on (#153): where an affine

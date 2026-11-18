@@ -55,6 +55,7 @@ const ADMIN_IDENTIFY: u8 = 0x06;
 const IO_FLUSH: u8 = 0x00;
 const IO_WRITE: u8 = 0x01;
 const IO_READ: u8 = 0x02;
+const IO_WRITE_ZEROES: u8 = 0x08;
 const IO_DSM: u8 = 0x09;
 const CNS_NAMESPACE: u8 = 0x00;
 const CNS_CONTROLLER: u8 = 0x01;
@@ -315,6 +316,9 @@ pub fn decode_identify_ctrl(data: &[u8]) -> (String, String) {
     };
     (field(4..24), field(24..64))
 }
+
+/// SCT 0, SC 0x01, as [`cqe_status`] reads it.
+const STATUS_INVALID_OPCODE: u16 = 0x01 << 1;
 
 fn cqe_status(cqe: &NvmeCqe) -> u16 {
     u16::from_le_bytes([cqe.raw[14], cqe.raw[15]]) & 0xFFFE
@@ -763,13 +767,13 @@ impl Conn {
         self.send_capsule(sqe, data).await?;
         let cqe = self.read_capsule_resp(sqe_cid(sqe)).await?;
         self.busy = false;
-        if cqe_status(&cqe) != 0 {
-            return Err(io::Error::other(format!(
-                "command failed: status {:#x}",
-                cqe_status(&cqe)
-            )));
+        match cqe_status(&cqe) {
+            0 => Ok(()),
+            // Invalid Opcode (#400): a target that does not do this command,
+            // which the caller may do another way.
+            STATUS_INVALID_OPCODE => Err(io::Error::new(io::ErrorKind::Unsupported, format!("command failed: status {STATUS_INVALID_OPCODE:#x} (invalid opcode)"))),
+            s => Err(io::Error::other(format!("command failed: status {s:#x}"))),
         }
-        Ok(())
     }
 
     async fn identify(&mut self, cns: u8, nsid: u32) -> io::Result<Vec<u8>> {
@@ -818,6 +822,19 @@ impl Conn {
         sqe[0] = IO_FLUSH;
         sqe[2..4].copy_from_slice(&cid.to_le_bytes());
         sqe[4..8].copy_from_slice(&nsid.to_le_bytes());
+        self.cmd_write_data(&sqe, &[]).await
+    }
+
+    /// WRITE ZEROES of `nlb` (1..=65536) blocks, DEAC set (#400).
+    async fn io_write_zeroes(&mut self, nsid: u32, slba: u64, nlb: u32) -> io::Result<()> {
+        let cid = self.next_cid();
+        let mut sqe = [0u8; 64];
+        sqe[0] = IO_WRITE_ZEROES;
+        sqe[2..4].copy_from_slice(&cid.to_le_bytes());
+        sqe[4..8].copy_from_slice(&nsid.to_le_bytes());
+        sqe[40..44].copy_from_slice(&(slba as u32).to_le_bytes());
+        sqe[44..48].copy_from_slice(&((slba >> 32) as u32).to_le_bytes());
+        sqe[48..52].copy_from_slice(&((nlb - 1) | (1 << 25)).to_le_bytes());
         self.cmd_write_data(&sqe, &[]).await
     }
 
@@ -1433,6 +1450,35 @@ impl NvmeofDevice {
         }
         guard.carried(0);
         Ok(())
+    }
+
+    /// Make `len` bytes at `offset` zeros and deallocated on the target
+    /// (#400): WRITE ZEROES with DEAC, so a thin target stays thin. `false`
+    /// when the target does not do the command (an engine before #400): the
+    /// caller writes zeros instead.
+    pub async fn write_zeroes_deallocate(&self, offset: u64, len: u64) -> DriveResult<bool> {
+        if len == 0 {
+            return Ok(true);
+        }
+        self.check_aligned(offset, len as usize)?;
+        let bs = self.block_size as u64;
+        let nsid = self.spec.nsid;
+        let mut slba = offset / bs;
+        let mut blocks = len / bs;
+        while blocks > 0 {
+            let nlb = blocks.min(65536) as u32;
+            let mut guard = self.lock_conn().await?;
+            let conn = guard.as_mut().expect("lock_conn established");
+            match bounded("write zeroes", conn.io_write_zeroes(nsid, slba, nlb)).await {
+                Ok(()) => {}
+                // Answered, and the connection is sound: the command only.
+                Err(e) if e.kind() == io::ErrorKind::Unsupported => return Ok(false),
+                Err(e) => return Err(Self::failed(&mut guard, e)),
+            }
+            slba += nlb as u64;
+            blocks -= nlb as u64;
+        }
+        Ok(true)
     }
 
     async fn discard_once(&self, offset: u64, len: u64) -> DriveResult<()> {

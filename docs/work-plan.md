@@ -55,6 +55,23 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #400 (with #399) — ship a snapshot's changed extents over NVMe/TCP (2026-11-18, P0: stormvm#31)
+
+#399 was still open and #400 sends what it reports, so both here.
+- [x] #399: `VolumeManager::changes` (maps loaded and pinned, metadata
+  only), `snapshot::changed_extents` / `changed_ranges`;
+  `GET /v1/snapshots/{id}/changes?base=&page=&limit=`; the #130 rule
+  (`resolve_engine`: a /v1 snapshot, a /v1 volume, an engine volume by id
+  or name)
+- [x] WRITE ZEROES: the engine's target (DEAC: discard, then zeroes),
+  ONCS bit 3; the initiator's `write_zeroes_deallocate` (Invalid Opcode
+  answered as `false`: zeros written instead)
+- [x] #400: `mgmt::ship`: `POST /v1/snapshots/{id}/ship` (202, admin like
+  the live mirror), `GET|DELETE /v1/ship-jobs/{id}`; only the changed
+  ranges, throttled, progress saved every 64 MiB after a flush, resumed at
+  start from `next_offset` or failed when the snapshot is gone
+- [ ] check.sh; docs; release; close #399 and #400
+
 ## #655 — Volume `spec.sizeBytes` grows a volume (2026-11-18, P0 hand-off)
 
 forge1's `registry-data` is 4 GiB; it must hold forge's images.

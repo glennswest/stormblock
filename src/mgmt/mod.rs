@@ -21,6 +21,7 @@ pub mod slab_report;
 pub mod storage_layout;
 pub mod link;
 pub mod replication;
+pub mod ship;
 pub mod drive_errors;
 pub mod format_job;
 pub mod tls;
@@ -880,6 +881,8 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             }
             // Every replication not finished, and every mirror, run again (#656).
             crate::mgmt::replication::resume(state.clone());
+            // Every ship job a restart cut short resumes, or reads failed (#400).
+            crate::mgmt::ship::resume(state.clone()).await;
             // And finish the formats a previous run left in the middle (#141).
             let in_use = api::volumes_in_use(&state).await;
             for (name, r) in

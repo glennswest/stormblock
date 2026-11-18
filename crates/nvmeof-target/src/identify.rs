@@ -127,8 +127,9 @@ pub fn controller(
     // NN (Number of Namespaces)
     data[516..520].copy_from_slice(&max_namespaces.to_le_bytes());
 
-    // ONCS (Optional NVM Command Support) — Dataset Management
-    data[520..522].copy_from_slice(&0x0004u16.to_le_bytes());
+    // ONCS (Optional NVM Command Support): Dataset Management, and Write
+    // Zeroes (#400: a shipped snapshot's freed extents, deallocated).
+    data[520..522].copy_from_slice(&0x000Cu16.to_le_bytes());
 
     // VWC: a volatile write cache is present (#366). With VWC clear a host
     // takes every completed write as durable and never sends a Flush. The I/O

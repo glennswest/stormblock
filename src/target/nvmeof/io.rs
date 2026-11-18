@@ -76,6 +76,7 @@ pub async fn handle_io_command(
         IO_WRITE => handle_write(sqe, device, inline_data, cid).await,
         IO_FLUSH => handle_flush(device, cid).await,
         IO_DATASET_MGMT => handle_dataset_mgmt(sqe, device, inline_data, cid).await,
+        IO_WRITE_ZEROES => handle_write_zeroes(sqe, device, cid).await,
         _ => {
             tracing::debug!("unsupported NVMe I/O opcode: {opcode:#04x}");
             IoResult {
@@ -182,6 +183,31 @@ async fn handle_flush(device: &Arc<dyn BlockDevice>, cid: u16) -> IoResult {
                 cqe: NvmeCqe::error(cid, 0, 0, sct, sc),
                 data: Vec::new(),
             }
+        }
+    }
+}
+
+/// WRITE ZEROES (#400): the range reads back as zeros. With DEAC (CDW12 bit
+/// 25) it is deallocated first, so a thin volume keeps no slot for it (a
+/// shipped backup's freed extent stays free); then zeroed, which on a thin
+/// volume touches only what is still mapped.
+async fn handle_write_zeroes(sqe: &NvmeSqe, device: &Arc<dyn BlockDevice>, cid: u16) -> IoResult {
+    let slba = ((sqe.cdw11() as u64) << 32) | sqe.cdw10() as u64;
+    let nlb = (sqe.cdw12() & 0xFFFF) as u64 + 1;
+    let deac = sqe.cdw12() & (1 << 25) != 0;
+    let bs = device.block_size() as u64;
+    let (offset, len) = (slba * bs, nlb * bs);
+    if offset + len > device.capacity_bytes() {
+        return IoResult { cqe: NvmeCqe::error(cid, 0, 0, SCT_GENERIC, SC_LBA_OUT_OF_RANGE), data: Vec::new() };
+    }
+    if deac {
+        let _ = device.discard(offset, len).await;
+    }
+    match device.write_zeroes(offset, len).await {
+        Ok(()) => IoResult { cqe: NvmeCqe::success(cid, 0, 0), data: Vec::new() },
+        Err(e) => {
+            tracing::warn!("NVMe write zeroes at {offset} ({len} bytes): {e}");
+            IoResult { cqe: NvmeCqe::error(cid, 0, 0, SCT_GENERIC, 0x06), data: Vec::new() }
         }
     }
 }

@@ -54,6 +54,7 @@ mod integration_serve_host_bound;
 mod integration_secret;
 mod integration_serve_in_use;
 mod integration_serve_own_exports;
+mod integration_ship;
 mod integration_serve_mounted;
 mod integration_stormfs;
 mod integration_synonyms;

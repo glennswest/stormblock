@@ -333,6 +333,51 @@ pub fn divergence(
     }
 }
 
+/// An extent map reduced to what a diff compares (#399): index -> (slab,
+/// slot) of its first location.
+pub type Placed = std::collections::BTreeMap<u64, (SlabId, u64)>;
+
+/// The changes of `id` against `base` (#399), as extent indices with
+/// `zero` for one `base` maps and `id` does not: with no base every extent
+/// `id` maps; with one, every extent whose location differs. Metadata only.
+pub fn changed_extents(id: &Placed, base: Option<&Placed>) -> Vec<(u64, bool)> {
+    match base {
+        None => id.keys().map(|i| (*i, false)).collect(),
+        Some(b) => {
+            let mut out: Vec<(u64, bool)> = id.iter().filter(|(i, loc)| b.get(i) != Some(loc)).map(|(i, _)| (*i, false)).collect();
+            out.extend(b.keys().filter(|i| !id.contains_key(i)).map(|i| (*i, true)));
+            out.sort_unstable();
+            out
+        }
+    }
+}
+
+/// One range of a diff (#399).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChangedRange {
+    pub offset: u64,
+    pub length: u64,
+    pub zero: bool,
+}
+
+/// Changed extents as ranges: contiguous ones of the same kind merged,
+/// clipped to the volume's `size`.
+pub fn changed_ranges(changed: &[(u64, bool)], extent_size: u64, size: u64) -> Vec<ChangedRange> {
+    let mut out: Vec<ChangedRange> = Vec::new();
+    for &(i, zero) in changed {
+        let offset = i * extent_size;
+        if offset >= size {
+            continue;
+        }
+        let end = (offset + extent_size).min(size);
+        match out.last_mut() {
+            Some(r) if r.zero == zero && r.offset + r.length == offset => r.length = end - r.offset,
+            _ => out.push(ChangedRange { offset, length: end - offset, zero }),
+        }
+    }
+    out
+}
+
 pub fn snapshot_diff(
     gem: &GlobalExtentMap,
     a: VolumeId,
@@ -374,6 +419,25 @@ pub fn snapshot_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #399: snapshot A, three extents written, snapshot B: B's changes
+    /// against A are those three; without a base, what B maps; an extent A
+    /// maps and B does not is `zero`.
+    #[test]
+    fn changes_between_two_snapshots() {
+        let s = SlabId(uuid::Uuid::nil());
+        let a: Placed = [(0, (s, 10)), (1, (s, 11)), (2, (s, 12)), (7, (s, 17))].into_iter().collect();
+        let b: Placed = [(0, (s, 10)), (1, (s, 21)), (2, (s, 22)), (3, (s, 23))].into_iter().collect();
+        assert_eq!(changed_extents(&b, Some(&a)), vec![(1, false), (2, false), (3, false), (7, true)]);
+        assert_eq!(changed_extents(&b, None), vec![(0, false), (1, false), (2, false), (3, false)]);
+        assert!(changed_extents(&a, Some(&a)).is_empty(), "nothing changed against itself");
+        let x = 8 << 20;
+        assert_eq!(
+            changed_ranges(&changed_extents(&b, Some(&a)), x, 64 << 20),
+            vec![ChangedRange { offset: x, length: 3 * x, zero: false }, ChangedRange { offset: 7 * x, length: x, zero: true }]
+        );
+        assert_eq!(changed_ranges(&[(7, false)], x, 7 * x + 4096), vec![ChangedRange { offset: 7 * x, length: 4096, zero: false }], "clipped to the size");
+    }
     use crate::drive::BlockDevice;
     use crate::drive::filedev::FileDevice;
     use crate::drive::slab::Slab;
