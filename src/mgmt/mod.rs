@@ -20,6 +20,7 @@ pub mod boot_mounts;
 pub mod slab_report;
 pub mod storage_layout;
 pub mod link;
+pub mod replication;
 pub mod drive_errors;
 pub mod format_job;
 pub mod tls;
@@ -877,6 +878,8 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             if !gone.is_empty() {
                 tracing::info!("retired {} standing clone(s) nobody had claimed", gone.len());
             }
+            // Every replication not finished, and every mirror, run again (#656).
+            crate::mgmt::replication::resume(state.clone());
             // And finish the formats a previous run left in the middle (#141).
             let in_use = api::volumes_in_use(&state).await;
             for (name, r) in

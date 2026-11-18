@@ -55,6 +55,30 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #656 — Replication: sync a store from a peer engine (2026-11-18, P0 hand-off)
+
+Owner: "get the sync built, we need the data on forge1". forge (24.2.2, open)
+holds 1714 goldens (32 GiB allocated of 6 TB virtual), 322 blanks, 222
+media, 208 writable volumes. Nothing new is needed on the peer: its listing,
+`/legs` (each mapped extent and its slab/slot) and `/content` with a Range
+(sealed only) are enough for a thin, lineage-keeping pull.
+- [x] stage 1: `mgmt::replication`: the `Replication` object (typed, so
+  `phase` precedes `items`), `<data_dir>/replications.json`, a run per
+  generation (once / mirror every N s), resumed at start; parents first; a
+  clone made as a COW clone of its parent's copy plus the extents it holds
+  (location differs from the parent's), zeros where the parent maps and it
+  does not; same name+namespace sealed same size here = the same; metrics
+  `storm_replication_bytes_total`, `_items_total`, `_lag_seconds`; bounded
+  `Range` in `http::Client`; POST/PUT/PATCH/DELETE admin
+- [ ] check.sh; docs; release; the master creates it on forge1 (proof
+  `api:/apis/storage.storm.io/v1/replications/forge ~ "phase":"Synced"…`)
+- [ ] stage 2: writable volumes (needs a content read of an unsealed volume
+  on the peer, or a snapshot there), the registry side (stormblock-registry
+  #175's peer + `/v1/replicate`), events, credentialSecret/caSecret
+
+#652 was paused here by the master (re-queued after #656): its code is on
+main (644c6dd7 + the clippy fix), check.sh was running on it.
+
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 
 forge1: three HGST 10 TB at 12 Gbit read 64–103 MB/s, the HITACHI at 6 Gbit

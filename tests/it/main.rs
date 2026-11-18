@@ -43,6 +43,7 @@ mod integration_peers;
 mod integration_nvmeof;
 mod integration_pallet;
 mod integration_placement;
+mod integration_replication;
 mod integration_rebalance;
 mod integration_rollback;
 mod integration_power_cut;

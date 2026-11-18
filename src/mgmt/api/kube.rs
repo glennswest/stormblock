@@ -117,6 +117,7 @@ async fn api_resources() -> Json<Value> {
             res("slabs", "Slab", &["get", "list", "watch"]),
             res("drives", "Drive", &["get", "list", "watch", "patch"]),
             res("nodes", "Node", &["get", "list", "watch"]),
+            res("replications", "Replication", &["get", "list", "create", "update", "patch", "delete"]),
         ],
     }))
 }
@@ -837,6 +838,110 @@ fn async_stream(
 
 use futures_util::StreamExt as _;
 
+// ----------------------------------------------------------- replications
+
+/// A typed body, so the object's fields keep their order (#656: the
+/// listing's maps are sorted; a status is read `phase` first).
+fn typed<T: serde::Serialize>(code: StatusCode, v: &T) -> Response {
+    match serde_json::to_vec(v) {
+        Ok(b) => (code, [(header::CONTENT_TYPE, "application/json")], b).into_response(),
+        Err(e) => status_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", e.to_string()),
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplicationList<'a> {
+    api_version: String,
+    kind: &'static str,
+    items: Vec<crate::mgmt::replication::Object<'a>>,
+}
+
+async fn list_replications(State(state): State<Arc<AppState>>) -> Response {
+    let all = crate::mgmt::replication::list(&state);
+    typed(StatusCode::OK, &ReplicationList { api_version: api_version(), kind: "ReplicationList", items: all.iter().map(|r| r.object()).collect() })
+}
+
+async fn get_replication(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    match crate::mgmt::replication::get(&state, &name) {
+        Some(r) => typed(StatusCode::OK, &r.object()),
+        None => status_error(StatusCode::NOT_FOUND, "NotFound", format!("replications \"{name}\" not found")),
+    }
+}
+
+fn spec_of(body: &Value) -> Result<crate::mgmt::replication::Spec, Response> {
+    serde_json::from_value(body.get("spec").cloned().unwrap_or(Value::Null))
+        .map_err(|e| status_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec: {e}")))
+}
+
+fn put_replication(state: &Arc<AppState>, name: &str, spec: crate::mgmt::replication::Spec, code: StatusCode) -> Response {
+    match crate::mgmt::replication::put(state, name, spec) {
+        Ok(r) => typed(code, &r.object()),
+        Err(e) => status_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", e),
+    }
+}
+
+/// `POST …/replications` (#656): `{metadata: {name}, spec}`; the run starts.
+async fn create_replication(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
+    let Some(name) = body["metadata"]["name"].as_str().map(str::to_string) else {
+        return status_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", "metadata.name: required");
+    };
+    if crate::mgmt::replication::get(&state, &name).is_some() {
+        return status_error(StatusCode::CONFLICT, "AlreadyExists", format!("replications \"{name}\" already exists"));
+    }
+    match spec_of(&body) {
+        Ok(spec) => put_replication(&state, &name, spec, StatusCode::CREATED),
+        Err(r) => r,
+    }
+}
+
+/// `PUT …/replications/{name}`: its spec replaced (a new generation, the
+/// run follows it), or made.
+async fn replace_replication(State(state): State<Arc<AppState>>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
+    match spec_of(&body) {
+        Ok(spec) => put_replication(&state, &name, spec, StatusCode::OK),
+        Err(r) => r,
+    }
+}
+
+/// A JSON merge patch (RFC 7386) of `patch` into `into`.
+fn merge(into: &mut Value, patch: &Value) {
+    match (into.as_object_mut(), patch.as_object()) {
+        (Some(o), Some(p)) => {
+            for (k, v) in p {
+                if v.is_null() {
+                    o.remove(k);
+                } else {
+                    merge(o.entry(k.clone()).or_insert(Value::Null), v);
+                }
+            }
+        }
+        _ => *into = patch.clone(),
+    }
+}
+
+/// `PATCH …/replications/{name}`: `{spec: {…}}` merged into its spec.
+async fn patch_replication(State(state): State<Arc<AppState>>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
+    let Some(r) = crate::mgmt::replication::get(&state, &name) else {
+        return status_error(StatusCode::NOT_FOUND, "NotFound", format!("replications \"{name}\" not found"));
+    };
+    let mut spec = serde_json::to_value(&r.spec).unwrap_or(Value::Null);
+    merge(&mut spec, body.get("spec").unwrap_or(&Value::Null));
+    match serde_json::from_value(spec) {
+        Ok(spec) => put_replication(&state, &name, spec, StatusCode::OK),
+        Err(e) => status_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec: {e}")),
+    }
+}
+
+/// `DELETE …/replications/{name}`: the run stops; nothing it copied goes.
+async fn delete_replication(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    if crate::mgmt::replication::delete(&state, &name) {
+        Json(json!({ "apiVersion": "v1", "kind": "Status", "status": "Success", "details": { "name": name, "kind": "replications" } })).into_response()
+    } else {
+        status_error(StatusCode::NOT_FOUND, "NotFound", format!("replications \"{name}\" not found"))
+    }
+}
+
 async fn list_volumes(State(state): State<Arc<AppState>>, Query(q): Query<ListQuery>) -> Response {
     list_or_watch(state, "Volume", q).await
 }
@@ -864,5 +969,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(&format!("{gv}/drives/{{name}}"), get(get_drive).patch(patch_drive))
         .route(&format!("{gv}/nodes"), get(list_nodes))
         .route(&format!("{gv}/nodes/{{name}}"), get(get_node))
+        .route(&format!("{gv}/replications"), get(list_replications).post(create_replication))
+        .route(
+            &format!("{gv}/replications/{{name}}"),
+            get(get_replication).put(replace_replication).patch(patch_replication).delete(delete_replication),
+        )
         .with_state(state)
 }

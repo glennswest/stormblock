@@ -1465,7 +1465,7 @@ async fn the_engine_serves_kubernetes_shaped_resources() {
     let res: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1")).send().await.unwrap().json().await.unwrap();
     assert_eq!(res["kind"], "APIResourceList");
     let names: Vec<&str> = res["resources"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
-    assert_eq!(names, vec!["volumes", "slabs", "drives", "nodes"]);
+    assert_eq!(names, vec!["volumes", "slabs", "drives", "nodes", "replications"]);
 
     let created: serde_json::Value = client
         .post(format!("{url}/api/v1/fstemplates"))

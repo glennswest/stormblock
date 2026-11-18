@@ -367,6 +367,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if matches!(p, "/debug/tasks" | "/debug/threads") {
         return true;
     }
+    // A Replication (#656) writes volumes here from wherever its spec
+    // points: making, changing or stopping one is the admin's.
+    if *method != Method::GET && *method != Method::HEAD && (p == "/apis/storage.storm.io/v1/replications" || p.starts_with("/apis/storage.storm.io/v1/replications/")) {
+        return true;
+    }
     if *method == Method::POST {
         // A golden from a VM's disk, and a ticket to pull it (#143).
         if p == "/api/v1/goldens" || (seg.len() == 6 && seg[3] == "goldens" && seg[5] == "ticket") {
@@ -1938,6 +1943,10 @@ mod tests {
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26801b649/details", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Destructive);
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Ordinary);
+        // #656: a Replication writes volumes from its peer: the admin's.
+        assert_eq!(classify(&Method::POST, "/apis/storage.storm.io/v1/replications", None), Class::Destructive);
+        assert_eq!(classify(&Method::DELETE, "/apis/storage.storm.io/v1/replications/forge", None), Class::Destructive);
+        assert_eq!(classify(&Method::GET, "/apis/storage.storm.io/v1/replications/forge", None), Class::Ordinary);
         // #652: the read test reads only; the node's own token runs it.
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/read-test", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/format", None), Class::Destructive);

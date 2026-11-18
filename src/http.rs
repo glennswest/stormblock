@@ -252,6 +252,7 @@ impl Client {
             content_type: None,
             timeout: None,
             bearer: self.bearer.clone(),
+            range: None,
         }
     }
 }
@@ -265,9 +266,19 @@ pub struct RequestBuilder {
     content_type: Option<&'static str>,
     timeout: Option<Duration>,
     bearer: Option<String>,
+    /// `Range: bytes=from-to` (inclusive), when asked (#656).
+    range: Option<(u64, u64)>,
 }
 
 impl RequestBuilder {
+    /// Ask for bytes `from..=to` only (#656: a peer volume's extents, by
+    /// range). A server that ignores it answers 200 with everything; the
+    /// caller checks the length.
+    pub fn range(mut self, from: u64, to: u64) -> Self {
+        self.range = Some((from, to));
+        self
+    }
+
     /// Send `value` as the JSON body.
     pub fn json<T: serde::Serialize + ?Sized>(mut self, value: &T) -> Self {
         self.body = serde_json::to_vec(value)
@@ -382,7 +393,8 @@ impl RequestBuilder {
                 body,
                 content_type: self.content_type,
                 bearer: self.bearer.as_deref(),
-                range_from: 0,
+                range_from: self.range.map(|r| r.0).unwrap_or(0),
+                range_to: self.range.map(|r| r.1),
             };
             let (_, resp) = self.client.exchange(ask, deadline).await?;
             let status = StatusCode(resp.status().as_u16());
@@ -411,7 +423,7 @@ impl Client {
         crate::retry::with_backoff(&what, crate::retry::Policy::NETWORK, Error::class, |_| async {
             // Bounded (#359): a HEAD that never answers held an import for
             // ever. Redirects followed (#113).
-            let ask = Ask { method: hyper::Method::HEAD, url, body: Bytes::new(), content_type: None, bearer: None, range_from: 0 };
+            let ask = Ask { method: hyper::Method::HEAD, url, body: Bytes::new(), content_type: None, bearer: None, range_from: 0, range_to: None };
             let (_, resp) = self.exchange(ask, self.timeout).await?;
             let status = resp.status().as_u16();
             if crate::retry::classify_status(status) == crate::retry::Class::Transient {
@@ -434,7 +446,7 @@ impl Client {
     /// to the headers by the client's timeout. Answers whether the server
     /// resumed (206) or started over (200), and the body.
     async fn get_from(&self, url: &str, from: u64) -> Result<(String, bool, hyper::body::Incoming), Error> {
-        let ask = Ask { method: hyper::Method::GET, url, body: Bytes::new(), content_type: None, bearer: None, range_from: from };
+        let ask = Ask { method: hyper::Method::GET, url, body: Bytes::new(), content_type: None, bearer: None, range_from: from, range_to: None };
         let (landed, resp) = self.exchange(ask, self.timeout).await?;
         let status = resp.status().as_u16();
         // Which URL in the chain answered (#113): a mirror's 404 is not the
@@ -471,7 +483,9 @@ impl Client {
             if let Some(ct) = content_type {
                 req = req.header(hyper::header::CONTENT_TYPE, ct);
             }
-            if ask.range_from > 0 {
+            if let Some(to) = ask.range_to {
+                req = req.header(hyper::header::RANGE, format!("bytes={}-{to}", ask.range_from));
+            } else if ask.range_from > 0 {
                 req = req.header(hyper::header::RANGE, format!("bytes={}-", ask.range_from));
             }
             // A credential goes to the host it was meant for, not to wherever
@@ -650,6 +664,8 @@ struct Ask<'a> {
     content_type: Option<&'static str>,
     bearer: Option<&'a str>,
     range_from: u64,
+    /// The last byte of a bounded range (#656).
+    range_to: Option<u64>,
 }
 
 /// `scheme://authority` of a URL, for "is this the same host".
