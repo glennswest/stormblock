@@ -225,6 +225,10 @@ rot". The drive's side (stormraid#80 is the set's), beside #642's link.
 - [x] stormdrive#149 comment (the fields); image build 78575423af94
 - [ ] shipped with proof `get:http://{node}:9090/metrics ~
   storm_drive_errors_total\{.*kind="pi_guard"`
+- [ ] **reopened 2026-11-18**: pvetest2 has no SAS card (no sampler) and
+  `/metrics` is token-only (401). Waits `--after-install
+  stormblock>=85160ac6@forge1`; then check forge1's open health
+  `drive_errors` and close.
 
 ## #646 — the drive's own link rate, mode page 0x19/1 (2026-11-18, P1)
 
