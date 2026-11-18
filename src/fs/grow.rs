@@ -13,11 +13,7 @@ const EXT4_IOC_RESIZE_FS: libc::c_ulong = 0x4008_6610;
 
 /// The new block count for `bytes` of device at `block` bytes a block.
 pub fn blocks_for(bytes: u64, block: u64) -> u64 {
-    if block == 0 {
-        0
-    } else {
-        bytes / block
-    }
+    bytes.checked_div(block).unwrap_or(0)
 }
 
 /// What the filesystem at `mountpoint` is (`ext4`, `xfs`, …), from the
