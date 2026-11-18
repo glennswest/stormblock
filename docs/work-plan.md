@@ -80,16 +80,18 @@ where there is one, is an extra data slab of tier **`fast`**, empty by
 default, used only by what asks (`tier: fast`, a `fast` StorageClass; the
 build VMs' private drive first). v24.29.0 had it the other way (SSD system,
 HDD `cool`).
-- [ ] engine: `StorageTier::Fast` (byte 4; an older engine reads it as cold):
+- [x] engine (151230ad): `StorageTier::Fast` (byte 4; an older engine reads it as cold):
   never in a default or fallback chain, never counted for a default role or
   a redundancy promise; `tier: fast` on slab create, volume create, /v1
   create, and on a clone (fstemplates clone and /v1: a clone may name its
   tier, its new extents go there)
-- [ ] /init rule 4: the machine's own rotating drive before a solid-state
+- [x] /init rule 4 (151230ad): the machine's own rotating drive before a solid-state
   one; the SSD beside it said `left for the fast tier`
-- [ ] docs (README tiers, storage-layout, boot rule 4), CHANGELOG, check.sh
-- [ ] correct stormdrive#156 / stormcos#1039 (SSD `fast`, not HDD `cool`);
-  rustkube-node: a StorageClass's `tier` to the clone request
+- [x] docs (README tiers, storage-layout, boot rule 4), CHANGELOG (014ab5d8)
+- [ ] check.sh on 151230ad; release v24.30.0; image; close #377 too (the clone tier)
+- [x] stormdrive#157 (156 was closed: SSD enrolled `fast`, HDD never `cool`),
+  stormcos#1039 corrected (`stormblock-fast`), rustkube-node#400 (class tier
+  on the clone)
 
 ## #659 — no stubs (P-1, 2026-11-18)
 
