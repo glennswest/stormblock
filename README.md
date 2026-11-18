@@ -774,6 +774,15 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     drive's firmware programs less than its hardware can, and then the link
     negotiated and a minute of its counters are said (#646).
     [docs/storage-layout.md](docs/storage-layout.md#the-sas-link-both-sides-every-minute-642).
+  - The read test (#652): `stormblock hba read-test`, `POST
+    /api/v1/storage/hba/read-test`, and /init on an install with `storage:`.
+    Every drive at once, read only: sequential 1 and 4 MiB reads through the
+    block device (the kernel's DIF path) and through sg (the drive's own PI
+    check), random 4 KiB reads, the caching, control, power-condition and
+    exception pages and the background scan. Each drive's `level` is set
+    against the best of its class (`ok`, `slow` below 80 %, `very_slow` below
+    50 %), and lines starting `read-test` go on the console.
+    [docs/storage-layout.md](docs/storage-layout.md#the-read-test-each-drive-against-its-class-652).
   - Drive error and PI-check counters (#648), sampled with the link every
     minute: the drive's error log pages (read, write, verify, non-medium),
     its grown defects (and a SATA drive's SMART pending and offline

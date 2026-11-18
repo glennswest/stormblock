@@ -601,6 +601,52 @@ minute, for every drive the card lists (not one a format job is formatting).
   `status.health` is stormdrive's (stormdrive#149), the alerts ironprom's
   (ironprom#53), the console's view stormconsole's (#339).
 
+### The read test, each drive against its class (#652)
+
+forge1's three HGST 10 TB drives at 12 Gbit read at 64–103 MB/s with `dd
+iflag=direct`, while the HITACHI 10 TB beside them read 238 MB/s at 6 Gbit.
+All four were 7200 rpm, at 4096 + PI type 1, with clean link counters.
+
+- **What it reads, read only, every drive at once:**
+  - sequential 1 MiB and 4 MiB reads from 10 % into the drive (the same
+    place on each, so the same zone), two ways:
+    - the kernel's block device with O_DIRECT. This is what the OS mirror
+      and the set read through: sd's DIF path, the card checking and
+      stripping the PI.
+    - sg `READ(16)` with `RDPROTECT 0`. The drive checks its own PI and
+      sends none, and the card does no EEDP.
+
+    The two side by side say whether the DIF read path is the cost.
+  - random 4 KiB reads, one at a time, over the whole drive.
+  - the mode pages 0x08 caching, 0x0A control (QAM), 0x1A power condition
+    (idle and standby timers) and 0x1C informational exceptions, said, and
+    log page 0x15's background scan (whether a medium scan is running, how
+    many, how far).
+- **The level:** each drive's best sequential rate against the best of its
+  class (same rotation rate and size, rounded to the TB). `ok` is 80 % of
+  that or more, `slow` is below 80 %, `very_slow` below 50 %. A drive alone
+  in its class is `ok`.
+- **The lines** start `read-test <sas> (<dev>, <vendor> <product> <rev>,
+  <class>, link <rate>)`, a line a step, then the level: `very_slow: 103
+  MB/s is 43 % of the best of its class (238 MB/s)`.
+- **Where:**
+  - `stormblock hba read-test [SAS…] [--dev-name /dev/sda…] [--all] [--mib
+    1024] [--offset-pct 10] [--secs 10] [--out FILE] [--json]` on the node;
+  - `POST /api/v1/storage/hba/read-test` (`{sas: [], bytes, offset_pct,
+    random_secs}`; every present drive by default; the node token, since it
+    only reads). Its lines are logged at WARN and reach the console. `GET`
+    gives the last results, which are also each card row's `read_test`.
+  - **/init, on an install with `storage:`:** after the link-rate policy
+    and before anything is formatted, while the drives are quiet, the drives
+    taken are tested at 256 MiB a pass and 5 s of random reads. The lines go
+    on the console and the results to `/run/stormblock/read-test.json`,
+    which the engine takes into the rows at its start.
+    `rd.stormblock.readtest=off` skips it.
+
+  It loads the drives while it runs, a minute or two at the defaults. A
+  fix it points to (a mode page) is made through the Drive object
+  (stormdrive#146), never by hand.
+
 ### The drive's own link rate, mode page 0x19/1 (#646)
 
 forge1 bay 3's replacement (a HITACHI with EMC firmware) negotiated 6 Gbit

@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18 (#652)
+- **feat:** #652 (forge1: three HGSTs at 12 Gbit read 64–103 MB/s, the HITACHI at 6 Gbit 238): the read test, read only, every drive at once. Sequential 1 and 4 MiB reads from 10 % into the drive go through the block device (O_DIRECT, the kernel's DIF path) and through sg (READ(16) RDPROTECT 0, the drive's own PI check), so the DIF path's cost shows. It also does random 4 KiB QD1 reads and reads mode pages 0x08/0x0A/0x1A/0x1C and log page 0x15's background scan. Each drive's level is set against the best of its class (`ok`, `slow` < 80 %, `very_slow` < 50 %). It runs from `stormblock hba read-test`, from `POST|GET /api/v1/storage/hba/read-test` (lines at WARN, rows' `read_test`), and from /init on an install with `storage:` (256 MiB a pass, before anything is formatted; `rd.stormblock.readtest=off`), whose results the engine takes into the rows.
+
 ## [v24.25.0] — 2026-11-18
 
 ### Added

@@ -1938,6 +1938,8 @@ mod tests {
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26801b649/details", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Destructive);
         assert_eq!(classify(&Method::GET, "/api/v1/storage/hba/0x5000cca26a819e69/write-test", None), Class::Ordinary);
+        // #652: the read test reads only; the node's own token runs it.
+        assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/read-test", None), Class::Ordinary);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/format", None), Class::Destructive);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/hba/0x5000cca26a819e69/firmware", None), Class::Destructive);
         assert_eq!(classify(&Method::POST, "/api/v1/storage/enclosures/0x500a098012345678/format", None), Class::Destructive);
