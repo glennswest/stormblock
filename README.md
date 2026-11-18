@@ -967,13 +967,58 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/api/v1/exports`, `/luns`, `/sessions`, `/discovery`, `/cluster` | engine exports, iSCSI LUNs and sessions, discovery (`/discovery/cluster`, `…/join`, `…/leave`), cluster (`nodes`, `nodes/{id}`, `status`, `heartbeat`) |
 | `/raft/{vote,append,snapshot}` | openraft RPCs between cluster peers (feature `cluster`) |
 | `/api/v1/stormfs` | the StormFS data path (`docs/stormfs-api.md`) |
-| `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement` (create takes `placement.array_id`, `slab_id` or `drive`, exactly one, on this node: a slab or drive that cannot hold it is `409`, one this node lacks `507`, #426), `prestage`, `fence`, `promote`, `dual-attach` |
+| `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement` (create takes `placement.array_id`, `slab_id` or `drive`, exactly one, on this node: a slab or drive that cannot hold it is `409`, one this node lacks `507`, #426), `prestage`, `fence`, `promote`, `dual-attach`; the backup primitives (stormstorage#46, stormvm#31): `GET /v1/snapshots/{id}/changes[?base=]` (#399) and `POST /v1/snapshots/{id}/ship` → `/v1/ship-jobs/{id}` (#400), below |
 | `/serve/v1` (and `/mk/v1`) | the serving layer: `health`, `ready`, `status`, `volumes` (list, create, delete), exports, tar, raw, trim |
 | `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` and `labelSelector` (`k=v`, `k!=v`, `k`, `!k`). A Volume's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` (`transport`, `device`, `mountedAt`, `target`, `port`, `lun`, `nsid`, `state`, `remote`) and `kind` as the REST listing does (#649), and its labels `storm.io/kind` and `storm.io/owner-kind`: `kubectl get volumes -l storm.io/owner-kind=Pod`, `-l '!storm.io/owner-kind,storm.io/kind=volume'` for orphan clones, or `?unowned=true` |
 | `PATCH /apis/storage.storm.io/v1/volumes/{id}` | `spec`: `redundancy`, `sealed`, `access`, `retention`, `resync`, and `sizeBytes` (#655), which grows the volume: thin, never smaller (`422`), never a sealed, exported or mirrored one (`409`). Its ublk device is told the new size. An ext4 the engine sees mounted on it is grown online (`EXT4_IOC_RESIZE_FS`); otherwise (an XFS, a mount in a service's own namespace) the service that mounts it grows it. `status.capacityBytes` follows, and the PATCH's answer carries `status.lastResize` (`from`, `to`, `device`, `filesystem`) |
 | `/apis/storage.storm.io/v1/replications` | `Replication` (#656): sync this engine's store from a peer engine, once or following it; create, replace, patch, delete are the admin's. See "Replication" below |
 | `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
 
+
+
+## Backups: a snapshot's changes, shipped (#399, #400)
+
+The two engine primitives behind stormstorage#46's backup tier and
+stormvm#31's VM backups. The engine does the data path; the caller decides
+when and keeps the points.
+
+**`GET /v1/snapshots/{id}/changes[?base=…][&page=N&limit=M]`** (#399).
+`{id}` and `base` are a `/v1` snapshot, a `/v1` volume, or an engine volume
+by id or name (#130), so this works on a head a promote moved the array
+to. It answers `{extent_size_bytes, size_bytes, changed_bytes, zero_bytes,
+ranges_total, page, next_page, ranges: [{offset, length, zero}]}`:
+- without `base`, the extents `{id}` maps;
+- with `base`, the extents whose location differs;
+- `zero: true` where `base` maps an extent `{id}` does not.
+
+The extent maps only, never the data. Contiguous extents of a kind are one
+range.
+
+**`POST /v1/snapshots/{id}/ship`** `{target_uri, base?, max_bytes_per_sec}`
+(#400) answers 202 with a job. It needs the admin token, since the
+snapshot's bytes leave the engine, as with a live mirror.
+- The target is opened as a remote drive (`nvme-tcp://host:port/<nqn>?nsid=N`,
+  `&hostnqn=` or this node's host NQN), and only the ranges the changes
+  report are written, at the same offsets.
+- A `zero` range is WRITE ZEROES with deallocate, so a thin target stays
+  thin. An older target that refuses the command gets zeros written, said
+  once in the log.
+- Then a flush, and the target is closed.
+- The cost is O(changed bytes), throttled by `max_bytes_per_sec` (0
+  unlimited).
+
+The job: `{id, state: copying|done|failed, bytes_total, bytes_done,
+zero_bytes, ranges, message, next_offset, …}`.
+- `GET /v1/ship-jobs/{id}` reads it.
+- `DELETE` cancels it: `failed`, `cancelled: …`, and the target is not
+  consistent.
+- Jobs are kept in `<data_dir>/ship-jobs.json`, their progress saved every
+  64 MiB after a flush of the target. After a restart a copying job resumes
+  from there, or reads `failed` when its snapshot is gone. A job that
+  existed is never a 404.
+
+The engine's own NVMe/TCP target does WRITE ZEROES now (ONCS bit 3). With
+DEAC the range is deallocated first, then zeroed.
 
 ## Replication
 
