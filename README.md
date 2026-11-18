@@ -774,6 +774,15 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     drive's firmware programs less than its hardware can, and then the link
     negotiated and a minute of its counters are said (#646).
     [docs/storage-layout.md](docs/storage-layout.md#the-sas-link-both-sides-every-minute-642).
+  - Drive error and PI-check counters (#648), sampled with the link every
+    minute: the drive's error log pages (read, write, verify, non-medium),
+    its grown defects (and a SATA drive's SMART pending and offline
+    uncorrectable), and the kernel's sense lines for it: PI guard /
+    application / reference tag checks the drive raised, apart from the
+    card's EEDP errors. Rates, a level (`ok`, `degraded`, `failing`), each
+    row's `errors`, health's `drive_errors`, `/metrics`
+    `storm_drive_errors_total{kind}` and `storm_drive_defects{kind}`.
+    [docs/storage-layout.md](docs/storage-layout.md#drive-error-and-pi-check-counters-every-minute-648).
   - The power button (#635): from early in `/init` until switch_root,
     `stormblock power-button` acts on the ACPI "Power Button" (a BMC's soft
     off): the storage engine and the screen stopped, a sync, a clean power

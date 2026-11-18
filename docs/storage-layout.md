@@ -547,6 +547,60 @@ protected write and read was good. Nobody read the counter.
   for a marginal drive until it is replaced, never set automatically; the
   level still watches it. `--max hw` gives the phy back its hardware maximum.
 
+### Drive error and PI-check counters, every minute (#648)
+
+Owner: "we also need raid counters and keep track of pi rewrites? Ie bit
+rot". stormraid#80 counts what the set finds and repairs. This is the
+drive's own side, sampled by the card's thread beside its link, once a
+minute, for every drive the card lists (not one a format job is formatting).
+
+- **What is read:**
+  - the drive's error counter log pages (only those page 0x00 lists): 0x02
+    write, 0x03 read, 0x05 verify (corrected without delay, corrected with
+    possible delays, total rewrites/rereads, total corrected, total
+    uncorrected) and 0x06 non-medium errors;
+  - 0x2F, the last informational exception (`exception`, ASC/ASCQ). The page
+    holds the last one, not a count;
+  - READ DEFECT DATA (12), the grown list's length (count only);
+  - a SATA drive (INQUIRY vendor `ATA`): SMART READ DATA through ATA
+    PASS-THROUGH (16), raw 5 (reallocated), 197 (pending), 198 (offline
+    uncorrectable);
+  - the kernel's sense lines for the drive (`/dev/kmsg`, matched by the
+    row's H:C:T:L, only records not seen before): `Sense Key` + `Add. Sense`
+    of each failed command. ASC 0x10 ASCQ 1/2/3 is a PI guard, application
+    tag or reference tag check. When the sense key is ILLEGAL REQUEST it is
+    the card's (mpt3sas makes an IOC EEDP error that,
+    `_scsih_eedp_error_handling`): `eedp_guard`, `eedp_app_tag`,
+    `eedp_ref_tag`. Otherwise the drive raised it: `pi_guard`, `pi_app_tag`,
+    `pi_ref_tag`. Medium, recovered and hardware errors are counted too. The
+    drive keeps no count of these itself; these count since the engine
+    started (and what the kernel's buffer held then).
+- **The rates:** per minute between samples, by kind; defects per day (a 24 h
+  window of the grown list, and SATA's pending).
+- **The level:** `settling` (one sample); `ok` (nothing that matters moving:
+  corrected-on-the-fly ECC never counts); `degraded` (a retry-corrected,
+  non-medium, recovered or hardware error, a medium error or PI check
+  failure, a defect grown in the last day); `failing` (an uncorrected error;
+  a PI check failure or medium error in 2 samples running; 10 defects grown
+  in a day). A change is logged at WARN: `storage: drive 0x… (bay 3): errors
+  ok -> degraded: pi_guard 1.0/min (#648)`.
+- **Where:** each row of `GET /api/v1/storage/hba` carries `errors` (the
+  drive's counters, the sense counts, `per_min`, `defects_per_day`, the
+  level, since when, `why`). Health (open) has `drive_errors`: each drive's
+  level, since when, `pi_checks`, `eedp_checks`, `uncorrected`,
+  `medium_errors`, `grown_defects`, `defects_per_day`, `why`. `/metrics` has
+  `storm_drive_errors_total{node,drive,bay,shelf,kind}` (counters; kinds
+  `pi_guard`, `pi_app_tag`, `pi_ref_tag`, `eedp_guard`, `eedp_app_tag`,
+  `eedp_ref_tag`, `medium_error`, `recovered_error`, `hardware_error`,
+  `{read,write,verify}_{corrected_fast,corrected_delayed,corrected,uncorrected}`,
+  `read_rereads`, `write_rewrites`, `verify_rereads`, `non_medium`; a kind the
+  drive keeps no page for is left out, the sense kinds are always there),
+  `storm_drive_defects{…,kind}` (gauge: `grown`, and on SATA `reallocated`,
+  `pending`, `offline_uncorrectable`) and `storm_drive_errors_level` (-1
+  settling, 0 ok, 1 degraded, 2 failing). The Drive object's
+  `status.health` is stormdrive's (stormdrive#149), the alerts ironprom's
+  (ironprom#53), the console's view stormconsole's (#339).
+
 ### The drive's own link rate, mode page 0x19/1 (#646)
 
 forge1 bay 3's replacement (a HITACHI with EMC firmware) negotiated 6 Gbit

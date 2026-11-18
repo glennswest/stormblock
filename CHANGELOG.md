@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18 (#648)
+- **feat:** #648 (owner: "keep track of pi rewrites? Ie bit rot"): each drive's error and PI-check counters, sampled every minute beside its link. Read: log pages 0x02/0x03/0x05 (corrected fast and delayed, rewrites/rereads, corrected, uncorrected) and 0x06 (only pages the drive lists), 0x2F's last exception, the grown defect count, a SATA drive's SMART 5/197/198, and the kernel's sense lines for the drive (PI guard / app tag / ref tag checks the drive raised, the card's EEDP errors told apart by ILLEGAL REQUEST, medium, recovered and hardware errors). Rates per minute, defects per day, a level (`ok|degraded|failing`, WARN on a change). Each card row's `errors`, health's `drive_errors`, `/metrics` `storm_drive_errors_total{kind}`, `storm_drive_defects{kind}`, `storm_drive_errors_level`.
+
 ## [v24.23.0] — 2026-11-18
 
 ### Added
