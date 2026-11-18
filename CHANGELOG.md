@@ -4,6 +4,14 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.30.0] — 2026-11-18
+
+### Added
+- #672: the `fast` tier, which only a volume, claim or clone that names it reaches (the blade's SSD); a clone may name its own tier (#377).
+
+### Changed
+- #672: `/init` rule 4 takes the machine's own rotating drive before a solid-state one: a blade's both halves on its HDD, the SSD left for `fast`.
+
 ### 2026-11-18 (#672, the owner's shape)
 - **feat:** #672: the `fast` tier, which nothing reaches unasked. It is the blade's SSD beside its system HDD; the build VMs' drive is first to use it. It is in no default policy or fallback chain, and not the any-slab fallback. It is not counted for a default role or a redundancy promise. An affine volume keeps to a fast slab only if it asked for one. `tier: fast` works on slab create, volume create and `/v1` create. A clone may name its own tier (fstemplates clone, volumes clone, `/v1` with a source); its writes go there and what it shares stays put. Tier byte 4: an older engine reads a fast slab as cold and a fast volume as hot.
 - **feat:** #672: `/init` rule 4 takes a rotating drive before a solid-state one among the machine's own drives. server8 lays both halves on its 2 TB HDD, as server1–7 do, and its SSD is said as `left for the fast tier`. This replaces v24.29.0's SSD system with the HDD `cool`.

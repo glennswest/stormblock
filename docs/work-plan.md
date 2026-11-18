@@ -88,7 +88,8 @@ HDD `cool`).
 - [x] /init rule 4 (151230ad): the machine's own rotating drive before a solid-state
   one; the SSD beside it said `left for the fast tier`
 - [x] docs (README tiers, storage-layout, boot rule 4), CHANGELOG (014ab5d8)
-- [ ] check.sh on 151230ad; release v24.30.0; image; close #377 too (the clone tier)
+- [x] check.sh ALL PASS on 151230ad; v24.30.0; image requested; #377 closed
+- [ ] proof: server8's next install on the HDD, the SSD `fast` (stormdrive#157)
 - [x] stormdrive#157 (156 was closed: SSD enrolled `fast`, HDD never `cool`),
   stormcos#1039 corrected (`stormblock-fast`), rustkube-node#400 (class tier
   on the clone)
