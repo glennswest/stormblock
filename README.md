@@ -1680,6 +1680,32 @@ registry node, whose content is meant to outlive a rebuild. There the default
 was a system slab that does not exist, and every write failed at its first
 allocation while reads went on working (#92, #93).
 
+### Tiers, and the `fast` tier nothing reaches unasked (#672)
+
+Each slab has a tier: `hot`, `warm`, `cool`, `cold` or `fast`. A volume
+prefers one, `hot` unless it names another (`tier` on `POST
+/api/v1/volumes` and `/v1` create), and falls back through the others
+hottest first: a tier is a preference, never a refusal (#151).
+
+`fast` is opt-in. It is the small SSD beside a blade's system HDD (the
+owner on #672: "put the system on the rotating, and have the option of
+putting stuff on the ssd"), and the build VMs' private drive is its first
+user. It is in no fallback chain. It is not the any-slab fallback. A
+redundancy promise or a default role does not count it. An affine volume
+that did not ask for it is never kept on it. So a volume that does not name
+`fast` never lands there, even with every other slab full. One that names it
+does, and spills to the shared tiers when it is full.
+
+A clone takes its source's tier unless it names its own: `tier` on `POST
+/api/v1/fstemplates/{id}/clone`, `POST /api/v1/volumes/{id}/clone` and a
+`/v1` create with a `source`. What it shares stays where it is, and its
+own writes go to the tier it names. So a `fast` claim cloned from the
+`pvc-ext4j` blank on the HDD writes to the SSD. A `fast` slab is made with
+`POST /api/v1/slabs {device_path, role: "data", tier: "fast"}` (stormdrive's
+DrivePolicy enrolls it) or `stormblock slab format --tier fast`. On disk it
+is tier byte 4: an engine before v24.30.0 reads a `fast` slab as `cold` and
+a `fast` volume as `hot`.
+
 ### Preformatted filesystem templates — mkfs once, clone forever
 
 > **A template is a volume that has been sealed (#76, v12.0.0).** Lineage
@@ -2637,7 +2663,7 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.tag=<name>` | the firmware's `StormBootTag`, else this, else SMBIOS serial/UUID | the name claimed as (`boothost/<name>`); a firmware name that differs wins, with a warning (#249) |
 | `rd.stormblock.hostnqn=<nqn>` | the firmware's `StormBootHostNqn` | the NQN presented on every NVMe/TCP connect |
 | `rd.stormblock.trust-smbios=1` | off | let a name guessed from SMBIOS install over a disk (#249) |
-| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any` (a blank drive, or this node's own layout), `blank`, `off`, `force`; which drive an install takes (#478, the owner's rules, replacing #351's stop): `system_drive:` in the install-config (serial, wwn, model, shelf + bay; exactly one match, else a STOP naming every drive), else the one `rd.stormblock.slab=` names, else the drive holding this node, else **the machine's first drive** by controller and port order (own shelves first, never USB or removable). Old installs, slabs and partitions on it are taken over, its data half kept; a RAID member is left. The choice is recorded as stormdrive's designation; the drive chosen is proved by WWN/serial/size before it is written (`docs/boot-hooks.md`). **A boot from the appliance that takes no local drive stops** (#427, the flow-over is mandatory): a FATAL naming every drive left and why. `off` runs it diskless, said |
+| `rd.stormblock.assimilate=` | `any` | which local drive the flow-over takes: `any` (a blank drive, or this node's own layout), `blank`, `off`, `force`; which drive an install takes (#478, the owner's rules, replacing #351's stop): `system_drive:` in the install-config (serial, wwn, model, shelf + bay; exactly one match, else a STOP naming every drive), else the one `rd.stormblock.slab=` names, else the drive holding this node, else **the machine's first drive** by controller and port order (own shelves first, a rotating drive before a solid-state one, #672, never USB or removable). Old installs, slabs and partitions on it are taken over, its data half kept; a RAID member is left. The choice is recorded as stormdrive's designation; the drive chosen is proved by WWN/serial/size before it is written (`docs/boot-hooks.md`). **A boot from the appliance that takes no local drive stops** (#427, the flow-over is mandatory): a FATAL naming every drive left and why. `off` runs it diskless, said |
 | `rd.stormblock.diskless=1` | unset | run from the appliance on purpose: a boot that takes no local drive goes on, said, where it would stop (#427) |
 | `rd.stormblock.allow-external=1` | off | count a drive on an external shelf as the machine's own (#273, #347, #351) |
 | `rd.stormblock.wipe=<dev>` | — | clear that disk's partition table and slab headers once, before the survey |

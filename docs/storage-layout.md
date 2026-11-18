@@ -620,20 +620,27 @@ minute, for every drive the card lists (not one a format job is formatting).
 
 server8's 2 TB SATA HDD sat laid with nothing and said nowhere. Every boot
 that has a local disk now says each whole drive its layout leaves, with what
-the drive is and why:
+the drive is and why. Laid as the owner asked (both halves on the HDD, rule
+4 in `docs/boot-hooks.md`), server8 says:
 
 ```
-not taken: sdb (ST2000DM008-2UB1, 2000 GB, SATA HDD, 512e): the install lays the node on /dev/sda; a data drive beyond them is enrolled by stormdrive's DrivePolicy after the boot, and its Drive object says what it decided (#672)
+not taken: sda (Patriot P210 512GB, 512 GB, SATA SSD, 512-byte sectors): left for the fast tier: the node is on the rotating /dev/sdb; stormdrive's DrivePolicy enrolls this drive as a `fast` data slab, which only a volume or claim that asks for `fast` uses, and its Drive object says what it decided (#672)
 not taken: sdc (Virtual Disk, 0 GB, USB): a USB drive: an install never takes one (#672)
 ```
+
+Before that, laid on the SSD (24.22.0), the HDD was said as `not taken: sdb
+(ST2000DM008-2UB1, 2000 GB, SATA HDD, 512e): the install lays the node on
+/dev/sda; a data drive beyond them is enrolled by stormdrive's DrivePolicy
+after the boot, …`.
 
 What it is: SATA/SSD/HDD, the kernel's zoned model (`zoned host-managed`;
 drive-managed SMR reads `none`, so stormdrive's ATA IDENTIFY says that one),
 and 512e, 4Kn or the sector size. Why: USB, removable, no media, or a data
-drive beyond the node's layout. Such a drive is stormdrive's to enroll: its
-DrivePolicy takes the blades' HDD as a `cool` data slab through `POST
-/api/v1/slabs {device_path, tier}`, at its block size with no format and no
-PI (stormdrive#156, stormcos#1039). The engine's survey (health's
+drive beyond the node's layout. Such a drive is stormdrive's to enroll,
+through `POST /api/v1/slabs {device_path, role, tier}`, at its block size
+with no format and no PI (a SATA 512e drive is taken as is). On a blade
+that is the SSD beside the HDD, as `{role: "data", tier: "fast"}`
+(stormdrive#156, stormcos#1039). The engine's survey (health's
 `local_disk.drives`) carries `rotational`, `zoned`, `logical_block` and
 `physical_block` for each drive.
 

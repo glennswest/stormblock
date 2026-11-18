@@ -100,14 +100,23 @@ taken, where #351 stopped. In order:
    drive in controller and port order: the by-path order, PCI addresses read
    as hex and every other number as a number, so `ata2` comes before `ata10`
    and `00:02.0` before `00:1f.2`. The machine's own shelves come before
-   external ones, then the lowest bay. It is never "`/dev/sda`", which is
-   only the order the kernel met the drives in. The console says which drive
-   and why:
+   external ones, a rotating drive before a solid-state one (#672), then
+   the lowest bay. It is never "`/dev/sda`", which is only the order the
+   kernel met the drives in. The console says which drive and why:
 
    ```
    SYSTEM DRIVE: /dev/sdb, this machine's first drive (no system_drive in its
    install-config; first by controller and port order: /sys/devices/pci0000:00/0000:00:1f.2/ata2/…) (#478)
+   the rotating drive before the solid-state sda, which is left for the fast tier (#672)
    ```
+
+   The rotating drive first is the owner's rule for the blades (#672,
+   2026-11-18: "put the system on the rotating, and have the option of
+   putting stuff on the ssd"). server8 lays out like server1–7, which have
+   only the HDD: both halves on the 2 TB HDD. Its small SSD is the `fast`
+   tier, which nothing uses unless it asks (README, "Tiers"). The rule only
+   decides a fresh install. A node already on a drive stays there (rule 3),
+   and `system_drive:` moves it.
 
    Several drives holding older installs that cannot be told apart (server8)
    come here too: the first drive is taken and the others are left.
