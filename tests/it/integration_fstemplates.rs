@@ -1364,6 +1364,39 @@ async fn any_engine_volume_can_be_attached_through_the_volume_door() {
     server.abort();
 }
 
+/// #655: `spec.sizeBytes` grows a volume through its object: thin, the
+/// object's `status.capacityBytes` following, never smaller, never sealed.
+#[tokio::test]
+async fn spec_size_bytes_grows_a_volume() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    let id = state.volume_manager.lock().await.create_volume_any("registry-data", 4 << 20).await.unwrap();
+    let patch = |size: u64| client.patch(format!("{url}/apis/storage.storm.io/v1/volumes/registry-data")).json(&serde_json::json!({ "spec": { "sizeBytes": size } })).send();
+    let r = patch(64 << 20).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(v["spec"]["sizeBytes"], 64u64 << 20);
+    assert_eq!(v["status"]["capacityBytes"], 64u64 << 20);
+    assert_eq!(v["status"]["lastResize"]["from"], 4u64 << 20);
+    assert_eq!(v["status"]["lastResize"]["device"], "no ublk device here");
+    assert!(v["status"]["lastResize"]["filesystem"].as_str().unwrap().contains("grown by the service that mounts it"), "{v}");
+    let text = serde_json::to_string(&v).unwrap();
+    assert!(text.contains(r#""storm.io/name":"registry-data""#) && text.contains(r#""sizeBytes":67108864"#), "the proof's shape: {text}");
+    {
+        let vm = state.volume_manager.lock().await;
+        let h = vm.get_volume_handle(&id).unwrap();
+        assert_eq!(stormblock::drive::BlockDevice::capacity_bytes(&*h), 64 << 20);
+    }
+    assert_eq!(patch(8 << 20).await.unwrap().status(), 422, "never smaller");
+    let same = patch(64 << 20).await.unwrap();
+    assert_eq!(same.status(), 200, "the same size is no change");
+    state.volume_manager.lock().await.seal_volume(id, None).await.unwrap();
+    assert_eq!(patch(128 << 20).await.unwrap().status(), 409, "a sealed volume is not grown");
+    server.abort();
+}
+
 /// #649: the Volume object says who owns a clone, what it is and whether
 /// it is in use, as the REST listing does; `storm.io/owner-kind` selects by
 /// owner, `!storm.io/owner-kind` and `?unowned=true` the orphans; with

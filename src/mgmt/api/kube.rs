@@ -285,6 +285,9 @@ async fn volume_object(s: &VolumeSnap, view: &AttachView) -> Value {
             "unreadable": health.unreadable,
             "failedSlabs": health.failed_slabs.iter().map(|s| s.0.to_string()).collect::<Vec<_>>(),
             "allocatedBytes": handle.allocated().await,
+            // What the volume is now (#655): `spec.sizeBytes` is what was
+            // asked; this follows the resize.
+            "capacityBytes": handle.capacity_bytes(),
             "physicalBytes": handle.physical().await,
             "parent": s.parent.map(|p| p.0.to_string()),
             "children": s.children.iter().map(|c| c.0.to_string()).collect::<Vec<_>>(),
@@ -359,6 +362,72 @@ struct VolumeSpecPatch {
     resync: Option<bool>,
     #[serde(default)]
     retention: Option<String>,
+    /// Grow the volume to this many bytes (#655): thin and online, never
+    /// smaller, never a sealed one.
+    #[serde(default, rename = "sizeBytes")]
+    size_bytes: Option<u64>,
+}
+
+/// Grow a volume through its object (#655): the engine's resize, then the
+/// kernel device told (a ublk export), then an ext4 the engine sees mounted
+/// grown online. What happened, in words, for `status.lastResize`.
+async fn grow_volume(state: &AppState, id: VolumeId, to: u64) -> Result<Value, Response> {
+    let uuid = id.0;
+    let (sealed, from) = {
+        let vm = state.volume_manager.lock().await;
+        match vm.get_volume_handle(&id) {
+            Some(h) => (h.is_sealed(), h.capacity_bytes()),
+            None => return Err(status_error(StatusCode::NOT_FOUND, "NotFound", format!("volumes \"{uuid}\" not found"))),
+        }
+    };
+    if to == from {
+        return Ok(json!({ "from": from, "to": to, "volume": "already that size" }));
+    }
+    if to < from {
+        return Err(status_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "Invalid",
+            format!("spec.sizeBytes: {to} is smaller than the volume ({from}): a volume grows, never shrinks (a filesystem on it cannot follow)"),
+        ));
+    }
+    if sealed {
+        return Err(status_error(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} is sealed: it takes no writes and is not grown (grow a clone of it)")));
+    }
+    if state.exports.read().await.iter().any(|e| e.volume_id == uuid) {
+        return Err(status_error(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} has iSCSI/NVMe exports: their hosts read its size at connect; detach them first")));
+    }
+    if crate::mgmt::live_mirror::is_mirrored(state, uuid).await {
+        return Err(status_error(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} is being mirrored to a peer; stop the mirror first")));
+    }
+    if let Err(e) = state.volume_manager.lock().await.resize_volume(id, to).await {
+        return Err(status_error(StatusCode::CONFLICT, "Conflict", e.to_string()));
+    }
+    let key = uuid.to_string();
+    let (device, dev_path) = {
+        let u = state.ublk_exports.lock().await;
+        let p = u.device_path(&key);
+        (u.update_size(&key, to), p)
+    };
+    let device = match device {
+        Ok(true) => format!("{} told {to} bytes", dev_path.as_deref().unwrap_or("its ublk device")),
+        Ok(false) => "no ublk device here".to_string(),
+        Err(e) => {
+            tracing::error!("volume {uuid} grew to {to} but its ublk device did not follow: {e} (#655)");
+            format!("its ublk device did not follow: {e}")
+        }
+    };
+    let fs = match dev_path.as_deref().and_then(crate::mgmt::ublk_export::mounted_at) {
+        Some(mp) => {
+            let r = tokio::task::spawn_blocking(move || crate::fs::grow::grow_mounted(&mp, to)).await.unwrap_or_else(|e| Err(e.to_string()));
+            match r {
+                Ok(s) => s,
+                Err(e) => e,
+            }
+        }
+        None => "not mounted where the engine sees it: grown by the service that mounts it".to_string(),
+    };
+    tracing::warn!("volume {uuid} grown from {from} to {to} bytes through its object: {device}; filesystem: {fs} (#655)");
+    Ok(json!({ "from": from, "to": to, "device": device, "filesystem": fs }))
 }
 
 /// `PATCH /apis/storage.storm.io/v1/volumes/{name}` — merge-patch on `spec`.
@@ -373,6 +442,15 @@ async fn patch_volume(
     };
     let Some(spec) = patch.spec else {
         return get_volume(State(state), Path(name)).await;
+    };
+    // First, and with no manager held across it (#571): it takes the
+    // exports, the ublk table and the mount table.
+    let resized = match spec.size_bytes {
+        Some(to) => match grow_volume(&state, id, to).await {
+            Ok(v) => Some(v),
+            Err(r) => return r,
+        },
+        None => None,
     };
     let mut vm = state.volume_manager.lock().await;
     if let Some(r) = spec.redundancy {
@@ -421,7 +499,12 @@ async fn patch_volume(
     // The object after the manager is let go (#571).
     drop(vm);
     match volume_objects(&state, Some(id)).await.pop() {
-        Some(v) => Json(v).into_response(),
+        Some(mut v) => {
+            if let Some(r) = resized {
+                v["status"]["lastResize"] = r;
+            }
+            Json(v).into_response()
+        }
         None => status_error(StatusCode::NOT_FOUND, "NotFound", format!("volumes \"{name}\" not found")),
     }
 }

@@ -55,6 +55,17 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #655 — Volume `spec.sizeBytes` grows a volume (2026-11-18, P0 hand-off)
+
+forge1's `registry-data` is 4 GiB; it must hold forge's images.
+- [x] kube PATCH `spec.sizeBytes`: the engine's resize (thin), refused
+  smaller (422), sealed, exported or mirrored (409); the ublk device told
+  (`update_size`); an ext4 the engine sees mounted grown online
+  (`fs::grow`, EXT4_IOC_RESIZE_FS), else said: the owner service grows it;
+  `status.capacityBytes`, the PATCH's `status.lastResize`
+- [ ] check.sh; docs; release; proof on forge1 after the master's patch:
+  `api:/apis/storage.storm.io/v1/volumes ~ "storm.io/name":"registry-data".*"sizeBytes":[0-9]{11,}`
+
 ## #656 — Replication: sync a store from a peer engine (2026-11-18, P0 hand-off)
 
 Owner: "get the sync built, we need the data on forge1". forge (24.2.2, open)
@@ -77,7 +88,8 @@ media, 208 writable volumes. Nothing new is needed on the peer: its listing,
   #175's peer + `/v1/replicate`), events, credentialSecret/caSecret
 
 #652 was paused here by the master (re-queued after #656): its code is on
-main (644c6dd7 + the clippy fix), check.sh was running on it.
+main; check.sh ALL PASS on 3bc41d18 (closed #653, #654). Left: release,
+the forge1 run.
 
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 
