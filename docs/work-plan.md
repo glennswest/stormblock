@@ -55,6 +55,23 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #649 — the Volume object says who owns it; orphans findable (2026-11-18, P1)
+
+Owner: "Every pod and container must have traceablity." forge1: 113 clones,
+all `owner: unclaimed`; the CRD is the API.
+- [x] kube Volume: `status.owner/consumer/inUse/attachments[]/kind` (the REST
+  listing's #115/#138 fields, the usage context gathered before the
+  manager, #571); labels `storm.io/kind`, `storm.io/owner-kind`
+- [x] listing: `?unowned=true`; selectors `!key`, `key!=v`
+- [x] `owner` on every clone door (fstemplates clone and claim, `/v1` create
+  were missing it); `[owners] require_on_clone` (off) refuses an ownerless
+  clone 422 on all of them
+- [x] `GET /api/v1/volumes/unowned`: ownerless clones as findings (size,
+  parent, in use, age and creator from creators.json), none deleted
+- [ ] check.sh; docs; release; shipped with proof
+  `api:/apis/storage.storm.io/v1/volumes ~ "owner":\{"kind":"Pod"` (needs a
+  writer: stormd#75, rustkube-node#372, …)
+
 ## #648 — drive error and PI-check counters, per drive, every minute (2026-11-18, P1)
 
 Owner: "we also need raid counters and keep track of pi rewrites? Ie bit

@@ -1040,6 +1040,9 @@ async fn create_volume(
         return ApiError::bad_request("a clone gets an id of its own; drop id or from_template");
     }
     if let Some(key) = req.from_template.as_deref() {
+        if super::usage::ownerless_refused(state.config.owners.require_on_clone, req.owner.as_ref()) {
+            return ApiError::unprocessable(super::usage::OWNERLESS);
+        }
         // Never a clone of a secret volume, by whatever door (#74).
         if let Ok(v) = volume_key(&state, key).await {
             if let Some(r) = refuse_secret(&state, v, "clone").await {
@@ -1370,6 +1373,95 @@ async fn set_redundancy(
         Err(e @ crate::volume::VolumeError::InsufficientDomains { .. }) => ApiError::conflict(e.to_string()),
         Err(e) => ApiError::bad_request(e.to_string()),
     }
+}
+
+/// One ownerless clone (#649): what the cleanup (#115) finds and leaves.
+#[derive(Debug, Serialize)]
+pub struct UnownedClone {
+    pub id: Uuid,
+    pub name: String,
+    pub namespace: String,
+    /// What it was cloned from: the golden or blank, by id and name.
+    pub parent: Uuid,
+    pub parent_name: Option<String>,
+    pub virtual_size_bytes: u64,
+    /// What it holds of its own (its divergence from the parent).
+    pub allocated_bytes: u64,
+    pub in_use: bool,
+    /// Who is using it when no owner says: the mount a ublk device carries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<super::usage::Consumer>,
+    /// When it was made and by which caller, from the creators record
+    /// (#422); absent for a clone made before that record or through a door
+    /// that does not keep one (a template clone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+}
+
+/// `GET /api/v1/volumes/unowned` (#649, #115): every writable clone no
+/// creator claimed, as findings with size and age, largest first. Nothing is
+/// deleted here or by the engine: an ownerless clone is a question for
+/// whoever made it (forge1: 113 of them, the node's own services and
+/// container roots).
+async fn unowned_clones(State(state): State<Arc<AppState>>) -> Response {
+    // What serves each volume, gathered before the manager is held (#571).
+    let ctx = super::usage::Context::gather(&state).await;
+    let mut found = {
+        let vm = state.volume_manager.lock().await;
+        let mut out = Vec::new();
+        for (id, name, vsize, allocated) in crate::volume::catalog::list_volumes(&*vm).await {
+            if vm.owner(&id).is_some() {
+                continue;
+            }
+            let Some(parent) = vm.parent(&id) else { continue };
+            let u = ctx.usage(&*vm, &id);
+            if u.kind != Some("volume") {
+                continue;
+            }
+            let parent_name = match vm.get_volume_handle(&parent) {
+                Some(h) => Some(h.name().await),
+                None => None,
+            };
+            out.push(UnownedClone {
+                id: id.0,
+                name,
+                namespace: vm.namespace(&id).to_string(),
+                parent: parent.0,
+                parent_name,
+                virtual_size_bytes: vsize,
+                allocated_bytes: allocated,
+                in_use: u.in_use.unwrap_or(false),
+                consumer: u.consumer,
+                created_at: None,
+                age_secs: None,
+                created_by: None,
+            });
+        }
+        out
+    };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    for f in &mut found {
+        if let Some(c) = crate::mgmt::creators::of(&state, &crate::mgmt::creators::volume(&f.id)) {
+            f.created_at = Some(c.at);
+            f.age_secs = Some(now.saturating_sub(c.at));
+            f.created_by = Some(c.who);
+        }
+    }
+    found.sort_by(|a, b| b.allocated_bytes.cmp(&a.allocated_bytes).then(a.name.cmp(&b.name)));
+    let bytes: u64 = found.iter().map(|f| f.allocated_bytes).sum();
+    let in_use = found.iter().filter(|f| f.in_use).count();
+    Json(serde_json::json!({
+        "count": found.len(),
+        "in_use": in_use,
+        "allocated_bytes": bytes,
+        "require_on_clone": state.config.owners.require_on_clone,
+        "items": found,
+    }))
+    .into_response()
 }
 
 /// `PUT /api/v1/volumes/{id}/owner` — record what a volume belongs to (#115).
@@ -1926,6 +2018,9 @@ async fn clone_volume(
     };
     if let Some(r) = refuse_secret(&state, VolumeId(uuid), "clone").await {
         return r;
+    }
+    if super::usage::ownerless_refused(state.config.owners.require_on_clone, req.owner.as_ref()) {
+        return ApiError::unprocessable(super::usage::OWNERLESS);
     }
     let size = match super::fstemplates::resolve_size(&req.size, None) {
         Ok(s) => s,
@@ -3834,6 +3929,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/attach", get(get_attach).post(attach_volume).delete(detach_volume))
         .route("/{id}/ana", get(get_ana).put(set_ana))
         .route("/{id}/mirror", axum::routing::post(crate::mgmt::live_mirror::post).delete(crate::mgmt::live_mirror::delete))
+        .route("/unowned", get(unowned_clones))
         .route("/import", get(list_imports).post(start_import))
         .route("/import/{id}", get(get_import))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))

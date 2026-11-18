@@ -340,6 +340,16 @@ impl Context {
     }
 }
 
+/// What a refused ownerless clone is told (#649).
+pub const OWNERLESS: &str = "a clone names its owner (#649: [owners] require_on_clone is on; give owner {kind, namespace, name, uid})";
+
+/// Whether a clone with this owner is refused (#649): only when
+/// `[owners] require_on_clone` is on and no owner (or one with no kind or
+/// name) was given.
+pub fn ownerless_refused(require: bool, owner: Option<&crate::volume::metadata::Owner>) -> bool {
+    require && owner.is_none_or(|o| o.kind.trim().is_empty() || o.name.trim().is_empty())
+}
+
 /// Does a volume pass the listing's filters?
 pub fn matches(u: &Usage, owned: bool, kind: Option<&str>, in_use: Option<bool>, unowned: bool) -> bool {
     let k = u.kind.unwrap_or("volume");
@@ -373,6 +383,17 @@ mod tests {
         assert!(!matches(&g, false, Some("volume"), None, false));
         assert!(matches(&v, false, None, Some(true), false) && !matches(&g, false, None, Some(true), false));
         assert!(!matches(&v, true, None, None, true), "owned is not unowned");
+    }
+
+    /// #649: the refusal only with the flag, and an owner with no name is none.
+    #[test]
+    fn an_ownerless_clone_refused_only_when_asked() {
+        let pod = crate::volume::metadata::Owner { kind: "Pod".into(), namespace: "kube-system".into(), name: "fastetcd-0".into(), uid: None };
+        let blank = crate::volume::metadata::Owner { kind: "Pod".into(), namespace: String::new(), name: " ".into(), uid: None };
+        assert!(!ownerless_refused(false, None), "off by default: nothing refused");
+        assert!(ownerless_refused(true, None));
+        assert!(ownerless_refused(true, Some(&blank)));
+        assert!(!ownerless_refused(true, Some(&pod)));
     }
 
     /// A template's scratch volume and a /v1 snapshot are images too, and

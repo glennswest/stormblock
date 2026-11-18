@@ -187,6 +187,10 @@ pub struct CreateVolumeRequest {
     /// `cold`), falling back to the others (#151). Absent: hot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// What the volume belongs to (#649, #115): the claim, pod or VM. Additive
+    /// (left out when absent); recorded on the engine volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::volume::metadata::Owner>,
 }
 
 /// `placement` on a `/v1` create.
@@ -1265,6 +1269,10 @@ async fn create_volume(
     if req.encrypted {
         return Err(V1Error::Unsupported(ENCRYPTION_UNSUPPORTED.to_string()));
     }
+    // A clone names its owner, when the node asks it to (#649).
+    if req.source.is_some() && super::usage::ownerless_refused(state.config.owners.require_on_clone, req.owner.as_ref()) {
+        return Err(V1Error::Unsupported(super::usage::OWNERLESS.to_string()));
+    }
     // The claim's policy (#151), checked before anything is allocated.
     let policy = crate::volume::RedundancyPolicy::from_request(req.redundancy.as_deref(), req.spread.as_deref())
         .map_err(|e| V1Error::BadRequest(format!("redundancy: {e}")))?;
@@ -1486,6 +1494,9 @@ async fn create_volume(
                     let mut vm = state.volume_manager.lock().await;
                     let _ = vm.mark_secret(id);
                     vm.persist().await;
+                }
+                if req.owner.is_some() {
+                    let _ = state.volume_manager.lock().await.set_owner(id, req.owner.clone()).await;
                 }
                 Some(id.0)
             }

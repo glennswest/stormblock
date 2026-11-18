@@ -33,6 +33,11 @@ async fn start(state: Arc<AppState>) -> (String, tokio::task::JoinHandle<()>) {
 /// A node with one slab and a data dir, which is all templates need — no RAID
 /// array, no export: a template clone is placed by the slab registry.
 async fn setup(dir: &TempDir) -> Arc<AppState> {
+    setup_with(dir, |_| {}).await
+}
+
+/// [`setup`] with the config changed first (#649: `[owners]`).
+async fn setup_with(dir: &TempDir, tune: impl FnOnce(&mut StormBlockConfig)) -> Arc<AppState> {
     let devices = common::create_file_devices(dir, 1, 2 * 1024 * 1024 * 1024).await;
     let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
     vm.add_backing_device(stormblock::raid::RaidArrayId(Uuid::new_v4()), devices[0].clone())
@@ -45,6 +50,7 @@ async fn setup(dir: &TempDir) -> Arc<AppState> {
     // loaded would otherwise get a local device where a build host without it
     // gets nvme-tcp — a test whose answer depends on the kernel it ran on.
     config.management.ublk_transport = false;
+    tune(&mut config);
     let slab_registry = vm.registry().clone();
     let gem = vm.gem().clone();
     Arc::new(AppState::new(config, vm, slab_registry, gem))
@@ -1355,6 +1361,90 @@ async fn any_engine_volume_can_be_attached_through_the_volume_door() {
         .send().await.unwrap();
     assert_eq!(resp.status(), 404);
 
+    server.abort();
+}
+
+/// #649: the Volume object says who owns a clone, what it is and whether
+/// it is in use, as the REST listing does; `storm.io/owner-kind` selects by
+/// owner, `!storm.io/owner-kind` and `?unowned=true` the orphans; with
+/// `[owners] require_on_clone` a clone that names no owner is refused, by
+/// every door.
+#[tokio::test]
+async fn the_volume_object_carries_its_owner() {
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    let created: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates"))
+        .json(&serde_json::json!({ "name": "base", "size": "64M" }))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(created["template"]["sealed_volume_id"].is_string(), "{created}");
+    let owned: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates/base/clone"))
+        .json(&serde_json::json!({ "name": "fastetcd-data", "owner": { "kind": "Pod", "namespace": "kube-system", "name": "fastetcd-0", "uid": "u-1" } }))
+        .send().await.unwrap().json().await.unwrap();
+    let owned_id = owned["volume_id"].as_str().expect("cloned").to_string();
+    let bare: serde_json::Value = client
+        .post(format!("{url}/api/v1/fstemplates/base/clone"))
+        .json(&serde_json::json!({ "name": "nobodys" }))
+        .send().await.unwrap().json().await.unwrap();
+    let bare_id = bare["volume_id"].as_str().expect("cloned without an owner while the flag is off").to_string();
+
+    let v: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes/{owned_id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(v["status"]["owner"], serde_json::json!({ "kind": "Pod", "namespace": "kube-system", "name": "fastetcd-0", "uid": "u-1" }));
+    assert_eq!(v["status"]["consumer"]["name"], "fastetcd-0");
+    assert_eq!(v["status"]["kind"], "volume");
+    assert_eq!(v["status"]["inUse"], false);
+    assert_eq!(v["status"]["attachments"], serde_json::json!([]));
+    assert_eq!(v["metadata"]["labels"]["storm.io/owner-kind"], "Pod");
+    assert_eq!(v["metadata"]["labels"]["storm.io/kind"], "volume");
+    let text = serde_json::to_string(&v).unwrap();
+    assert!(text.contains(r#""owner":{"kind":"Pod""#), "the proof's shape: {text}");
+    let b: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes/{bare_id}")).send().await.unwrap().json().await.unwrap();
+    assert!(b["status"]["owner"].is_null() && b["metadata"]["labels"].get("storm.io/owner-kind").is_none());
+
+    let names = |l: &serde_json::Value| -> Vec<String> { l["items"].as_array().unwrap().iter().map(|i| i["metadata"]["name"].as_str().unwrap().to_string()).collect() };
+    let pods: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes?labelSelector=storm.io/owner-kind=Pod")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(names(&pods), vec![owned_id.clone()]);
+    let orphans: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes?labelSelector=!storm.io/owner-kind,storm.io/kind=volume")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(names(&orphans), vec![bare_id.clone()]);
+    let unowned: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes?unowned=true")).send().await.unwrap().json().await.unwrap();
+    let u = names(&unowned);
+    assert!(u.contains(&bare_id) && !u.contains(&owned_id), "{u:?}");
+    // The cleanup's findings: the ownerless clone with its size and parent,
+    // nothing deleted.
+    let f: serde_json::Value = client.get(format!("{url}/api/v1/volumes/unowned")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(f["count"], 1, "{f}");
+    assert_eq!(f["items"][0]["id"], bare_id.as_str());
+    assert_eq!(f["items"][0]["name"], "nobodys");
+    assert!(f["items"][0]["parent"].is_string() && f["items"][0]["in_use"] == false, "{f}");
+    assert_eq!(f["require_on_clone"], false);
+    let again: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes/{bare_id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(again["metadata"]["name"], bare_id.as_str(), "a finding is not deleted");
+    server.abort();
+
+    // The flag on: every door refuses a clone that names no owner.
+    let dir = TempDir::new().unwrap();
+    let state = setup_with(&dir, |c| c.owners.require_on_clone = true).await;
+    let (url, server) = start(state.clone()).await;
+    client.post(format!("{url}/api/v1/fstemplates")).json(&serde_json::json!({ "name": "base", "size": "64M" })).send().await.unwrap();
+    for (path, body) in [
+        ("api/v1/fstemplates/base/clone", serde_json::json!({ "name": "a" })),
+        ("api/v1/fstemplates/base/claim", serde_json::json!({})),
+        ("api/v1/volumes", serde_json::json!({ "name": "b", "from_template": "base" })),
+        ("api/v1/volumes/fstemplate-base-raw/clone", serde_json::json!({ "name": "c" })),
+    ] {
+        let r = client.post(format!("{url}/{path}")).json(&body).send().await.unwrap();
+        assert_eq!(r.status(), 422, "{path}");
+        let e: serde_json::Value = r.json().await.unwrap();
+        assert!(e["error"].as_str().unwrap_or_default().contains("a clone names its owner"), "{path}: {e}");
+    }
+    let ok = client
+        .post(format!("{url}/api/v1/fstemplates/base/clone"))
+        .json(&serde_json::json!({ "name": "d", "owner": { "kind": "Pod", "namespace": "default", "name": "p" } }))
+        .send().await.unwrap();
+    assert_eq!(ok.status(), 201);
     server.abort();
 }
 

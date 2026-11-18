@@ -875,6 +875,14 @@ impl ApiError {
         (StatusCode::BAD_REQUEST, Json(body)).into_response()
     }
 
+    pub fn unprocessable(msg: impl Into<String>) -> Response {
+        let body = ApiError {
+            error: msg.into(),
+            code: 422,
+        };
+        (StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response()
+    }
+
     pub fn conflict(msg: impl Into<String>) -> Response {
         let body = ApiError {
             error: msg.into(),

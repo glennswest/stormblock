@@ -137,10 +137,16 @@ struct VolumeSnap {
     parent: Option<VolumeId>,
     children: Vec<VolumeId>,
     retention: &'static str,
+    /// What it belongs to (#115) and its kind, attachments and consumer
+    /// (#138), as the REST listing has them (#649).
+    owner: Option<crate::volume::metadata::Owner>,
+    usage: super::usage::Usage,
 }
 
-fn volume_snap(vm: &crate::volume::VolumeManager, id: VolumeId) -> Option<VolumeSnap> {
+fn volume_snap(vm: &crate::volume::VolumeManager, id: VolumeId, ctx: &super::usage::Context) -> Option<VolumeSnap> {
     Some(VolumeSnap {
+        owner: vm.owner(&id).cloned(),
+        usage: ctx.usage(vm, &id),
         id,
         handle: vm.get_volume_handle(&id)?,
         fs: vm.fs_info(&id).map(|f| f.json()),
@@ -173,14 +179,46 @@ async fn attach_view(state: &AppState, keys: &[String]) -> AttachView {
 
 /// Snapshots of every volume (or the ones asked for), the manager held only
 /// to take them.
-async fn volume_snaps(state: &AppState, only: Option<VolumeId>) -> Vec<VolumeSnap> {
+async fn volume_snaps(state: &AppState, only: Option<VolumeId>, ctx: &super::usage::Context) -> Vec<VolumeSnap> {
     let vm = state.volume_manager.lock().await;
     let mut ids = match only {
         Some(id) => vec![id],
         None => vm.volume_ids(),
     };
     ids.sort_by_key(|i| i.0);
-    ids.into_iter().filter_map(|id| volume_snap(&vm, id)).collect()
+    ids.into_iter().filter_map(|id| volume_snap(&vm, id, ctx)).collect()
+}
+
+/// An attachment as the object carries it (#649): camelCase, what the REST
+/// listing's `attachments[]` says.
+fn attachment_json(a: &super::usage::Attachment) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("transport".into(), json!(a.transport));
+    for (k, v) in [("device", a.device.as_ref()), ("mountedAt", a.mounted_at.as_ref()), ("target", a.target.as_ref()), ("state", a.state.as_ref())] {
+        if let Some(v) = v {
+            m.insert(k.into(), json!(v));
+        }
+    }
+    if let Some(p) = a.port {
+        m.insert("port".into(), json!(p));
+    }
+    if let Some(l) = a.lun {
+        m.insert("lun".into(), json!(l));
+    }
+    if let Some(n) = a.nsid {
+        m.insert("nsid".into(), json!(n));
+    }
+    if !a.remote.is_empty() {
+        m.insert("remote".into(), serde_json::to_value(&a.remote).unwrap_or(Value::Null));
+    }
+    Value::Object(m)
+}
+
+/// A label value as Kubernetes takes one: at most 63 of `[A-Za-z0-9._-]`,
+/// starting and ending alphanumeric.
+fn label_value(s: &str) -> String {
+    let v: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' }).take(63).collect();
+    v.trim_matches(|c: char| !c.is_ascii_alphanumeric()).to_string()
 }
 
 async fn volume_object(s: &VolumeSnap, view: &AttachView) -> Value {
@@ -204,6 +242,18 @@ async fn volume_object(s: &VolumeSnap, view: &AttachView) -> Value {
     labels.insert("storm.io/namespace".to_string(), s.namespace.clone());
     if let Some(p) = s.parent {
         labels.insert("storm.io/parent".to_string(), p.0.to_string());
+    }
+    // What it is and what owns it (#649): `kubectl get volumes -l
+    // storm.io/owner-kind=Pod`, and `-l '!storm.io/owner-kind'` for the
+    // orphans.
+    if let Some(k) = s.usage.kind {
+        labels.insert("storm.io/kind".to_string(), k.to_string());
+    }
+    if let Some(o) = &s.owner {
+        let v = label_value(&o.kind);
+        if !v.is_empty() {
+            labels.insert("storm.io/owner-kind".to_string(), v);
+        }
     }
     object(
         "Volume",
@@ -238,13 +288,24 @@ async fn volume_object(s: &VolumeSnap, view: &AttachView) -> Value {
             "parent": s.parent.map(|p| p.0.to_string()),
             "children": s.children.iter().map(|c| c.0.to_string()).collect::<Vec<_>>(),
             "attach": attach,
+            // #649: the REST listing's #115/#138 fields. `owner` is what a
+            // creator recorded (null: nothing claimed it, an orphan for a
+            // clone); `consumer` the owner, else the mount a ublk device
+            // carries.
+            "owner": s.owner,
+            "consumer": s.usage.consumer,
+            "inUse": s.usage.in_use,
+            "attachments": s.usage.attachments.iter().map(attachment_json).collect::<Vec<_>>(),
+            "kind": s.usage.kind,
         }),
     )
 }
 
 /// The Volume objects, the manager held only for their snapshots (#571).
 async fn volume_objects(state: &AppState, only: Option<VolumeId>) -> Vec<Value> {
-    let snaps = volume_snaps(state, only).await;
+    // What serves each volume, gathered before the manager is taken (#571).
+    let ctx = super::usage::Context::gather(state).await;
+    let snaps = volume_snaps(state, only, &ctx).await;
     let keys: Vec<String> = snaps.iter().map(|s| s.id.0.to_string()).collect();
     let view = attach_view(state, &keys).await;
     let mut out = Vec::with_capacity(snaps.len());
@@ -643,14 +704,46 @@ struct ListQuery {
     /// `key=value[,key=value]` over `metadata.labels`.
     #[serde(default, rename = "labelSelector")]
     label_selector: Option<String>,
+    /// `?unowned=true` (#649, as the REST listing has it): only Volumes no
+    /// creator claimed (`status.owner` null).
+    #[serde(default)]
+    unowned: Option<String>,
 }
 
+/// The listing's filters: the label selector, and `?unowned` (#649).
+#[derive(Clone, Default)]
+struct Filter {
+    selector: Option<String>,
+    unowned: bool,
+}
+
+impl Filter {
+    fn of(q: &ListQuery) -> Filter {
+        Filter { selector: q.label_selector.clone(), unowned: watch_truthy(&q.unowned) }
+    }
+    fn keeps(&self, item: &Value) -> bool {
+        selected(item, &self.selector) && (!self.unowned || item["kind"] != "Volume" || item["status"]["owner"].is_null())
+    }
+}
+
+/// `key=value`, `key!=value`, `key` and `!key` (#649), comma-separated, all
+/// of them.
 fn selected(item: &Value, selector: &Option<String>) -> bool {
     let Some(sel) = selector else { return true };
     let labels = &item["metadata"]["labels"];
-    sel.split(',').filter(|s| !s.trim().is_empty()).all(|pair| match pair.split_once('=') {
-        Some((k, v)) => labels.get(k.trim()).and_then(|x| x.as_str()) == Some(v.trim()),
-        None => labels.get(pair.trim()).is_some(),
+    let get = |k: &str| labels.get(k.trim()).and_then(|x| x.as_str());
+    sel.split(',').filter(|s| !s.trim().is_empty()).all(|pair| {
+        let pair = pair.trim();
+        if let Some((k, v)) = pair.split_once("!=") {
+            return get(k) != Some(v.trim());
+        }
+        if let Some((k, v)) = pair.split_once('=') {
+            return get(k) == Some(v.trim_start_matches('=').trim());
+        }
+        match pair.strip_prefix('!') {
+            Some(k) => labels.get(k.trim()).is_none(),
+            None => labels.get(pair).is_some(),
+        }
     })
 }
 
@@ -673,13 +766,13 @@ fn watch_truthy(w: &Option<String>) -> bool {
 /// projection changes, sampled every two seconds. Coarse, honest, and
 /// enough for a UI and for kubectl.
 async fn list_or_watch(state: Arc<AppState>, kind: &'static str, q: ListQuery) -> Response {
-    let items: Vec<Value> = collect(&state, kind).await.into_iter().filter(|i| selected(i, &q.label_selector)).collect();
+    let filter = Filter::of(&q);
+    let items: Vec<Value> = collect(&state, kind).await.into_iter().filter(|i| filter.keeps(i)).collect();
     if !watch_truthy(&q.watch) {
         let rv = fingerprint(&Value::Array(items.clone()));
         return Json(list(kind, items, rv)).into_response();
     }
-    let selector = q.label_selector.clone();
-    let stream = async_stream(state, kind, items, selector);
+    let stream = async_stream(state, kind, items, filter);
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")
@@ -692,7 +785,7 @@ fn async_stream(
     state: Arc<AppState>,
     kind: &'static str,
     initial: Vec<Value>,
-    selector: Option<String>,
+    filter: Filter,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
     tokio::spawn(async move {
@@ -710,7 +803,7 @@ fn async_stream(
             if tx.is_closed() {
                 return;
             }
-            let now: Vec<Value> = collect(&state, kind).await.into_iter().filter(|i| selected(i, &selector)).collect();
+            let now: Vec<Value> = collect(&state, kind).await.into_iter().filter(|i| filter.keeps(i)).collect();
             let mut present: BTreeMap<String, u64> = BTreeMap::new();
             for it in &now {
                 let name = it["metadata"]["name"].as_str().unwrap_or_default().to_string();

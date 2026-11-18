@@ -214,6 +214,17 @@ pub struct CloneRequest {
     /// Check the clone before handing it out. Default true.
     #[serde(default = "yes")]
     pub verify: bool,
+    /// What the clone belongs to (#649, #115): the pod, container or VM. Set
+    /// before the clone is answered, so it is never an orphan.
+    #[serde(default)]
+    pub owner: Option<crate::volume::metadata::Owner>,
+}
+
+/// Record a new clone's owner (#649).
+async fn own(state: &AppState, id: crate::volume::VolumeId, owner: &Option<crate::volume::metadata::Owner>) {
+    if owner.is_some() {
+        let _ = state.volume_manager.lock().await.set_owner(id, owner.clone()).await;
+    }
 }
 
 /// Resolve `size` / `size_bytes` into bytes.
@@ -487,10 +498,14 @@ async fn clone_template(
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "clone")
         .increment(1);
 
+    if super::usage::ownerless_refused(state.config.owners.require_on_clone, req.owner.as_ref()) {
+        return ApiError::unprocessable(super::usage::OWNERLESS);
+    }
     let size = match resolve_size(&req.size, req.size_bytes) {
         Ok(s) => s,
         Err(e) => return ApiError::bad_request(e),
     };
+    let owner = req.owner.clone();
     let spec = CloneSpec {
         name: req.name,
         size_bytes: size,
@@ -510,6 +525,7 @@ async fn clone_template(
             if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, c.volume_id).await {
                 return r;
             }
+            own(&state, c.volume_id, &owner).await;
             (
             axum::http::StatusCode::CREATED,
             Json(json!({
@@ -587,6 +603,9 @@ pub struct ClaimRequest {
     /// that does not ask.
     #[serde(default)]
     pub label: Option<String>,
+    /// What the clone belongs to (#649).
+    #[serde(default)]
+    pub owner: Option<crate::volume::metadata::Owner>,
 }
 
 /// `POST /api/v1/fstemplates/{id}/claim` — a fresh clone of the template,
@@ -599,6 +618,9 @@ async fn claim_clone(
     metrics::counter!("stormblock_api_requests_total", "endpoint" => "fstemplates", "method" => "claim")
         .increment(1);
     let req = body.map(|Json(b)| b).unwrap_or_default();
+    if super::usage::ownerless_refused(state.config.owners.require_on_clone, req.owner.as_ref()) {
+        return ApiError::unprocessable(super::usage::OWNERLESS);
+    }
     let spec = template::ClaimSpec { size_bytes: req.size_bytes, label: req.label };
     match template::claim(&state.volume_manager, &state.fstemplates, &id, &spec).await {
         Ok(c) => {
@@ -606,6 +628,7 @@ async fn claim_clone(
             if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, c.volume_id).await {
                 return r;
             }
+            own(&state, c.volume_id, &req.owner).await;
             metrics::counter!("stormblock_fstemplate_claims_total").increment(1);
             Json(json!({
                 "volume_id": c.volume_id.0,

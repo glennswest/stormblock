@@ -75,6 +75,23 @@ pub struct StormBlockConfig {
     /// How many rollback copies an install's set-aside volumes keep (#565).
     #[serde(default)]
     pub rollback: RollbackSection,
+    /// Whether a clone must name its owner (#649).
+    #[serde(default)]
+    pub owners: OwnersSection,
+}
+
+/// `[owners]` (#649): every pod and container traceable to its volumes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OwnersSection {
+    /// Refuse a clone that names no owner (`422: a clone names its owner`) on
+    /// every door that makes one: `POST /api/v1/volumes/{id}/clone`, `POST
+    /// /api/v1/volumes` with `from_template`, `POST /api/v1/fstemplates/{id}/
+    /// clone` and `…/claim`, and a `/v1` create with a `source`. Off until
+    /// every writer sets one (stormd#75, rustkube-node#372,
+    /// stormblock-registry#174, stormvm#129, stormblock-csi#69); on by
+    /// default in the release after.
+    pub require_on_clone: bool,
 }
 
 /// `[rollback]` (#565): the node's volumes an install set aside
