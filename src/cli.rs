@@ -10903,7 +10903,7 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
                 anyhow::bail!("hba read-test: no card lists a present drive");
             }
             let o = crate::drive::read_test::Opts {
-                bytes: (*mib).clamp(16, 16 << 10) / 4 * 4 << 20,
+                bytes: ((*mib).clamp(16, 16 << 10) / 4 * 4) << 20,
                 offset_pct: *offset_pct,
                 random_secs: *secs,
                 ..Default::default()
