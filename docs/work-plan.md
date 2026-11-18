@@ -68,9 +68,11 @@ all `owner: unclaimed`; the CRD is the API.
   clone 422 on all of them
 - [x] `GET /api/v1/volumes/unowned`: ownerless clones as findings (size,
   parent, in use, age and creator from creators.json), none deleted
-- [ ] check.sh; docs; release; shipped with proof
+- [x] check.sh ALL PASS (1346f8e9, 1504 tests); README, CHANGELOG; v24.25.0
+- [ ] shipped with proof
   `api:/apis/storage.storm.io/v1/volumes ~ "owner":\{"kind":"Pod"` (needs a
   writer: stormd#75, rustkube-node#372, …)
+- [ ] later, once the writers ship: `require_on_clone` on by default
 
 ## #648 — drive error and PI-check counters, per drive, every minute (2026-11-18, P1)
 
