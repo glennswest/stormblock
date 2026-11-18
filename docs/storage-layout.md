@@ -613,6 +613,27 @@ minute, for every drive the card lists (not one a format job is formatting).
   `status.health` is stormdrive's (stormdrive#149), the alerts ironprom's
   (ironprom#53), the console's view stormconsole's (#339).
 
+### A drive the layout does not take says why (#672)
+
+server8's 2 TB SATA HDD sat laid with nothing and said nowhere. Every boot
+that has a local disk now says each whole drive its layout leaves, with what
+the drive is and why:
+
+```
+not taken: sdb (ST2000DM008-2UB1, 2000 GB, SATA HDD, 512e): the install lays the node on /dev/sda; a data drive beyond them is enrolled by stormdrive's DrivePolicy after the boot, and its Drive object says what it decided (#672)
+not taken: sdc (Virtual Disk, 0 GB, USB): a USB drive: an install never takes one (#672)
+```
+
+What it is: SATA/SSD/HDD, the kernel's zoned model (`zoned host-managed`;
+drive-managed SMR reads `none`, so stormdrive's ATA IDENTIFY says that one),
+and 512e, 4Kn or the sector size. Why: USB, removable, no media, or a data
+drive beyond the node's layout. Such a drive is stormdrive's to enroll: its
+DrivePolicy takes the blades' HDD as a `cool` data slab through `POST
+/api/v1/slabs {device_path, tier}`, at its block size with no format and no
+PI (stormdrive#156, stormcos#1039). The engine's survey (health's
+`local_disk.drives`) carries `rotational`, `zoned`, `logical_block` and
+`physical_block` for each drive.
+
 ### The read test, each drive against its class (#652)
 
 forge1's three HGST 10 TB drives at 12 Gbit read at 64–103 MB/s with `dd

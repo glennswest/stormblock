@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18 (#672)
+- **feat:** #672 (server8: a 2 TB SATA HDD `out` with no reason). Every boot says each whole drive its layout doesn't take, with what it is (SATA HDD, zoned, 512e/4Kn) and why (USB, removable, no media, or a data drive beyond the node's layout, which stormdrive's DrivePolicy enrolls). The survey (health's `local_disk.drives`) carries `rotational`, `zoned`, `logical_block`, `physical_block`. The Drive object's reason, SMR detection and the `cool` enrollment are stormdrive#156; the blades' policy and a `cool` StorageClass are stormcos#1039.
+
 ### 2026-11-18 (#659)
 - **docs:** #659 (owner: "stubs are lies"): no stub wording left outside tests. An XFS template's refusal of `seed` now says what is true (fio-xfs reads XFS and has no writer), and the gap is #671. The history spec says the VFIO stub was removed (#167).
 

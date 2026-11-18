@@ -68,9 +68,9 @@ stormdrive's: its DrivePolicy enrolls a data drive through the engine's
   tests/initramfs-drives-not-taken.sh (server8's drives)
 - [x] the survey (health `local_disk.drives`): rotational, zoned,
   logical/physical block
-- [ ] stormdrive issue: membershipReason/condition from the verdict, SMR
+- [x] stormdrive#156: membershipReason/condition from the verdict, SMR
   (ATA IDENTIFY word 69, DM-SMR) on the Drive object, the SMR HDD enrolled
-  `cool`; stormcos issue: the blades' DrivePolicy and a `cool` StorageClass
+  `cool`; stormcos#1039: the blades' DrivePolicy and a `cool` StorageClass
 - [ ] check.sh; release; #672 behind those, its proof theirs
 
 ## #659 — no stubs (P-1, 2026-11-18)
