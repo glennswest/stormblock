@@ -607,6 +607,7 @@ impl Default for StormBlockConfig {
             images: ImagesSection::default(),
             redundancy: RedundancySection::default(),
             rollback: RollbackSection::default(),
+            owners: OwnersSection::default(),
         }
     }
 }
