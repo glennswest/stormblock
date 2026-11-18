@@ -153,6 +153,9 @@ media, 208 writable volumes. Nothing new is needed on the peer: its listing,
 main; check.sh ALL PASS on 3bc41d18 (closed #653, #654), and on
 f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
 `POST /api/v1/storage/hba/read-test`), the why from its lines, a fix.
+- [ ] **reopened 2026-11-18**: the proof's `api:` path 404s on the apiserver
+  (no replications CRD; no object made on pvetest2). Behind #655's owner
+  decision (A CRDs / B APIService / C :9090).
 
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 
