@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18 (#655)
+- **feat:** #655 (forge1's `registry-data` is 4 GiB and must hold forge's images): `spec.sizeBytes` on the Volume object grows a volume. The resize is thin. The volume's ublk device is told the new size, and an ext4 the engine sees mounted on it is grown online (`fs::grow`, `EXT4_IOC_RESIZE_FS`); otherwise the service that mounts it grows it, and the answer says so. A smaller size is refused (422), as is a sealed, exported or mirrored volume (409). `status.capacityBytes` follows, and the PATCH answers `status.lastResize`.
+
 ### 2026-11-18 (#656)
 - **feat:** #656 (owner: "get the sync built, we need the data on forge1"): the `Replication` object (`storage.storm.io/v1`, admin to change). It syncs this engine's goldens, media and blanks from a peer engine, once or as a mirror every N seconds, with progress in `status` (phase, items, bytes, rate, ETA, errors, the `Synced` condition) and on `/metrics`. The copy is thin and keeps lineage using only what the peer already serves (its listing, `/legs`, ranged `/content`): a clone arrives as a copy-on-write clone of its parent's copy plus only the extents it holds. Writable volumes, the registry side, events and peer credentials are stage 2. `http::Client` takes a bounded `Range`.
 
