@@ -547,6 +547,44 @@ protected write and read was good. Nobody read the counter.
   for a marginal drive until it is replaced, never set automatically; the
   level still watches it. `--max hw` gives the phy back its hardware maximum.
 
+### The drive's own link rate, mode page 0x19/1 (#646)
+
+forge1 bay 3's replacement (a HITACHI with EMC firmware) negotiated 6 Gbit
+on a 12 Gbit HBA phy. The cause was the drive, not the HBA. Its phy control
+and discover subpage (mode page 0x19 subpage 1) has, in each phy's
+descriptor, byte 32 = programmed minimum | hardware minimum and byte 33 =
+programmed maximum | hardware maximum. Its byte 33 was `0xab`: programmed
+6 Gbit, hardware 12. The HBA's `maximum_linkrate` (#642) cannot raise that.
+
+- **Read:** every minute with the link (`scsi::phy_rates`). The sample
+  carries `drive_programmed_max` and `drive_hardware_max` (Mbit/s, the
+  lowest of the drive's phys) in each row's `link` and in health's
+  `drive_links`. A drive that programs less than its hardware is logged at
+  WARN once: `storage: drive 0x… (bay 3): the drive programs 6 Gbit
+  (hardware 12)`. The level's line says it too. The write test and the lay
+  each say it: `link: the drive programs 6 Gbit (hardware 12): …linkRate
+  raises it (#646)`.
+- **Set:** `linkRate` (and `stormblock hba linkrate --max N|hw`) works on
+  both sides:
+  1. When the drive programs less than `N`, its programmed maximum is raised
+     to `N`, capped at its hardware maximum (`hw`: the hardware maximum).
+     This is MODE SELECT(10) with the page as the drive gave it, only the
+     programmed maximum nibble changed on every phy, SP = 1 when the page is
+     savable (current and saved). Otherwise it is current only, set again on
+     every boot by the engine's kept policy. It is read back.
+  2. Then the HBA phy's maximum is set, and the link is reset.
+  3. The rate negotiated is said (`bay 3 (0x…): negotiated 12 Gbit after the
+     reset; drive programmed 12 (hardware 12); host phy-1:2 maximum 12.0
+     Gbit`).
+  4. The counters on both sides are watched for `--watch` seconds (60 by
+     default; the install's `/init` waits that minute) and what moved is
+     said.
+
+  A drive that programs at least the asked rate is left alone: holding a
+  link lower is the HBA's maximum. A programmed maximum the drive does not
+  mark changeable is refused by name, and a refused MODE SELECT is said with
+  its sense. The HBA side is set either way.
+
 ### The runtime format (#621)
 
 The owner, 2026-11-15: "the new 'format' needs to be implemented in running

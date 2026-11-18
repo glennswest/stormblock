@@ -172,11 +172,13 @@ enum HbaAction {
         #[arg(long = "devdir", default_value = "/dev")]
         devdir: String,
     },
-    /// The link-rate policy (#642): hold the HBA phy facing a drive at a
-    /// maximum rate (`--max 6`, Gbit/s) and reset its link; `--max hw` gives
-    /// it back what the hardware can. For a marginal link, at the owner's
-    /// word, until the drive is replaced. `--dev /dev/sdb` (or an sg node)
-    /// or `--sas`.
+    /// The link-rate policy (#642, #646): hold the HBA phy facing a drive at
+    /// a maximum rate (`--max 6`, Gbit/s) and reset its link; `--max hw`
+    /// gives it back what the hardware can. The drive's own programmed
+    /// maximum (mode page 0x19/1) is raised to the rate first when it
+    /// programs less (`hw`: its hardware maximum). Then the link negotiated
+    /// is said, and its counters, both sides, watched for `--watch` seconds.
+    /// `--dev /dev/sdb` (or an sg node) or `--sas`.
     Linkrate {
         #[arg(long)]
         sas: Option<String>,
@@ -184,6 +186,9 @@ enum HbaAction {
         dev: Option<String>,
         #[arg(long)]
         max: String,
+        /// Seconds to watch the link's counters after (0: not watched).
+        #[arg(long, default_value_t = 60)]
+        watch: u64,
         #[arg(long, default_value = "/sys")]
         sys: String,
         #[arg(long = "devdir", default_value = "/dev")]
@@ -3800,6 +3805,21 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
         let s = sas_of.clone();
         tokio::task::spawn_blocking(move || s.iter().map(|a| a.and_then(link_sample)).collect()).await.unwrap_or_default()
     };
+    // A drive whose firmware programs its link below what its hardware can
+    // (#646: forge1 bay 3's EMC HITACHI, 6 of 12 Gbit) is said before the lay.
+    {
+        let s = sas_of.clone();
+        let below: Vec<Option<String>> = tokio::task::spawn_blocking(move || {
+            s.iter().map(|a| a.and_then(link_rates).and_then(|r| crate::drive::scsi::programmed_below(&r))).collect()
+        })
+        .await
+        .unwrap_or_default();
+        for (d, b) in drives.iter().zip(below) {
+            if let Some(b) = b {
+                eprintln!("Storage: {d}: link: {b}: storage.drives[].linkRate raises it (#646)");
+            }
+        }
+    }
     let smallest = devs.iter().map(|d| d.capacity_bytes()).min().unwrap_or(0);
     let regions = local::storage_regions(smallest, system_bytes).map_err(|e| anyhow::anyhow!("{e}"))?;
     let t = std::time::Instant::now();
@@ -3918,6 +3938,20 @@ fn link_sample(sas: u64) -> Option<Vec<crate::drive::scsi::PhyLink>> {
 
 #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
 fn link_sample(_sas: u64) -> Option<Vec<crate::drive::scsi::PhyLink>> {
+    None
+}
+
+/// A drive's own phys' rates (mode page 0x19/1), through sg or the card (#646).
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn link_rates(sas: u64) -> Option<Vec<crate::drive::scsi::PhyRates>> {
+    crate::drive::mpt::with_drive(std::path::Path::new("/dev"), std::path::Path::new("/sys"), sas, crate::drive::scsi::phy_rates)
+        .ok()
+        .and_then(|r| r.ok())
+        .filter(|v| !v.is_empty())
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+fn link_rates(_sas: u64) -> Option<Vec<crate::drive::scsi::PhyRates>> {
     None
 }
 
@@ -10662,7 +10696,7 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
                 println!("0x{a:016x}: {l}");
             }
         }
-        HbaAction::Linkrate { sas, dev, max, sys, devdir } => {
+        HbaAction::Linkrate { sas, dev, max, watch, sys, devdir } => {
             let a = match (sas, dev) {
                 (Some(s), _) => mpt::parse_addr(s).ok_or_else(|| anyhow::anyhow!("hba linkrate: {s} is no SAS address"))?,
                 (None, Some(d)) => crate::mgmt::link::sas_of_dev(Path::new(sys), d).ok_or_else(|| anyhow::anyhow!("hba linkrate: {d} has no SAS address in sysfs"))?,
@@ -10672,8 +10706,51 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
                 "hw" | "max" | "clear" => None,
                 m => Some(m.parse::<f32>().map_err(|_| anyhow::anyhow!("hba linkrate: --max {m}: Gbit/s (6, 12) or hw"))?),
             };
-            let said = mpt::set_max_linkrate(Path::new(devdir), Path::new(sys), a, g).map_err(anyhow::Error::msg)?;
-            println!("0x{a:016x}: {said} (#642)");
+            let (devp, sysp) = (Path::new(devdir), Path::new(sys));
+            let bay = mpt::slot_of(devp, sysp, a).map(|s| format!("bay {s} ")).unwrap_or_default();
+            let who = format!("{bay}(0x{a:016x})");
+            let (drive, host) = mpt::set_link_max(devp, sysp, a, g);
+            let drive_said = match &drive {
+                Ok(s) => s.clone(),
+                Err(e) => format!("the drive's own maximum not programmed: {e}"),
+            };
+            println!("{who}: {drive_said} (#646)");
+            let host_said = host.map_err(|e| anyhow::anyhow!("hba linkrate: {who}: {e}"))?;
+            println!("{who}: {host_said} (#642)");
+            // The link negotiated again: up to 30 s for the reset.
+            let mut up = None;
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if let Some((_, p, _)) = mpt::host_phy(devp, sysp, a).filter(|(_, p, _)| p.rate_mbps > 0) {
+                    up = Some(p.rate_mbps);
+                    break;
+                }
+            }
+            let rates = mpt::with_drive(devp, sysp, a, crate::drive::scsi::phy_rates).ok().and_then(|r| r.ok()).unwrap_or_default();
+            let programs = rates
+                .first()
+                .map(|p| format!("drive programmed {} (hardware {})", crate::drive::scsi::gbit(p.programmed_max_mbps), crate::drive::scsi::gbit(p.hardware_max_mbps)))
+                .unwrap_or_else(|| "the drive's mode page 0x19/1 not read".into());
+            let host_max = mpt::host_phy(devp, sysp, a).map(|(n, _, m)| format!("host {n} maximum {m}")).unwrap_or_default();
+            match up {
+                Some(r) => println!("{who}: negotiated {} Gbit after the reset; {programs}; {host_max} (#646)", crate::drive::scsi::gbit(r)),
+                None => println!("{who}: WARNING: the link did not come back within 30 s of the reset; {programs}; {host_max} (#646)"),
+            }
+            if *watch > 0 && up.is_some() {
+                let drive_before = link_sample(a).unwrap_or_default();
+                let host_before = mpt::host_phy(devp, sysp, a);
+                std::thread::sleep(std::time::Duration::from_secs(*watch));
+                let drive_after = link_sample(a).unwrap_or_default();
+                let mut moved: Vec<String> = crate::drive::scsi::link_moved(&drive_before, &drive_after).into_iter().map(|l| format!("drive {l}")).collect();
+                if let (Some((n, b, _)), Some((_, af, _))) = (host_before, mpt::host_phy(devp, sysp, a)) {
+                    moved.extend(crate::drive::scsi::link_moved(std::slice::from_ref(&b), std::slice::from_ref(&af)).into_iter().map(|l| format!("host {n} {l}")));
+                }
+                if moved.is_empty() {
+                    println!("{who}: link counters over {watch} s: nothing moved, both sides (#646)");
+                } else {
+                    println!("{who}: link counters over {watch} s: {} (#646)", moved.join("; "));
+                }
+            }
         }
         HbaAction::Pages { sas, compare, json, sys, dev } => {
             use crate::drive::scsi;

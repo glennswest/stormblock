@@ -329,7 +329,10 @@ fn sample_links(rows: &[Value]) {
             bay: word(r, "slot"),
             shelf: word(r, "enclosure"),
         };
-        super::link::record(sas, &labels, drive, host, now());
+        // The drive's own maxima (#646): what its firmware programs, against
+        // what its hardware can.
+        let rates = crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), a, crate::drive::scsi::phy_rates).ok().and_then(|r| r.ok());
+        super::link::record(sas, &labels, drive, host, rates, now());
     }
 }
 

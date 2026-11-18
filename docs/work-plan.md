@@ -55,6 +55,20 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #646 — the drive's own link rate, mode page 0x19/1 (2026-11-18, P1)
+
+forge1 bay 3's EMC HITACHI: hardware 12 Gbit, firmware programs 6.
+- [x] scsi: `PhyRates`, `parse_phy_control`, `phy_control_select`,
+  `phy_rates`, `set_programmed_max` (MODE SELECT SP=1 when savable),
+  `programmed_below`; the write test's `link_rates`
+- [x] mpt `set_link_max` (drive then HBA), `slot_of`; link: maxima in the
+  sample, health, WARN once; the engine's policy both sides
+- [x] `hba linkrate`: negotiated rate, `--watch` 60 s; /init says every line;
+  the lay says a drive programmed below its hardware
+- [ ] check.sh; release; shipped with proof
+  `console:bay 3 .* negotiated 12 Gbit .* drive programmed 12 \(hardware 12\)`
+  on forge1 (with `linkRate: 12`)
+
 ## #642 — the SAS link, both sides, every minute (2026-11-17, P0)
 
 forge1 bay 3: loss of DWORD sync climbing at 12 Gbit, frozen at 6; the

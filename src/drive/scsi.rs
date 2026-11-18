@@ -125,6 +125,20 @@ pub mod cdb {
         let [hi, lo] = alloc.to_be_bytes();
         [0x5A, (if llbaa { 0x10 } else { 0 }) | (if dbd { 0x08 } else { 0 }), page & 0x3F, 0, 0, 0, 0, hi, lo, 0]
     }
+    /// MODE SENSE(10) of a subpage (#646: 0x19/1, phy control and
+    /// discover), no block descriptors, `pc` as above.
+    pub fn mode_sense10_sub(page: u8, sub: u8, pc: u8, alloc: u16) -> [u8; 10] {
+        let mut c = mode_sense10_pc(page, pc, true, alloc);
+        c[3] = sub;
+        c
+    }
+    /// PF=1, SP as asked (#646: SP=1 saves the page, so it holds across a
+    /// power cycle).
+    pub fn mode_select10_sp(len: u16, sp: bool) -> [u8; 10] {
+        let mut c = mode_select10(len);
+        c[1] |= u8::from(sp);
+        c
+    }
     /// PF=1, SP=0.
     pub fn mode_select10(len: u16) -> [u8; 10] {
         let [hi, lo] = len.to_be_bytes();
@@ -957,6 +971,163 @@ pub fn link_moved(before: &[PhyLink], after: &[PhyLink]) -> Vec<String> {
     out
 }
 
+// ---- the drive's own link rates, mode page 0x19/1 (#646) ----
+
+/// One phy's rates from the drive's phy control and discover subpage
+/// (SPL: mode page 0x19 subpage 1): what it negotiated, the minimum and
+/// maximum its firmware programs (MODE SELECT may change them) and what its
+/// hardware can. forge1 bay 3's EMC-firmware HITACHI: hardware 12 Gbit,
+/// programmed 6, so it negotiated 6 on a 12 Gbit HBA phy.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct PhyRates {
+    pub phy: u8,
+    pub negotiated_mbps: u32,
+    pub programmed_min_mbps: u32,
+    pub programmed_max_mbps: u32,
+    pub hardware_min_mbps: u32,
+    pub hardware_max_mbps: u32,
+}
+
+/// The SAS rate code of a rate in Mbit/s (the inverse of [`sas_rate_mbps`]).
+pub fn sas_rate_code(mbps: u32) -> Option<u8> {
+    (0x8..=0xC).find(|c| sas_rate_mbps(*c) == mbps)
+}
+
+/// Mbit/s as Gbit/s in words: `6`, `12`, `1.5`, `22.5`.
+pub fn gbit(mbps: u32) -> String {
+    if mbps % 1000 == 0 {
+        (mbps / 1000).to_string()
+    } else {
+        format!("{:.1}", mbps as f64 / 1000.0)
+    }
+}
+
+/// A subpage out of a MODE SENSE(10) answer: header, block descriptors,
+/// then the page with its 2-byte length (SPF = 1).
+pub fn mode_subpage_of(d: &[u8]) -> Option<&[u8]> {
+    if d.len() < 8 {
+        return None;
+    }
+    let total = (be16(d, 0) as usize + 2).min(d.len());
+    let bdl = be16(d, 6) as usize;
+    let p = d.get(8 + bdl..total)?;
+    if p.len() < 4 || p[0] & 0x40 == 0 {
+        return None;
+    }
+    let len = 4 + be16(p, 2) as usize;
+    p.get(..len.min(p.len()))
+}
+
+/// Offset of the first phy descriptor in subpage 0x19/1, and each one's size.
+const PHY_DESC_AT: usize = 8;
+const PHY_DESC_LEN: usize = 48;
+
+/// Each phy's rates from subpage 0x19/1 (the page from its first byte).
+pub fn parse_phy_control(p: &[u8]) -> Vec<PhyRates> {
+    if p.len() < PHY_DESC_AT || p[0] & 0x3F != 0x19 || p[1] != 1 {
+        return Vec::new();
+    }
+    (0..p[7] as usize)
+        .map_while(|i| p.get(PHY_DESC_AT + i * PHY_DESC_LEN..PHY_DESC_AT + (i + 1) * PHY_DESC_LEN))
+        .map(|d| PhyRates {
+            phy: d[1],
+            negotiated_mbps: sas_rate_mbps(d[5]),
+            programmed_min_mbps: sas_rate_mbps(d[32] >> 4),
+            hardware_min_mbps: sas_rate_mbps(d[32]),
+            programmed_max_mbps: sas_rate_mbps(d[33] >> 4),
+            hardware_max_mbps: sas_rate_mbps(d[33]),
+        })
+        .collect()
+}
+
+/// The MODE SELECT(10) parameter list that programs every phy's maximum
+/// to `want` Mbit/s (each phy's hardware maximum when `None`, or when
+/// `want` is above it): an 8-byte header with no block descriptor, then
+/// the page as the drive gave it (PS cleared), only the programmed maximum
+/// changed. Every other field stays the current value, as SPC asks.
+pub fn phy_control_select(page: &[u8], want: Option<u32>) -> Vec<u8> {
+    let mut v = vec![0u8; 8];
+    let mut p = page.to_vec();
+    p[0] &= 0x7F;
+    for i in 0..p.get(7).copied().unwrap_or(0) as usize {
+        let at = PHY_DESC_AT + i * PHY_DESC_LEN + 33;
+        let Some(b) = p.get(at).copied() else { break };
+        let hw = sas_rate_mbps(b);
+        let to = want.map_or(hw, |w| w.min(hw));
+        if let Some(code) = sas_rate_code(to) {
+            p[at] = (code << 4) | (b & 0x0F);
+        }
+    }
+    v.extend(p);
+    v
+}
+
+/// The drive's phys' rates, read now (MODE SENSE 0x19/1, current values).
+pub fn phy_rates(t: &dyn Transport) -> Result<Vec<PhyRates>, String> {
+    let mut e = Vec::new();
+    let d = ask(t, &cdb::mode_sense10_sub(0x19, 1, 0, 1024), 1024, "MODE SENSE 0x19/1", &mut e).ok_or_else(|| e.join("; "))?;
+    let p = mode_subpage_of(&d).ok_or("MODE SENSE 0x19/1: an answer with no subpage in it")?;
+    Ok(parse_phy_control(p))
+}
+
+/// What the drive programs, in words, when it holds a phy below what its
+/// hardware can (`the drive programs 6 Gbit (hardware 12)`); `None` when
+/// every phy is programmed to its hardware maximum.
+pub fn programmed_below(r: &[PhyRates]) -> Option<String> {
+    let p = r.iter().find(|p| p.programmed_max_mbps > 0 && p.programmed_max_mbps < p.hardware_max_mbps)?;
+    Some(format!("the drive programs {} Gbit (hardware {})", gbit(p.programmed_max_mbps), gbit(p.hardware_max_mbps)))
+}
+
+/// Program the drive's maximum link rate (#646): raised to `want` Mbit/s
+/// (capped at what its hardware can) when it programs less, or set back to
+/// the hardware maximum (`None`). A drive that already programs at least
+/// that is left alone (the HBA's maximum holds a link lower). MODE SELECT
+/// with SP = 1 when the page is savable, so it holds across a power cycle;
+/// read back. Answers what was done; a refusal with the drive's sense.
+pub fn set_programmed_max(t: &dyn Transport, want: Option<u32>) -> Result<String, String> {
+    let mut e = Vec::new();
+    let cur = ask(t, &cdb::mode_sense10_sub(0x19, 1, 0, 1024), 1024, "MODE SENSE 0x19/1", &mut e).ok_or_else(|| e.join("; "))?;
+    let page = mode_subpage_of(&cur).ok_or("MODE SENSE 0x19/1: an answer with no subpage in it")?.to_vec();
+    let before = parse_phy_control(&page);
+    if before.is_empty() {
+        return Err("mode page 0x19/1 lists no phy".into());
+    }
+    let said = |r: &[PhyRates]| {
+        let p = &r[0];
+        format!("drive programmed {} (hardware {})", gbit(p.programmed_max_mbps), gbit(p.hardware_max_mbps))
+    };
+    let target = |p: &PhyRates| want.map_or(p.hardware_max_mbps, |w| w.min(p.hardware_max_mbps));
+    let needed = before.iter().any(|p| match want {
+        Some(_) => p.programmed_max_mbps < target(p),
+        None => p.programmed_max_mbps != p.hardware_max_mbps,
+    });
+    if !needed {
+        return Ok(format!("{}, left as it is", said(&before)));
+    }
+    let chg = ask(t, &cdb::mode_sense10_sub(0x19, 1, 1, 1024), 1024, "MODE SENSE 0x19/1 (changeable)", &mut e)
+        .and_then(|c| mode_subpage_of(&c).map(<[u8]>::to_vec))
+        .ok_or_else(|| e.join("; "))?;
+    for (i, p) in before.iter().enumerate() {
+        let m = chg.get(PHY_DESC_AT + i * PHY_DESC_LEN + 33).copied().unwrap_or(0);
+        if m & 0xF0 != 0xF0 {
+            return Err(format!("phy {}: the programmed maximum is not changeable (changeable mask 0x{m:02x})", p.phy));
+        }
+    }
+    let list = phy_control_select(&page, want);
+    let savable = page[0] & 0x80 != 0;
+    let mut buf = list.clone();
+    let r = t.run(&cdb::mode_select10_sp(list.len() as u16, savable), Dir::Out, &mut buf, 30).map_err(|e| format!("MODE SELECT 0x19/1: not sent: {e}"))?;
+    if !r.good() {
+        return Err(format!("MODE SELECT 0x19/1 refused: {}", r.said()));
+    }
+    let after = phy_rates(t)?;
+    let was = gbit(before[0].programmed_max_mbps);
+    if after.iter().zip(&before).any(|(a, b)| a.programmed_max_mbps != target(b)) {
+        return Err(format!("MODE SELECT 0x19/1 taken, but the drive still programs {} (asked {})", gbit(after[0].programmed_max_mbps), gbit(target(&before[0]))));
+    }
+    Ok(format!("{}, was {was}{}", said(&after), if savable { ", saved" } else { "; the page is not savable: set again on every boot" }))
+}
+
 // ---- every VPD page (#636) ----
 
 /// A VPD page as the drive answered it: raw always, what it says when the
@@ -1198,6 +1369,9 @@ pub struct Matrix {
     /// (#642: forge1 bay 3's failures were the link, not the PI path).
     pub link_before: Vec<PhyLink>,
     pub link_after: Vec<PhyLink>,
+    /// The drive's own phys' rates (#646, mode page 0x19/1): what its
+    /// firmware programs against what its hardware can.
+    pub link_rates: Vec<PhyRates>,
     /// Why the run stopped short, when it did.
     pub stopped: Option<String>,
 }
@@ -1229,6 +1403,7 @@ pub fn write_matrix(t: &dyn Transport, link: &dyn Fn() -> Option<String>) -> Mat
     m.mode_before = mode_pages(t);
     m.log_before = log_pages(t);
     m.link_before = sas_phys(t).unwrap_or_default();
+    m.link_rates = phy_rates(t).unwrap_or_default();
     let Some(cap) = m.capacity.clone() else {
         m.stopped = Some(format!("READ CAPACITY 16 did not answer: {}", e.join("; ")));
         return m;
@@ -1351,6 +1526,9 @@ impl Matrix {
             if b != a {
                 v.push(format!("log page {pg} after: {a}"));
             }
+        }
+        if let Some(p) = programmed_below(&self.link_rates) {
+            v.push(format!("link: {p}: storage.drives[].linkRate or hba linkrate raises it (#646)"));
         }
         if !self.link_before.is_empty() {
             let moved = link_moved(&self.link_before, &self.link_after);
@@ -1981,6 +2159,110 @@ mod tests {
         let n = (p.len() - 4) as u16;
         p[2..4].copy_from_slice(&n.to_be_bytes());
         p
+    }
+
+    /// Subpage 0x19/1 as forge1 bay 3's HITACHI (EMC firmware) answers it:
+    /// two phys, phy 0 at 6 Gbit, byte 32 0x88, byte 33 0xab (programmed
+    /// max 6, hardware 12); changeable f0 ff. Savable (PS) as asked.
+    fn phy_control_page(max: u8, ps: bool) -> Vec<u8> {
+        let mut p = vec![0x40 | 0x19 | if ps { 0x80 } else { 0 }, 1, 0, 0, 0, 6, 0, 2];
+        for phy in 0..2u8 {
+            let mut d = vec![0u8; 48];
+            d[1] = phy;
+            d[5] = if phy == 0 { 0x0A } else { 0 };
+            d[8..16].copy_from_slice(&0x5000cca27ea19055u64.to_be_bytes());
+            d[32] = 0x88;
+            d[33] = max;
+            p.extend(d);
+        }
+        let n = (p.len() - 4) as u16;
+        p[2..4].copy_from_slice(&n.to_be_bytes());
+        p
+    }
+
+    /// A drive with subpage 0x19/1 that takes MODE SELECT as a drive does.
+    struct Bay3 {
+        max: std::cell::Cell<u8>,
+        ps: bool,
+        changeable: u8,
+        selects: std::cell::RefCell<Vec<(u8, Vec<u8>)>>,
+    }
+    impl Transport for Bay3 {
+        fn run(&self, cdb: &[u8], _dir: Dir, data: &mut [u8], _t: u32) -> std::io::Result<Reply> {
+            match cdb[0] {
+                0x5A if cdb[2] & 0x3F == 0x19 && cdb[3] == 1 => {
+                    let mut page = phy_control_page(self.max.get(), self.ps);
+                    if cdb[2] >> 6 == 1 {
+                        for i in 0..2 {
+                            let d = &mut page[8 + i * 48..8 + (i + 1) * 48];
+                            d.fill(0);
+                            d[32] = 0xf0;
+                            d[33] = self.changeable;
+                        }
+                    }
+                    let mut v = vec![0u8; 8];
+                    v.extend(page);
+                    let n = (v.len() - 2) as u16;
+                    v[0..2].copy_from_slice(&n.to_be_bytes());
+                    let k = v.len().min(data.len());
+                    data[..k].copy_from_slice(&v[..k]);
+                    Ok(Reply { len: k, ..Default::default() })
+                }
+                0x55 => {
+                    let p = &data[8..];
+                    self.max.set(p[8 + 33]);
+                    self.selects.borrow_mut().push((cdb[1], data.to_vec()));
+                    Ok(Reply::default())
+                }
+                _ => Ok(Reply { status: 2, sense: vec![0x70, 0, 5, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0x20, 0], len: 0, transport: None }),
+            }
+        }
+        fn name(&self) -> String {
+            "bay3".into()
+        }
+    }
+
+    #[test]
+    fn the_drives_programmed_link_rate() {
+        let r = parse_phy_control(&phy_control_page(0xab, true));
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            r[0],
+            PhyRates { phy: 0, negotiated_mbps: 6000, programmed_min_mbps: 1500, hardware_min_mbps: 1500, programmed_max_mbps: 6000, hardware_max_mbps: 12000 }
+        );
+        assert_eq!(programmed_below(&r).as_deref(), Some("the drive programs 6 Gbit (hardware 12)"));
+        assert_eq!(programmed_below(&parse_phy_control(&phy_control_page(0xbb, true))), None);
+        assert_eq!((gbit(1500), gbit(12000)), ("1.5".to_string(), "12".to_string()));
+        assert_eq!(sas_rate_code(12000), Some(0xB));
+        // linkRate 12: raised, saved (SP = 1), only byte 33's high nibble changed.
+        let d = Bay3 { max: 0xab.into(), ps: true, changeable: 0xff, selects: Default::default() };
+        assert_eq!(phy_rates(&d).unwrap()[0].programmed_max_mbps, 6000);
+        assert_eq!(set_programmed_max(&d, Some(12000)).unwrap(), "drive programmed 12 (hardware 12), was 6, saved");
+        let sel = d.selects.borrow();
+        assert_eq!(sel.len(), 1);
+        assert_eq!(sel[0].0, 0x11, "PF and SP");
+        let mut want = vec![0u8; 8];
+        let mut page = phy_control_page(0xbb, false);
+        page[0] &= 0x7F;
+        want.extend(page);
+        assert_eq!(sel[0].1, want, "the page as given, PS cleared, programmed max 12 on both phys");
+        drop(sel);
+        // Already there: nothing sent.
+        assert_eq!(set_programmed_max(&d, Some(12000)).unwrap(), "drive programmed 12 (hardware 12), left as it is");
+        assert_eq!(d.selects.borrow().len(), 1);
+        // A lower ask is the HBA's to hold: the drive is left alone.
+        assert!(set_programmed_max(&d, Some(6000)).unwrap().ends_with("left as it is"));
+        // Above the hardware: capped at it. Not savable: SP = 0, said.
+        let d = Bay3 { max: 0xab.into(), ps: false, changeable: 0xff, selects: Default::default() };
+        assert_eq!(set_programmed_max(&d, Some(22500)).unwrap(), "drive programmed 12 (hardware 12), was 6; the page is not savable: set again on every boot");
+        assert_eq!(d.selects.borrow()[0].0, 0x10);
+        // hw from a programmed 3: the hardware maximum.
+        let d = Bay3 { max: 0x9b.into(), ps: true, changeable: 0xff, selects: Default::default() };
+        assert!(set_programmed_max(&d, None).unwrap().starts_with("drive programmed 12 (hardware 12), was 3"));
+        // Not changeable: refused, nothing sent.
+        let d = Bay3 { max: 0xab.into(), ps: true, changeable: 0x0f, selects: Default::default() };
+        assert!(set_programmed_max(&d, Some(12000)).unwrap_err().contains("not changeable (changeable mask 0x0f)"));
+        assert!(d.selects.borrow().is_empty());
     }
 
     #[test]

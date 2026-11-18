@@ -93,6 +93,13 @@ pub struct Link {
     /// The HBA phy facing the drive (`phy-1:2`) and its maximum rate.
     pub host_phy: Option<String>,
     pub host_maximum: Option<String>,
+    /// The drive's own maximum (#646, mode page 0x19/1, the lowest of its
+    /// phys), Mbit/s: what its firmware programs and what its hardware can.
+    /// forge1 bay 3's EMC HITACHI: 6000 and 12000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive_programmed_max: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive_hardware_max: Option<u32>,
     pub level: Level,
     /// Since when it has been at this level.
     pub since: u64,
@@ -145,6 +152,8 @@ pub fn next(prev: Option<&Link>, sas: &str, drive: Vec<PhyLink>, host: Vec<PhyLi
             host: Side { phys: host, rates: vec![] },
             host_phy: None,
             host_maximum: None,
+            drive_programmed_max: None,
+            drive_hardware_max: None,
             level: Level::Settling,
             since: at,
             streak: 0,
@@ -171,6 +180,8 @@ pub fn next(prev: Option<&Link>, sas: &str, drive: Vec<PhyLink>, host: Vec<PhyLi
         host: Side { phys: host, rates: hr },
         host_phy: p.host_phy.clone(),
         host_maximum: p.host_maximum.clone(),
+        drive_programmed_max: p.drive_programmed_max,
+        drive_hardware_max: p.drive_hardware_max,
         level,
         since: if level == p.level { p.since } else { at },
         streak,
@@ -191,7 +202,24 @@ pub fn said(l: &Link) -> String {
         }
     }
     let rate = l.drive.phys.iter().find(|p| p.rate_mbps > 0).map(|p| format!(" at {} Gbit", p.rate_mbps as f64 / 1000.0)).unwrap_or_default();
-    format!("{}{rate}: {}", l.level.as_str(), if parts.is_empty() { "nothing moving".into() } else { parts.join(", ") })
+    let programs = match (l.drive_programmed_max, l.drive_hardware_max) {
+        (Some(p), Some(h)) if p < h => format!(" ({})", programmed_said(p, h)),
+        _ => String::new(),
+    };
+    format!("{}{rate}{programs}: {}", l.level.as_str(), if parts.is_empty() { "nothing moving".into() } else { parts.join(", ") })
+}
+
+/// `the drive programs 6 Gbit (hardware 12)` (#646).
+pub fn programmed_said(programmed: u32, hardware: u32) -> String {
+    use crate::drive::scsi::gbit;
+    format!("the drive programs {} Gbit (hardware {})", gbit(programmed), gbit(hardware))
+}
+
+/// The drive's maxima from its phys' rates: the lowest programmed and
+/// hardware maximum of the phys that report one.
+pub fn maxima(r: &[crate::drive::scsi::PhyRates]) -> (Option<u32>, Option<u32>) {
+    let low = |f: fn(&crate::drive::scsi::PhyRates) -> u32| r.iter().map(f).filter(|v| *v > 0).min();
+    (low(|p| p.programmed_max_mbps), low(|p| p.hardware_max_mbps))
 }
 
 static STATE: Mutex<Option<HashMap<String, Link>>> = Mutex::new(None);
@@ -204,7 +232,14 @@ fn with<R>(f: impl FnOnce(&mut HashMap<String, Link>) -> R) -> R {
 /// Take a new sample of a drive (from the card's thread); a change of level
 /// is logged, and the metrics are set.
 #[allow(clippy::too_many_arguments)]
-pub fn record(sas: &str, labels: &Labels, drive: Result<Vec<PhyLink>, String>, host: Option<(String, PhyLink, String)>, at: u64) {
+pub fn record(
+    sas: &str,
+    labels: &Labels,
+    drive: Result<Vec<PhyLink>, String>,
+    host: Option<(String, PhyLink, String)>,
+    rates: Option<Vec<crate::drive::scsi::PhyRates>>,
+    at: u64,
+) {
     let (dphys, derr) = match drive {
         Ok(v) => (v, None),
         Err(e) => (vec![], Some(format!("drive side: {e}"))),
@@ -217,6 +252,15 @@ pub fn record(sas: &str, labels: &Labels, drive: Result<Vec<PhyLink>, String>, h
         let mut l = next(m.get(sas), sas, dphys, hphys, at);
         l.host_phy = hname;
         l.host_maximum = hmax;
+        if let Some(r) = &rates {
+            (l.drive_programmed_max, l.drive_hardware_max) = maxima(r);
+            let was = m.get(sas).and_then(|p| p.drive_programmed_max);
+            if let (Some(p), Some(h)) = (l.drive_programmed_max, l.drive_hardware_max) {
+                if p < h && was != Some(p) {
+                    tracing::warn!("storage: drive {sas} (bay {}): {} (#646: storage.drives[].linkRate raises it)", labels.bay, programmed_said(p, h));
+                }
+            }
+        }
         l.errors = derr.into_iter().collect();
         if let Some(p) = m.get(sas) {
             if p.level != l.level && l.level != Level::Settling {
@@ -331,7 +375,12 @@ pub fn apply_policy(run: &std::path::Path, data_dir: &std::path::Path, install_b
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 fn apply_one(sas: u64, g: f32) {
     use std::path::Path;
-    match crate::drive::mpt::set_max_linkrate(Path::new("/dev"), Path::new("/sys"), sas, Some(g)) {
+    let (drive, host) = crate::drive::mpt::set_link_max(Path::new("/dev"), Path::new("/sys"), sas, Some(g));
+    match drive {
+        Ok(s) => tracing::info!("storage: drive 0x{sas:016x}: {s} (the link-rate policy, #646)"),
+        Err(e) => tracing::warn!("storage: drive 0x{sas:016x}: its own maximum not programmed to {g} Gbit: {e} (#646)"),
+    }
+    match host {
         Ok(s) => tracing::warn!("storage: drive 0x{sas:016x}: {s} (the link-rate policy, #642)"),
         Err(e) => tracing::warn!("storage: drive 0x{sas:016x}: the link-rate policy ({g} Gbit) not applied: {e} (#642)"),
     }
@@ -351,6 +400,8 @@ pub fn summary() -> Vec<Value> {
                     "sas_address": l.sas_address, "level": l.level.as_str(), "since": l.since,
                     "loss_of_sync_per_min": sync,
                     "rate_mbps": l.drive.phys.iter().map(|p| p.rate_mbps).max(),
+                    "drive_programmed_max": l.drive_programmed_max,
+                    "drive_hardware_max": l.drive_hardware_max,
                 })
             })
             .collect()
@@ -418,6 +469,16 @@ mod tests {
         assert_eq!((l4.level, l5.level), (Level::Degraded, Level::Degraded));
         // A re-plug resets the drive's counters: no rate from that pair.
         let l6 = next(Some(&l5), sas, vec![phy(46_622, 0, 10)], host(9), 1360);
+        // #646: the drive's own maxima carried from sample to sample, said.
+        let mut l7 = l6.clone();
+        (l7.drive_programmed_max, l7.drive_hardware_max) = maxima(&[
+            crate::drive::scsi::PhyRates { phy: 0, programmed_max_mbps: 6000, hardware_max_mbps: 12000, ..Default::default() },
+            crate::drive::scsi::PhyRates { phy: 1, ..Default::default() },
+        ]);
+        assert_eq!((l7.drive_programmed_max, l7.drive_hardware_max), (Some(6000), Some(12000)));
+        let l8 = next(Some(&l7), sas, vec![phy(46_622, 0, 10)], host(9), 1420);
+        assert_eq!(l8.drive_programmed_max, Some(6000));
+        assert!(said(&l8).starts_with("ok at 12 Gbit (the drive programs 6 Gbit (hardware 12)): nothing moving"), "{}", said(&l8));
         assert_eq!(l6.drive.rates[0].loss_of_sync, None);
         assert_eq!(l6.level, Level::Ok);
     }

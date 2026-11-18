@@ -610,6 +610,27 @@ pub fn set_max_linkrate(dev: &Path, sys: &Path, sas: u64, gbit: Option<f32>) -> 
     Ok(format!("{name}: maximum {want}, link reset"))
 }
 
+/// The link-rate policy on both sides (#646): the drive's own programmed
+/// maximum (mode page 0x19/1) raised to `gbit` when it programs less, or
+/// set back to its hardware maximum (`None`); then the HBA phy's maximum
+/// and a link reset ([`set_max_linkrate`]), so the link is negotiated
+/// again with both. Each side's answer, apart: a drive that refuses MODE
+/// SELECT still has its HBA side set.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn set_link_max(dev: &Path, sys: &Path, sas: u64, gbit: Option<f32>) -> (Result<String, String>, Result<String, String>) {
+    let want = gbit.map(|g| (g * 1000.0).round() as u32);
+    let drive = with_drive(dev, sys, sas, |t| crate::drive::scsi::set_programmed_max(t, want)).and_then(|r| r);
+    let host = set_max_linkrate(dev, sys, sas, gbit);
+    (drive, host)
+}
+
+/// The bay (the card's slot) of the drive with SAS address `sas`.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn slot_of(dev: &Path, sys: &Path, sas: u64) -> Option<u16> {
+    let (cards, _) = cards(dev, sys, false);
+    cards.iter().find_map(|c| c.drives().find(|r| r.device.sas_address == sas).map(|r| r.device.slot))
+}
+
 /// A link reset on the phy the card says the drive is on (#620): written to
 /// `/sys/class/sas_phy/phy-<host>:<phy>/link_reset`. Answers the phy's name.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]

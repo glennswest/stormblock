@@ -768,7 +768,11 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     `/metrics` as `storm_drive_link_*` (counters by side and phy, the rate,
     the level). The write test and the lay read it before and after.
     `linkRate` on a `storage.drives` entry, or `stormblock hba linkrate`,
-    holds a marginal drive's link at a rate.
+    holds a marginal drive's link at a rate. The drive's own programmed
+    maximum (mode page 0x19/1) is read with it (`drive_programmed_max`,
+    `drive_hardware_max`). `linkRate` raises it with MODE SELECT when the
+    drive's firmware programs less than its hardware can, and then the link
+    negotiated and a minute of its counters are said (#646).
     [docs/storage-layout.md](docs/storage-layout.md#the-sas-link-both-sides-every-minute-642).
   - The power button (#635): from early in `/init` until switch_root,
     `stormblock power-button` acts on the ACPI "Power Button" (a BMC's soft

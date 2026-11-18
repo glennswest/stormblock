@@ -229,7 +229,7 @@ rescue_shell() { echo RESCUE; exit 0; }
 inv_card() { :; }
 inv_card_act() { return 1; }
 inv_card_ready() { echo "0x5000cca268077301: TEST UNIT READY good; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1; no Linux device yet"; return 2; }
-inv_card_linkrate() { echo "$*" >> "$W/linkrate.args"; echo "phy-1:2: maximum 6.0 Gbit, link reset"; }
+inv_card_linkrate() { echo "$*" >> "$W/linkrate.args"; echo "phy-1:2: maximum 6.0 Gbit, link reset"; echo "bay 1 (0x5000cca26a819e69): negotiated 6 Gbit after the reset; drive programmed 12 (hardware 12)"; }
 inv_rescan() { :; }
 inv_settling() { :; }
 EOF
@@ -357,6 +357,7 @@ echo 0x5000cca26a819e69 > "$SYS/sdb/device/sas_address"
 layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml"
 check "the card told" "--dev /dev/sdb --max 6" "$(cat "$WORK/linkrate.args")"
 has "said" "$WORK/out" "storage: /dev/sdb: phy-1:2: maximum 6.0 Gbit, link reset"
+has "every line said (#646)" "$WORK/out" "storage: /dev/sdb: bay 1 (0x5000cca26a819e69): negotiated 6 Gbit after the reset; drive programmed 12 (hardware 12)"
 check "kept for the engine" "0x5000cca26a819e69 6" "$(cat "$WORK/run/link-policy")"
 rm -f "$SYS/sdb/device/sas_address" "$WORK/linkrate.args"
 

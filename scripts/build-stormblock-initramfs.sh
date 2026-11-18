@@ -5495,8 +5495,9 @@ if [ "$BOOT_MODE" = "local" ]; then
     # `system_drive:` are read from the file, never printed (#275).
     STORAGE_FROM=""; STORAGE_DRIVES=""; STORAGE_SYSTEM=""; STORAGE_STOP=""; STORAGE_SAID=""
     STORAGE_LINKRATE=""
-    # The link-rate policy (#642): `linkRate` on a storage.drives entry holds
-    # the HBA phy facing that drive at that rate (a marginal link, at the
+    # The link-rate policy (#642, #646): `linkRate` on a storage.drives entry
+    # raises the drive's own programmed maximum to it when the drive programs
+    # less (mode page 0x19/1), and holds the HBA phy facing that drive at that rate (a marginal link, at the
     # owner's word, until the drive is replaced), set before anything is
     # formatted or laid, and kept for the node's engine, which applies it
     # again on every boot (a sysfs write does not persist).
@@ -5509,10 +5510,13 @@ if [ "$BOOT_MODE" = "local" ]; then
                 */sg*) _sls=$(cat "${STORM_INV_SG:-/sys/class/scsi_generic}/${_sld##*/}/device/sas_address" 2>/dev/null) ;;
                 *) _sls=$(cat "$SURVEY_SYS/${_sld##*/}/device/sas_address" 2>/dev/null) ;;
             esac
+            # A line a step (#646): the drive's own programmed maximum, the
+            # HBA phy's, the rate negotiated after the reset, and a minute of
+            # the link's counters, both sides.
             if _slo=$(inv_card_linkrate --dev "$_sld" --max "$_slg" 2>&1); then
-                echo "  storage: $_sld: $_slo"
+                printf '%s\n' "$_slo" | sed "s|^|  storage: $_sld: |"
             else
-                echo "  WARNING: storage: $_sld: its link not held at $_slg Gbit: $_slo (#642)"
+                printf '%s\n' "$_slo" | sed "s|^|  WARNING: storage: $_sld: its link not held at $_slg Gbit: |"
             fi
             [ -n "$_sls" ] && { mkdir -p "${_slp%/*}"; echo "$_sls $_slg" >> "$_slp"; }
         done
