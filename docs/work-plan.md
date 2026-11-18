@@ -184,6 +184,9 @@ forge1: three HGST 10 TB at 12 Gbit read 64–103 MB/s, the HITACHI at 6 Gbit
 - [ ] on forge1: the lines say why (block vs sg, background scan, pages);
   a fix, if a MODE SELECT, through stormdrive#146; proof
   `console:read-test .* sda .* MB/s`
+- [ ] 2026-11-18: back after pvetest2's install (a VM: says nothing of
+  forge1's HGSTs). Waits `--after-install stormblock>=60cc66c4@forge1`;
+  forge1 runs 24.16.0.
 
 ## #649 — the Volume object says who owns it; orphans findable (2026-11-18, P1)
 
