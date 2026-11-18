@@ -72,7 +72,7 @@ stormdrive's: its DrivePolicy enrolls a data drive through the engine's
   (ATA IDENTIFY word 69, DM-SMR) on the Drive object, the SMR HDD enrolled
   `cool`; stormcos#1039: the blades' DrivePolicy and a `cool` StorageClass
 - [x] check.sh ALL PASS (ed4d623c); storage-layout.md, CHANGELOG; v24.29.0
-- [ ] #672 behind stormdrive#156 (its proof reads the Drive object)
+- [x] image requested; #672 behind stormdrive#156 (its proof reads the Drive object)
 
 ## #659 — no stubs (P-1, 2026-11-18)
 
