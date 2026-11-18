@@ -55,6 +55,16 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #647 — the set's PI said, never silent (2026-11-18, P1)
+
+Decided (owner via the master): `--pi auto` (already asked since #573) and
+the honest line; mpt3sas is DIF-only by design, no re-lay of forge1.
+- [x] /init `storage_pi_said`: stormraid's answer, else each member's
+  protection_type, wwid, the HBA's prot_capabilities and proc_name; one line
+  `storage: node-data PI …`; tests (forge1's case, a member without PI, no
+  DIF, type1)
+- [ ] check.sh; release; shipped (proof `console:node-data PI (type1|off: )`)
+
 ## #658 (with #649) — attachments from the kernel's view (2026-11-18, P1)
 
 forge1: 93 ublk devices, the engine reports 10 in use. rustkube-node#372

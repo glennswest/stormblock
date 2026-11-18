@@ -187,7 +187,7 @@ EOF
 cat >> "$WORK/stormraid" <<'EOF'
 case "$1" in
 create) shift; for a in "$@"; do printf '%s\n' "$a"; done > "$W/raid.args"
-    echo "stormraid: created node-data"
+    cat "$W/raid.say" 2>/dev/null || echo "stormraid: created node-data"
     exit "$(cat "$W/raid.rc" 2>/dev/null || echo 0)" ;;
 serve) shift; for a in "$@"; do printf '%s\n' "$a"; done > "$W/serve.args"
     touch "$W/dev/ublkb$2"; exit 0 ;;
@@ -958,6 +958,29 @@ check "known by its identity" "ID-sda" "$(val SYSTEM_DISK_ID)"
 check "no pair" "" "$(val PAIR_DISK)"
 check "laid fresh" "1" "$(val FORCE_LOCAL)"
 has "the regions said" "$WORK/out" "a 9000-byte data region"
+has "--pi auto asked (#647)" "$WORK/raid.args" "^auto$"
+
+echo "the lay: the set's PI said, never silent (#647)"
+reset
+for d in sda sdb sdc sdd; do echo 1 > "$SYS/$d/device/scsi_disk/0:0:0:0/protection_type"; done
+mkdir -p "$WORK/scsi_host/host0"
+echo 7 > "$WORK/scsi_host/host0/prot_capabilities"
+echo mpt3sas > "$WORK/scsi_host/host0/proc_name"
+printf 'stormraid: --pi auto: off (/dev/sda3 has no T10 PI type 1 profile)\ncreated set node-data e5979f0e (role node-data) - 4 drives, parity 1, PI off, journal on the drives\n' > "$WORK/raid.say"
+lay "$D4"
+has "forge1: drives type1, the card's DIF" "$WORK/out" "storage: node-data PI off: drives type1, card-inserted (DIF, no host DIX on mpt3sas); set checksums by stormraid (#647)"
+echo 0 > "$SYS/sdc/device/scsi_disk/0:0:0:0/protection_type"
+echo naa.5000cca26a819e69 > "$SYS/sdc/device/wwid"
+lay "$D4"
+has "a member with no PI, named" "$WORK/out" "storage: node-data PI off: sdc (naa.5000cca26a819e69) has no PI (#647)"
+echo 1 > "$SYS/sdc/device/scsi_disk/0:0:0:0/protection_type"
+echo 0 > "$WORK/scsi_host/host0/prot_capabilities"
+lay "$D4"
+has "no DIF at all" "$WORK/out" "PI off: drives type1, checked by the drive only (mpt3sas offers the host no DIF)"
+printf 'created set node-data e5979f0e (role node-data) - 4 drives, parity 1, PI type1, journal on the drives\n' > "$WORK/raid.say"
+lay "$D4"
+has "type1 when stormraid laid it" "$WORK/out" "storage: node-data PI type1: every member 4096 + PI type 1 with the host's integrity profile (#647)"
+rm -rf "$WORK/raid.say" "$WORK/scsi_host" "$SYS/sdc/device/wwid"
 hasnt "no rescue" "$WORK/out" "RESCUE"
 
 echo "the lay: a spare is the last member"

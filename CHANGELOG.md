@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18 (#647)
+- **fix:** #647 (forge1: the node-data set laid `PI off` over four drives at 4096 + PI type 1, with no word why). The lay already asks stormraid for `--pi auto`. Now it also says the set's PI on the console from what the members and the HBA say: `PI type1`; `PI off: drives type1, card-inserted (DIF, no host DIX on mpt3sas); set checksums by stormraid`; or `PI off: <drive> (<wwid>) has no PI`. mpt3sas is DIF-only by design, so a type1 set needs a DIX-capable HBA (stormcos#1016).
+
 ## [v24.28.0] — 2026-11-18
 
 ### Changed

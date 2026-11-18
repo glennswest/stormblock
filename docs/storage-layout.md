@@ -183,12 +183,24 @@ After the format, every drive taken gets a fresh GPT: a boot area, a
 `stormblock` system partition on each system leg, and a `stormblock-raid`
 data region, every region one size on every drive (the smallest drive's).
 With more than one drive the data regions become one stormraid set
-(`stormraid create --role node-data --parity P --force`), served at
+(`stormraid create --role node-data --parity P --pi auto --force`), served at
 `/dev/ublkb65535`; the node's data half is laid on it, and its system half on
 the first leg. The id is far above any the engine numbers (#605): boot-local
 numbers the release's volumes 0, 1, 2, … in the order `/init` mounts them, and
 12.84's 81 volumes reached the old 64. boot-local refuses to start, naming the
-device, when an id it would create is already live. Same rule as the format: only over drives this boot formatted,
+device, when an id it would create is already live.
+
+**The set's PI is said, never silent** (#647). `--pi auto` lays `type1` when
+every member has PI and the kernel holds the host's integrity profile (DIX).
+An mpt3sas HBA offers DIF only, by design (`prot_capabilities` 7). On one the
+set is `off`, while every block is still PI-guarded from the card to the
+platter: the card inserts and strips the tags, and the drive checks them. One
+line says which case it is:
+- `storage: node-data PI type1: every member 4096 + PI type 1 with the host's integrity profile`;
+- `storage: node-data PI off: drives type1, card-inserted (DIF, no host DIX on mpt3sas); set checksums by stormraid` (forge1);
+- `storage: node-data PI off: sdc (naa.…) has no PI` when a member lacks it.
+
+The route to a type1 set is a DIX-capable HBA (stormcos#1016). Same rule as the format: only over drives this boot formatted,
 with the wipe word, on a fresh install, or over drives that carry nothing.
 
 ### A drive that cannot be laid (#625)

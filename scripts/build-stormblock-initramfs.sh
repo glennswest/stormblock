@@ -6693,6 +6693,44 @@ $1|$_svp|$3"
         progress step lay done "ESP, system region and data region on $STORAGE_DRIVES" 2>/dev/null
         _sl_first=${STORAGE_MEMBERS%% *}
         _sl_n=$(printf '%s\n' $STORAGE_MEMBERS | grep -c .)
+        # The set's PI, said and never silent (#647). stormraid's `--pi auto`
+        # lays type1 when every member has PI and the kernel has the host's
+        # integrity profile (DIX); an mpt3sas HBA offers DIF only, by design,
+        # so on it the set is `off` while every block is still PI-guarded
+        # from the card to the platter (the card inserts and strips, the
+        # drive checks). One line says which it is: type1; off and why (a
+        # member without PI, by name; or drives type1 with the card's DIF and
+        # no host DIX, naming the driver); the route to type1 is a
+        # DIX-capable HBA (stormcos#1016).
+        storage_pi_said() { # stormraid's answer, members... -> one line
+            _sp_said=$1; shift
+            case "$_sp_said" in *type1*) echo "PI type1: every member 4096 + PI type 1 with the host's integrity profile"; return ;; esac
+            _sp_drv=""; _sp_caps=""
+            for _sp_m in "$@"; do
+                _sp_d=$(disk_of "$_sp_m"); _sp_n=${_sp_d##*/}
+                _sp_pt=$(cat "$SURVEY_SYS/$_sp_n"/device/scsi_disk/*/protection_type 2>/dev/null | head -n 1)
+                if [ "${_sp_pt:-0}" = 0 ]; then
+                    _sp_w=$(cat "$SURVEY_SYS/$_sp_n/device/wwid" 2>/dev/null)
+                    echo "PI off: $_sp_n${_sp_w:+ ($_sp_w)} has no PI"
+                    return
+                fi
+                _sp_h=$(ls -d "$SURVEY_SYS/$_sp_n"/device/scsi_disk/*:* 2>/dev/null | head -n 1)
+                _sp_h=${_sp_h##*/}; _sp_h=${_sp_h%%:*}
+                _sp_hs="${STORM_STORAGE_SCSI_HOST:-/sys/class/scsi_host}/host$_sp_h"
+                [ -n "$_sp_drv" ] || _sp_drv=$(cat "$_sp_hs/proc_name" 2>/dev/null)
+                [ -n "$_sp_caps" ] || _sp_caps=$(cat "$_sp_hs/prot_capabilities" 2>/dev/null)
+            done
+            _sp_c=${_sp_caps:-0}
+            case "$_sp_c" in *[!0-9]*) _sp_c=0 ;; esac
+            # prot_capabilities: DIF types 1-3 are bits 0-2, DIX 3-6.
+            if [ $((_sp_c & 7)) -ne 0 ] && [ $((_sp_c & 120)) -eq 0 ]; then
+                echo "PI off: drives type1, card-inserted (DIF, no host DIX on ${_sp_drv:-the HBA}); set checksums by stormraid"
+            elif [ $((_sp_c & 7)) -eq 0 ]; then
+                echo "PI off: drives type1, checked by the drive only (${_sp_drv:-the HBA} offers the host no DIF); set checksums by stormraid"
+            else
+                echo "PI off: drives type1 and ${_sp_drv:-the HBA} offers DIX, yet stormraid said: ${_sp_said:-nothing of PI}"
+            fi
+        }
         if [ "$STORAGE_RAID" = yes ] && [ "$_sl_n" -gt 1 ]; then
             _sr="${STORM_STORMRAID:-/usr/sbin/stormraid}"
             [ -x "$_sr" ] || storage_fail "storage: in ${STORAGE_FROM##*/} makes a raid set, and this initramfs has no stormraid ($_sr): it is built with it (stormcentral#1335)"
@@ -6710,6 +6748,8 @@ $1|$_svp|$3"
                 storage_fail "stormraid create failed: $(tail -n 1 "$_st_dir/raid-create.log")"
             fi
             sed 's/^/  /' "$_st_dir/raid-create.log"
+            # shellcheck disable=SC2086
+            echo "  storage: node-data $(storage_pi_said "$(grep -o 'PI [a-z0-9]*' "$_st_dir/raid-create.log" | head -n 1)" $STORAGE_MEMBERS) (#647)"
             # The set's shape for the layout report (#573 step 8).
             # shellcheck disable=SC2086
             "$_sr" status $STORAGE_MEMBERS > "${STORM_RUN:-/run/stormblock}/stormraid-status.txt" 2>&1 || true
