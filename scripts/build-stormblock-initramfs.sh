@@ -1246,6 +1246,7 @@ SYSTEM_NAMED=""
 DECLARED_NET=""
 STATUS_LISTEN=""
 SCREEN=""
+READTEST=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -1296,6 +1297,7 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.diskless=*)    DISKLESS_OK="${param#*=}" ;;
         rd.stormblock.status=*)      STATUS_LISTEN="${param#*=}" ;;
         rd.stormblock.screen=*)      SCREEN="${param#*=}" ;;
+        rd.stormblock.readtest=*)    READTEST="${param#*=}" ;;
         rd.stormblock.meta=*)        META="${param#*=}" ;;
         rd.stormblock.overlay=*)     OVERLAY="${param#*=}" ;;
         rd.stormblock.image-store=*) IMAGE_STORE="${param#*=}" ;;
@@ -2504,6 +2506,7 @@ INV_HBA="${STORM_INV_HBA:-${STORM_STORMBLOCK:-/usr/sbin/stormblock} hba}"
 inv_card() { $INV_HBA "$@" 2>/dev/null || true; }
 inv_card_act() { $INV_HBA act "$@"; } # its exit code and stderr are the format's
 inv_card_linkrate() { $INV_HBA linkrate "$@"; } # the link-rate policy (#642): its line on stdout
+inv_card_readtest() { $INV_HBA read-test "$@"; } # the read test (#652): a line a step, `read-test …`
 inv_card_ready() { $INV_HBA ready "$@"; } # one round after a format (#620): one line; 0 Linux has it, 2 ready on the card, 3 not ready
 # A drive that answers and has no readable format (#595: forge1's three SAS
 # drives, left by an interrupted format, answer NOT READY / medium format
@@ -5521,6 +5524,27 @@ if [ "$BOOT_MODE" = "local" ]; then
             [ -n "$_sls" ] && { mkdir -p "${_slp%/*}"; echo "$_sls $_slg" >> "$_slp"; }
         done
     }
+    # The read test (#652): every sd drive storage: takes, read at once,
+    # read only (256 MiB a pass, both paths: the block device and sg),
+    # before anything is formatted or laid, while the drives are quiet: a
+    # line a step on the console, each drive's level against its class, the
+    # results kept for the engine's rows. `rd.stormblock.readtest=off` skips it.
+    storage_readtest() {
+        [ "${READTEST:-on}" = off ] && return 0
+        _srd=""
+        for _d in ${STORAGE_DRIVES:-}; do
+            case "$_d" in /dev/sd*) _srd="$_srd --dev-name $_d" ;; esac
+        done
+        [ -n "$_srd" ] || return 0
+        _srt="${STORM_RUN:-/run/stormblock}/read-test.json"
+        mkdir -p "${_srt%/*}"
+        # shellcheck disable=SC2086 # one word an option
+        if _sro=$(inv_card_readtest $_srd --mib 256 --secs 5 --out "$_srt" 2>&1); then
+            printf '%s\n' "$_sro" | sed 's/^/  storage: /'
+        else
+            printf '%s\n' "${_sro:-the read test did not run (#652)}" | sed 's/^/  WARNING: storage: /'
+        fi
+    }
     STORAGE_FORCE=""; STORAGE_WIPE=""
     for _icf in "${INSTALL_CONFIG_STAGED:-}" "${INSTALL_CONFIG_FORGE:-${STORM_RUN:-/run/stormblock}/install-config.forge.yaml}"; do
         [ -n "$_icf" ] && [ -f "$_icf" ] || continue
@@ -5775,6 +5799,7 @@ STEOF
         elif [ -n "$STORAGE_DRIVES" ]; then
             printf '%s\n' "$STORAGE_SAID" | sed 's/^/  /'
             storage_linkrate
+            storage_readtest
             _st_first=${STORAGE_SYSTEM%% *}
             if [ -n "$NAMED_DISK" ] && [ "/dev/$NAMED_DISK" != "$_st_first" ]; then
                 echo "  rd.stormblock.slab= names /dev/$NAMED_DISK; storage: lays every drive, $_st_first first (#573)"

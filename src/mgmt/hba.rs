@@ -50,6 +50,8 @@ struct State {
     /// Each drive's INQUIRY and READ CAPACITY 16, read each minute (#621:
     /// the firmware revision and the format in the row).
     idents: HashMap<String, crate::drive::scsi::Ident>,
+    /// The last read test of each drive (#652).
+    read_tests: HashMap<String, Value>,
     poked: bool,
 }
 
@@ -163,6 +165,7 @@ pub fn report() -> Value {
                     let offered = offered(&r, id.as_ref(), job.as_ref());
                     let link = super::link::get(&sas);
                     let errors = super::drive_errors::get(&sas);
+                    let read_test = s.read_tests.get(&sas).cloned();
                     if let Some(o) = r.as_object_mut() {
                         if let Some(l) = link {
                             o.insert("link".into(), l);
@@ -170,6 +173,10 @@ pub fn report() -> Value {
                         // The drive's error and PI-check counters (#648).
                         if let Some(e) = errors {
                             o.insert("errors".into(), e);
+                        }
+                        // Its last read test and level among its class (#652).
+                        if let Some(t) = read_test {
+                            o.insert("read_test".into(), t);
                         }
                         if let Some(i) = id {
                             o.insert("vendor".into(), serde_json::json!(i.vendor));
@@ -301,6 +308,103 @@ pub fn write_test(_sas: u64) -> Result<Value, String> {
     Err("no mpt card here".into())
 }
 
+/// The read-test results file /init writes on an install (#652), read by the
+/// engine at its start into the rows.
+pub const READ_TEST_FILE: &str = "read-test.json";
+
+/// Keep read tests (#652) for the rows.
+pub fn keep_read_tests(all: &[crate::drive::read_test::ReadTest]) {
+    with(|s| {
+        for r in all {
+            if let Ok(v) = serde_json::to_value(r) {
+                s.read_tests.insert(r.sas_address.clone(), v);
+            }
+        }
+    });
+}
+
+/// Every drive's last read test (#652).
+pub fn read_tests() -> Vec<Value> {
+    let mut v: Vec<Value> = with(|s| s.read_tests.values().cloned().collect());
+    v.sort_by(|a, b| a["sas_address"].as_str().cmp(&b["sas_address"].as_str()));
+    v
+}
+
+/// The read test (#652, blocking, read only) on the drives with these SAS
+/// addresses, every one at once (each on its own thread: the card's
+/// bandwidth is many times four drives'), through each one's block device
+/// and sg node (or the card); ranked against their class. Each line goes to
+/// `say`.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn run_read_tests(dev: &std::path::Path, sys: &std::path::Path, sas: &[u64], o: &crate::drive::read_test::Opts, say: &(dyn Fn(&str) + Sync)) -> Vec<crate::drive::read_test::ReadTest> {
+    use crate::drive::read_test;
+    let (cards, _) = crate::drive::mpt::cards(dev, sys, false);
+    let rows: Vec<Value> = cards.iter().flat_map(|c| c.rows_json()).collect();
+    let mut all: Vec<read_test::ReadTest> = std::thread::scope(|sc| {
+        let hs: Vec<_> = sas
+            .iter()
+            .map(|&a| {
+                let row = rows.iter().find(|r| key(r) == format!("0x{a:016x}")).cloned();
+                sc.spawn(move || {
+                    let block = row.as_ref().and_then(|r| r["block"].as_str()).map(|b| dev.join(b));
+                    let mut t = match crate::drive::mpt::with_drive(dev, sys, a, |t| read_test::run(t, block.as_deref(), o)) {
+                        Ok(t) => t,
+                        Err(e) => read_test::ReadTest { errors: vec![e], level: "unknown".into(), ..Default::default() },
+                    };
+                    t.sas_address = format!("0x{a:016x}");
+                    t.link = row.as_ref().and_then(|r| r["link"].as_str()).map(str::to_string);
+                    t
+                })
+            })
+            .collect();
+        hs.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    read_test::rank(&mut all);
+    for r in &all {
+        for l in read_test::lines(r) {
+            say(&l);
+        }
+    }
+    all
+}
+
+/// The read test from the engine (#652): every present drive the card lists
+/// when `sas` is empty. Each line is logged at WARN (the console), and the
+/// results are kept for the rows.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn read_test(sas: Vec<u64>, o: crate::drive::read_test::Opts) -> Vec<Value> {
+    use std::path::Path;
+    let list = if sas.is_empty() {
+        let (rows, _) = read();
+        rows.iter().filter(|r| r.get("present") == Some(&Value::Bool(true))).filter_map(|r| crate::drive::mpt::parse_addr(&key(r))).collect()
+    } else {
+        sas
+    };
+    let all = run_read_tests(Path::new("/dev"), Path::new("/sys"), &list, &o, &|l| tracing::warn!("storage: {l} (#652)"));
+    keep_read_tests(&all);
+    all.iter().filter_map(|r| serde_json::to_value(r).ok()).collect()
+}
+
+#[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+pub fn read_test(_sas: Vec<u64>, _o: crate::drive::read_test::Opts) -> Vec<Value> {
+    vec![]
+}
+
+/// An install's read test (/init's, #652), taken into the rows at the
+/// engine's start.
+pub fn load_read_tests(run: &std::path::Path) {
+    let Ok(b) = std::fs::read(run.join(READ_TEST_FILE)) else { return };
+    if let Ok(all) = serde_json::from_slice::<Vec<Value>>(&b) {
+        with(|s| {
+            for v in all {
+                if let Some(k) = v["sas_address"].as_str() {
+                    s.read_tests.insert(k.to_string(), v);
+                }
+            }
+        });
+    }
+}
+
 pub fn keep_details(sas: &str, v: Value) {
     with(|s| {
         s.details.insert(sas.to_string(), v);
@@ -399,6 +503,7 @@ pub fn spawn() {
     if crate::drive::mpt::mpt_hosts(std::path::Path::new("/sys")).is_empty() {
         return;
     }
+    load_read_tests(std::path::Path::new("/run/stormblock"));
     let r = std::thread::Builder::new().name("hba".into()).spawn(|| {
         with(|s| s.watching = true);
         let mut last_link = 0u64;
@@ -473,6 +578,16 @@ mod tests {
     fn row(sas: &str, slot: u64, state: &str, block: Option<&str>, sg: Option<&str>) -> Value {
         json!({"sas_address": sas, "slot": slot, "state": state, "link": "12.0 Gbit", "access": null,
                "present": true, "block": block, "sg": sg, "scsi": if state == "no target" { None } else { Some("0:0:1:0") }, "bytes": null})
+    }
+
+    /// #652: an install's read test taken into the rows.
+    #[test]
+    fn read_tests_loaded_into_the_rows() {
+        let d = tempfile::tempdir().unwrap();
+        let t = crate::drive::read_test::ReadTest { sas_address: "0x5000cca26801b6aa".into(), level: "very_slow".into(), ..Default::default() };
+        std::fs::write(d.path().join(READ_TEST_FILE), serde_json::to_vec(&vec![t]).unwrap()).unwrap();
+        load_read_tests(d.path());
+        assert!(read_tests().iter().any(|v| v["sas_address"] == "0x5000cca26801b6aa" && v["level"] == "very_slow"));
     }
 
     #[test]

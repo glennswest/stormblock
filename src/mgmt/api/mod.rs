@@ -698,6 +698,55 @@ async fn hba_write_test(
     }
 }
 
+#[derive(serde::Deserialize, Default)]
+struct HbaReadTestRequest {
+    /// SAS addresses; none: every present drive the card lists.
+    #[serde(default)]
+    sas: Vec<String>,
+    /// Bytes per sequential pass (default 1 GiB).
+    #[serde(default)]
+    bytes: Option<u64>,
+    #[serde(default)]
+    offset_pct: Option<u8>,
+    #[serde(default)]
+    random_secs: Option<u64>,
+}
+
+/// `POST /api/v1/storage/hba/read-test` (#652): the read test on the drives
+/// asked (every present one by default), all at once, read only: sequential
+/// 1 and 4 MiB through the block device and sg, random 4 KiB, the drive's
+/// caching/control/power/exception pages and background scan, each drive's
+/// level against its class. Every line is logged at WARN. It loads the
+/// drives while it runs (a minute or two). `GET` answers the last results.
+async fn hba_read_test(body: Option<Json<HbaReadTestRequest>>) -> Response {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let mut sas = Vec::new();
+    for s in &req.sas {
+        match hba_addr(s) {
+            Ok(a) => sas.push(a),
+            Err(r) => return r,
+        }
+    }
+    let d = crate::drive::read_test::Opts::default();
+    let o = crate::drive::read_test::Opts {
+        bytes: req.bytes.unwrap_or(d.bytes).clamp(16 << 20, 16 << 30) / (4 << 20) * (4 << 20),
+        offset_pct: req.offset_pct.unwrap_or(d.offset_pct),
+        random_secs: req.random_secs.unwrap_or(d.random_secs).min(120),
+        ..d
+    };
+    tracing::warn!(drives = sas.len(), "the read test on the card's drives (#652)");
+    match tokio::task::spawn_blocking(move || super::hba::read_test(sas, o)).await {
+        Ok(v) => Json(serde_json::json!({"drives": v})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// `GET /api/v1/storage/hba/read-test` (#652): each drive's last read test
+/// (an install's, from /init, or the engine's).
+async fn hba_read_test_last() -> Response {
+    Json(serde_json::json!({"drives": super::hba::read_tests()})).into_response()
+}
+
 /// `GET /api/v1/storage/hba/{sas}/write-test` (#627): the last run.
 async fn hba_write_test_last(axum::extract::Path(sas): axum::extract::Path<String>) -> Response {
     let a = match hba_addr(&sas) {
@@ -735,6 +784,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/storage/enclosures/{id}/format", axum::routing::post(enclosure_format).with_state(state.clone()))
         .route("/api/v1/storage/formats", axum::routing::get(storage_formats))
+        .route("/api/v1/storage/hba/read-test", axum::routing::post(hba_read_test).get(hba_read_test_last))
         .route(
             "/api/v1/storage/hba/{sas}/write-test",
             axum::routing::post(hba_write_test).get(hba_write_test_last).with_state(state.clone()),

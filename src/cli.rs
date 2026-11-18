@@ -249,6 +249,37 @@ enum HbaAction {
         #[arg(long, default_value = "/dev")]
         dev: String,
     },
+    /// The read test (#652), read only: sequential 1 MiB and 4 MiB reads
+    /// (`--mib` each, from `--offset-pct` into the drive) through the block
+    /// device (O_DIRECT, the kernel's DIF path) and through sg (READ(16)
+    /// RDPROTECT 0), random 4 KiB reads for `--secs`, the drive's caching,
+    /// control, power-condition and informational-exceptions pages and its
+    /// background scan; every drive at once, each ranked against the best of
+    /// its class (same rpm and size): ok, slow (< 80 %), very_slow (< 50 %).
+    ReadTest {
+        /// SAS addresses; none (or `--all`): every present drive the card lists
+        sas: Vec<String>,
+        #[arg(long)]
+        all: bool,
+        /// Block devices instead (`/dev/sda`), by their SAS address
+        #[arg(long = "dev-name")]
+        dev_name: Vec<String>,
+        #[arg(long, default_value_t = 1024)]
+        mib: u64,
+        #[arg(long, default_value_t = 10)]
+        offset_pct: u8,
+        #[arg(long, default_value_t = 10)]
+        secs: u64,
+        /// The results as JSON into this file (/init: /run/stormblock/read-test.json)
+        #[arg(long)]
+        out: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "/sys")]
+        sys: String,
+        #[arg(long, default_value = "/dev")]
+        dev: String,
+    },
     /// An action on a drive (#611): spin_up, spin_down, self_test,
     /// self_test_extended, or format (`--block-size`, `--pi none|type1`;
     /// every byte on the drive is lost). `--wait` follows a format to its
@@ -10845,6 +10876,44 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
             }
             if *json {
                 println!("{}", serde_json::to_string_pretty(&m)?);
+            }
+        }
+        HbaAction::ReadTest { sas, all, dev_name, mib, offset_pct, secs, out, json, sys, dev } => {
+            let (devp, sysp) = (Path::new(dev), Path::new(sys));
+            let mut list = Vec::new();
+            for s in sas {
+                list.push(mpt::parse_addr(s).ok_or_else(|| anyhow::anyhow!("hba read-test: {s} is no SAS address"))?);
+            }
+            for d in dev_name {
+                list.push(crate::mgmt::link::sas_of_dev(sysp, d).ok_or_else(|| anyhow::anyhow!("hba read-test: {d} has no SAS address in sysfs"))?);
+            }
+            if list.is_empty() || *all {
+                let (cards, _) = mpt::cards(devp, sysp, false);
+                for r in cards.iter().flat_map(|c| c.rows_json()) {
+                    if r["present"] == true {
+                        if let Some(a) = r["sas_address"].as_str().and_then(mpt::parse_addr) {
+                            if !list.contains(&a) {
+                                list.push(a);
+                            }
+                        }
+                    }
+                }
+            }
+            if list.is_empty() {
+                anyhow::bail!("hba read-test: no card lists a present drive");
+            }
+            let o = crate::drive::read_test::Opts {
+                bytes: (*mib).clamp(16, 16 << 10) / 4 * 4 << 20,
+                offset_pct: *offset_pct,
+                random_secs: *secs,
+                ..Default::default()
+            };
+            let all = crate::mgmt::hba::run_read_tests(devp, sysp, &list, &o, &|l| println!("{l}"));
+            if let Some(p) = out {
+                std::fs::write(p, serde_json::to_vec(&all)?)?;
+            }
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&all)?);
             }
         }
         HbaAction::Act { sas, action, block_size, pi, wait, sys, dev } => {

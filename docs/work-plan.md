@@ -55,6 +55,23 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
+
+forge1: three HGST 10 TB at 12 Gbit read 64–103 MB/s, the HITACHI at 6 Gbit
+238. Owner: "can we look at the raid performance".
+- [x] `drive::read_test`: sequential 1/4 MiB through the block device
+  (O_DIRECT, the kernel's DIF path) and sg (READ(16) RDPROTECT 0), random 4
+  KiB QD1, mode pages 0x08/0x0A/0x1A/0x1C said, log 0x15 background scan;
+  `rank`: ok / slow (< 80 % of the class's best) / very_slow (< 50 %)
+- [x] `stormblock hba read-test`, `POST|GET /api/v1/storage/hba/read-test`
+  (lines at WARN), rows' `read_test`; /init runs it on an install with
+  `storage:` (256 MiB a pass, `rd.stormblock.readtest=off`), the engine
+  takes `/run/stormblock/read-test.json` into the rows
+- [ ] check.sh; docs; release; stormdrive#149 note
+- [ ] on forge1: the lines say why (block vs sg, background scan, pages);
+  a fix, if a MODE SELECT, through stormdrive#146; proof
+  `console:read-test .* sda .* MB/s`
+
 ## #649 — the Volume object says who owns it; orphans findable (2026-11-18, P1)
 
 Owner: "Every pod and container must have traceablity." forge1: 113 clones,

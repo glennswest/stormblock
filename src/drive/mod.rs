@@ -17,6 +17,7 @@ pub mod flushgate;
 pub mod identity;
 pub mod mpt;
 pub mod scsi;
+pub mod read_test;
 pub mod designation;
 pub mod handover;
 pub mod httpdev;

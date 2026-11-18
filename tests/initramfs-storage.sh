@@ -230,6 +230,7 @@ inv_card() { :; }
 inv_card_act() { return 1; }
 inv_card_ready() { echo "0x5000cca268077301: TEST UNIT READY good; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1; no Linux device yet"; return 2; }
 inv_card_linkrate() { echo "$*" >> "$W/linkrate.args"; echo "phy-1:2: maximum 6.0 Gbit, link reset"; echo "bay 1 (0x5000cca26a819e69): negotiated 6 Gbit after the reset; drive programmed 12 (hardware 12)"; }
+inv_card_readtest() { echo "$*" >> "$W/readtest.args"; echo "read-test 0x5000cca26801b649 (sda, HGST H7210A521SUN010T A3B0, 7200rpm 10TB): sequential at 931 GiB: 1 MiB 64 MB/s, 4 MiB 103 MB/s through the block device, O_DIRECT (the kernel's DIF path)"; }
 inv_rescan() { :; }
 inv_settling() { :; }
 EOF
@@ -345,7 +346,7 @@ check "no storage: never asks the engine" "no" "$([ -e "$WORK/plan.args" ] && ec
 
 echo "the layout: a drive's link held at its linkRate before anything is formatted (#642)"
 reset
-rm -f "$WORK/linkrate.args"
+rm -f "$WORK/linkrate.args" "$WORK/readtest.args"
 printf 'storage:\n  drives:\n    - bay: 0\n    - {bay: 1, linkRate: 6}\n' > "$WORK/install-config.yaml"
 cat > "$WORK/plan.out" <<'EOF'
 STORAGE_DRIVES='/dev/sda /dev/sdb'
@@ -360,6 +361,12 @@ has "said" "$WORK/out" "storage: /dev/sdb: phy-1:2: maximum 6.0 Gbit, link reset
 has "every line said (#646)" "$WORK/out" "storage: /dev/sdb: bay 1 (0x5000cca26a819e69): negotiated 6 Gbit after the reset; drive programmed 12 (hardware 12)"
 check "kept for the engine" "0x5000cca26a819e69 6" "$(cat "$WORK/run/link-policy")"
 rm -f "$SYS/sdb/device/sas_address" "$WORK/linkrate.args"
+# #652: the read test over the drives taken, before anything is formatted.
+check "the read test asked of the sd drives" "--dev-name /dev/sda --dev-name /dev/sdb --mib 256 --secs 5 --out $WORK/run/read-test.json" "$(cat "$WORK/readtest.args")"
+has "its lines said" "$WORK/out" "storage: read-test 0x5000cca26801b649 (sda, .*MB/s"
+rm -f "$WORK/readtest.args"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" READTEST=off
+check "rd.stormblock.readtest=off: none" "" "$(cat "$WORK/readtest.args" 2>/dev/null)"
 
 echo "the layout: a plan takes the drives"
 reset
