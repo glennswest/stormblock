@@ -1,7 +1,8 @@
 > **History, not current (moved here by #131, 2026-09-26).** This is the
 > original design, v0.1, written 2026-02-17 before the slab/GEM model. Much of
 > it was built differently or not at all:
-> - the NVMe/VFIO userspace driver is a stub (`src/drive/nvme.rs`);
+> - the NVMe/VFIO userspace driver was a stub (`src/drive/nvme.rs`), removed
+>   in #167: drives are opened by the kernel, `O_DIRECT`;
 > - there is no buildroot image, SQPOLL, zero-copy send on its own io_uring,
 >   management/I-O core split, AVX-512 or SIMD Q parity, on-disk RAID journal,
 >   scheduled scrub, VAAI, or error recovery level above 0;

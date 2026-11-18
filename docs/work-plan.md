@@ -55,6 +55,17 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #659 — no stubs (P-1, 2026-11-18)
+
+Owner: "stubs are lies". The master's sweep found 3; the proof grep found 2.
+- [x] `fs/template.rs`: the XFS seed refusal worded as what is (no
+  "not supported yet"), README too; the gap is #671 (P3)
+- [x] `docs/history/stormblock-spec.md`: the VFIO stub "was", removed in #167
+- [x] `crates/nvmeof-target/src/pdu.rs:1003`: a test helper's assertion
+  message inside `mod tests`, not a stub; unchanged
+- [x] the work plan's rustkube-node#70 line reworded
+- [ ] check.sh; close with the grep empty
+
 ## #647 — the set's PI said, never silent (2026-11-18, P1)
 
 Decided (owner via the master): `--pi auto` (already asked since #573) and
@@ -7241,7 +7252,7 @@ dropped) or an engine that stopped left it there for good.
       the slab whose metadata records it, else a half the node has. On a node
       with both halves the same bug put an unwritten data volume (a fresh PVC)
       in the half an install replaces.
-- [ ] rustkube-node#70 (open, not implemented there yet): wait for `ready` when a found blank is still
+- [ ] rustkube-node#70 (open, that project's): wait for `ready` when a found blank is still
       formatting; an Event on the claim.
 
 ### No file I/O for real storage (2026-09-25, #140) — DONE (v18.2.0)

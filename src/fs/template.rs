@@ -1549,8 +1549,9 @@ impl FormatParams {
 }
 
 /// What an XFS template may ask for (#147). `mkfs-xfs` refuses under 300 MB
-/// as `mkfs.xfs` does; `fio-xfs` cannot write yet, so nothing can be seeded
-/// into one; the ext feature list and a log-less filesystem mean nothing here.
+/// as `mkfs.xfs` does; `fio-xfs` reads XFS and has no writer, so an XFS
+/// template takes no seed files (#671); the ext feature list and a log-less
+/// filesystem mean nothing here.
 fn xfs_spec_ok(spec: &TemplateSpec) -> Result<()> {
     if spec.size_bytes < xfs::MIN_BYTES {
         return Err(TemplateError::Invalid(format!(
@@ -1560,7 +1561,7 @@ fn xfs_spec_ok(spec: &TemplateSpec) -> Result<()> {
     }
     if !spec.seed.is_empty() {
         return Err(TemplateError::Invalid(
-            "seeding files into XFS is not supported yet: fio-xfs reads, it does not write".to_string(),
+            "an XFS template takes no seed files: fio-xfs reads XFS and has no writer (#671); seed an ext4 template, or write the files into each clone".to_string(),
         ));
     }
     if spec.features.is_some() {

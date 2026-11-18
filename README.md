@@ -1830,9 +1830,9 @@ up. The log it zeroes is a discard on a thin volume, so a 2 GiB XFS blank
 costs 6 MiB. Sealing checks what can be checked without `xfs_repair`: the
 superblock's CRC and flags, then the whole tree walked by
 [`fio-xfs`](https://github.com/glennswest/fio.xfs.rs) with every v5 checksum
-checked. The crate has no checker of its own yet. Not for XFS: `features`
-(an `mke2fs` list), `journal: false` (XFS always has a log), and `seed`
-(`fio-xfs` reads, it does not write yet). A claim or clone of an XFS blank
+checked; the crate has no checker of its own. An XFS template refuses
+`features` (an `mke2fs` list), `journal: false` (XFS always has a log), and
+`seed` (`fio-xfs` reads XFS and has no writer: #671). A claim or clone of an XFS blank
 gets a new UUID the way `xfs_admin -U` gives one: `sb_uuid` changes, the old
 UUID stays in `sb_meta_uuid` (the one the metadata blocks carry), and the
 `META_UUID` feature is set, one sector per allocation group. The log's record
