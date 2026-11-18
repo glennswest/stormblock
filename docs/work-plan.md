@@ -99,7 +99,8 @@ the honest line; mpt3sas is DIF-only by design, no re-lay of forge1.
 - [x] **reopened 2026-11-18** (pvetest1 lays no set; forge1 is not re-laid):
   the line said on every boot that serves the set (`storage_serve`), from
   the facts; `storage pi said` its own block; tests in -serve and -storage
-- [ ] check.sh; release; back after forge1's install, its console read
+- [x] check.sh ALL PASS (c9b9df59); v24.29.1
+- [ ] back after forge1's install: its console read for `storage: node-data PI`
 
 ## #658 (with #649) — attachments from the kernel's view (2026-11-18, P1)
 
