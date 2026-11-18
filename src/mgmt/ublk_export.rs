@@ -152,28 +152,71 @@ impl ShutdownWait {
 /// a server that never comes back, and every `sync` on the node then sits in
 /// `submit_bio_wait` for ever. A detach under a mount wedged the R230 that way.
 pub fn mounted_at(device_path: &str) -> Option<String> {
+    mounts_of(device_path).into_iter().next()
+}
+
+/// Every place `device_path` is mounted on the node, in every mount
+/// namespace (#658): a service's `/state`, a pod's `/var/log/pods`, not only
+/// what PID 1 and this engine see. The node's own namespace first.
+pub fn mounts_of(device_path: &str) -> Vec<String> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
-        let rdev = std::fs::metadata(device_path).ok()?.rdev();
-        let (maj, min) = (libc::major(rdev), libc::minor(rdev));
-        let want = format!("{maj}:{min}");
-        for table in ["/proc/1/mountinfo", "/proc/self/mountinfo"] {
-            let Ok(text) = std::fs::read_to_string(table) else { continue };
-            for line in text.lines() {
-                let f: Vec<&str> = line.split(' ').collect();
-                if f.len() > 4 && f[2] == want {
-                    return Some(f[4].to_string());
-                }
-            }
-        }
-        None
+        let Ok(m) = std::fs::metadata(device_path) else { return Vec::new() };
+        let rdev = m.rdev();
+        let want = format!("{}:{}", libc::major(rdev), libc::minor(rdev));
+        mount_table().get(&want).cloned().unwrap_or_default()
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = device_path;
-        None
+        Vec::new()
     }
+}
+
+/// One mountinfo table into `out`: `maj:min` → mount points, each once.
+pub fn take_mountinfo(text: &str, out: &mut HashMap<String, Vec<String>>) {
+    for line in text.lines() {
+        let f: Vec<&str> = line.split(' ').collect();
+        if f.len() > 4 {
+            let v = out.entry(f[2].to_string()).or_default();
+            if !v.iter().any(|m| m == f[4]) {
+                v.push(f[4].to_string());
+            }
+        }
+    }
+}
+
+/// The node's mounts by device, from each mount namespace once (PID 1's
+/// first), read at most every two seconds: a listing or a watch asks for
+/// every volume at once.
+#[cfg(target_os = "linux")]
+fn mount_table() -> Arc<HashMap<String, Vec<String>>> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Arc<HashMap<String, Vec<String>>>)>> = std::sync::Mutex::new(None);
+    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, t)) = g.as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(2) {
+            return t.clone();
+        }
+    }
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seen: std::collections::HashSet<std::ffi::OsString> = std::collections::HashSet::new();
+    let mut pids: Vec<String> = vec!["1".into(), "self".into()];
+    if let Ok(rd) = std::fs::read_dir("/proc") {
+        pids.extend(rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.bytes().all(|b| b.is_ascii_digit())));
+    }
+    for pid in pids {
+        let Ok(ns) = std::fs::read_link(format!("/proc/{pid}/ns/mnt")) else { continue };
+        if !seen.insert(ns.into_os_string()) {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")) {
+            take_mountinfo(&text, &mut out);
+        }
+    }
+    let t = Arc::new(out);
+    *g = Some((std::time::Instant::now(), t.clone()));
+    t
 }
 
 /// How long a detach waits for its device to be gone before it answers
@@ -913,6 +956,19 @@ pub fn room_for_one(device: &dyn BlockDevice) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// #658: the mount tables of every namespace, read into one map by
+    /// device: each mount point once, the first namespace's first.
+    #[test]
+    fn mount_tables_merged() {
+        let mut m = std::collections::HashMap::new();
+        take_mountinfo("36 25 259:3 / / rw - ext4 /dev/ublkb3 rw\n37 25 259:15 / /state rw - ext4 /dev/ublkb15 rw\n", &mut m);
+        take_mountinfo("90 80 259:15 / /state rw - ext4 /dev/ublkb15 rw\n91 80 259:12 / /var/log/pods rw - ext4 /dev/ublkb12 rw\n", &mut m);
+        assert_eq!(m["259:3"], vec!["/".to_string()]);
+        assert_eq!(m["259:15"], vec!["/state".to_string()], "the same mount in two namespaces, once");
+        assert_eq!(m["259:12"], vec!["/var/log/pods".to_string()], "a pod's own namespace counts");
+    }
+
     use super::*;
 
     /// #231: the wait for a device sleeps asynchronously: the runtime it

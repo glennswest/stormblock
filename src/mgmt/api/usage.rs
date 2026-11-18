@@ -142,12 +142,30 @@ impl Context {
             }
         }
         let devices = state.ublk_exports.lock().await.devices();
+        // A `/v1` attach keys its device by the `/v1` volume id, not the
+        // engine's (#658): those are found through `/v1`'s record, below.
+        let mut by_v1: Vec<(String, String)> = Vec::new();
         for (vol, dev) in devices {
-            let Ok(v) = Uuid::parse_str(&vol) else { continue };
+            let Ok(v) = Uuid::parse_str(&vol) else {
+                by_v1.push((vol, dev));
+                continue;
+            };
             let mut a = Attachment::new("ublk");
             a.mounted_at = crate::mgmt::ublk_export::mounted_at(&dev);
             a.device = Some(dev);
             add(v, a);
+        }
+        if !by_v1.is_empty() {
+            let found: Vec<(Uuid, String)> = {
+                let v1 = state.v1.lock().await;
+                by_v1.into_iter().filter_map(|(k, dev)| v1.volumes.get(&k).and_then(|r| r.local_id).map(|l| (l, dev))).collect()
+            };
+            for (v, dev) in found {
+                let mut a = Attachment::new("ublk");
+                a.mounted_at = crate::mgmt::ublk_export::mounted_at(&dev);
+                a.device = Some(dev);
+                add(v, a);
+            }
         }
         for (v, (nqn, port)) in state.nvme_portals.read().await.iter() {
             let mut a = Attachment::new("nvme-tcp");

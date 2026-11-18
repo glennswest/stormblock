@@ -1434,6 +1434,17 @@ async fn the_volume_object_carries_its_owner() {
     assert_eq!(v["metadata"]["labels"]["storm.io/kind"], "volume");
     let text = serde_json::to_string(&v).unwrap();
     assert!(text.contains(r#""owner":{"kind":"Pod""#), "the proof's shape: {text}");
+    assert_eq!(v["status"]["attach"], serde_json::json!([]), "#658: a list, empty when nothing serves it");
+    // #658: a device the engine serves but did not create in this process (a
+    // boot device it adopted) is an attachment on the object too.
+    state.ublk_exports.lock().await.record_adopted(&owned_id, "/dev/ublkb7".into());
+    let a: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes/{owned_id}")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(a["status"]["inUse"], true, "{a}");
+    assert_eq!(a["status"]["attach"][0]["transport"], "ublk");
+    assert_eq!(a["status"]["attach"][0]["device"], "/dev/ublkb7");
+    assert_eq!(a["status"]["attach"][0]["deviceHint"], "/dev/ublkb7");
+    assert_eq!(a["status"]["attachments"][0]["device"], "/dev/ublkb7");
+    assert!(serde_json::to_string(&a).unwrap().contains(r#""attach":[{"#), "the proof's shape");
     let b: serde_json::Value = client.get(format!("{url}/apis/storage.storm.io/v1/volumes/{bare_id}")).send().await.unwrap().json().await.unwrap();
     assert!(b["status"]["owner"].is_null() && b["metadata"]["labels"].get("storm.io/owner-kind").is_none());
 

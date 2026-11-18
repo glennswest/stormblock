@@ -162,20 +162,10 @@ fn volume_snap(vm: &crate::volume::VolumeManager, id: VolumeId, ctx: &super::usa
 /// let go before the next (#571).
 struct AttachView {
     local_node: String,
-    nsids: std::collections::HashMap<String, u32>,
-    ublk: std::collections::HashMap<String, String>,
 }
 
-async fn attach_view(state: &AppState, keys: &[String]) -> AttachView {
-    let (local_node, nsids) = {
-        let v1 = state.v1.lock().await;
-        (v1.local_node.clone(), v1.nvme_nsids.clone())
-    };
-    let ublk = {
-        let u = state.ublk_exports.lock().await;
-        keys.iter().filter_map(|k| u.device_path(k).map(|p| (k.clone(), p))).collect()
-    };
-    AttachView { local_node, nsids: nsids.into_iter().collect(), ublk }
+async fn attach_view(state: &AppState) -> AttachView {
+    AttachView { local_node: state.v1.lock().await.local_node.clone() }
 }
 
 /// Snapshots of every volume (or the ones asked for), the manager held only
@@ -227,13 +217,24 @@ async fn volume_object(s: &VolumeSnap, view: &AttachView) -> Value {
     let name = handle.name().await;
     let health = handle.health().await;
     let key = id.0.to_string();
-    let attach = if let Some(path) = view.ublk.get(&key) {
-        json!({ "transport": "ublk", "deviceHint": path })
-    } else if let Some(nsid) = view.nsids.get(&key).copied() {
-        json!({ "transport": "nvme_tcp", "nsid": nsid })
-    } else {
-        Value::Null
-    };
+    // Every way the volume is served now (#658): the engine's ublk devices
+    // (an adopted boot device and a `/v1` attach's too), mounted where, in
+    // any mount namespace; its NVMe/TCP and iSCSI exports with who is
+    // connected. A list; empty when nothing serves it.
+    let attach: Vec<Value> = s
+        .usage
+        .attachments
+        .iter()
+        .map(|a| {
+            let mut v = attachment_json(a);
+            if a.transport == "ublk" {
+                if let (Some(o), Some(d)) = (v.as_object_mut(), a.device.as_ref()) {
+                    o.insert("deviceHint".into(), json!(d));
+                }
+            }
+            v
+        })
+        .collect();
     let mut labels = BTreeMap::new();
     labels.insert("storm.io/name".to_string(), name.clone());
     labels.insert("storm.io/node".to_string(), view.local_node.clone());
@@ -310,8 +311,7 @@ async fn volume_objects(state: &AppState, only: Option<VolumeId>) -> Vec<Value> 
     // What serves each volume, gathered before the manager is taken (#571).
     let ctx = super::usage::Context::gather(state).await;
     let snaps = volume_snaps(state, only, &ctx).await;
-    let keys: Vec<String> = snaps.iter().map(|s| s.id.0.to_string()).collect();
-    let view = attach_view(state, &keys).await;
+    let view = attach_view(state).await;
     let mut out = Vec::with_capacity(snaps.len());
     for s in &snaps {
         out.push(volume_object(s, &view).await);
