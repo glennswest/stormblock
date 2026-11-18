@@ -704,23 +704,7 @@ impl WriteProbe {
 /// none). Read from `/dev/kmsg`, at most `max`.
 #[cfg(target_os = "linux")]
 pub fn kernel_lines(name: &str, extra: &[String], max: usize) -> Vec<String> {
-    use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    let Ok(mut f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open("/dev/kmsg") else {
-        return vec![];
-    };
-    let mut all = Vec::new();
-    let mut buf = vec![0u8; 8192];
-    loop {
-        match f.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => all.push(String::from_utf8_lossy(&buf[..n]).into_owned()),
-            // EPIPE: a record was overwritten while read; the next one follows.
-            Err(e) if e.raw_os_error() == Some(libc::EPIPE) => continue,
-            Err(_) => break,
-        }
-    }
-    kernel_lines_of(&all, name, extra, max)
+    kernel_lines_of(&kmsg_records(), name, extra, max)
 }
 
 /// [`kernel_lines`] over records already read (`pri,seq,usec,flags;text`).
@@ -1125,6 +1109,283 @@ pub fn set_programmed_max(t: &dyn Transport, want: Option<u32>) -> Result<String
         return Err(format!("MODE SELECT 0x19/1 taken, but the drive still programs {} (asked {})", gbit(after[0].programmed_max_mbps), gbit(target(&before[0]))));
     }
     Ok(format!("{}, was {was}{}", said(&after[..]), if savable { ", saved" } else { "; the page is not savable: set again on every boot" }))
+}
+
+// ---- error and PI-check counters (#648) ----
+
+/// One of the error counter log pages (0x02 write, 0x03 read, 0x05 verify),
+/// lifetime totals as the drive keeps them.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct ErrorPage {
+    /// Parameter 0: corrected without substantial delay (ECC on the fly).
+    pub corrected_fast: Option<u64>,
+    /// Parameter 1: corrected with possible delays (a retry).
+    pub corrected_delayed: Option<u64>,
+    /// Parameter 2: total rewrites (write) or rereads (read, verify).
+    pub retries: Option<u64>,
+    /// Parameter 3: total errors corrected.
+    pub corrected: Option<u64>,
+    /// Parameter 6: total uncorrected errors.
+    pub uncorrected: Option<u64>,
+}
+
+pub fn parse_error_page(d: &[u8]) -> ErrorPage {
+    let ps = log_params(d);
+    let v = |c| param(&ps, c).map(be_var);
+    ErrorPage { corrected_fast: v(0), corrected_delayed: v(1), retries: v(2), corrected: v(3), uncorrected: v(6) }
+}
+
+/// The drive's own error counters, read now (#648): every one `None` when
+/// the drive keeps no such page.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct ErrorCounters {
+    pub write: Option<ErrorPage>,
+    pub read: Option<ErrorPage>,
+    pub verify: Option<ErrorPage>,
+    /// Log page 0x06, parameter 0: non-medium errors (the link, the
+    /// controller, a timeout: anything that is not the platter).
+    pub non_medium: Option<u64>,
+    /// Log page 0x2F, parameter 0: the last informational exception, ASC/ASCQ
+    /// (`0x00/0x00` none; `0x5d/..` a SMART trip). The page holds the last
+    /// one, not a count.
+    pub exception: Option<String>,
+    /// READ DEFECT DATA (12), the grown list's length.
+    pub grown_defects: Option<u32>,
+    /// A SATA drive's SMART raw values (ATA PASS-THROUGH 16): 5 reallocated
+    /// sectors, 197 pending, 198 offline uncorrectable. A SAS drive keeps
+    /// none of these; its grown list is what grows instead.
+    pub reallocated: Option<u64>,
+    pub pending: Option<u64>,
+    pub offline_uncorrectable: Option<u64>,
+    /// What did not answer.
+    pub errors: Vec<String>,
+}
+
+/// Log page 0x00: the pages the drive keeps.
+pub fn parse_supported_logs(d: &[u8]) -> Vec<u8> {
+    let n = be16(d, 2) as usize;
+    d.get(4..(4 + n).min(d.len())).map(|s| s.iter().map(|p| p & 0x3F).collect()).unwrap_or_default()
+}
+
+/// ATA PASS-THROUGH (16), SMART READ DATA: PIO data-in, one 512-byte block.
+pub fn cdb_smart_read_data() -> [u8; 16] {
+    // protocol 4 (PIO data-in) << 1; T_DIR in, BYT_BLOK, T_LENGTH in the
+    // sector count; FEATURES 0xD0, COUNT 1, LBA mid/high 0x4F/0xC2, 0xB0.
+    [0x85, 4 << 1, 0x0E, 0, 0xD0, 0, 1, 0, 0, 0, 0x4F, 0, 0xC2, 0, 0xB0, 0]
+}
+
+/// The SMART attribute table: raw values by id (30 entries of 12 bytes from
+/// offset 2, the raw value 6 bytes little-endian at 5).
+pub fn parse_smart_attrs(d: &[u8]) -> Vec<(u8, u64)> {
+    (0..30)
+        .filter_map(|i| {
+            let e = d.get(2 + i * 12..14 + i * 12)?;
+            (e[0] != 0).then(|| (e[0], e[5..11].iter().rev().fold(0u64, |a, b| (a << 8) | *b as u64)))
+        })
+        .collect()
+}
+
+/// Every error counter the drive keeps, read now (#648). `ata` asks SMART
+/// too (a SATA drive: INQUIRY's vendor is `ATA`).
+pub fn error_counters(t: &dyn Transport, ata: bool) -> ErrorCounters {
+    let mut c = ErrorCounters::default();
+    let mut e = Vec::new();
+    let pages = ask(t, &cdb::log_sense(0, 0, 255), 255, "LOG SENSE 0x00", &mut e).map(|d| parse_supported_logs(&d));
+    // A drive that lists no pages is asked the standard ones anyway.
+    let keeps = |p: u8| pages.as_ref().is_none_or(|l| l.contains(&p));
+    let log = |page: u8, e: &mut Vec<String>| ask(t, &cdb::log_sense(page, 0, 512), 512, &format!("LOG SENSE 0x{page:02x}"), e);
+    if keeps(0x02) {
+        c.write = log(0x02, &mut e).map(|d| parse_error_page(&d));
+    }
+    if keeps(0x03) {
+        c.read = log(0x03, &mut e).map(|d| parse_error_page(&d));
+    }
+    if keeps(0x05) {
+        c.verify = log(0x05, &mut e).map(|d| parse_error_page(&d));
+    }
+    if keeps(0x06) {
+        c.non_medium = log(0x06, &mut e).and_then(|d| param(&log_params(&d), 0).map(be_var));
+    }
+    if keeps(0x2F) {
+        c.exception = log(0x2F, &mut e).and_then(|d| {
+            let ps = log_params(&d);
+            param(&ps, 0).filter(|v| v.len() >= 2).map(|v| format!("0x{:02x}/0x{:02x}", v[0], v[1]))
+        });
+    }
+    if let Some(h) = ask(t, &cdb::read_defect_data12(8), 8, "READ DEFECT DATA 12", &mut e) {
+        c.grown_defects = (h.len() >= 8).then(|| be32(&h, 4) / 8);
+    }
+    if ata {
+        if let Some(d) = ask(t, &cdb_smart_read_data(), 512, "SMART READ DATA", &mut e) {
+            let a = parse_smart_attrs(&d);
+            let raw = |id| a.iter().find(|(i, _)| *i == id).map(|(_, v)| *v);
+            c.reallocated = raw(5);
+            c.pending = raw(197);
+            c.offline_uncorrectable = raw(198);
+        }
+    }
+    c.errors = e;
+    c
+}
+
+/// What the kernel said of a drive's failed commands, counted (#648): the
+/// sense lines sd prints (`Sense Key : …`, `Add. Sense: …`), by device.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct SenseCounts {
+    /// ASC 0x10, ASCQ 1/2/3 the drive raised (ABORTED COMMAND or MEDIUM
+    /// ERROR): its own PI check failed (bit rot, a torn write, a misdirected
+    /// one).
+    pub pi_guard: u64,
+    pub pi_app_tag: u64,
+    pub pi_ref_tag: u64,
+    /// The same ASC raised by the card (mpt3sas makes ILLEGAL REQUEST of an
+    /// IOC EEDP error, `_scsih_eedp_error_handling`): the PI the card
+    /// inserted or stripped did not check.
+    pub eedp_guard: u64,
+    pub eedp_app_tag: u64,
+    pub eedp_ref_tag: u64,
+    pub medium_error: u64,
+    pub recovered_error: u64,
+    pub hardware_error: u64,
+}
+
+fn sense_key_word(s: &str) -> Option<u8> {
+    let s = s.trim().to_ascii_lowercase();
+    const NAMES: [(&str, u8); 7] = [
+        ("recovered error", 0x1),
+        ("not ready", 0x2),
+        ("medium error", 0x3),
+        ("hardware error", 0x4),
+        ("illegal request", 0x5),
+        ("unit attention", 0x6),
+        ("aborted command", 0xB),
+    ];
+    if let Some((_, k)) = NAMES.iter().find(|(n, _)| s.starts_with(n)) {
+        return Some(*k);
+    }
+    u8::from_str_radix(s.strip_prefix("0x")?.split_whitespace().next()?, 16).ok()
+}
+
+/// The PI check an `Add. Sense:` text names: 1 guard, 2 application tag,
+/// 3 reference tag (also `ASC=0x10 ASCQ=0x1` from a kernel without the
+/// names).
+fn pi_check_of(add: &str) -> Option<u8> {
+    let a = add.trim().to_ascii_lowercase();
+    if a.starts_with("logical block guard check failed") {
+        return Some(1);
+    }
+    if a.starts_with("logical block application tag check failed") {
+        return Some(2);
+    }
+    if a.starts_with("logical block reference tag check failed") {
+        return Some(3);
+    }
+    let (asc, ascq) = a.strip_prefix("asc=")?.split_once(" ascq=")?;
+    let n = |s: &str| u8::from_str_radix(s.trim().trim_start_matches("0x").split_whitespace().next().unwrap_or(""), 16).ok();
+    match (n(asc)?, n(ascq)?) {
+        (0x10, q @ 1..=3) => Some(q),
+        _ => None,
+    }
+}
+
+/// Counts the kernel's sense lines (#648), kept across reads of `/dev/kmsg`:
+/// by device (`0:0:1:0`, sd's prefix), only records after the last one
+/// seen.
+#[derive(Debug, Default)]
+pub struct SenseTally {
+    pub last_seq: Option<u64>,
+    pub by_device: std::collections::HashMap<String, SenseCounts>,
+    /// The sense key of a command whose `Add. Sense` line has not come yet,
+    /// by device and tag.
+    keys: std::collections::HashMap<(String, String), u8>,
+}
+
+impl SenseTally {
+    /// Takes records as `/dev/kmsg` gives them (`pri,seq,usec,flags;text`).
+    pub fn take(&mut self, records: &[String]) {
+        for r in records {
+            let Some(first) = r.lines().next() else { continue };
+            let Some((head, text)) = first.split_once(';') else { continue };
+            let seq: Option<u64> = head.split(',').nth(1).and_then(|s| s.parse().ok());
+            if let (Some(s), Some(l)) = (seq, self.last_seq) {
+                if s <= l {
+                    continue;
+                }
+            }
+            if seq.is_some() {
+                self.last_seq = seq;
+            }
+            self.line(text);
+        }
+    }
+
+    /// One line: `sd 0:0:1:0: [sdb] tag#12 Sense Key : Medium Error [current]`.
+    pub fn line(&mut self, text: &str) {
+        let Some(rest) = text.strip_prefix("sd ") else { return };
+        let Some((dev, rest)) = rest.split_once(": ") else { return };
+        let mut rest = rest.trim_start();
+        if rest.starts_with('[') {
+            rest = rest.split_once("] ").map(|(_, r)| r).unwrap_or("");
+        }
+        let mut tag = String::new();
+        if let Some(t) = rest.strip_prefix("tag#") {
+            let (n, r) = t.split_once(' ').unwrap_or((t, ""));
+            tag = n.to_string();
+            rest = r;
+        }
+        let rest = rest.trim_start();
+        let k = (dev.to_string(), tag);
+        if let Some(s) = rest.strip_prefix("Sense Key : ").or_else(|| rest.strip_prefix("Sense Key: ")) {
+            let Some(key) = sense_key_word(s) else { return };
+            self.keys.insert(k.clone(), key);
+            let c = self.by_device.entry(k.0).or_default();
+            match key {
+                0x1 => c.recovered_error += 1,
+                0x3 => c.medium_error += 1,
+                0x4 => c.hardware_error += 1,
+                _ => {}
+            }
+        } else if let Some(add) = rest.strip_prefix("Add. Sense: ") {
+            let key = self.keys.remove(&k);
+            let Some(q) = pi_check_of(add) else { return };
+            let c = self.by_device.entry(k.0).or_default();
+            let card = key == Some(0x5);
+            match (card, q) {
+                (false, 1) => c.pi_guard += 1,
+                (false, 2) => c.pi_app_tag += 1,
+                (false, _) => c.pi_ref_tag += 1,
+                (true, 1) => c.eedp_guard += 1,
+                (true, 2) => c.eedp_app_tag += 1,
+                (true, _) => c.eedp_ref_tag += 1,
+            }
+        }
+        // Bound what is waiting: a key whose Add. Sense never came.
+        if self.keys.len() > 4096 {
+            self.keys.clear();
+        }
+    }
+}
+
+/// `/dev/kmsg`'s records now (non-blocking, from the oldest the buffer
+/// holds).
+#[cfg(target_os = "linux")]
+pub fn kmsg_records() -> Vec<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(mut f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open("/dev/kmsg") else {
+        return vec![];
+    };
+    let mut all = Vec::new();
+    let mut buf = vec![0u8; 8192];
+    loop {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => all.push(String::from_utf8_lossy(&buf[..n]).into_owned()),
+            Err(e) if e.raw_os_error() == Some(libc::EPIPE) => continue,
+            Err(_) => break,
+        }
+    }
+    all
 }
 
 // ---- every VPD page (#636) ----
@@ -2457,5 +2718,112 @@ mod tests {
         assert_eq!(d.temperature_c, Some(38));
         assert!(d.capacity.is_none());
         assert!(d.errors.iter().any(|e| e.starts_with("READ CAPACITY 16: ILLEGAL REQUEST")), "{:?}", d.errors);
+    }
+
+    /// A log page from (code, value) parameters.
+    fn log_page(page: u8, ps: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut p = vec![page, 0, 0, 0];
+        for (c, v) in ps {
+            p.extend_from_slice(&c.to_be_bytes());
+            p.extend_from_slice(&[0x02, v.len() as u8]);
+            p.extend_from_slice(v);
+        }
+        let n = (p.len() - 4) as u16;
+        p[2..4].copy_from_slice(&n.to_be_bytes());
+        p
+    }
+
+    /// #648: a HITACHI's read error page, the pages it keeps, a SATA drive's
+    /// SMART table.
+    #[test]
+    fn error_pages_read() {
+        let d = log_page(0x03, &[(0, &[0, 0, 0x01, 0x00]), (1, &[0, 0, 0, 2]), (2, &[0, 0, 0, 3]), (3, &[0, 0, 1, 2]), (4, &[0, 0, 0, 9]), (6, &[0, 0, 0, 0, 0, 0, 0, 1])]);
+        assert_eq!(
+            parse_error_page(&d),
+            ErrorPage { corrected_fast: Some(256), corrected_delayed: Some(2), retries: Some(3), corrected: Some(258), uncorrected: Some(1) }
+        );
+        assert_eq!(parse_supported_logs(&[0, 0, 0, 4, 0x00, 0x02, 0x03, 0x2F]), vec![0, 2, 3, 0x2F]);
+        let mut smart = vec![0u8; 512];
+        for (i, (id, raw)) in [(5u8, 8u64), (197, 3), (198, 1)].iter().enumerate() {
+            let e = 2 + i * 12;
+            smart[e] = *id;
+            smart[e + 5..e + 11].copy_from_slice(&raw.to_le_bytes()[..6]);
+        }
+        assert_eq!(parse_smart_attrs(&smart), vec![(5, 8), (197, 3), (198, 1)]);
+        assert_eq!(cdb_smart_read_data()[..3], [0x85, 0x08, 0x0E]);
+        assert_eq!(cdb_smart_read_data()[14], 0xB0);
+    }
+
+    /// #648: the counters through a transport: only the pages listed, the
+    /// grown list's length, SMART for an ATA drive.
+    #[test]
+    fn error_counters_asked() {
+        struct D;
+        impl Transport for D {
+            fn run(&self, cdb: &[u8], _dir: Dir, data: &mut [u8], _t: u32) -> std::io::Result<Reply> {
+                let b: Vec<u8> = match (cdb[0], cdb.get(2).map(|p| p & 0x3F)) {
+                    (0x4D, Some(0x00)) => vec![0, 0, 0, 4, 0x00, 0x02, 0x03, 0x06],
+                    (0x4D, Some(0x02)) => log_page(0x02, &[(6, &[0, 0, 0, 0])]),
+                    (0x4D, Some(0x03)) => log_page(0x03, &[(1, &[0, 0, 0, 7]), (6, &[0, 0, 0, 2])]),
+                    (0x4D, Some(0x06)) => log_page(0x06, &[(0, &[0, 0, 0, 5])]),
+                    (0xB7, _) => vec![0, 0x0D, 0, 0, 0, 0, 0, 24],
+                    (0x85, _) => {
+                        let mut s = vec![0u8; 512];
+                        s[2] = 197;
+                        s[7] = 4;
+                        s
+                    }
+                    (0x4D, Some(p)) => panic!("asked a page the drive does not list: 0x{p:02x}"),
+                    _ => return Ok(Reply { status: 2, sense: vec![0x70, 0, 5, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0x20, 0], len: 0, transport: None }),
+                };
+                let n = b.len().min(data.len());
+                data[..n].copy_from_slice(&b[..n]);
+                Ok(Reply { len: n, ..Default::default() })
+            }
+            fn name(&self) -> String {
+                "d".into()
+            }
+        }
+        let c = error_counters(&D, true);
+        assert_eq!(c.read.as_ref().and_then(|p| p.uncorrected), Some(2));
+        assert_eq!(c.read.as_ref().and_then(|p| p.corrected_delayed), Some(7));
+        assert_eq!(c.write.as_ref().and_then(|p| p.uncorrected), Some(0));
+        assert_eq!((c.verify.as_ref(), c.exception.as_ref()), (None, None), "not listed, not asked");
+        assert_eq!(c.non_medium, Some(5));
+        assert_eq!(c.grown_defects, Some(3));
+        assert_eq!((c.pending, c.reallocated), (Some(4), None));
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert_eq!(error_counters(&D, false).pending, None, "SMART only for an ATA drive");
+    }
+
+    /// #648: the kernel's sense lines counted by device: the drive's PI
+    /// checks, the card's (ILLEGAL REQUEST), medium errors; a record seen
+    /// once counted once.
+    #[test]
+    fn sense_lines_counted() {
+        let rec = |seq: u64, t: &str| format!("3,{seq},100,-;{t}\n");
+        let lines = [
+            rec(10, "sd 0:0:1:0: [sdb] tag#7 FAILED Result: hostbyte=DID_OK driverbyte=DRIVER_OK cmd_age=0s"),
+            rec(11, "sd 0:0:1:0: [sdb] tag#7 Sense Key : Aborted Command [current] [descriptor] "),
+            rec(12, "sd 0:0:1:0: [sdb] tag#7 Add. Sense: Logical block guard check failed"),
+            rec(13, "sd 0:0:1:0: [sdb] tag#9 Sense Key : Illegal Request [current] "),
+            rec(14, "sd 0:0:1:0: [sdb] tag#9 Add. Sense: Logical block reference tag check failed"),
+            rec(15, "sd 0:0:2:0: [sdc] tag#1 Sense Key : Medium Error [current] "),
+            rec(16, "sd 0:0:2:0: [sdc] tag#1 Add. Sense: ASC=0x10 ASCQ=0x2"),
+            rec(17, "sd 0:0:2:0: [sdc] tag#2 Sense Key : Medium Error [current] "),
+            rec(18, "sd 0:0:2:0: [sdc] tag#2 Add. Sense: Unrecovered read error"),
+            rec(19, "mpt3sas_cm0: log_info(0x31110d00)"),
+        ];
+        let mut t = SenseTally::default();
+        t.take(&lines);
+        let b = t.by_device["0:0:1:0"];
+        assert_eq!((b.pi_guard, b.eedp_ref_tag, b.pi_ref_tag, b.medium_error), (1, 1, 0, 0));
+        let c = t.by_device["0:0:2:0"];
+        assert_eq!((c.pi_app_tag, c.medium_error), (1, 2));
+        assert_eq!(t.last_seq, Some(19));
+        t.take(&lines);
+        assert_eq!(t.by_device["0:0:1:0"].pi_guard, 1, "records already seen are not counted again");
+        t.take(&[rec(20, "sd 0:0:1:0: Sense Key : Recovered Error [current] ")]);
+        assert_eq!(t.by_device["0:0:1:0"].recovered_error, 1, "a line with no name or tag");
     }
 }

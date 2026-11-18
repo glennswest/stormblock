@@ -156,6 +156,12 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// `/api/v1/storage/hba` and on `/metrics`. Left out with no card.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         drive_links: Vec<serde_json::Value>,
+        /// Each drive's error and PI-check counters (#648), in brief: its
+        /// level and since when, its PI checks (the drive's and the card's),
+        /// uncorrected and medium errors, grown defects and their day's rate,
+        /// why. Open like `drive_links`; left out with no card.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        drive_errors: Vec<serde_json::Value>,
         /// The boot's mode (#629): `diagnostic` when the install-config said
         /// so; this node runs from its image and lays and flows over nothing.
         /// Left out on an ordinary boot.
@@ -283,6 +289,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     let slabs = super::slab_report::for_health(&state);
     let storage_layout = super::storage_layout::report(slabs.as_ref());
     let drive_links = super::link::summary();
+    let drive_errors = super::drive_errors::summary();
     let metadata = crate::mgmt::api::slabs::summary_for_health(&state).await;
     let boot_mounts = crate::mgmt::boot_mounts::read();
     let mounts_failed = boot_mounts.as_ref().is_some_and(|m| !m.failed.is_empty());
@@ -308,6 +315,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         slabs,
         storage_layout,
         drive_links,
+        drive_errors,
         mode: crate::boot_mode::mode(),
         formats: super::format_job::summary(),
         metadata,

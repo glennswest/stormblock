@@ -162,9 +162,14 @@ pub fn report() -> Value {
                     let job = super::format_job::get(&sas);
                     let offered = offered(&r, id.as_ref(), job.as_ref());
                     let link = super::link::get(&sas);
+                    let errors = super::drive_errors::get(&sas);
                     if let Some(o) = r.as_object_mut() {
                         if let Some(l) = link {
                             o.insert("link".into(), l);
+                        }
+                        // The drive's error and PI-check counters (#648).
+                        if let Some(e) = errors {
+                            o.insert("errors".into(), e);
                         }
                         if let Some(i) = id {
                             o.insert("vendor".into(), serde_json::json!(i.vendor));
@@ -336,6 +341,37 @@ fn sample_links(rows: &[Value]) {
     }
 }
 
+/// A sample of every listed drive's error and PI-check counters (#648):
+/// its error log pages, grown defects and (SATA) SMART, through its sg node
+/// or the card, and the kernel's sense lines for it by H:C:T:L. Not a drive
+/// a format job is formatting.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+fn sample_errors(rows: &[Value]) {
+    use std::path::Path;
+    let node = std::fs::read_to_string("/proc/sys/kernel/hostname").map(|s| s.trim().to_string()).unwrap_or_default();
+    let sense = super::drive_errors::tally(&crate::drive::scsi::kmsg_records());
+    for r in rows {
+        if r.get("present") != Some(&Value::Bool(true)) {
+            continue;
+        }
+        let Some(sas) = r.get("sas_address").and_then(Value::as_str) else { continue };
+        let Some(a) = crate::drive::mpt::parse_addr(sas) else { continue };
+        if super::format_job::running(a) {
+            continue;
+        }
+        let ata = with(|s| s.idents.get(sas).and_then(|i| i.vendor.clone())).is_some_and(|v| v.trim().eq_ignore_ascii_case("ATA"));
+        let Ok(c) = crate::drive::mpt::with_drive(Path::new("/dev"), Path::new("/sys"), a, |t| crate::drive::scsi::error_counters(t, ata)) else { continue };
+        let s = r.get("scsi").and_then(Value::as_str).and_then(|h| sense.get(h).copied()).unwrap_or_default();
+        let labels = super::link::Labels {
+            node: node.clone(),
+            drive: r.get("block").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| sas.to_string()),
+            bay: word(r, "slot"),
+            shelf: word(r, "enclosure"),
+        };
+        super::drive_errors::record(sas, &labels, c, s, now());
+    }
+}
+
 /// Every present drive's INQUIRY and READ CAPACITY 16 (#621), but not one
 /// a format job is formatting.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
@@ -373,6 +409,7 @@ pub fn spawn() {
                 last_link = now();
                 sample_links(&rows);
                 sample_idents(&rows);
+                sample_errors(&rows);
             }
             take(rows, errs, now());
             let g = STATE.lock().unwrap_or_else(|e| e.into_inner());
