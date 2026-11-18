@@ -119,6 +119,12 @@ forge1's `registry-data` is 4 GiB; it must hold forge's images.
 - [x] image build e0393fe1ac5c; shipped
 - [ ] proof on forge1 after the master's patch:
   `api:/apis/storage.storm.io/v1/volumes ~ "storm.io/name":"registry-data".*"sizeBytes":[0-9]{11,}`
+- [ ] **reopened 2026-11-18**: the `api:` proof asks the node's apiserver,
+  which has no `volumes` (the engine serves its objects on :9090 only; the
+  apiserver's storage.storm.io is stormdrive's/stormraid's CRDs). Asked the
+  owner (wait-owner): A) the engine publishes Volume/Replication as CRDs
+  and reconciles spec from there (recommended), B) APIService, C) prove on
+  :9090. Same for #649, #656, #658.
 
 ## #656 — Replication: sync a store from a peer engine (2026-11-18, P0 hand-off)
 
