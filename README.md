@@ -969,7 +969,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/api/v1/stormfs` | the StormFS data path (`docs/stormfs-api.md`) |
 | `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement` (create takes `placement.array_id`, `slab_id` or `drive`, exactly one, on this node: a slab or drive that cannot hold it is `409`, one this node lacks `507`, #426), `prestage`, `fence`, `promote`, `dual-attach`; the backup primitives (stormstorage#46, stormvm#31): `GET /v1/snapshots/{id}/changes[?base=]` (#399) and `POST /v1/snapshots/{id}/ship` → `/v1/ship-jobs/{id}` (#400), below |
 | `/serve/v1` (and `/mk/v1`) | the serving layer: `health`, `ready`, `status`, `volumes` (list, create, delete), exports, tar, raw, trim |
-| `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` and `labelSelector` (`k=v`, `k!=v`, `k`, `!k`). A Volume's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` (`transport`, `device`, `mountedAt`, `target`, `port`, `lun`, `nsid`, `state`, `remote`) and `kind` as the REST listing does (#649), and its labels `storm.io/kind` and `storm.io/owner-kind`: `kubectl get volumes -l storm.io/owner-kind=Pod`, `-l '!storm.io/owner-kind,storm.io/kind=volume'` for orphan clones, or `?unowned=true` |
+| `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` and `labelSelector` (`k=v`, `k!=v`, `k`, `!k`). A Volume's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` (`transport`, `device`, `mountedAt`, `target`, `port`, `lun`, `nsid`, `state`, `remote`) and `kind` as the REST listing does (#649), and `attach`, the same list with `deviceHint` on a ublk entry (#658; it was one object or null, from the engine's own exports only), and its labels `storm.io/kind` and `storm.io/owner-kind`: `kubectl get volumes -l storm.io/owner-kind=Pod`, `-l '!storm.io/owner-kind,storm.io/kind=volume'` for orphan clones, or `?unowned=true` |
 | `PATCH /apis/storage.storm.io/v1/volumes/{id}` | `spec`: `redundancy`, `sealed`, `access`, `retention`, `resync`, and `sizeBytes` (#655), which grows the volume: thin, never smaller (`422`), never a sealed, exported or mirrored one (`409`). Its ublk device is told the new size. An ext4 the engine sees mounted on it is grown online (`EXT4_IOC_RESIZE_FS`); otherwise (an XFS, a mount in a service's own namespace) the service that mounts it grows it. `status.capacityBytes` follows, and the PATCH's answer carries `status.lastResize` (`from`, `to`, `device`, `filesystem`) |
 | `/apis/storage.storm.io/v1/replications` | `Replication` (#656): sync this engine's store from a peer engine, once or following it; create, replace, patch, delete are the admin's. See "Replication" below |
 | `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
@@ -1748,6 +1748,13 @@ rest without naming conventions:
   empty (stormcluster#15/#21). Discovery-only connections are not counted.
 - **`consumer`**: the volume's owner (`PUT …/owner`: a PVC, a VMI, …), else the
   mount a ublk device carries.
+- **Where it is mounted** (#658) is read from every mount namespace on the
+  node (`/proc/*/mountinfo`, each namespace once, PID 1's first, at most
+  every two seconds): a service's `/state` or a pod's `/var/log/pods`, not
+  only what PID 1 sees. A detach refuses a device mounted in any of them. A
+  ublk device a `/v1` attach made is keyed by the `/v1` id; it is counted
+  for its engine volume, as are the boot devices an adopting engine took
+  over.
 - Filters: `?kind=volume|golden|blank|media|snapshot|template` (comma-separated),
   `?kind=image` for everything but `volume`, `?in_use=true|false`,
   `?unowned=true`. With no filter the listing is what it always was.
