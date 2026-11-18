@@ -259,20 +259,25 @@ pub(crate) fn resolve_size(
 /// already knows about is left alone, so a node with a real data directory
 /// keeps whatever it had.
 pub async fn adopt_slab_templates(state: &Arc<AppState>) {
-    let derived = {
+    let recorded: Vec<(Uuid, Option<Uuid>)> = state.fstemplates.lock().await.templates.iter().map(|t| (t.id, t.sealed_volume_id)).collect();
+    let (derived, present) = {
         let vm = state.volume_manager.lock().await;
         let mut out = Vec::new();
         for (id, name, size) in vm.templates().await {
             let fs = vm.fs_info(&id).cloned();
             out.push((id, name, size, fs));
         }
-        out
+        // Which records' sealed volumes are still here (#663).
+        let present: std::collections::HashSet<Uuid> =
+            recorded.iter().filter(|(_, v)| v.is_some_and(|v| vm.get_volume(&VolumeId(v)).is_some())).map(|(t, _)| *t).collect();
+        (out, present)
     };
     if derived.is_empty() {
         return;
     }
     let mut store = state.fstemplates.lock().await;
     let mut adopted = 0usize;
+    let mut repointed = 0usize;
     for (id, name, size, fs) in derived {
         if store.templates.iter().any(|t| t.sealed_volume_id == Some(id.0)) {
             continue;
@@ -281,6 +286,25 @@ pub async fn adopt_slab_templates(state: &Arc<AppState>) {
         // taken from it already carries the shorter name, so using it here
         // keeps one name for one thing.
         let tname = name.strip_suffix(".golden").unwrap_or(&name).to_string();
+        // A record of this name already (#663): kept when its volume is
+        // here; when it is gone (an install re-laid the release's blank under
+        // a new id), this volume is that template from now on. Never a second
+        // record of one name.
+        if let Some(t) = store.templates.iter_mut().find(|t| t.name == tname) {
+            if !present.contains(&t.id) {
+                tracing::warn!(
+                    "fstemplate {tname}: its sealed volume {} is gone; the slabs' {name} ({}) from now on (#663)",
+                    t.sealed_volume_id.map(|v| v.to_string()).unwrap_or_else(|| "(none)".into()),
+                    id.0
+                );
+                t.sealed_volume_id = Some(id.0);
+                t.raw_volume_id = None;
+                t.state = crate::fs::template::TemplateState::Ready;
+                t.formatting = false;
+                repointed += 1;
+            }
+            continue;
+        }
         store.insert(crate::fs::template::FsTemplate {
             id: Uuid::new_v4(),
             name: tname,
@@ -303,31 +327,46 @@ pub async fn adopt_slab_templates(state: &Arc<AppState>) {
             seeded: Vec::new(),
             standing: None,
             formatting: false,
-            broken: None,
         });
         adopted += 1;
     }
     if adopted > 0 {
         tracing::info!("adopted {adopted} blank(s) from the slabs as templates");
     }
+    if adopted + repointed > 0 {
+        store.persist();
+    }
 }
 
 /// A template as listed, its sealed volume looked for now (#281): a ready
-/// template whose volume has gone since the last check lists as broken.
+/// template whose volume has gone is gone (#663: not listed, and made whole
+/// in the background: the slabs' blank of its name, or minted again).
 ///
 /// Looked for in the volume presence set, never under the volume manager's
 /// lock (#358): that lock is held through every create, clone and delete's
 /// durable persist, and taking it once per template made the listing wait
 /// in line behind all of them — over 30 s on the Dell.
-fn live_json(state: &AppState, mut t: template::FsTemplate) -> serde_json::Value {
-    if t.state == template::TemplateState::Ready && t.broken.is_none() {
-        if let Some(src) = t.clone_source() {
-            if !state.volume_presence.contains(&src) {
-                t.broken = Some(format!("its sealed volume {} is missing", src.0));
-            }
-        }
+fn live_json(state: &AppState, t: template::FsTemplate) -> Option<serde_json::Value> {
+    if t.state == template::TemplateState::Ready && !t.clone_source().is_some_and(|src| state.volume_presence.contains(&src)) {
+        return None;
     }
-    t.json()
+    Some(t.json())
+}
+
+/// Settle every template whose volume is gone, in the background, one pass
+/// at a time (#663).
+pub fn settle_in_background(state: &Arc<AppState>) {
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        for (name, why, settled) in template::reconcile(&state.volume_manager, &state.fstemplates).await {
+            tracing::warn!("fstemplate {name}: {why}; {} (#663)", settled.said());
+        }
+        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
 }
 
 async fn list_templates(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -335,8 +374,15 @@ async fn list_templates(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .increment(1);
     let templates: Vec<template::FsTemplate> = state.fstemplates.lock().await.templates.clone();
     let mut items = Vec::with_capacity(templates.len());
+    let mut gone = false;
     for t in templates {
-        items.push(live_json(&state, t));
+        match live_json(&state, t) {
+            Some(v) => items.push(v),
+            None => gone = true,
+        }
+    }
+    if gone {
+        settle_in_background(&state);
     }
     let count = items.len();
     Json(json!({ "items": items, "count": count }))
@@ -345,7 +391,13 @@ async fn list_templates(State(state): State<Arc<AppState>>) -> impl IntoResponse
 async fn get_template(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let found = state.fstemplates.lock().await.find(&id).cloned();
     match found {
-        Some(t) => Json(live_json(&state, t)).into_response(),
+        Some(t) => match live_json(&state, t) {
+            Some(v) => Json(v).into_response(),
+            None => {
+                settle_in_background(&state);
+                ApiError::not_found(format!("fstemplate {id}: its sealed volume is gone; it is being made whole (the slabs' blank of its name, or minted again)"))
+            }
+        },
         None => ApiError::not_found(format!("fstemplate {id} not found")),
     }
 }

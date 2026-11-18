@@ -55,6 +55,27 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #663 — a template is its sealed volume; never kept `broken` (2026-11-18, P0)
+
+server8 12.92: the install kept `pvc-ext4j-64m`'s record while the release's
+blank it named was re-laid under a new id (the system half); adopt added a
+second record of the name; the old one, `broken` ("its sealed volume … is
+missing"), was the one found. Owner: "why would we even let the template
+get broken"; "those empty volumes are important".
+- [x] `broken` gone from `fs/template.rs` (states: formatting, ready);
+  `settle_one`: the slabs' blank of its name, else minted again (plain
+  blank, data half, same id), else dropped; `reconcile` at start (dupes
+  collapse); the clone path settles inline (409 "is gone … is not sealed"
+  only when dropped)
+- [x] `adopt_slab_templates` re-points a record whose volume is gone, never
+  a second record of one name
+- [x] the listing leaves out (and settles in the background) a template
+  whose volume is gone; health `fstemplates` (ready, minting, `pvc-ladder: N
+  of M`)
+- [ ] check.sh; docs; release; item 2 (the registry warm-up) filed on
+  stormblock-registry; item 3 (a golden clone with no superblock) its own
+  issue
+
 ## #400 (with #399) — ship a snapshot's changed extents over NVMe/TCP (2026-11-18, P0: stormvm#31)
 
 #399 was still open and #400 sends what it reports, so both here.

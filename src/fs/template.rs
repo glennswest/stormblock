@@ -41,6 +41,7 @@
 //! days later inside a container as `Read-only file system`
 //! (stormblock-registry#10).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -314,13 +315,6 @@ pub struct FsTemplate {
     /// Unset for a template waiting on an external formatter.
     #[serde(default)]
     pub formatting: bool,
-    /// Why a `ready` template cannot be cloned, when it cannot (#281): its
-    /// sealed volume is gone, or was never recorded, or will not seal. Set by
-    /// [`verify_ready`] (at startup) and by a clone that finds it so; cleared
-    /// when the volume is back and sealed. Kept beside `state` rather than as
-    /// a state of its own, so an older engine still reads the store.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub broken: Option<String>,
     /// The template this one was built `FROM`, if any.
     ///
     /// Recorded for lineage, not for reads: a snapshot owns a complete extent
@@ -366,9 +360,10 @@ impl FsTemplate {
             "metadata_csum_seed": self.csum_seed,
             "label": self.label,
             "fs_uuid": self.fs_uuid,
-            // A ready template that cannot be cloned says so (#281).
-            "state": if self.broken.is_some() { "broken" } else { self.state.as_str() },
-            "broken": self.broken,
+            // `formatting` or `ready`, nothing else (#663): a template is its
+            // sealed volume, so one whose volume is gone is gone (minted again,
+            // or re-found), never listed `broken`.
+            "state": self.state.as_str(),
             "formatting": self.formatting,
             "raw_volume_id": self.raw_volume_id,
             "sealed_volume_id": self.sealed_volume_id,
@@ -740,7 +735,6 @@ pub async fn create(
     let template = FsTemplate {
         standing: None,
         formatting: spec.format_in_core,
-        broken: None,
         id: Uuid::new_v4(),
         name: spec.name.clone(),
         fs: parent.as_ref().map(|p| p.fs).unwrap_or(spec.fs),
@@ -1699,16 +1693,26 @@ pub async fn clone_template(
         )));
     }
     // Its sealed volume, there and sealed — checked now, not trusted from the
-    // store (#281). A template whose volume is gone answers one thing,
-    // every time, and is marked so the listing says it too.
-    if let Err(why) = check_sealed(vm, &template).await {
-        mark_broken(store, template.id, Some(why.clone())).await;
-        return Err(TemplateError::Conflict(broken_message(&template.name, &why)));
-    }
-    if template.broken.is_some() {
-        mark_broken(store, template.id, None).await;
-    }
-    let source = template.clone_source().expect("check_sealed found it");
+    // store (#281). A template is its sealed volume (#663): one whose volume
+    // is gone is made whole first (the slabs' blank of its name, or minted
+    // again), and only one that cannot be is refused.
+    let template = match check_sealed(vm, &template).await {
+        Ok(()) => template,
+        Err(why) => match settle_one(vm, store, &template, &why).await {
+            Settled::Dropped(how) => return Err(TemplateError::Conflict(gone_message(&template.name, &how))),
+            settled => {
+                tracing::warn!("fstemplate {}: {why}; {} (#663)", template.name, settled.said());
+                store
+                    .lock()
+                    .await
+                    .by_name(&template.name)
+                    .cloned()
+                    .filter(|t| t.state == TemplateState::Ready)
+                    .ok_or_else(|| TemplateError::Conflict(gone_message(&template.name, "it is being minted again")))?
+            }
+        },
+    };
+    let source = template.clone_source().ok_or_else(|| TemplateError::Conflict(gone_message(&template.name, "no sealed volume")))?;
 
     let mut result = clone_volume(vm, source, spec).await?;
     result.template_id = Some(template.id);
@@ -1747,56 +1751,170 @@ async fn check_sealed(vm: &VmLock, template: &FsTemplate) -> std::result::Result
     Ok(())
 }
 
-/// The clone refusal for a broken template: 409, and the same words every
-/// time. "is not sealed" is kept in it for rustkube-node e3ca68d, which
-/// deletes and mints a template again on a 409 that says so.
-pub fn broken_message(name: &str, why: &str) -> String {
-    format!(
-        "fstemplate {name} is broken: {why}. It is not sealed and cannot be cloned; \
-         delete it and mint it again (or restore its volume)"
-    )
+/// The clone refusal for a template that is gone and could not be made
+/// whole (#663): 409. "is not sealed" is kept in it for rustkube-node
+/// e3ca68d, which deletes and mints a template again on a 409 that says so.
+pub fn gone_message(name: &str, why: &str) -> String {
+    format!("fstemplate {name} is gone: {why}. It is not sealed and cannot be cloned; mint it again")
 }
 
-async fn mark_broken(store: &StoreLock, id: Uuid, why: Option<String>) {
-    let mut s = store.lock().await;
-    if let Some(t) = s.get_mut(&id) {
-        if t.broken != why {
-            match &why {
-                Some(w) => tracing::warn!("fstemplate {} is broken: {w}", t.name),
-                None => tracing::info!("fstemplate {}: its sealed volume is back; no longer broken", t.name),
-            }
-            t.broken = why;
-            s.persist();
+/// What became of a template whose sealed volume was gone (#663).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Settled {
+    /// Whole by the time it was looked at (another settle got there first).
+    Whole,
+    /// The blank of its name the slabs carry now (an install re-laid the
+    /// release's `<name>.golden` under a new id).
+    Repointed(VolumeId),
+    /// Minted again, in the data half, from its record.
+    Reminted(VolumeId),
+    /// Neither: the record is dropped, and why.
+    Dropped(String),
+}
+
+impl Settled {
+    pub fn said(&self) -> String {
+        match self {
+            Settled::Whole => "whole again".into(),
+            Settled::Repointed(v) => format!("the slabs' blank of its name, {}, from now on", v.0),
+            Settled::Reminted(v) => format!("minted again in the data half as {}", v.0),
+            Settled::Dropped(why) => format!("dropped: {why}"),
         }
     }
 }
 
-/// Check every `ready` template's sealed volume (#281): at startup, after
-/// the slabs are open and the formats a previous run left are finished. A
-/// store can outlive its volume — a delete cut short, a reclaim, a store
-/// restored onto a slab seeded again — and such a template listed `ready`
-/// while every clone of it failed. Each is re-sealed when its volume is there
-/// and unsealed, marked broken (with the reason, in the listing) when it is
-/// not, and cleared when it is whole again. Returns `(name, problem)` for
-/// every template broken after the check.
-pub async fn verify_ready(vm: &VmLock, store: &StoreLock) -> Vec<(String, String)> {
+/// A template that can be minted again from its record alone: a plain blank
+/// (no seeded files, not built on a parent).
+pub fn remintable(t: &FsTemplate) -> bool {
+    t.seeded.is_empty() && t.parent_id.is_none()
+}
+
+/// One settle at a time: two claims of one gone template mint it once.
+static SETTLING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Make whole a template whose sealed volume is gone or will not seal
+/// (#663): the volume of its name the slabs carry, else minted again when it
+/// is a plain blank, else the record dropped. There is no `broken`: a
+/// template is its sealed volume.
+pub async fn settle_one(vm: &VmLock, store: &StoreLock, t: &FsTemplate, why: &str) -> Settled {
+    let _one = SETTLING.lock().await;
+    // Whole already: some record of this name is ready and its volume is
+    // there (settled while this waited, or a duplicate). That one stays.
+    let same: Vec<FsTemplate> = store.lock().await.templates.iter().filter(|x| x.name == t.name).cloned().collect();
+    for now in same.iter().filter(|x| x.state == TemplateState::Ready) {
+        if check_sealed(vm, now).await.is_ok() {
+            let mut s = store.lock().await;
+            for o in same.iter().filter(|x| x.id != now.id) {
+                s.remove(&o.id);
+            }
+            s.persist();
+            return Settled::Whole;
+        }
+    }
+    let taken: HashSet<Uuid> = store.lock().await.templates.iter().filter_map(|x| x.sealed_volume_id).collect();
+    let found = {
+        let m = vm.lock().await;
+        let mut hit = None;
+        for (id, name, _) in m.templates().await {
+            let base = name.strip_suffix(".golden").unwrap_or(&name);
+            if base == t.name && !taken.contains(&id.0) && m.is_sealed(&id) {
+                hit = Some(id);
+                break;
+            }
+        }
+        hit
+    };
+    let mut s = store.lock().await;
+    // Every record of this name goes: the one that is whole is the only one.
+    let old: Vec<FsTemplate> = s.templates.iter().filter(|x| x.name == t.name).cloned().collect();
+    for o in &old {
+        s.remove(&o.id);
+    }
+    if let Some(id) = found {
+        let mut r = t.clone();
+        r.sealed_volume_id = Some(id.0);
+        r.raw_volume_id = None;
+        r.state = TemplateState::Ready;
+        r.formatting = false;
+        s.insert(r);
+        s.persist();
+        return Settled::Repointed(id);
+    }
+    s.persist();
+    drop(s);
+    if !remintable(t) {
+        return Settled::Dropped(format!(
+            "{why}, and it was {}: mint it again",
+            if t.parent_id.is_some() { "built on a parent" } else { "seeded with files" }
+        ));
+    }
+    let mut spec = TemplateSpec::new(t.name.clone(), t.size_bytes);
+    spec.fs = t.fs;
+    spec.journal = Some(t.journal);
+    spec.label = t.label.clone();
+    spec.features = t.features.clone();
+    // Where every other node-data volume lives, so an install does not take
+    // it again.
+    spec.role = Some(crate::drive::slab::SlabRole::Data);
+    let made = match create(vm, store, &spec).await {
+        Ok(m) => Ok(m),
+        Err(_) => {
+            // A node with no data half: wherever it has room.
+            spec.role = None;
+            create(vm, store, &spec).await
+        }
+    };
+    match made {
+        Ok(m) => {
+            let vol = m.sealed_volume_id.map(VolumeId).unwrap_or(VolumeId(Uuid::nil()));
+            // The same id and count as before: callers that kept the id still
+            // find it.
+            let mut s = store.lock().await;
+            if let Some(x) = s.get_mut(&m.id) {
+                x.id = t.id;
+                x.clones = t.clones;
+            }
+            s.persist();
+            Settled::Reminted(vol)
+        }
+        Err(e) => Settled::Dropped(format!("{why}, and minting it again failed: {e}")),
+    }
+}
+
+/// Every `ready` template checked against its sealed volume (#281, #663), at
+/// startup and when a listing finds one gone: re-sealed when it is there and
+/// unsealed; made whole ([`settle_one`]) when it is not. Duplicate records of
+/// one name collapse into the one that is whole. Returns `(name, what was
+/// wrong, what became of it)` for each that was not whole.
+pub async fn reconcile(vm: &VmLock, store: &StoreLock) -> Vec<(String, String, Settled)> {
     let ready: Vec<FsTemplate> =
         store.lock().await.templates.iter().filter(|t| t.state == TemplateState::Ready).cloned().collect();
-    let mut broken = Vec::new();
+    let mut out = Vec::new();
+    let mut done: HashSet<String> = HashSet::new();
     for t in ready {
+        let dup = store.lock().await.templates.iter().filter(|x| x.name == t.name).count() > 1;
         match check_sealed(vm, &t).await {
+            Ok(()) if !dup => continue,
             Ok(()) => {
-                if t.broken.is_some() {
-                    mark_broken(store, t.id, None).await;
+                // Another record of this name is gone: keep this one only.
+                let mut s = store.lock().await;
+                let others: Vec<Uuid> = s.templates.iter().filter(|x| x.name == t.name && x.id != t.id).map(|x| x.id).collect();
+                for o in others {
+                    s.remove(&o);
                 }
+                s.persist();
+                continue;
             }
             Err(why) => {
-                mark_broken(store, t.id, Some(why.clone())).await;
-                broken.push((t.name, why));
+                if !done.insert(t.name.clone()) {
+                    continue;
+                }
+                let settled = settle_one(vm, store, &t, &why).await;
+                out.push((t.name.clone(), why, settled));
             }
         }
     }
-    broken
+    out
 }
 
 // ------------------------------------------------------------------ claims

@@ -1956,9 +1956,11 @@ async fn the_template_listing_answers_while_the_volume_manager_is_held() {
     assert!(r.status().is_success());
     let v: serde_json::Value = r.json().await.unwrap();
     let items = v["items"].as_array().unwrap();
-    assert_eq!(items.len(), 6, "{v}");
+    // #663: a template whose volume is gone is not listed (it is being made
+    // whole in the background), never `broken`.
+    assert_eq!(items.len(), 5, "{v}");
     let by = |n: &str| items.iter().find(|t| t["name"] == n).unwrap().clone();
-    assert_eq!(by("pvc-ext4j-0m")["state"], "broken", "a gone volume is still seen: {v}");
+    assert!(items.iter().all(|t| t["name"] != "pvc-ext4j-0m"), "a gone volume is not listed: {v}");
     assert_eq!(by("pvc-ext4j-1m")["state"], "ready", "{v}");
     let one = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -1973,83 +1975,106 @@ async fn the_template_listing_answers_while_the_volume_manager_is_held() {
     server.abort();
 }
 
+/// #663 (#281, server8): a template is its sealed volume, never kept
+/// `broken`. After a restart (the store read back and checked, as at
+/// startup):
+/// - a plain blank whose volume is gone (an install re-laid the half it was
+///   in) is minted again, under the same id;
+/// - a template whose name the slabs carry a blank of (the release's
+///   `<name>.golden`, re-laid under a new id) takes that blank, one record of
+///   the name;
+/// - one that cannot be minted from its record (seeded) is dropped;
+/// - one whose volume is there but unsealed is sealed again.
+/// The listing never says `broken`, and a clone of a template whose volume
+/// went since is made whole inline.
 #[tokio::test]
-async fn a_ready_template_whose_volume_is_gone_lists_broken_and_refuses_clones_clearly() {
+async fn a_template_whose_volume_is_gone_is_made_whole() {
     let dir = TempDir::new().unwrap();
     let state = setup(&dir).await;
     let gone = sealed_template(&state, "pvc-ext4j-64m").await;
     let unsealed = sealed_template(&state, "pvc-unsealed").await;
-    let (gone_vol, unsealed_vol) = {
+    let (gone_vol, unsealed_vol, mut seeded, mut sixteen) = {
         let s = state.fstemplates.lock().await;
-        (
-            VolumeId(s.get(&gone).unwrap().sealed_volume_id.unwrap()),
-            VolumeId(s.get(&unsealed).unwrap().sealed_volume_id.unwrap()),
-        )
+        let g = s.get(&gone).unwrap().clone();
+        (VolumeId(g.sealed_volume_id.unwrap()), VolumeId(s.get(&unsealed).unwrap().sealed_volume_id.unwrap()), g.clone(), g)
+    };
+    // A seeded template and a pvc-ext4j-16m whose volumes are not here.
+    seeded.id = Uuid::new_v4();
+    seeded.name = "seeded".into();
+    seeded.seeded = vec!["/etc/boot.toml".into()];
+    seeded.sealed_volume_id = Some(Uuid::new_v4());
+    sixteen.id = Uuid::new_v4();
+    sixteen.name = "pvc-ext4j-16m".into();
+    sixteen.sealed_volume_id = Some(Uuid::new_v4());
+    {
+        let mut s = state.fstemplates.lock().await;
+        s.insert(seeded.clone());
+        s.insert(sixteen.clone());
+        s.persist();
+    }
+    // The release's blank of that name, re-laid under a new id.
+    let golden16 = {
+        let mut vm = state.volume_manager.lock().await;
+        let id = vm.create_volume_any("pvc-ext4j-16m.golden", 16 << 20).await.unwrap();
+        vm.mark_template(id);
+        vm.seal_volume(id, None).await.unwrap();
+        id
     };
     {
         let mut vm = state.volume_manager.lock().await;
         vm.delete_volume(gone_vol).await.unwrap();
         vm.unseal_volume(unsealed_vol).await.unwrap();
     }
-    let (base, server) = start(state.clone()).await;
-    let c = reqwest::Client::new();
-    let list = |c: reqwest::Client, base: String| async move {
-        let v: serde_json::Value = c.get(format!("{base}/api/v1/fstemplates")).send().await.unwrap().json().await.unwrap();
-        v["items"].as_array().unwrap().clone()
-    };
-    let item = |items: &[serde_json::Value], name: &str| items.iter().find(|t| t["name"] == name).unwrap().clone();
-
-    // Before any check, the listing already looks for the volume.
-    let items = list(c.clone(), base.clone()).await;
-    assert_eq!(item(&items, "pvc-ext4j-64m")["state"], "broken", "{items:?}");
+    stormblock::mgmt::api::fstemplates::adopt_slab_templates(&state).await;
+    {
+        let s = state.fstemplates.lock().await;
+        let named: Vec<_> = s.templates.iter().filter(|t| t.name == "pvc-ext4j-16m").collect();
+        assert_eq!(named.len(), 1, "one record of a name");
+        assert_eq!(named[0].sealed_volume_id, Some(golden16.0), "the slabs' blank from now on");
+        assert_eq!(named[0].id, sixteen.id);
+    }
 
     // Restart: the store from the data directory, checked as at startup.
     *state.fstemplates.lock().await = stormblock::fs::TemplateStore::load(dir.path());
-    let broken = template::verify_ready(&state.volume_manager, &state.fstemplates).await;
-    assert_eq!(broken.len(), 1, "{broken:?}");
-    assert_eq!(broken[0].0, "pvc-ext4j-64m");
-
-    let items = list(c.clone(), base.clone()).await;
-    let t = item(&items, "pvc-ext4j-64m");
-    assert_eq!(t["state"], "broken");
-    assert!(t["broken"].as_str().unwrap().contains("missing"), "{t}");
-    let t = item(&items, "pvc-unsealed");
-    assert_eq!(t["state"], "ready", "an unsealed volume is sealed again: {t}");
-    assert!(t["broken"].is_null());
+    let settled = template::reconcile(&state.volume_manager, &state.fstemplates).await;
+    let what = |n: &str| settled.iter().find(|(name, _, _)| name == n).map(|(_, why, s)| (why.clone(), s.clone()));
+    let (why, s) = what("pvc-ext4j-64m").expect("the gone one settled");
+    assert!(why.contains("missing"), "{why}");
+    assert!(matches!(s, template::Settled::Reminted(_)), "{s:?}");
+    let (_, s) = what("seeded").expect("the seeded one settled");
+    assert!(matches!(s, template::Settled::Dropped(_)), "{s:?}");
+    assert!(what("pvc-unsealed").is_none(), "an unsealed volume is sealed again, not settled");
     assert!(state.volume_manager.lock().await.is_sealed(&unsealed_vol));
-    // Kept: the store read again says broken too.
-    assert!(stormblock::fs::TemplateStore::load(dir.path()).get(&gone).unwrap().broken.is_some());
-
-    // One clear answer to a clone and to a claim: 409, saying why.
-    for path in [format!("{base}/api/v1/fstemplates/{gone}/clone"), format!("{base}/api/v1/fstemplates/pvc-ext4j-64m/claim")] {
-        let r = c.post(&path).json(&serde_json::json!({"name": "pvc-new"})).send().await.unwrap();
-        assert_eq!(r.status().as_u16(), 409, "{path}");
-        let body: serde_json::Value = r.json().await.unwrap();
-        let e = body["error"].as_str().unwrap();
-        assert!(e.contains("pvc-ext4j-64m is broken") && e.contains("missing"), "{e}");
-        // rustkube-node e3ca68d deletes and mints again on a 409 that says this.
-        assert!(e.contains("is not sealed"), "{e}");
+    {
+        let s = state.fstemplates.lock().await;
+        let t = s.by_name("pvc-ext4j-64m").unwrap();
+        assert_eq!((t.id, t.state), (gone, stormblock::fs::TemplateState::Ready), "the same id, ready");
+        let v = VolumeId(t.sealed_volume_id.unwrap());
+        assert_ne!(v, gone_vol);
+        assert!(state.volume_manager.lock().await.is_sealed(&v));
+        assert!(s.by_name("seeded").is_none(), "dropped");
     }
-    // The repaired one clones.
-    let r = c
-        .post(format!("{base}/api/v1/fstemplates/{unsealed}/clone"))
-        .json(&serde_json::json!({"name": "pvc-fine"}))
-        .send()
-        .await
-        .unwrap();
-    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    assert!(template::reconcile(&state.volume_manager, &state.fstemplates).await.is_empty(), "whole: nothing to settle");
 
-    // Deleted and minted again, it is whole.
-    let r = c.delete(format!("{base}/api/v1/fstemplates/{gone}")).send().await.unwrap();
+    let (base, server) = start(state.clone()).await;
+    let c = reqwest::Client::new();
+    let v: serde_json::Value = c.get(format!("{base}/api/v1/fstemplates")).send().await.unwrap().json().await.unwrap();
+    let items = v["items"].as_array().unwrap();
+    assert!(items.iter().all(|t| t["state"] == "ready" && t.get("broken").is_none()), "{v}");
+    for path in [format!("{base}/api/v1/fstemplates/{gone}/clone"), format!("{base}/api/v1/fstemplates/{unsealed}/clone")] {
+        let r = c.post(&path).json(&serde_json::json!({"name": format!("pvc-{}", Uuid::new_v4().simple())})).send().await.unwrap();
+        assert!(r.status().is_success(), "{path}: {}", r.text().await.unwrap());
+    }
+    // Its volume gone again while running: a claim makes it whole inline.
+    let v = VolumeId(state.fstemplates.lock().await.get(&gone).unwrap().sealed_volume_id.unwrap());
+    state.volume_manager.lock().await.delete_volume(v).await.unwrap();
+    let r = c.post(format!("{base}/api/v1/fstemplates/pvc-ext4j-64m/claim")).json(&serde_json::json!({})).send().await.unwrap();
     assert!(r.status().is_success(), "{}", r.text().await.unwrap());
-    let again = sealed_template(&state, "pvc-ext4j-64m").await;
-    let r = c
-        .post(format!("{base}/api/v1/fstemplates/{again}/clone"))
-        .json(&serde_json::json!({"name": "pvc-new"}))
-        .send()
-        .await
-        .unwrap();
-    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+    let r = c.post(format!("{base}/api/v1/fstemplates/seeded/clone")).json(&serde_json::json!({"name": "x"})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 404, "a dropped template is not there");
+    // Health says the ladder.
+    let h: serde_json::Value = c.get(format!("{base}/api/v1/health")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(h["fstemplates"]["ladder"], "pvc-ladder: 3 of 3 ready", "{}", h["fstemplates"]);
     server.abort();
 }
 

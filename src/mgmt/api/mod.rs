@@ -162,6 +162,12 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         /// why. Open like `drive_links`; left out with no card.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         drive_errors: Vec<serde_json::Value>,
+        /// The node's filesystem templates (#663): how many are ready, which
+        /// are being minted, and the claim ladder (`pvc-*`) in a line,
+        /// `pvc-ladder: 5 of 5 ready` or naming the classes not ready.
+        /// Left out with none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fstemplates: Option<serde_json::Value>,
         /// The boot's mode (#629): `diagnostic` when the install-config said
         /// so; this node runs from its image and lays and flows over nothing.
         /// Left out on an ordinary boot.
@@ -290,6 +296,10 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
     let storage_layout = super::storage_layout::report(slabs.as_ref());
     let drive_links = super::link::summary();
     let drive_errors = super::drive_errors::summary();
+    let fstemplates = {
+        let ts = state.fstemplates.lock().await.templates.clone();
+        templates_health(&ts, &state.volume_presence)
+    };
     let metadata = crate::mgmt::api::slabs::summary_for_health(&state).await;
     let boot_mounts = crate::mgmt::boot_mounts::read();
     let mounts_failed = boot_mounts.as_ref().is_some_and(|m| !m.failed.is_empty());
@@ -316,6 +326,7 @@ async fn health(axum::extract::State(state): axum::extract::State<Arc<AppState>>
         storage_layout,
         drive_links,
         drive_errors,
+        fstemplates,
         mode: crate::boot_mode::mode(),
         formats: super::format_job::summary(),
         metadata,
@@ -696,6 +707,30 @@ async fn hba_write_test(
         Ok(Err(e)) => (StatusCode::CONFLICT, Json(serde_json::json!({"sas_address": want, "error": e}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
     }
+}
+
+/// Health's `fstemplates` (#663): ready (and its volume here), minting, and
+/// the `pvc-*` claim ladder in a line.
+pub fn templates_health(ts: &[crate::fs::template::FsTemplate], present: &crate::volume::VolumePresence) -> Option<serde_json::Value> {
+    use crate::fs::template::TemplateState;
+    if ts.is_empty() {
+        return None;
+    }
+    let ready = |t: &crate::fs::template::FsTemplate| t.state == TemplateState::Ready && t.clone_source().is_some_and(|v| present.contains(&v));
+    let minting: Vec<&str> = ts.iter().filter(|t| !ready(t)).map(|t| t.name.as_str()).collect();
+    let ladder: Vec<&crate::fs::template::FsTemplate> = ts.iter().filter(|t| t.name.starts_with("pvc-")).collect();
+    let up = ladder.iter().filter(|t| ready(t)).count();
+    let missing: Vec<&str> = ladder.iter().filter(|t| !ready(t)).map(|t| t.name.as_str()).collect();
+    let line = if missing.is_empty() {
+        format!("pvc-ladder: {up} of {} ready", ladder.len())
+    } else {
+        format!("pvc-ladder: {up} of {}, being minted: {}", ladder.len(), missing.join(", "))
+    };
+    Some(serde_json::json!({
+        "ready": ts.len() - minting.len(),
+        "minting": minting,
+        "ladder": if ladder.is_empty() { None } else { Some(line) },
+    }))
 }
 
 #[derive(serde::Deserialize, Default)]
