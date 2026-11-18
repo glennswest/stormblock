@@ -55,6 +55,24 @@ stormcentral#1441.
 - [ ] shipped: proof is forge1's health with `"mode":"diagnostic"` after a
   `testhost install … --diagnostic` (stormcentral#1441)
 
+## #672 — SATA drives: a drive out says why; the SSD+HDD blades (2026-11-18, P0)
+
+server8 (24.22.0, read from its open health): the node on the Patriot SSD
+(sda: system + two data slabs), the Seagate ST2000DM008 (sdb, SATA 512e)
+laid with nothing and said nowhere. Membership (`fleet`/`out`) is
+stormdrive's: its DrivePolicy enrolls a data drive through the engine's
+`POST /api/v1/slabs {device_path, tier}` (512e taken as is), and its verdict
+`Skip(reason)` is what the Drive object must show.
+- [x] stormblock /init: `drives not taken` block, each whole drive the
+  layout leaves with what it is (SATA HDD, zoned, 512e/4Kn) and why;
+  tests/initramfs-drives-not-taken.sh (server8's drives)
+- [x] the survey (health `local_disk.drives`): rotational, zoned,
+  logical/physical block
+- [ ] stormdrive issue: membershipReason/condition from the verdict, SMR
+  (ATA IDENTIFY word 69, DM-SMR) on the Drive object, the SMR HDD enrolled
+  `cool`; stormcos issue: the blades' DrivePolicy and a `cool` StorageClass
+- [ ] check.sh; release; #672 behind those, its proof theirs
+
 ## #659 — no stubs (P-1, 2026-11-18)
 
 Owner: "stubs are lies". The master's sweep found 3; the proof grep found 2.

@@ -2799,7 +2799,16 @@ for _n in $(inv_disks); do
     if [ "$_bytes" = 0 ] && [ "$(cat "$_b/removable" 2>/dev/null)" != 1 ]; then
         _ready=false; _rs="NOT READY: no readable format (0 bytes)"
     fi
-    INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_n\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"wwid\": $(_ij "$_wwid"), \"size_bytes\": $_bytes, \"ready\": $_ready, \"transport\": \"$_tr\", \"controller\": $(_ij "$_ctl"), \"shelf\": $(shelf_json "$_b"), \"bay\": $(_ij "$_bay")}"
+    # What kind of drive (#672): rotational, the kernel's zoned model
+    # (drive-managed SMR reads `none`: stormdrive's ATA IDENTIFY says it),
+    # and its block sizes (a SATA 512e drive is taken at 512, never
+    # formatted).
+    _rot=false; [ "$(cat "$_b/queue/rotational" 2>/dev/null)" = 1 ] && _rot=true
+    _zon=$(cat "$_b/queue/zoned" 2>/dev/null); _zon=${_zon:-none}
+    _lbs=$(cat "$_b/queue/logical_block_size" 2>/dev/null); _lbs=${_lbs:-0}
+    _pbs=$(cat "$_b/queue/physical_block_size" 2>/dev/null); _pbs=${_pbs:-0}
+    case "$_lbs$_pbs" in *[!0-9]*) _lbs=0; _pbs=0 ;; esac
+    INV_DRIVES="$INV_DRIVES${INV_DRIVES:+, }{\"name\": \"$_n\", \"model\": $(_ij "$_model"), \"serial\": $(_ij "$_serial"), \"wwid\": $(_ij "$_wwid"), \"size_bytes\": $_bytes, \"ready\": $_ready, \"transport\": \"$_tr\", \"rotational\": $_rot, \"zoned\": $(_ij "$_zon"), \"logical_block\": $_lbs, \"physical_block\": $_pbs, \"controller\": $(_ij "$_ctl"), \"shelf\": $(shelf_json "$_b"), \"bay\": $(_ij "$_bay")}"
     echo "    $_n: ${_model:-?} serial ${_serial:-?}${_wwid:+ $_wwid}, $_rs, $_tr${_ctl:+ on $_ctl}, $_shpos shelf${_shid:+ $_shid}${_bay:+, bay $_bay}"
     INV_NAMES="${INV_NAMES:-}${INV_NAMES:+ }/dev/$_n"
 done
@@ -6362,6 +6371,49 @@ $1|$_svp|$3"
         echo "  $PAIR_DISK is $(drive_desc "$SURVEY_SYS/${PAIR_DISK##*/}" "$PAIR_DISK" | cut -d: -f2-)"
     fi
     # --- END system drive
+
+    # --- BEGIN drives not taken (covered by tests/initramfs-drives-not-taken.sh)
+    # Every whole drive this boot's layout does not take is said, with what
+    # it is and why (#672; the no-empty-states rule): server8's 2 TB SATA
+    # HDD sat `out` with no word. The install lays the node on the drives
+    # above (its local disk, a system drive, a pair, storage:'s); a data
+    # drive beyond them is stormdrive's to enroll after the boot, by its
+    # DrivePolicy (a drive-managed SMR HDD as a `cool` slab), and its Drive
+    # object says what it decided.
+    if [ -n "${LOCAL_DISK:-}" ]; then
+        _nt_taken=" $(disk_of "$LOCAL_DISK") ${SYSTEM_DISK:-} ${PAIR_DISK:-} ${STORAGE_DRIVES:-} "
+        for _nt in "$SURVEY_SYS"/sd* "$SURVEY_SYS"/nvme*n* "$SURVEY_SYS"/vd*; do
+            [ -e "$_nt" ] || continue
+            _ntn=${_nt##*/}
+            case "$_nt_taken" in *" /dev/$_ntn "*) continue ;; esac
+            _ntm=$(sed 's/  */ /g; s/ *$//' "$_nt/device/model" 2>/dev/null)
+            _ntb=$(( $(cat "$_nt/size" 2>/dev/null || echo 0) * 512 ))
+            _ntk=SSD
+            [ "$(cat "$_nt/queue/rotational" 2>/dev/null)" = 1 ] && _ntk=HDD
+            _ntz=$(cat "$_nt/queue/zoned" 2>/dev/null)
+            [ -n "$_ntz" ] && [ "$_ntz" != none ] && _ntk="$_ntk, zoned $_ntz"
+            _ntl=$(cat "$_nt/queue/logical_block_size" 2>/dev/null)
+            _ntp=$(cat "$_nt/queue/physical_block_size" 2>/dev/null)
+            if [ "$_ntl" = 512 ] && [ "$_ntp" = 4096 ]; then _ntk="$_ntk, 512e"
+            elif [ "$_ntl" = 4096 ]; then _ntk="$_ntk, 4Kn"
+            elif [ -n "$_ntl" ]; then _ntk="$_ntk, $_ntl-byte sectors"; fi
+            case "$(readlink -f "$_nt")" in
+            *"/usb"*) _ntk="USB"; _ntw="a USB drive: an install never takes one" ;;
+            *)
+                case "$(readlink -f "$_nt")" in *"/ata"*) _ntk="SATA $_ntk" ;; esac
+                if [ "$(cat "$_nt/removable" 2>/dev/null)" = 1 ]; then
+                    _ntw="removable: an install never takes one"
+                elif [ "$_ntb" = 0 ]; then
+                    _ntw="no media (0 bytes)"
+                else
+                    _ntw="the install lays the node on $(printf '%s' "$_nt_taken" | tr -s ' ' | sed 's/^ //; s/ $//'); a data drive beyond them is enrolled by stormdrive's DrivePolicy after the boot, and its Drive object says what it decided"
+                fi
+                ;;
+            esac
+            echo "  not taken: $_ntn (${_ntm:-?}, $((_ntb / 1000000000)) GB, $_ntk): $_ntw (#672)"
+        done
+    fi
+    # --- END drives not taken
 
     # --- BEGIN storage format (covered by tests/initramfs-storage.sh)
     # Every drive storage: takes, formatted to its block size and protection

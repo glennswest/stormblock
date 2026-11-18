@@ -175,10 +175,11 @@ c = {x["pci"]: x for x in d["controllers"]}
 dr = {x["name"]: x for x in d["drives"]}
 print(d["state"], len(c), c["0000:01:00.0"]["driver"], c["0000:00:1f.2"]["driver"], ",".join(c["0000:01:00.0"]["drives"]),
       dr["sda"]["serial"], dr["sda"]["bay"], dr["sda"]["size_bytes"], dr["nvme0n1"]["transport"],
-      dr["sda"]["shelf"]["position"], dr["sda"]["shelf"]["id"], dr["sda"]["shelf"]["identity"], dr["nvme0n1"]["shelf"]["position"])
+      dr["sda"]["shelf"]["position"], dr["sda"]["shelf"]["id"], dr["sda"]["shelf"]["identity"], dr["nvme0n1"]["shelf"]["position"],
+      dr["sda"]["rotational"], dr["sda"]["zoned"], type(dr["sda"]["logical_block"]).__name__)
 ' "$WORK/report.json" 2>&1)
     check "local-disk.json carries the inventory, as JSON" \
-        "unknown 3 mpt3sas None sda WD-WX11D28JFS6T Slot 04 2000398934016 nvme front 500056b3a1b2c3d4 DP BP13G+ internal" "$r"
+        "unknown 3 mpt3sas None sda WD-WX11D28JFS6T Slot 04 2000398934016 nvme front 500056b3a1b2c3d4 DP BP13G+ internal False none int" "$r"
 else
     echo "  skip  local-disk.json as JSON (no python3)"
 fi
