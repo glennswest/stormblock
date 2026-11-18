@@ -887,7 +887,7 @@ mod tests {
         let all = vec![pv("c2", "golden-b-2", "golden", Some("c1")), pv("c1", "golden-b-1", "golden", Some("p")), pv("p", "golden-a", "golden", None), pv("v", "data", "volume", None), pv("m", "iso", "media", None)];
         let spec = Spec { from: Peer::default(), what: vec![], select: Select::default(), mode: "once".into(), every: 600, bandwidth_mi_bps: 0 };
         let ids: Vec<String> = selected(&spec, &all).into_iter().map(|v| v.id).collect();
-        assert_eq!(ids, vec!["m", "p", "c1", "c2"], "the sealed kinds by default, parents before clones");
+        assert_eq!(ids, vec!["p", "m", "c1", "c2"], "the sealed kinds by default, parents before clones, by name at a depth");
         let spec = Spec { what: vec!["volumes".into()], ..spec.clone() };
         assert_eq!(selected(&spec, &all).len(), 1);
         let spec = Spec { what: vec![], select: Select { names: vec!["golden-b-*".into()], ..Default::default() }, ..spec };
