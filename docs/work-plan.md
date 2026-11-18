@@ -74,7 +74,8 @@ get broken"; "those empty volumes are important".
   of M`)
 - [x] check.sh ALL PASS (3d9cde99, 1520 tests); README, CHANGELOG;
   v24.27.1; item 2 is stormblock-registry#182; item 3 is #665
-- [ ] shipped: the proof on a reinstall of server8
+- [x] image build be341dd10599; shipped (proof: health `pvc-ladder: N of N ready`)
+- [ ] the proof on a node
 
 ## #400 (with #399) — ship a snapshot's changed extents over NVMe/TCP (2026-11-18, P0: stormvm#31)
 
