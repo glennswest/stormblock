@@ -72,9 +72,9 @@ get broken"; "those empty volumes are important".
 - [x] the listing leaves out (and settles in the background) a template
   whose volume is gone; health `fstemplates` (ready, minting, `pvc-ladder: N
   of M`)
-- [ ] check.sh; docs; release; item 2 (the registry warm-up) filed on
-  stormblock-registry; item 3 (a golden clone with no superblock) its own
-  issue
+- [x] check.sh ALL PASS (3d9cde99, 1520 tests); README, CHANGELOG;
+  v24.27.1; item 2 is stormblock-registry#182; item 3 is #665
+- [ ] shipped: the proof on a reinstall of server8
 
 ## #400 (with #399) — ship a snapshot's changed extents over NVMe/TCP (2026-11-18, P0: stormvm#31)
 

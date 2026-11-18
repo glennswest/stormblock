@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.27.1] — 2026-11-18
+
+### Fixed
+- #663: a template is its sealed volume, with no `broken` state. One whose volume is gone takes the slabs' blank of its name, is minted again in the data half under the same id, or is dropped: at startup, inline on a clone or claim, and from the listing. Adopt never makes a second record of a name. Health shows the `pvc-ladder`.
+
 ### 2026-11-18 (#663)
 - **fix:** #663 (server8 12.92: `pvc-ext4j-64m` kept `broken` across an install, every claim of the class failing). A template is its sealed volume, with no `broken` state. One whose volume is gone takes the slabs' blank of its name (the release's, re-laid under a new id), or is minted again in the data half under the same id when it is a plain blank, or is dropped. This runs at startup, inline on a clone or claim, and in the background from the listing, which leaves it out until then. Adopting the slabs' blanks never makes a second record of a name. Health carries `fstemplates` with the `pvc-ladder` line. The registry warm-up's side is stormblock-registry#182; a golden whose content is not its record is #665.
 
