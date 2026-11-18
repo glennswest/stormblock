@@ -6,7 +6,6 @@
 use crate::common;
 use std::sync::Arc;
 
-use stormblock::drive::BlockDevice;
 use stormblock::mgmt::config::StormBlockConfig;
 use stormblock::mgmt::AppState;
 use stormblock::volume::{VolumeId, VolumeManager, DEFAULT_EXTENT_SIZE};
