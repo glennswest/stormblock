@@ -100,7 +100,8 @@ the honest line; mpt3sas is DIF-only by design, no re-lay of forge1.
   the line said on every boot that serves the set (`storage_serve`), from
   the facts; `storage pi said` its own block; tests in -serve and -storage
 - [x] check.sh ALL PASS (c9b9df59); v24.29.1
-- [ ] back after forge1's install: its console read for `storage: node-data PI`
+- [x] image requested; waits `--after-install stormblock>=b209add7@forge1`
+- [ ] forge1's console read for `storage: node-data PI`, then closed
 
 ## #658 (with #649) — attachments from the kernel's view (2026-11-18, P1)
 
