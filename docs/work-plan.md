@@ -72,7 +72,8 @@ rot". The drive's side (stormraid#80 is the set's), beside #642's link.
   {kind}, storm_drive_defects{kind}, storm_drive_errors_level
 - [x] docs (storage-layout.md, README), CHANGELOG; check.sh ALL PASS
   (e3ceaffc, 1502 tests, clippy clean); v24.24.0
-- [ ] stormdrive#149 comment; shipped with proof `get:http://{node}:9090/metrics ~
+- [x] stormdrive#149 comment (the fields); image build 78575423af94
+- [ ] shipped with proof `get:http://{node}:9090/metrics ~
   storm_drive_errors_total\{.*kind="pi_guard"`
 
 ## #646 — the drive's own link rate, mode page 0x19/1 (2026-11-18, P1)
