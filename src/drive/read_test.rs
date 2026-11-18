@@ -81,7 +81,7 @@ pub struct Random {
 }
 
 /// Log page 0x15, parameter 0 (SBC): the background scan.
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct BackgroundScan {
     /// 0 none active, 1 a medium scan active, 2 a pre-scan active, 3..
     /// halted (why, by SBC's table), 8 waiting on the BMS timer.
