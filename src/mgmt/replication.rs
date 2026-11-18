@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::drive::BlockDevice;
 use crate::mgmt::AppState;
 use crate::volume::VolumeId;
 
