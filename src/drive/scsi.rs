@@ -1102,7 +1102,7 @@ pub fn set_programmed_max(t: &dyn Transport, want: Option<u32>) -> Result<String
         None => p.programmed_max_mbps != p.hardware_max_mbps,
     });
     if !needed {
-        return Ok(format!("{}, left as it is", said(&before)));
+        return Ok(format!("{}, left as it is", said(&before[..])));
     }
     let chg = ask(t, &cdb::mode_sense10_sub(0x19, 1, 1, 1024), 1024, "MODE SENSE 0x19/1 (changeable)", &mut e)
         .and_then(|c| mode_subpage_of(&c).map(<[u8]>::to_vec))
@@ -1113,10 +1113,9 @@ pub fn set_programmed_max(t: &dyn Transport, want: Option<u32>) -> Result<String
             return Err(format!("phy {}: the programmed maximum is not changeable (changeable mask 0x{m:02x})", p.phy));
         }
     }
-    let list = phy_control_select(&page, want);
+    let mut list = phy_control_select(&page, want);
     let savable = page[0] & 0x80 != 0;
-    let mut buf = list.clone();
-    let r = t.run(&cdb::mode_select10_sp(list.len() as u16, savable), Dir::Out, &mut buf, 30).map_err(|e| format!("MODE SELECT 0x19/1: not sent: {e}"))?;
+    let r = t.run(&cdb::mode_select10_sp(list.len() as u16, savable), Dir::Out, &mut list, 30).map_err(|e| format!("MODE SELECT 0x19/1: not sent: {e}"))?;
     if !r.good() {
         return Err(format!("MODE SELECT 0x19/1 refused: {}", r.said()));
     }
@@ -1125,7 +1124,7 @@ pub fn set_programmed_max(t: &dyn Transport, want: Option<u32>) -> Result<String
     if after.iter().zip(&before).any(|(a, b)| a.programmed_max_mbps != target(b)) {
         return Err(format!("MODE SELECT 0x19/1 taken, but the drive still programs {} (asked {})", gbit(after[0].programmed_max_mbps), gbit(target(&before[0]))));
     }
-    Ok(format!("{}, was {was}{}", said(&after), if savable { ", saved" } else { "; the page is not savable: set again on every boot" }))
+    Ok(format!("{}, was {was}{}", said(&after[..]), if savable { ", saved" } else { "; the page is not savable: set again on every boot" }))
 }
 
 // ---- every VPD page (#636) ----
@@ -2235,7 +2234,7 @@ mod tests {
         assert_eq!((gbit(1500), gbit(12000)), ("1.5".to_string(), "12".to_string()));
         assert_eq!(sas_rate_code(12000), Some(0xB));
         // linkRate 12: raised, saved (SP = 1), only byte 33's high nibble changed.
-        let d = Bay3 { max: 0xab.into(), ps: true, changeable: 0xff, selects: Default::default() };
+        let d = Bay3 { max: std::cell::Cell::new(0xab), ps: true, changeable: 0xff, selects: Default::default() };
         assert_eq!(phy_rates(&d).unwrap()[0].programmed_max_mbps, 6000);
         assert_eq!(set_programmed_max(&d, Some(12000)).unwrap(), "drive programmed 12 (hardware 12), was 6, saved");
         let sel = d.selects.borrow();
@@ -2253,14 +2252,14 @@ mod tests {
         // A lower ask is the HBA's to hold: the drive is left alone.
         assert!(set_programmed_max(&d, Some(6000)).unwrap().ends_with("left as it is"));
         // Above the hardware: capped at it. Not savable: SP = 0, said.
-        let d = Bay3 { max: 0xab.into(), ps: false, changeable: 0xff, selects: Default::default() };
+        let d = Bay3 { max: std::cell::Cell::new(0xab), ps: false, changeable: 0xff, selects: Default::default() };
         assert_eq!(set_programmed_max(&d, Some(22500)).unwrap(), "drive programmed 12 (hardware 12), was 6; the page is not savable: set again on every boot");
         assert_eq!(d.selects.borrow()[0].0, 0x10);
         // hw from a programmed 3: the hardware maximum.
-        let d = Bay3 { max: 0x9b.into(), ps: true, changeable: 0xff, selects: Default::default() };
+        let d = Bay3 { max: std::cell::Cell::new(0x9b), ps: true, changeable: 0xff, selects: Default::default() };
         assert!(set_programmed_max(&d, None).unwrap().starts_with("drive programmed 12 (hardware 12), was 3"));
         // Not changeable: refused, nothing sent.
-        let d = Bay3 { max: 0xab.into(), ps: true, changeable: 0x0f, selects: Default::default() };
+        let d = Bay3 { max: std::cell::Cell::new(0xab), ps: true, changeable: 0x0f, selects: Default::default() };
         assert!(set_programmed_max(&d, Some(12000)).unwrap_err().contains("not changeable (changeable mask 0x0f)"));
         assert!(d.selects.borrow().is_empty());
     }
