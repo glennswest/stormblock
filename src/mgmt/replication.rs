@@ -532,20 +532,17 @@ async fn legs(c: &crate::http::Client, base: &str, id: &str) -> Result<Extents, 
     Ok(e)
 }
 
-/// The volume here under this name and namespace, if any: (id, sealed, size).
-async fn local_named(state: &AppState, name: &str, namespace: &str) -> Option<(VolumeId, bool, u64)> {
+/// Every volume here by (namespace, name): (id, sealed, size). Read once a
+/// pass, not once a volume (forge holds 2,466).
+async fn local_index(state: &AppState) -> HashMap<(String, String), (VolumeId, bool, u64)> {
     let vm = state.volume_manager.lock().await;
+    let mut out = HashMap::new();
     for id in vm.volume_ids() {
-        if vm.namespace(&id) != namespace {
-            continue;
-        }
         if let Some(h) = vm.get_volume_handle(&id) {
-            if h.name().await == name {
-                return Some((id, h.is_sealed(), h.capacity_bytes()));
-            }
+            out.insert((vm.namespace(&id).to_string(), h.name().await), (id, h.is_sealed(), h.capacity_bytes()));
         }
     }
-    None
+    out
 }
 
 struct Pace {
@@ -704,6 +701,7 @@ async fn pass(state: &Arc<AppState>, name: &str, generation: u64, spec: &Spec) -
     let done_bytes = std::sync::atomic::AtomicU64::new(0);
     // Each peer volume's extents, kept for its clones.
     let mut extents: HashMap<String, Extents> = HashMap::new();
+    let mut index = local_index(state).await;
     for v in &chosen {
         if !current(state, name, generation) {
             return Ok(());
@@ -723,7 +721,7 @@ async fn pass(state: &Arc<AppState>, name: &str, generation: u64, spec: &Spec) -
         let mut outcome: Result<(), String> = Ok(());
         if !here_ok {
             set_status(state, name, generation, |s, _| s.current = Some(reference.clone()));
-            match local_named(state, &v.name, &v.namespace).await {
+            match index.get(&(v.namespace.clone(), v.name.clone())).copied() {
                 Some((id, true, size)) if size == v.size => {
                     set_status(state, name, generation, |_, m| {
                         m.insert(v.id.clone(), id.0.to_string());
@@ -756,6 +754,7 @@ async fn pass(state: &Arc<AppState>, name: &str, generation: u64, spec: &Spec) -
                     match copy_one(state, &c, &base, v, parent_here, &mut pace, &moved).await {
                         Ok((id, _, mine)) => {
                             extents.insert(v.id.clone(), mine);
+                            index.insert((v.namespace.clone(), v.name.clone()), (id, v.sealed, v.size));
                             set_status(state, name, generation, |_, m| {
                                 m.insert(v.id.clone(), id.0.to_string());
                             });
