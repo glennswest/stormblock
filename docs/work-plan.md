@@ -74,6 +74,23 @@ stormdrive's: its DrivePolicy enrolls a data drive through the engine's
 - [x] check.sh ALL PASS (ed4d623c); storage-layout.md, CHANGELOG; v24.29.0
 - [x] image requested; #672 behind stormdrive#156 (its proof reads the Drive object)
 
+Reopened (2026-11-18, the owner's final shape on the issue, after v24.29.0):
+**both halves on the HDD** on every blade, server8 like server1-7; the SSD,
+where there is one, is an extra data slab of tier **`fast`**, empty by
+default, used only by what asks (`tier: fast`, a `fast` StorageClass; the
+build VMs' private drive first). v24.29.0 had it the other way (SSD system,
+HDD `cool`).
+- [ ] engine: `StorageTier::Fast` (byte 4; an older engine reads it as cold):
+  never in a default or fallback chain, never counted for a default role or
+  a redundancy promise; `tier: fast` on slab create, volume create, /v1
+  create, and on a clone (fstemplates clone and /v1: a clone may name its
+  tier, its new extents go there)
+- [ ] /init rule 4: the machine's own rotating drive before a solid-state
+  one; the SSD beside it said `left for the fast tier`
+- [ ] docs (README tiers, storage-layout, boot rule 4), CHANGELOG, check.sh
+- [ ] correct stormdrive#156 / stormcos#1039 (SSD `fast`, not HDD `cool`);
+  rustkube-node: a StorageClass's `tier` to the clone request
+
 ## #659 — no stubs (P-1, 2026-11-18)
 
 Owner: "stubs are lies". The master's sweep found 3; the proof grep found 2.
