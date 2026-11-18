@@ -970,7 +970,62 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement` (create takes `placement.array_id`, `slab_id` or `drive`, exactly one, on this node: a slab or drive that cannot hold it is `409`, one this node lacks `507`, #426), `prestage`, `fence`, `promote`, `dual-attach` |
 | `/serve/v1` (and `/mk/v1`) | the serving layer: `health`, `ready`, `status`, `volumes` (list, create, delete), exports, tar, raw, trim |
 | `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` and `labelSelector` (`k=v`, `k!=v`, `k`, `!k`). A Volume's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` (`transport`, `device`, `mountedAt`, `target`, `port`, `lun`, `nsid`, `state`, `remote`) and `kind` as the REST listing does (#649), and its labels `storm.io/kind` and `storm.io/owner-kind`: `kubectl get volumes -l storm.io/owner-kind=Pod`, `-l '!storm.io/owner-kind,storm.io/kind=volume'` for orphan clones, or `?unowned=true` |
+| `/apis/storage.storm.io/v1/replications` | `Replication` (#656): sync this engine's store from a peer engine, once or following it; create, replace, patch, delete are the admin's. See "Replication" below |
 | `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
+
+
+## Replication
+
+A `Replication` (#656, `storage.storm.io/v1`) makes this engine's store a
+copy of a peer engine's. Owner: "We should have a sync/replicate!"; forge1
+takes what forge holds. Kept in `<data_dir>/replications.json`, run again
+at the engine's start (what already arrived is not copied again).
+
+```yaml
+apiVersion: storage.storm.io/v1
+kind: Replication
+metadata: {name: forge}
+spec:
+  from: {engine: http://forge.g16.lo:9090}
+  what: [goldens, media, blanks]     # empty: these three
+  select: {namespaces: [], names: ["golden-*"]}   # empty: everything
+  mode: once                         # or mirror: again every `every` s
+  every: 600
+  bandwidthMiBps: 0                  # 0: unlimited
+```
+
+`status`: `phase` (`Pending`, `Listing`, `Syncing`, `Synced`, `Failed`,
+`Waiting` between a mirror's passes), `items {total, done, failed}`, `bytes
+{total, done}`, `rateMiBps`, `etaSecs`, `lastSynced`, `current`, `errors[]
+{reference, reason}`, `notes`, the `Synced` condition, `observedGeneration`.
+`/metrics`: `storm_replication_bytes_total`, `storm_replication_items_total
+{result}`, `storm_replication_lag_seconds`.
+
+**How a volume moves.** Nothing new is needed on the peer. Its listing
+gives each volume's name, namespace, size, parent, seal, role, filesystem
+and owner. `GET …/{id}/legs` gives the extents it maps, and `GET
+…/{id}/content` with a `Range` gives a sealed volume's bytes.
+- A volume with no parent here gets every extent it maps.
+- A clone whose parent is already here is made as a copy-on-write clone of
+  that copy. Only the extents it holds of its own are copied (an extent
+  whose location is not its parent's at the same index), and zeros are
+  written where its parent maps an extent it does not. So forge's 32 GiB of
+  goldens move, not the 6 TB their sizes add to.
+- Parents go first. Names, namespaces, LBA size, filesystem record, owner,
+  blank-ness and the seal are kept.
+- A sealed volume already here under the same name and namespace, of the
+  same size, is taken as the same. One that differs is an error and is never
+  overwritten.
+- Deleting the Replication, or the peer deleting a volume, deletes nothing
+  here: the copy is the point.
+
+**Not yet (stage 2):**
+- writable volumes: the peer serves no content of a volume that takes
+  writes, so they are listed in `errors`;
+- the registry's references (`images`, stormblock-registry#175's peer and
+  `/v1/replicate`);
+- events;
+- `credentialSecret` / `caSecret`: the peer is reached as an open one.
 
 ## Files
 
