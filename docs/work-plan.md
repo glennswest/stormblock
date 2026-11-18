@@ -96,6 +96,10 @@ the honest line; mpt3sas is DIF-only by design, no re-lay of forge1.
   DIF, type1)
 - [x] check.sh ALL PASS (4c8ae32e, 1521 tests); storage-layout.md, CHANGELOG; v24.28.1
 - [x] image build a5271aea7f9d; shipped (proof `console:storage: node-data PI (type1|off: )`)
+- [x] **reopened 2026-11-18** (pvetest1 lays no set; forge1 is not re-laid):
+  the line said on every boot that serves the set (`storage_serve`), from
+  the facts; `storage pi said` its own block; tests in -serve and -storage
+- [ ] check.sh; release; back after forge1's install, its console read
 
 ## #658 (with #649) — attachments from the kernel's view (2026-11-18, P1)
 

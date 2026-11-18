@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18 (#647, again)
+- **fix:** #647: the node-data set's PI line is said on every boot that serves the set, not only on the one that lays it. A keep-data install (forge1's next) says it too, decided from the facts: a DIF-only host or a member without PI can't hold a type1 set. On a DIX host it says the facts without claiming the set's mode.
+
 ## [v24.29.0] — 2026-11-18
 
 ### Added

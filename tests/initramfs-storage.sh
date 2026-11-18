@@ -27,6 +27,8 @@ sed -n '/# --- BEGIN install progress/,/# --- END install progress/p' "$GEN" >> 
 grep -q 'END install progress' "$WORK/tools.sh" || { echo "FAIL: could not extract the install progress block"; exit 1; }
 sed -n '/# --- BEGIN install progress/,/# --- END install progress/p' "$GEN" > "$WORK/progress.sh"
 sed -n '/# --- BEGIN storage layout/,/# --- END storage layout/p' "$GEN" > "$WORK/layout.sh"
+sed -n '/# --- BEGIN storage pi said/,/# --- END storage pi said/p' "$GEN" > "$WORK/pi.sh"
+grep -q 'END storage pi said' "$WORK/pi.sh" || { echo "FAIL: could not extract the storage pi said block"; exit 1; }
 grep -q 'END storage layout' "$WORK/layout.sh" || { echo "FAIL: could not extract the storage layout block"; exit 1; }
 sed -n '/# --- BEGIN storage format (/,/# --- END storage format$/p' "$GEN" > "$WORK/format.sh"
 grep -q 'END storage format$' "$WORK/format.sh" || { echo "FAIL: could not extract the storage format block"; exit 1; }
@@ -290,7 +292,7 @@ lay() { # vars... -> runs the lay block
         echo 'STORAGE_FROM=/run/install-config.yaml STORAGE_SYSTEM_BYTES=0 STORAGE_RAID=yes STORAGE_PARITY=1 STORAGE_SPARES=0'
         echo 'LOCAL_DISK=/dev/sda4 SYSTEM_DISK=/dev/sdb PAIR_DISK=/dev/sdc INSTALL_KEEP="" INSTALL_FRESH=1 STORAGE_FORCE="" FORCE_LOCAL="" STORAGE_FORMATTED=""'
         for v in "$@"; do echo "$v"; done
-        cat "$WORK/progress.sh"
+        cat "$WORK/progress.sh" "$WORK/pi.sh"
         echo 'storage_fail() { echo "FATAL: $1 (#573)"; ld_write failed "${LOCAL_DISK:-}" "storage: $1"; rescue_shell; }'
         cat "$WORK/lay.sh"
         cat <<'EOF'

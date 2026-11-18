@@ -123,6 +123,27 @@ has "as the served device" "$WORK/partner.args" "^$WORK/dev/ublkb65535$"
 hasnt "not degraded" "$WORK/out" "DEGRADED"
 check "let go of" "" "$(val AFTER)"
 
+echo "every boot that serves the set says its PI (#647)"
+reset
+for d in sda sdb sdc sdd; do
+    member "$d" "${d}3" stormblock-raid STORMRD1
+    mkdir -p "$WORK/sys/$d/device/scsi_disk/1:0:$d:0"
+    echo 1 > "$WORK/sys/$d/device/scsi_disk/1:0:$d:0/protection_type"
+done
+mkdir -p "$WORK/scsi_host/host1"
+echo 7 > "$WORK/scsi_host/host1/prot_capabilities"
+echo mpt3sas > "$WORK/scsi_host/host1/proc_name"
+run "STORM_STORAGE_SCSI_HOST=$WORK/scsi_host"
+has "forge1: the card's DIF, said on a boot that only serves" "$WORK/out" "storage: node-data PI off: drives type1, card-inserted (DIF, no host DIX on mpt3sas); set checksums by stormraid (#647)"
+echo 0 > "$WORK/sys/sdb/device/scsi_disk/1:0:sdb:0/protection_type"
+run "STORM_STORAGE_SCSI_HOST=$WORK/scsi_host"
+has "a member without PI, named" "$WORK/out" "storage: node-data PI off: sdb has no PI (#647)"
+echo 1 > "$WORK/sys/sdb/device/scsi_disk/1:0:sdb:0/protection_type"
+echo 23 > "$WORK/scsi_host/host1/prot_capabilities"
+run "STORM_STORAGE_SCSI_HOST=$WORK/scsi_host"
+has "a DIX host: the facts, never a claim of the mode" "$WORK/out" "storage: node-data PI: drives type1 with the host's integrity profile on mpt3sas (the set's mode is in its superblocks)"
+rm -rf "$WORK/scsi_host"
+
 echo "the other system legs: every other member drive with a system slab"
 reset
 for d in sda sdb sdc sdd; do member "$d" "${d}3" stormblock-raid STORMRD1; done

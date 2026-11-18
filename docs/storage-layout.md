@@ -195,7 +195,10 @@ every member has PI and the kernel holds the host's integrity profile (DIX).
 An mpt3sas HBA offers DIF only, by design (`prot_capabilities` 7). On one the
 set is `off`, while every block is still PI-guarded from the card to the
 platter: the card inserts and strips the tags, and the drive checks them. One
-line says which case it is:
+line says which case it is, on the boot that lays the set and on every boot
+that serves it (stormraid's `serve` and `status` don't say the set's PI, so a
+serving boot decides from the facts; a DIF-only host or a member without PI
+can't hold a type1 set):
 - `storage: node-data PI type1: every member 4096 + PI type 1 with the host's integrity profile`;
 - `storage: node-data PI off: drives type1, card-inserted (DIF, no host DIX on mpt3sas); set checksums by stormraid` (forge1);
 - `storage: node-data PI off: sdc (naa.…) has no PI` when a member lacks it.
