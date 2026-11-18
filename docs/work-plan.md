@@ -65,7 +65,8 @@ forge1 bay 3's EMC HITACHI: hardware 12 Gbit, firmware programs 6.
   sample, health, WARN once; the engine's policy both sides
 - [x] `hba linkrate`: negotiated rate, `--watch` 60 s; /init says every line;
   the lay says a drive programmed below its hardware
-- [ ] check.sh; release; shipped with proof
+- [x] check.sh ALL PASS (6a3ebf7e); v24.23.0
+- [ ] shipped with proof
   `console:bay 3 .* negotiated 12 Gbit .* drive programmed 12 \(hardware 12\)`
   on forge1 (with `linkRate: 12`)
 

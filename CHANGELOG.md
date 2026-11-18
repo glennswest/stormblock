@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.23.0] — 2026-11-18
+
+### Added
+- #646: the drive's own link rate (mode page 0x19/1). It is read every minute with the link (`drive_programmed_max`, `drive_hardware_max`) and said by the write test and the lay when the drive programs less than its hardware. `linkRate` and `hba linkrate` raise it with MODE SELECT (saved when savable) before the HBA phy is set and reset. The rate negotiated and a minute of both sides' counters are then said.
+
 ### 2026-11-18 (#646)
 - **feat:** #646 (forge1 bay 3: a HITACHI with EMC firmware whose hardware does 12 Gbit, programmed to 6): the drive's own link rate. Mode page 0x19 subpage 1 is read every minute with the link. Each row's `link` and health's `drive_links` carry `drive_programmed_max` / `drive_hardware_max` (Mbit/s). A drive that programs less than its hardware is logged once, and the write test and the lay say `the drive programs 6 Gbit (hardware 12)`. `linkRate` and `hba linkrate --max N|hw` now raise the drive's programmed maximum first when it is lower: MODE SELECT, SP = 1 when savable, read back, a refusal with its sense. Then the HBA phy is set and reset, the rate negotiated is said (`bay 3 (0x…): negotiated 12 Gbit after the reset; drive programmed 12 (hardware 12); …`), and both sides' counters are watched for `--watch` seconds (60). The engine's kept policy does both sides at every start.
 
