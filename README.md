@@ -1886,19 +1886,32 @@ template claims **and nothing on this node is serving**, and `DELETE` on the
 same path reclaims them; clones are named by their consumer, so they are never
 in that set.
 
-**A ready template whose sealed volume is gone is `broken`, not `ready`**
-(#281). At startup the engine checks every ready template. It seals the
-volume again when it is there and unsealed, and marks the template broken
-when the volume is missing (a delete cut short, a reclaim, a store restored
-onto a slab seeded again), was never recorded, or will not seal. The listing
-also looks for the volume on every read, in a set of the volumes that exist
-kept beside the volume manager, never under its lock. That lock is held
-through every create, clone and delete's durable persist, and asking it once
-per template kept the listing from answering for 30 s on a busy node (#358). A broken template lists as
-`"state": "broken"` with `"broken": "<why>"`. A clone or claim of it answers
-409 `fstemplate <name> is broken: <why>. It is not sealed and cannot be
-cloned; delete it and mint it again`. Deleting it and creating it again
-makes it whole.
+**A template is its sealed volume; there is no `broken`** (#663, after
+#281). A template is `formatting` or `ready`. One whose sealed volume is gone
+(server8: an install re-laid the half the release's blank was in, under a new
+id) is made whole:
+1. the blank of its name the slabs carry now (`pvc-ext4j-64m.golden`) is
+   that template from now on;
+2. else a plain blank (no seeded files, no parent) is minted again in the
+   data half, under the same id;
+3. else the record is dropped, and the template is minted again by whoever
+   uses it.
+
+This runs at startup (each line on the console: `fstemplate pvc-ext4j-64m:
+its sealed volume … is missing; minted again in the data half as …`),
+inline when a clone or claim finds the volume gone (the claim then succeeds),
+and in the background when the listing finds one gone. The listing leaves
+such a template out until it is whole, looking for volumes in a set kept
+beside the volume manager and never under its lock: that lock is held through
+every create, clone and delete's durable persist, and asking it once per
+template kept the listing from answering for 30 s on a busy node (#358).
+A volume that is there and unsealed is sealed again. Adopting the slabs'
+blanks never makes a second record of one name. A clone of a template that
+was dropped answers 404; one that could not be made whole answers 409
+`fstemplate <name> is gone: <why>. It is not sealed and cannot be cloned;
+mint it again`. Health carries `fstemplates: {ready, minting, ladder}`, the
+ladder as `pvc-ladder: 5 of 5 ready` or `pvc-ladder: 4 of 5, being minted:
+pvc-ext4j-64m`.
 
 Formats do not queue. No lock is held across a format, a check or a stamp, and
 the formatter takes `&self` so one format fans out across block groups.
