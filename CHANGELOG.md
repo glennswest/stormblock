@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.29.0] — 2026-11-18
+
+### Added
+- #672: every drive a boot's layout doesn't take is said on the console with what it is and why, and the survey carries `rotational`, `zoned`, `logical_block`, `physical_block`. (#659's reworded XFS seed refusal ships here too.)
+
 ### 2026-11-18 (#672)
 - **feat:** #672 (server8: a 2 TB SATA HDD `out` with no reason). Every boot says each whole drive its layout doesn't take, with what it is (SATA HDD, zoned, 512e/4Kn) and why (USB, removable, no media, or a data drive beyond the node's layout, which stormdrive's DrivePolicy enrolls). The survey (health's `local_disk.drives`) carries `rotational`, `zoned`, `logical_block`, `physical_block`. The Drive object's reason, SMR detection and the `cool` enrollment are stormdrive#156; the blades' policy and a `cool` StorageClass are stormcos#1039.
 
