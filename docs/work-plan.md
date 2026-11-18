@@ -64,7 +64,7 @@ the honest line; mpt3sas is DIF-only by design, no re-lay of forge1.
   `storage: node-data PI …`; tests (forge1's case, a member without PI, no
   DIF, type1)
 - [x] check.sh ALL PASS (4c8ae32e, 1521 tests); storage-layout.md, CHANGELOG; v24.28.1
-- [ ] shipped (proof `console:storage: node-data PI (type1|off: )`)
+- [x] image build a5271aea7f9d; shipped (proof `console:storage: node-data PI (type1|off: )`)
 
 ## #658 (with #649) — attachments from the kernel's view (2026-11-18, P1)
 
