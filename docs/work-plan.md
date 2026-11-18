@@ -59,19 +59,20 @@ stormcentral#1441.
 
 Owner: "we also need raid counters and keep track of pi rewrites? Ie bit
 rot". The drive's side (stormraid#80 is the set's), beside #642's link.
-- [ ] scsi: log pages 0x02/0x03/0x05 (corrected fast/delayed, rereads,
+- [x] scsi: log pages 0x02/0x03/0x05 (corrected fast/delayed, rereads,
   corrected, uncorrected), 0x06, 0x2F's last asc/ascq, the grown defect
   count, a SATA drive's SMART 5/197/198 (ATA PASS-THROUGH 16); only the log
   pages the drive lists (page 0x00)
-- [ ] the kernel's sense lines from /dev/kmsg, per H:C:T:L: PI guard / app /
+- [x] the kernel's sense lines from /dev/kmsg, per H:C:T:L: PI guard / app /
   ref tag the drive raised, the same with ILLEGAL REQUEST (mpt3sas's EEDP
   errors: the card), medium, recovered, hardware errors
-- [ ] mgmt::drive_errors: rates per minute, defects per day (24 h window),
+- [x] mgmt::drive_errors: rates per minute, defects per day (24 h window),
   level ok|degraded|failing (thresholds named), WARN on change; rows'
   `errors`, health's `drive_errors`, `/metrics` storm_drive_errors_total
   {kind}, storm_drive_defects{kind}, storm_drive_errors_level
-- [ ] docs (storage-layout.md, README), CHANGELOG; check.sh; stormdrive#149
-  comment; shipped with proof `get:http://{node}:9090/metrics ~
+- [x] docs (storage-layout.md, README), CHANGELOG; check.sh ALL PASS
+  (e3ceaffc, 1502 tests, clippy clean); v24.24.0
+- [ ] stormdrive#149 comment; shipped with proof `get:http://{node}:9090/metrics ~
   storm_drive_errors_total\{.*kind="pi_guard"`
 
 ## #646 — the drive's own link rate, mode page 0x19/1 (2026-11-18, P1)
