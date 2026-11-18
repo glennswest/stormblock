@@ -64,6 +64,7 @@ forge1's `registry-data` is 4 GiB; it must hold forge's images.
   (`fs::grow`, EXT4_IOC_RESIZE_FS), else said: the owner service grows it;
   `status.capacityBytes`, the PATCH's `status.lastResize`
 - [x] check.sh ALL PASS (f54a6b3c, 1517 tests); README, CHANGELOG; v24.26.0
+- [x] image build e0393fe1ac5c; shipped
 - [ ] proof on forge1 after the master's patch:
   `api:/apis/storage.storm.io/v1/volumes ~ "storm.io/name":"registry-data".*"sizeBytes":[0-9]{11,}`
 
@@ -83,6 +84,7 @@ media, 208 writable volumes. Nothing new is needed on the peer: its listing,
   `storm_replication_bytes_total`, `_items_total`, `_lag_seconds`; bounded
   `Range` in `http::Client`; POST/PUT/PATCH/DELETE admin
 - [x] check.sh ALL PASS (096234cf, then f54a6b3c); README, CHANGELOG; v24.26.0
+- [x] image build e0393fe1ac5c; stage 2 filed as #660; shipped
 - [ ] the master creates it on forge1 (proof
   `api:/apis/storage.storm.io/v1/replications/forge ~ "phase":"Synced"…`)
 - [ ] stage 2: writable volumes (needs a content read of an unsealed volume
