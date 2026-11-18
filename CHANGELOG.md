@@ -4,6 +4,12 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.27.0] — 2026-11-18
+
+### Added
+- #399: `GET /v1/snapshots/{id}/changes[?base=]`, a snapshot's changed ranges from the extent maps only.
+- #400: `POST /v1/snapshots/{id}/ship` and `/v1/ship-jobs/{id}`: only the changed ranges sent to an `nvme-tcp://` target as a background job (throttled, cancellable, resumed after a restart); WRITE ZEROES with deallocate on the engine's target and initiator.
+
 ### 2026-11-18 (#399, #400)
 - **feat:** #399: `GET /v1/snapshots/{id}/changes[?base=]`, the ranges a snapshot differs from its base by (all it maps without one; `zero` where only the base maps), from the extent maps only, paged, by the #130 rule.
 - **feat:** #400 (stormstorage#46, stormvm#31): `POST /v1/snapshots/{id}/ship` sends only those ranges to an `nvme-tcp://` target as a background job, throttled by `max_bytes_per_sec`, with `zero` ranges as WRITE ZEROES + deallocate. `GET`/`DELETE /v1/ship-jobs/{id}` read and cancel it, and after a restart a job resumes from its saved offset or reads failed. The engine's NVMe/TCP target and initiator do WRITE ZEROES (ONCS bit 3).

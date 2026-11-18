@@ -70,7 +70,7 @@ stormcentral#1441.
   the live mirror), `GET|DELETE /v1/ship-jobs/{id}`; only the changed
   ranges, throttled, progress saved every 64 MiB after a flush, resumed at
   start from `next_offset` or failed when the snapshot is gone
-- [ ] check.sh; docs; release; close #399 and #400
+- [x] check.sh ALL PASS (4adecf7f, 1520 tests); README, contract notes, CHANGELOG; v24.27.0; #399 and #400 closed
 
 ## #655 — Volume `spec.sizeBytes` grows a volume (2026-11-18, P0 hand-off)
 
