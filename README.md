@@ -960,7 +960,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/api/v1/stormfs` | the StormFS data path (`docs/stormfs-api.md`) |
 | `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement` (create takes `placement.array_id`, `slab_id` or `drive`, exactly one, on this node: a slab or drive that cannot hold it is `409`, one this node lacks `507`, #426), `prestage`, `fence`, `promote`, `dual-attach` |
 | `/serve/v1` (and `/mk/v1`) | the serving layer: `health`, `ready`, `status`, `volumes` (list, create, delete), exports, tar, raw, trim |
-| `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` |
+| `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` and `labelSelector` (`k=v`, `k!=v`, `k`, `!k`). A Volume's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` (`transport`, `device`, `mountedAt`, `target`, `port`, `lun`, `nsid`, `state`, `remote`) and `kind` as the REST listing does (#649), and its labels `storm.io/kind` and `storm.io/owner-kind`: `kubectl get volumes -l storm.io/owner-kind=Pod`, `-l '!storm.io/owner-kind,storm.io/kind=volume'` for orphan clones, or `?unowned=true` |
 | `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
 
 ## Files
@@ -1641,6 +1641,22 @@ rest without naming conventions:
 - Filters: `?kind=volume|golden|blank|media|snapshot|template` (comma-separated),
   `?kind=image` for everything but `volume`, `?in_use=true|false`,
   `?unowned=true`. With no filter the listing is what it always was.
+- **Owners on every clone door** (#649): `owner` (`{kind, namespace, name,
+  uid}`: the Pod, container, VM or claim) is taken by `POST
+  /api/v1/volumes/{id}/clone`, `POST /api/v1/volumes` (with or without
+  `from_template`), `POST /api/v1/fstemplates/{id}/clone` and `…/claim`, and
+  a `/v1` create, and recorded before the volume is answered. `[owners]
+  require_on_clone = true` refuses a clone that names none on all of them
+  (`422`, `a clone names its owner`). It is off until every writer sets one
+  (stormd#75, rustkube-node#372, stormblock-registry#174, stormvm#129,
+  stormblock-csi#69).
+- **The orphans** (#649, #115): `GET /api/v1/volumes/unowned` lists every
+  writable clone no owner claimed, largest first: its name, namespace,
+  parent (id and name), virtual and allocated bytes, whether it is in use
+  and who (a mount), and when and by which caller it was made where
+  `creators.json` recorded it (`created_at`, `age_secs`, `created_by`; a
+  template clone, or one made before #422, has none). Totals beside it.
+  Nothing is deleted, by this or by the engine.
 
 ```
 GET /api/v1/volumes?kind=volume&in_use=true   # the Volumes view

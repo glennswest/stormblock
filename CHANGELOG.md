@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18 (#649)
+- **feat:** #649 (owner: "Every pod and container must have traceablity"; forge1: 113 clones, every one `unclaimed`): the `storage.storm.io/v1` Volume object's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` and `kind`, as the REST listing has since #115/#138. It has labels `storm.io/kind` and `storm.io/owner-kind`, and the object listing takes `?unowned=true` and `!key` / `key!=value` selectors. `owner` is accepted on every clone door (the template clone and claim and a `/v1` create took none), and `[owners] require_on_clone` (off by default, until the writers set owners) refuses an ownerless clone `422`. `GET /api/v1/volumes/unowned` lists ownerless clones as findings with size, parent and, where recorded, age and creator, and deletes none.
+
 ## [v24.24.0] — 2026-11-18
 
 ### Added
