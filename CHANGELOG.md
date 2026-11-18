@@ -4,6 +4,14 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.28.0] — 2026-11-18
+
+### Changed
+- #658: the Volume object's `status.attach` is a list of every attachment (it was one object or null). Readers of `status.attach.transport` read `status.attach[0].transport`.
+
+### Fixed
+- #658: a `/v1` attach's ublk device counts for its engine volume, and mounts are read from every mount namespace on the node.
+
 ### 2026-11-18 (#658, #649)
 - **fix:** #658 (forge1: 93 ublk devices, 10 counted in use). A `/v1` attach's ublk device, keyed by the `/v1` id, now counts for its engine volume; it was dropped. Mount points are read from every mount namespace on the node, so a service's or pod's mount is the attachment's `mountedAt` and a detach refuses it. The Volume object's `status.attach` is the attachment list (adopted boot devices included, `deviceHint` on ublk), where it was one object or null from the engine's own exports only.
 

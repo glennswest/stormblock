@@ -59,13 +59,14 @@ stormcentral#1441.
 
 forge1: 93 ublk devices, the engine reports 10 in use. rustkube-node#372
 closed, so #649's proof is reachable; the master: do #658 with it.
-- [ ] usage::Context::gather: a ublk export keyed by a /v1 id mapped to its
+- [x] usage::Context::gather: a ublk export keyed by a /v1 id mapped to its
   engine volume (it was dropped: `Uuid::parse_str` … `continue`)
-- [ ] mounts from every mount namespace (`/proc/*/mountinfo`, deduped by
+- [x] mounts from every mount namespace (`/proc/*/mountinfo`, deduped by
   `ns/mnt`, cached 2 s): `mounted_at` a service's or pod's mount
-- [ ] the Volume object's `status.attach`: the attachment list (adopted boot
+- [x] the Volume object's `status.attach`: the attachment list (adopted boot
   devices included), each with transport, device, mountedAt, …
-- [ ] check.sh; docs; release; #649 and #658 shipped with their proofs
+- [x] check.sh ALL PASS (67676d59, 1521 tests); README, CHANGELOG; v24.28.0
+- [ ] #649 and #658 shipped with their proofs
 
 ## #663 — a template is its sealed volume; never kept `broken` (2026-11-18, P0)
 
