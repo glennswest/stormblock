@@ -63,7 +63,8 @@ forge1's `registry-data` is 4 GiB; it must hold forge's images.
   (`update_size`); an ext4 the engine sees mounted grown online
   (`fs::grow`, EXT4_IOC_RESIZE_FS), else said: the owner service grows it;
   `status.capacityBytes`, the PATCH's `status.lastResize`
-- [ ] check.sh; docs; release; proof on forge1 after the master's patch:
+- [x] check.sh ALL PASS (f54a6b3c, 1517 tests); README, CHANGELOG; v24.26.0
+- [ ] proof on forge1 after the master's patch:
   `api:/apis/storage.storm.io/v1/volumes ~ "storm.io/name":"registry-data".*"sizeBytes":[0-9]{11,}`
 
 ## #656 — Replication: sync a store from a peer engine (2026-11-18, P0 hand-off)
@@ -81,15 +82,17 @@ media, 208 writable volumes. Nothing new is needed on the peer: its listing,
   does not; same name+namespace sealed same size here = the same; metrics
   `storm_replication_bytes_total`, `_items_total`, `_lag_seconds`; bounded
   `Range` in `http::Client`; POST/PUT/PATCH/DELETE admin
-- [ ] check.sh; docs; release; the master creates it on forge1 (proof
+- [x] check.sh ALL PASS (096234cf, then f54a6b3c); README, CHANGELOG; v24.26.0
+- [ ] the master creates it on forge1 (proof
   `api:/apis/storage.storm.io/v1/replications/forge ~ "phase":"Synced"…`)
 - [ ] stage 2: writable volumes (needs a content read of an unsealed volume
   on the peer, or a snapshot there), the registry side (stormblock-registry
   #175's peer + `/v1/replicate`), events, credentialSecret/caSecret
 
 #652 was paused here by the master (re-queued after #656): its code is on
-main; check.sh ALL PASS on 3bc41d18 (closed #653, #654). Left: release,
-the forge1 run.
+main; check.sh ALL PASS on 3bc41d18 (closed #653, #654), and on
+f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
+`POST /api/v1/storage/hba/read-test`), the why from its lines, a fix.
 
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 

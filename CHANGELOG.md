@@ -4,6 +4,13 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.26.0] — 2026-11-18
+
+### Added
+- #652: the read test, read only, every drive at once: sequential 1 and 4 MiB reads through the block device and through sg, random 4 KiB reads, the caching/control/power/exception pages and the background scan. Each drive's level is set against the best of its class. It runs from `stormblock hba read-test`, from `POST|GET /api/v1/storage/hba/read-test`, and from /init on an install with `storage:`.
+- #656: the `Replication` object (`storage.storm.io/v1`). It syncs goldens, media and blanks from a peer engine, once or as a mirror, thin and lineage-keeping, with progress in `status` and on `/metrics`.
+- #655: `spec.sizeBytes` on the Volume object grows a volume (thin; its ublk device told, an ext4 seen mounted grown online), and `status.capacityBytes` follows.
+
 ### 2026-11-18 (#655)
 - **feat:** #655 (forge1's `registry-data` is 4 GiB and must hold forge's images): `spec.sizeBytes` on the Volume object grows a volume. The resize is thin. The volume's ublk device is told the new size, and an ext4 the engine sees mounted on it is grown online (`fs::grow`, `EXT4_IOC_RESIZE_FS`); otherwise the service that mounts it grows it, and the answer says so. A smaller size is refused (422), as is a sealed, exported or mirrored volume (409). `status.capacityBytes` follows, and the PATCH answers `status.lastResize`.
 
