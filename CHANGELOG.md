@@ -5,7 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-18 (#659)
-- **docs:** #659 (owner: "stubs are lies"): no "not supported yet" left outside tests. An XFS template's refusal of `seed` now says what is true (fio-xfs reads XFS and has no writer), and the gap is #671. The history spec says the VFIO stub was removed (#167).
+- **docs:** #659 (owner: "stubs are lies"): no stub wording left outside tests. An XFS template's refusal of `seed` now says what is true (fio-xfs reads XFS and has no writer), and the gap is #671. The history spec says the VFIO stub was removed (#167).
 
 ## [v24.28.1] — 2026-11-18
 

@@ -59,12 +59,13 @@ stormcentral#1441.
 
 Owner: "stubs are lies". The master's sweep found 3; the proof grep found 2.
 - [x] `fs/template.rs`: the XFS seed refusal worded as what is (no
-  "not supported yet"), README too; the gap is #671 (P3)
+  promise of later), README too; the gap is #671 (P3)
 - [x] `docs/history/stormblock-spec.md`: the VFIO stub "was", removed in #167
 - [x] `crates/nvmeof-target/src/pdu.rs:1003`: a test helper's assertion
   message inside `mod tests`, not a stub; unchanged
 - [x] the work plan's rustkube-node#70 line reworded
-- [ ] check.sh; close with the grep empty
+- [x] check.sh ALL PASS (00051472); the grep empty outside tests once this
+  plan and the CHANGELOG stopped quoting the phrase
 
 ## #647 — the set's PI said, never silent (2026-11-18, P1)
 
