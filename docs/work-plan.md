@@ -109,7 +109,7 @@ closed, so #649's proof is reachable; the master: do #658 with it.
   devices included), each with transport, device, mountedAt, …
 - [x] check.sh ALL PASS (67676d59, 1521 tests); README, CHANGELOG; v24.28.0
 - [x] image build 60d2d4dfdff5; #649 and #658 shipped with their proofs; the master told of `status.attach` as a list
-- [ ] **#649 reopened 2026-11-18**: its `api:` proof 404s on the apiserver,
+- [ ] **#649 and #658 reopened 2026-11-18**: their `api:` proofs 404 on the apiserver,
   as #655/#656; behind #655's owner decision.
 
 ## #663 — a template is its sealed volume; never kept `broken` (2026-11-18, P0)
