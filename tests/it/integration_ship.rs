@@ -208,7 +208,12 @@ async fn a_full_then_an_incremental_ship() {
 
     // A restart mid-job: a copying job recorded half way resumes from there.
     let half = 4 * MIB;
-    tvol.write(half, &vec![0xEE; (size - half) as usize]).await.unwrap();
+    // What a job cut short leaves: the extents after its offset not yet the
+    // snapshot's (a ship writes only what the snapshot maps; the rest of a
+    // backup volume is the earlier copies').
+    for x in [4u64, 6, 7, 12] {
+        tvol.write(x * MIB, &vec![0xEE; MIB as usize]).await.unwrap();
+    }
     tvol.flush().await.unwrap();
     let file = dir.path().join("s").join("ship-jobs.json");
     let mut jobs: serde_json::Map<String, Value> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
