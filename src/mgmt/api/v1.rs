@@ -1279,7 +1279,7 @@ async fn create_volume(
     let tier = match req.tier.as_deref() {
         None => crate::placement::topology::StorageTier::Hot,
         Some(t) => super::slabs::parse_tier(t)
-            .ok_or_else(|| V1Error::BadRequest(format!("tier {t}: hot, warm, cool or cold")))?,
+            .ok_or_else(|| V1Error::BadRequest(format!("tier {t}: {}", crate::placement::topology::StorageTier::NAMES)))?,
     };
     let asked_policy = req.redundancy.is_some() || req.spread.is_some();
     // A named slab or drive (#426): one place, on this node, a new volume.
@@ -1402,8 +1402,9 @@ async fn create_volume(
         req.replica_tier.slaves,
     )?;
 
-    // A clone takes its source's policy and tier (#151): a claim that names
-    // another is refused, not quietly given the source's.
+    // A clone takes its source's policy (#151): a claim that names another
+    // is refused, not quietly given the source's. A tier it names is its
+    // own (#672): its writes go there, what it shares stays where it is.
     if let Some(src) = source_local {
         let vm = state.volume_manager.lock().await;
         if let Some(h) = vm.get_volume_handle(&EngineVolumeId(src)) {
@@ -1413,12 +1414,6 @@ async fn create_volume(
                     "a clone takes its source's redundancy ({}), not {}",
                     theirs.spelling(),
                     policy.spelling()
-                )));
-            }
-            if req.tier.is_some() && h.preferred_tier() != tier {
-                return Err(V1Error::Conflict(format!(
-                    "a clone takes its source's tier ({}), not {tier}",
-                    h.preferred_tier()
                 )));
             }
         }
@@ -1437,12 +1432,21 @@ async fn create_volume(
             Some(src) if has_fs => {
                 let mut spec = crate::fs::template::CloneSpec::new(&req.name);
                 spec.verify = false;
+                spec.tier = req.tier.is_some().then_some(tier);
                 crate::fs::template::clone_volume_unsealed_ok(&state.volume_manager, EngineVolumeId(src), &spec)
                     .await
                     .map(|c| c.volume_id)
                     .map_err(|e| crate::volume::VolumeError::AllocatorError(e.to_string()))
             }
-            Some(src) => state.volume_manager.lock().await.create_snapshot(EngineVolumeId(src), &req.name).await,
+            Some(src) => {
+                let mut vm = state.volume_manager.lock().await;
+                let asked = req.tier.is_some().then_some(tier);
+                let made = vm.create_snapshot_deferred_preread_on(EngineVolumeId(src), &req.name, None, asked).await;
+                if made.is_ok() {
+                    vm.persist().await;
+                }
+                made
+            }
             None => match pin_array {
                 Some(a) => state.volume_manager.lock().await.create_volume(&req.name, req.size_bytes, a).await,
                 None => {

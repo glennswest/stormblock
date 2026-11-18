@@ -1508,12 +1508,9 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
         rec.origin = super::metadata::Origin::from_code(rest[4]);
         if rest.len() >= 6 {
             use crate::placement::topology::StorageTier;
-            rec.tier = match rest[5] {
-                1 => Some(StorageTier::Warm),
-                2 => Some(StorageTier::Cool),
-                3 => Some(StorageTier::Cold),
-                _ => None,
-            };
+            // 0 (and a byte no tier has) is hot, written as no tier (#151);
+            // 4 is `fast` (#672), which a reader before it takes as hot.
+            rec.tier = StorageTier::from_byte(rest[5]).filter(|t| *t != StorageTier::Hot);
         }
         // Tagged blocks after the tier, in order; a tag not known here ends
         // the walk (its length is not known).

@@ -828,6 +828,9 @@ survey_m() { # policy name|kind... -> the LOCAL_DISK the survey leaves behind
             tail) printf 'a92b4efc' | dd of="$dev/$n" bs=1 seek=$((4 * 1048576 - 4096)) conv=notrunc 2>/dev/null ;;
             layout|baylayout|atlayout=*) printf '%s\n' "$DATA_ONLY" "$SYS_HALF" > "$ans/$n" ;;
             removable) echo 1 > "$sys/$n/removable" ;;
+            # #672: a blank rotating drive, or a blank solid-state one.
+            hdd) mkdir -p "$sys/$n/queue"; echo 1 > "$sys/$n/queue/rotational" ;;
+            ssd) mkdir -p "$sys/$n/queue"; echo 0 > "$sys/$n/queue/rotational" ;;
             dataonly) printf '%s\n' "$DATA_ONLY" > "$ans/$n" ;;
             sysonly) printf '%s\n' "$SYS_HALF" > "$ans/$n" ;;
             datashelf) printf '%s\n' "$DATA_ONLY" > "$ans/$n" ;;
@@ -1127,6 +1130,19 @@ check "a removable drive is never the first drive" "/dev/sdb force" \
     "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|removable sdb\|blank)"
 check "the machine's own shelves before an external one" "/dev/sdc force" \
     "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|jbod sdb\|jbod sdc\|internal)"
+# #672 (owner, 2026-11-18: "put the system on the rotating, and have the
+# option of putting stuff on the ssd"): server8 blank, its SSD first by port,
+# its HDD second: the HDD, the SSD left for the fast tier.
+check "server8 blank, nothing named: the rotating drive before the SSD (#672)" "/dev/sdb force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|ssd sdb\|hdd)"
+grep -q "SYSTEM DRIVE: /dev/sdb, this machine's first drive" "$WORK/msurvey.log" \
+    && check "  the console says the HDD" yes yes || check "  the console says the HDD: $(grep SYSTEM "$WORK/msurvey.log")" yes no
+grep -q "the rotating drive before the solid-state sda, which is left for the fast tier (#672)" "$WORK/msurvey.log" \
+    && check "  and that the SSD is left for the fast tier" yes yes || check "  and that the SSD is left for the fast tier" yes no
+check "two SSDs: port order as before (#672)" "/dev/sda force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|ssd sdb\|ssd)"
+check "an HDD on an external shelf is not before the machine's own SSD (#672)" "/dev/sdb force" \
+    "$(CLAIMED_T="$CLAIM_URI" survey_m any sda\|jbod sdb\|ssd)"
 NOINTENT=""
 # A booting machine runs from a local disk: that is its system drive, and a
 # blank drive beside it is never taken (it was, before #351).

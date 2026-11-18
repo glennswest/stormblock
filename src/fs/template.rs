@@ -1193,6 +1193,10 @@ pub struct CloneSpec {
     /// copy instead: the clone depends on nothing in the slab it came from,
     /// and an install that replaces that slab does not take it (#88).
     pub role: Option<SlabRole>,
+    /// The tier the clone's own writes go to first, instead of its
+    /// source's (#672): `fast` puts a claim cloned from a template on the
+    /// HDD onto the node's SSD. What it shares stays where it is.
+    pub tier: Option<crate::placement::topology::StorageTier>,
 }
 
 impl CloneSpec {
@@ -1315,7 +1319,7 @@ async fn clone_volume_impl(
             Some(id) => id,
             // One metadata write for the whole mint, at the end (#137).
             None => m
-                .create_snapshot_deferred_preread(source, &spec.name, pre)
+                .create_snapshot_deferred_preread_on(source, &spec.name, pre, spec.tier)
                 .await
                 .map_err(|e| match e {
                     e @ crate::volume::VolumeError::Secret { .. } => TemplateError::Conflict(e.to_string()),

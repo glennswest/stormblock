@@ -123,9 +123,11 @@ impl Layout {
 
 impl PlacementPolicy {
     /// Prefer `tier`, falling back through every other tier, hottest first
-    /// (#151): a tier is a preference, never a refusal.
+    /// (#151): a tier is a preference, never a refusal. `fast` is in no
+    /// chain but its own (#672): a volume that asks for it spills to the
+    /// shared tiers when it is full, and nothing else ever reaches it.
     pub fn preferring(tier: StorageTier) -> Self {
-        let fallback = [StorageTier::Hot, StorageTier::Warm, StorageTier::Cool, StorageTier::Cold]
+        let fallback = StorageTier::SHARED
             .into_iter()
             .filter(|t| *t != tier)
             .collect();
@@ -1523,7 +1525,13 @@ impl ThinVolumeHandle {
         // Affine (#153): the volume's own slab while it takes the extent.
         if self.affine() {
             if let Some(a) = self.affinity() {
-                let allowed = super::target::of(&self.id).is_none_or(|t| t.allows(&a));
+                // An opt-in tier's slab (#672) holds only a volume that asked
+                // for that tier, and such a volume keeps to it only there: a
+                // spill while it was full is no reason to stay off it.
+                let opt_in_ok = registry
+                    .get(&a)
+                    .is_some_and(|s| s.tier().opt_in() == self.placement.preferred_tier.opt_in());
+                let allowed = opt_in_ok && super::target::of(&self.id).is_none_or(|t| t.allows(&a));
                 if allowed && !self.is_failed(a) && registry.takes(&a, self.placement.role, self.slot_size) {
                     if let Some(slab) = registry.get_mut(&a) {
                         if let Ok(slot_idx) = slab.allocate_deferred(self.id, vext_idx, generation).await {

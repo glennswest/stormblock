@@ -2715,6 +2715,19 @@ impl VolumeManager {
         name: &str,
         pre: Option<HashMap<SlabId, crate::drive::slottable::Preread>>,
     ) -> Result<VolumeId, VolumeError> {
+        self.create_snapshot_deferred_preread_on(source_id, name, pre, None).await
+    }
+
+    /// The same, the clone's new extents going to `tier` first instead of
+    /// its source's (#672: a `fast` claim cloned from a template on the
+    /// HDD). What it shares stays where it is; what it writes goes there.
+    pub async fn create_snapshot_deferred_preread_on(
+        &mut self,
+        source_id: VolumeId,
+        name: &str,
+        pre: Option<HashMap<SlabId, crate::drive::slottable::Preread>>,
+        tier: Option<StorageTier>,
+    ) -> Result<VolumeId, VolumeError> {
         self.refuse_if_undurable().await?;
         self.refuse_unknown_scheme(&source_id)?;
         // A clone, a snapshot, a template's claim, a golden: all start here.
@@ -2744,7 +2757,7 @@ impl VolumeManager {
             ).await?
         };
         let snap_id = snap.id();
-        let snap_handle = Arc::new(self.inherit_handle(snap, &source_id));
+        let snap_handle = Arc::new(self.inherit_handle_on(snap, &source_id, tier));
         self.volumes.insert(snap_id, snap_handle);
         self.present.insert(snap_id);
         self.origins.insert(snap_id, crate::volume::metadata::Origin::Node);
@@ -2959,10 +2972,17 @@ impl VolumeManager {
     /// data volume that copied-on-write into a *system* slab would put half
     /// of the node's identity in the half an install replaces (#88).
     fn inherit_handle(&self, vol: ThinVolume, source_id: &VolumeId) -> ThinVolumeHandle {
+        self.inherit_handle_on(vol, source_id, None)
+    }
+
+    /// [`inherit_handle`](Self::inherit_handle), with the clone's own tier
+    /// when one is asked (#672); everything else is still the source's.
+    fn inherit_handle_on(&self, vol: ThinVolume, source_id: &VolumeId, asked: Option<StorageTier>) -> ThinVolumeHandle {
         let (policy, failed, role, pinned, lba, tier, layout) = match self.volumes.get(source_id) {
             Some(src) => (src.redundancy(), src.failed_slabs(), src.placement_role(), src.pinned_slab(), src.lba(), src.preferred_tier(), src.layout()),
             None => (RedundancyPolicy::none(), Vec::new(), SlabRole::System, None, thin::Lba::DEFAULT, StorageTier::Hot, thin::Layout::default()),
         };
+        let tier = asked.unwrap_or(tier);
         // A clone of a pinned volume shares its slots on that slab, and its
         // copy-on-writes stay there with them (#150).
         let handle = ThinVolumeHandle::with_redundancy(
@@ -5372,6 +5392,88 @@ mod redundancy_tests {
         let d = std::env::temp_dir().join(format!("stormblock-vm-redundancy-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// #672: a blade's SSD as a `fast` slab beside the HDD's hot one. A
+    /// volume that does not name `fast` never lands there, not even with
+    /// the hot slab full (it is out of room, not spilled); one that names
+    /// it does, and so does a clone of a hot volume that names it, while
+    /// what the clone shares stays on the hot slab. The tier is kept across
+    /// a restart, and the fast slab is no domain a mirror may count.
+    #[tokio::test]
+    async fn nothing_lands_on_a_fast_slab_unasked() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let (hot, fast, path_h, path_f, plain, fastvol, clone) = {
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+            let (h, ph) = file_slab(&d, "hdd", slot).await;
+            let pf = d.join("ssd.bin").to_str().unwrap().to_string();
+            let fdev = FileDevice::open_with_capacity(&pf, 8 * 1024 * 1024).await.unwrap();
+            let f = Slab::format(Arc::new(fdev), slot, StorageTier::Fast).await.unwrap();
+            let (hot, fast) = (h.slab_id(), f.slab_id());
+            mgr.add_slab(h).await;
+            mgr.add_slab(f).await;
+            assert_eq!(mgr.registry().read().await.distinct_domains_with_space("drive"), 1, "the fast slab is no domain to promise on");
+            assert!(
+                mgr.create_volume_with("m", 1 << 20, CreateOptions::redundant(RedundancyPolicy::parse("mirror:2").unwrap())).await.is_err(),
+                "a mirror is not promised across the fast slab"
+            );
+
+            let plain = mgr.create_volume_any("plain", 1 << 20).await.unwrap();
+            let fastvol = mgr
+                .create_volume_with("fast", 1 << 20, CreateOptions { placement: PlacementPolicy::preferring(StorageTier::Fast), ..Default::default() })
+                .await
+                .unwrap();
+            let pv = mgr.get_volume(&plain).unwrap();
+            for i in 0..8u64 {
+                pv.write(i * slot, &[1u8; 4096]).await.unwrap();
+            }
+            mgr.get_volume(&fastvol).unwrap().write(0, &[2u8; 4096]).await.unwrap();
+            mgr.seal_volume(plain, None).await.unwrap();
+            let clone = mgr
+                .create_snapshot_deferred_preread_on(plain, "fast-clone", None, Some(StorageTier::Fast))
+                .await
+                .unwrap();
+            assert_eq!(mgr.get_volume_handle(&clone).unwrap().preferred_tier(), StorageTier::Fast);
+            mgr.get_volume(&clone).unwrap().write(0, &[3u8; 4096]).await.unwrap();
+            mgr.get_volume(&clone).unwrap().write(100 * slot, &[4u8; 4096]).await.unwrap();
+            {
+                let gem = mgr.gem().read().await;
+                assert!(gem.get_volume_map(&plain).unwrap().all_legs().all(|l| l.slab_id == hot), "a plain volume reached the fast slab");
+                assert!(gem.get_volume_map(&fastvol).unwrap().all_legs().all(|l| l.slab_id == fast), "a fast volume missed it");
+                let m = gem.get_volume_map(&clone).unwrap();
+                let legs: Vec<_> = m.all_legs().map(|l| l.slab_id).collect();
+                assert!(legs.contains(&fast), "the fast clone's writes went elsewhere: {legs:?}");
+                assert!(legs.contains(&hot), "what the clone shares stays where it is: {legs:?}");
+            }
+
+            // The hot slab filled: a plain volume is out of room, never on the SSD.
+            let filler = mgr.create_volume_any("filler", 16 << 20).await.unwrap();
+            let fv = mgr.get_volume(&filler).unwrap();
+            let mut i = 0u64;
+            while fv.write(i * slot, &[5u8; 4096]).await.is_ok() {
+                i += 1;
+                assert!(i < 4096, "the hot slab never filled");
+            }
+            {
+                let gem = mgr.gem().read().await;
+                assert!(gem.get_volume_map(&filler).unwrap().all_legs().all(|l| l.slab_id == hot), "a full hot slab spilled onto the fast one");
+            }
+            mgr.persist().await;
+            (hot, fast, ph, pf, plain, fastvol, clone)
+        };
+        let _ = (hot, fast);
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        for p in [&path_h, &path_f] {
+            let dev = FileDevice::open(p).await.unwrap();
+            mgr.add_slab(Slab::open(Arc::new(dev)).await.unwrap()).await;
+        }
+        mgr.restore().await.unwrap();
+        for (id, tier) in [(plain, StorageTier::Hot), (fastvol, StorageTier::Fast), (clone, StorageTier::Fast)] {
+            assert_eq!(mgr.get_volume_handle(&id).unwrap().preferred_tier(), tier, "{id} after a restart");
+        }
+        assert_eq!(mgr.registry().read().await.get(&fast).unwrap().tier(), StorageTier::Fast, "the slab header keeps fast");
     }
 
     /// A general slab and an array's dedicated slab (#150): the pool never

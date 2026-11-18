@@ -5120,8 +5120,13 @@ if [ "$BOOT_MODE" = "local" ]; then
     #      install).
     #   4. The machine's first drive: the first non-removable, non-USB drive
     #      by controller and port order (the by-path order), the machine's own
-    #      shelves before external ones, then the lowest bay. Not `/dev/sda`:
-    #      a name is the order the kernel met them in.
+    #      shelves before external ones, a rotating drive before a solid-state
+    #      one (#672), then the lowest bay. Not `/dev/sda`: a name is the order
+    #      the kernel met them in. The rotating drive first is the owner's
+    #      rule for the blades (2026-11-18: "put the system on the rotating,
+    #      and have the option of putting stuff on the ssd"): server8's small
+    #      SATA SSD beside its 2 TB HDD is left for the `fast` tier, and the
+    #      node lays out as server1-7, which have only the HDD.
     #
     # Old stormcos installs, slabs and partitions on the chosen drive are
     # taken over (its data half kept, #311). A RAID member (stormraid, md,
@@ -5188,8 +5193,10 @@ if [ "$BOOT_MODE" = "local" ]; then
             _p=$(readlink -f "$_d" 2>/dev/null); [ -n "$_p" ] || _p="$_d"
             case "$_p" in */usb*) continue ;; esac
             if drive_external "$_d"; then _x=1; else _x=0; fi
+            # Rotating first (#672): 0 for an HDD, 1 for a solid-state drive.
+            if [ "$(cat "$_d/queue/rotational" 2>/dev/null)" = 1 ]; then _r=0; else _r=1; fi
             _s=$(shelf_of "$_d"); _s=${_s#*|}; _s=${_s#*|}
-            printf '%s %s %s\t/dev/%s\t%s\n' "$_x" "$_p" "${_s%%|*}" "${_d##*/}" "$_p"
+            printf '%s %s %s %s\t/dev/%s\t%s\n' "$_x" "$_r" "$_p" "${_s%%|*}" "${_d##*/}" "$_p"
         done | awk -F '\t' '
             # PCI addresses are hex, every other number decimal: each made a
             # fixed-width decimal so that a plain sort is controller, port
@@ -5941,6 +5948,16 @@ STEOF
             fi
             echo "  SYSTEM DRIVE: /dev/$NAMED_DISK, this machine's first drive (no system_drive in its"
             echo "  install-config; first by controller and port order: ${_fd#*	}) (#478)"
+            if [ "$(cat "$SURVEY_SYS/$NAMED_DISK/queue/rotational" 2>/dev/null)" = 1 ]; then
+                for _fd_s in $(sd_drives); do
+                    [ "${_fd_s##*/}" = "$NAMED_DISK" ] && continue
+                    [ "$(cat "$_fd_s/queue/rotational" 2>/dev/null)" = 1 ] && continue
+                    [ "$(cat "$_fd_s/removable" 2>/dev/null)" = 1 ] && continue
+                    case "$(readlink -f "$_fd_s" 2>/dev/null)" in */usb*) continue ;; esac
+                    drive_external "$_fd_s" && continue
+                    echo "  the rotating drive before the solid-state ${_fd_s##*/}, which is left for the fast tier (#672)"
+                done
+            fi
         fi
     fi
     # Rule 3: the drive holding this node is the one considered, so a blank
@@ -6433,8 +6450,10 @@ $1|$_svp|$3"
     # HDD sat `out` with no word. The install lays the node on the drives
     # above (its local disk, a system drive, a pair, storage:'s); a data
     # drive beyond them is stormdrive's to enroll after the boot, by its
-    # DrivePolicy (a drive-managed SMR HDD as a `cool` slab), and its Drive
-    # object says what it decided.
+    # DrivePolicy, and its Drive object says what it decided. A solid-state
+    # drive beside a rotating system drive (server8's SSD, the owner's shape
+    # on #672) is for the `fast` tier: a data slab only a volume or claim
+    # that asks for `fast` uses.
     if [ -n "${LOCAL_DISK:-}" ]; then
         _nt_taken=" $(disk_of "$LOCAL_DISK") ${SYSTEM_DISK:-} ${PAIR_DISK:-} ${STORAGE_DRIVES:-} "
         for _nt in "$SURVEY_SYS"/sd* "$SURVEY_SYS"/nvme*n* "$SURVEY_SYS"/vd*; do
@@ -6462,6 +6481,11 @@ $1|$_svp|$3"
                     _ntw="no media (0 bytes)"
                 else
                     _ntw="the install lays the node on $(printf '%s' "$_nt_taken" | tr -s ' ' | sed 's/^ //; s/ $//'); a data drive beyond them is enrolled by stormdrive's DrivePolicy after the boot, and its Drive object says what it decided"
+                    _nt_sys=$(disk_of "$LOCAL_DISK"); _nt_sys=${_nt_sys##*/}
+                    if [ "$(cat "$_nt/queue/rotational" 2>/dev/null)" != 1 ] \
+                       && [ "$(cat "$SURVEY_SYS/$_nt_sys/queue/rotational" 2>/dev/null)" = 1 ]; then
+                        _ntw="left for the fast tier: the node is on the rotating /dev/$_nt_sys; stormdrive's DrivePolicy enrolls this drive as a \`fast\` data slab, which only a volume or claim that asks for \`fast\` uses, and its Drive object says what it decided"
+                    fi
                 fi
                 ;;
             esac

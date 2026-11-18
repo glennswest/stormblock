@@ -28,6 +28,51 @@ pub enum StorageTier {
     Cool = 2,
     /// Tier 3: Archive/backup — remote HDD, object storage, tape.
     Cold = 3,
+    /// Opt-in (#672): a drive set aside for what asks for it by name — the
+    /// small SSD beside a blade's system HDD, the build VMs' private drive.
+    /// Never in a default placement or any fallback chain, so nothing lands
+    /// on it unasked. Byte 4 on disk: an engine before #672 reads a `fast`
+    /// slab as `cold` and a `fast` volume as `hot`.
+    Fast = 4,
+}
+
+impl StorageTier {
+    /// Every tier, in the order a fallback chain walks them. `Fast` is not
+    /// in it: it is reached only by asking for it (#672).
+    pub const SHARED: [StorageTier; 4] = [StorageTier::Hot, StorageTier::Warm, StorageTier::Cool, StorageTier::Cold];
+
+    /// The tier a slab header or a volume record's byte names; `None` for a
+    /// byte no tier has.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0 => Some(StorageTier::Hot),
+            1 => Some(StorageTier::Warm),
+            2 => Some(StorageTier::Cool),
+            3 => Some(StorageTier::Cold),
+            4 => Some(StorageTier::Fast),
+            _ => None,
+        }
+    }
+
+    /// A tier by name (`hot`, `warm`, `cool`, `cold`, `fast`), any case.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "hot" => Some(StorageTier::Hot),
+            "warm" => Some(StorageTier::Warm),
+            "cool" => Some(StorageTier::Cool),
+            "cold" => Some(StorageTier::Cold),
+            "fast" => Some(StorageTier::Fast),
+            _ => None,
+        }
+    }
+
+    /// The names [`Self::parse`] takes, for a refusal's words.
+    pub const NAMES: &'static str = "hot, warm, cool, cold or fast";
+
+    /// Whether only a volume that names this tier may allocate on it (#672).
+    pub fn opt_in(self) -> bool {
+        self == StorageTier::Fast
+    }
 }
 
 impl fmt::Display for StorageTier {
@@ -37,6 +82,7 @@ impl fmt::Display for StorageTier {
             StorageTier::Warm => write!(f, "warm"),
             StorageTier::Cool => write!(f, "cool"),
             StorageTier::Cold => write!(f, "cold"),
+            StorageTier::Fast => write!(f, "fast"),
         }
     }
 }
@@ -111,6 +157,8 @@ impl StorageDevice {
             (StorageTier::Warm, Locality::Remote { .. }) => 30,
             (StorageTier::Cool, Locality::Remote { .. }) => 20,
             (StorageTier::Cold, _) => 10,
+            // Opt-in (#672): never attractive to anything that did not ask.
+            (StorageTier::Fast, _) => 0,
         };
         StorageDevice {
             id: Uuid::new_v4(),
@@ -161,5 +209,20 @@ mod tests {
     fn tier_display() {
         assert_eq!(StorageTier::Hot.to_string(), "hot");
         assert_eq!(StorageTier::Cold.to_string(), "cold");
+        assert_eq!(StorageTier::Fast.to_string(), "fast");
+    }
+
+    /// #672: `fast` by name and by byte, and never in the shared chain.
+    #[test]
+    fn fast_is_named_read_and_opt_in() {
+        for t in StorageTier::SHARED.into_iter().chain([StorageTier::Fast]) {
+            assert_eq!(StorageTier::parse(&t.to_string()), Some(t));
+            assert_eq!(StorageTier::from_byte(t as u8), Some(t));
+        }
+        assert_eq!(StorageTier::parse(" FAST "), Some(StorageTier::Fast));
+        assert_eq!(StorageTier::parse("ssd"), None);
+        assert_eq!(StorageTier::from_byte(5), None);
+        assert!(!StorageTier::SHARED.contains(&StorageTier::Fast));
+        assert!(StorageTier::Fast.opt_in() && !StorageTier::Hot.opt_in());
     }
 }

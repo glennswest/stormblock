@@ -1268,13 +1268,7 @@ impl GoldenSource {
 }
 
 fn parse_tier(s: &str) -> Result<StorageTier> {
-    match s.to_ascii_lowercase().as_str() {
-        "hot" => Ok(StorageTier::Hot),
-        "warm" => Ok(StorageTier::Warm),
-        "cool" => Ok(StorageTier::Cool),
-        "cold" => Ok(StorageTier::Cold),
-        other => Err(ImageError::Spec(format!("unknown tier '{other}'"))),
-    }
+    StorageTier::parse(s).ok_or_else(|| ImageError::Spec(format!("unknown tier '{s}'")))
 }
 
 async fn member_len(m: &MemberEntry) -> Result<u64> {

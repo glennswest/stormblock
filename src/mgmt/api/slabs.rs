@@ -122,13 +122,7 @@ fn default_tier() -> String {
 }
 
 pub(crate) fn parse_tier(s: &str) -> Option<StorageTier> {
-    match s.to_lowercase().as_str() {
-        "hot" => Some(StorageTier::Hot),
-        "warm" => Some(StorageTier::Warm),
-        "cool" => Some(StorageTier::Cool),
-        "cold" => Some(StorageTier::Cold),
-        _ => None,
-    }
+    StorageTier::parse(s)
 }
 
 async fn list_slabs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -221,7 +215,7 @@ pub(crate) async fn format_slab(
 
     let tier = match parse_tier(&req.tier) {
         Some(t) => t,
-        None => return ApiError::bad_request(format!("invalid tier '{}' (use hot, warm, cool, cold)", req.tier)),
+        None => return ApiError::bad_request(format!("invalid tier '{}' (use {})", req.tier, StorageTier::NAMES)),
     };
 
     let slot_size = req.slot_size.unwrap_or(crate::drive::slab::DEFAULT_SLOT_SIZE);

@@ -2366,13 +2366,7 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     fn parse_tier(s: &str) -> Result<StorageTier, String> {
-        match s.to_lowercase().as_str() {
-            "hot" => Ok(StorageTier::Hot),
-            "warm" => Ok(StorageTier::Warm),
-            "cool" => Ok(StorageTier::Cool),
-            "cold" => Ok(StorageTier::Cold),
-            _ => Err(format!("unknown tier '{s}' (use hot, warm, cool, cold)")),
-        }
+        StorageTier::parse(s).ok_or_else(|| format!("unknown tier '{s}' (use {})", StorageTier::NAMES))
     }
 
     async fn handle_slab_command(action: &SlabAction) -> anyhow::Result<()> {

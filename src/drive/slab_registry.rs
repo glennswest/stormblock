@@ -412,11 +412,13 @@ impl SlabRegistry {
     }
 
     /// The same, counting only slabs of one role — the space a volume of
-    /// that role can actually reach.
+    /// that role can actually reach. A slab of an opt-in tier (#672) is not
+    /// counted: only a volume that names it reaches it, so it is neither a
+    /// default role's space nor a domain a redundancy promise may lean on.
     pub fn distinct_domains_with_space_in_role(&self, rung: &str, role: SlabRole, size: u64) -> usize {
         let mut seen: Vec<FailureDomain> = Vec::new();
-        for id in self.slabs.keys() {
-            if self.allocatable(id).is_none() || self.role_of(id) != role || !self.size_ok(id, size) {
+        for (id, slab) in &self.slabs {
+            if slab.tier().opt_in() || self.allocatable(id).is_none() || self.role_of(id) != role || !self.size_ok(id, size) {
                 continue;
             }
             let d = self.domain_of(id);
@@ -490,9 +492,12 @@ impl SlabRegistry {
                 return Some(id);
             }
         }
-        // Fallback: any system slab with space
+        // Fallback: any system slab with space, never one of an opt-in
+        // tier (#672) that was not named.
         self.slabs
-            .keys()
+            .iter()
+            .filter(|(_, s)| !s.tier().opt_in())
+            .map(|(id, _)| id)
             .filter(|id| self.role_of(id) == SlabRole::System)
             .filter_map(|id| Some((*id, self.allocatable(id)?)))
             .max_by_key(|(_, free)| *free)
@@ -586,6 +591,21 @@ mod tests {
         assert!(reg.get(&id1).is_none());
 
         cleanup(&[p1, p2]);
+    }
+
+    /// #672: a `fast` slab is reached only by naming it: never the
+    /// any-slab fallback, never a domain counted for a default role.
+    #[tokio::test]
+    async fn a_fast_slab_is_reached_only_by_name() {
+        let (c_fast, p1) = make_slab(10 * 1024 * 1024, StorageTier::Fast).await;
+        let fast_id = c_fast.slab_id();
+        let mut reg = SlabRegistry::new();
+        reg.add(c_fast);
+        assert_eq!(reg.best_slab(&[StorageTier::Hot, StorageTier::Cold]), None, "the fallback took the fast slab");
+        assert_eq!(reg.best_slab(&[StorageTier::Fast]), Some(fast_id));
+        assert_eq!(reg.best_slab_for_tier(StorageTier::Fast), Some(fast_id));
+        assert_eq!(reg.distinct_domains_with_space("drive"), 0);
+        cleanup(&[p1]);
     }
 
     #[tokio::test]

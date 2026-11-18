@@ -446,12 +446,8 @@ impl SlabHeader {
         let table_offset = u64::from_le_bytes(data[76..84].try_into().unwrap());
         let create_time = u64::from_le_bytes(data[84..92].try_into().unwrap());
         let update_time = u64::from_le_bytes(data[92..100].try_into().unwrap());
-        let tier = match data[100] {
-            0 => StorageTier::Hot,
-            1 => StorageTier::Warm,
-            2 => StorageTier::Cool,
-            _ => StorageTier::Cold,
-        };
+        // A byte no tier has reads as cold, as it always did (#672: 4 is `fast`).
+        let tier = StorageTier::from_byte(data[100]).unwrap_or(StorageTier::Cold);
         let flags = data[101];
         let role = match data[102] {
             1 => SlabRole::Data,

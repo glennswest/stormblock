@@ -109,13 +109,7 @@ async fn persist(state: &AppState, st: &StormFsState) {
 }
 
 fn parse_tier(s: &str) -> Option<StorageTier> {
-    match s.to_lowercase().as_str() {
-        "hot" => Some(StorageTier::Hot),
-        "warm" => Some(StorageTier::Warm),
-        "cool" => Some(StorageTier::Cool),
-        "cold" => Some(StorageTier::Cold),
-        _ => None,
-    }
+    StorageTier::parse(s)
 }
 
 /// Slot size and virtual size of a volume, or a 404.

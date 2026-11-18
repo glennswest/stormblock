@@ -816,7 +816,7 @@ async fn retier_volume(
 
     let Some(tier) = super::slabs::parse_tier(&req.tier) else {
         return ApiError::bad_request(format!(
-            "invalid tier '{}' (hot, warm, cool, cold)", req.tier
+            "invalid tier '{}' ({})", req.tier, crate::placement::topology::StorageTier::NAMES
         ));
     };
 
@@ -1136,7 +1136,7 @@ async fn create_volume(
         None => crate::placement::topology::StorageTier::Hot,
         Some(t) => match super::slabs::parse_tier(t) {
             Some(t) => t,
-            None => return ApiError::bad_request(format!("tier {t}: hot, warm, cool or cold")),
+            None => return ApiError::bad_request(format!("tier {t}: {}", crate::placement::topology::StorageTier::NAMES)),
         },
     };
     if req.target.is_some() && req.array_id.is_some() {
@@ -1988,6 +1988,10 @@ pub struct CloneRequest {
     /// The clone's namespace (#408). Absent: its source's.
     #[serde(default)]
     pub namespace: Option<String>,
+    /// The tier the clone's own writes go to (#672), e.g. `fast`. Absent:
+    /// its source's.
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -2035,11 +2039,19 @@ async fn clone_volume(
         },
         None => None,
     };
+    let tier = match req.tier.as_deref() {
+        None => None,
+        Some(t) => match super::slabs::parse_tier(t) {
+            Some(t) => Some(t),
+            None => return ApiError::bad_request(format!("tier {t}: {}", crate::placement::topology::StorageTier::NAMES)),
+        },
+    };
     let mut spec = crate::fs::template::CloneSpec::new(&req.name);
     spec.size_bytes = size;
     spec.label = req.label;
     spec.verify = req.verify;
     spec.role = role;
+    spec.tier = tier;
     match crate::fs::template::clone_volume(&state.volume_manager, VolumeId(uuid), &spec).await {
         Ok(c) => {
             if let Some(r) = crate::mgmt::capacity::admit_or_undo(&state, c.volume_id).await {
@@ -3843,7 +3855,7 @@ async fn compose_slab(
         None => crate::placement::topology::StorageTier::Hot,
         Some(t) => match super::slabs::parse_tier(t) {
             Some(t) => t,
-            None => return ApiError::bad_request(format!("unknown tier '{t}': hot, cool or cold")),
+            None => return ApiError::bad_request(format!("unknown tier '{t}': {}", crate::placement::topology::StorageTier::NAMES)),
         },
     };
     let size = match super::fstemplates::resolve_size(&Some(req.size.clone()), None) {

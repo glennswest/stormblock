@@ -72,6 +72,13 @@ has "the virtual disk" "$WORK/out" "not taken: sdc (Virtual Disk, 0 GB, USB): a 
 has "the stick" "$WORK/out" "not taken: sdd (USB, 31 GB, USB): a USB drive"
 hasnt "no error" "$WORK/out" "EXIT"
 
+echo "server8 as the owner laid it (#672): the node on the HDD, the SSD left for the fast tier"
+run LOCAL_DISK=/dev/sdb2 SYSTEM_DISK= PAIR_DISK=
+hasnt "the HDD is not said" "$WORK/out" "not taken: sdb "
+has "the SSD, what it is" "$WORK/out" "not taken: sda (Patriot P210 512GB, 512 GB, SATA SSD, 512-byte sectors)"
+has "the SSD, why" "$WORK/out" "left for the fast tier: the node is on the rotating /dev/sdb; stormdrive's DrivePolicy enrolls this drive as a \`fast\` data slab"
+hasnt "no error" "$WORK/out" "EXIT"
+
 echo "a system drive and storage: drives are taken too"
 run LOCAL_DISK=/dev/sda4 SYSTEM_DISK=/dev/sdb PAIR_DISK=
 hasnt "the system drive is not said" "$WORK/out" "not taken: sdb "

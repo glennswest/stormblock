@@ -218,6 +218,11 @@ pub struct CloneRequest {
     /// before the clone is answered, so it is never an orphan.
     #[serde(default)]
     pub owner: Option<crate::volume::metadata::Owner>,
+    /// The tier the clone's own writes go to (#672): `fast` puts the claim
+    /// on the node's SSD, which nothing reaches without asking. Absent: the
+    /// template's.
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 /// Record a new clone's owner (#649).
@@ -557,6 +562,13 @@ async fn clone_template(
         Ok(s) => s,
         Err(e) => return ApiError::bad_request(e),
     };
+    let tier = match req.tier.as_deref() {
+        None => None,
+        Some(t) => match crate::placement::topology::StorageTier::parse(t) {
+            Some(t) => Some(t),
+            None => return ApiError::bad_request(format!("tier {t}: {}", crate::placement::topology::StorageTier::NAMES)),
+        },
+    };
     let owner = req.owner.clone();
     let spec = CloneSpec {
         name: req.name,
@@ -569,6 +581,7 @@ async fn clone_template(
         // storage. Crossing is `POST /api/v1/volumes/{id}/clone` with a
         // `role`, where the copy it costs is the caller's decision (#88).
         role: None,
+        tier,
     };
 
     match template::clone_template(&state.volume_manager, &state.fstemplates, &id, &spec).await {
