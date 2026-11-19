@@ -4,6 +4,15 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.34.2] — 2026-11-19
+
+### Fixed
+- #685: the node engine (`adopt-ublk`) sets its `oom_score_adj` to -1000: its death left a node wedged, since nothing else can serve its root and logs.
+- #685: the every-namespace mount table (#658) is read within bounds: 50,000 lines a namespace, 256 mount points a device, a set rather than a scan, and no caller waits on another's read.
+
+### Added
+- #685: the node engine's record is sent off the node after switch_root; a panic's FATAL line also goes to `/dev/kmsg`.
+
 ### 2026-11-19
 - **fix:** #685: `adopt-ublk` sets its `oom_score_adj` to -1000. On a node the engine serves its own root and every log volume, so if the OOM killer took it (it locks every page, `mlockall(MCL_FUTURE)`, which made it the likeliest pick) the node was wedged for good. That is how 12.96's pvetest2 and pvetest3 were left: `:9090` and `:6443` refused, and everything else accepting connections without answering.
 - **feat:** #685: the node engine sends its own record off the node, following it from its end at adopt (logcast, as /init's did up to switch_root); a panic's FATAL line also goes to `/dev/kmsg`, and the abort waits 600 ms so the follower can send it. Before this, nothing the node engine said after switch_root left the node.
