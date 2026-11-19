@@ -2750,6 +2750,7 @@ from DHCP and the name from the firmware.
 | `rd.stormblock.writable=<vol>:<path>,…` | — | writable volumes, written to fstab |
 | `rd.stormblock.mount=<vol>:<path>,…` | the root volume's `/etc/stormblock/mounts` | volumes `/init` exports and mounts itself, for a PID 1 that is not systemd. **Without it on the line, `/init` reads the list from the root volume** of the slab it boots: `/etc/stormblock/mounts`, one `<vol>:<path>` per line, `#` comments, read with `slab cat` before anything is exported (#262). A list on the line does not fit: x86 caps the line at 2048 bytes and the EFI stub truncates it and boots anyway (11.68 mounted nothing). The line still works, and wins, for older images. **An entry starting with `?`** (`?cilium:/p/cilium`) is optional (#288): mounted when the slab has the volume, left out when it does not (the console says `optional, not in this release`), never counted missing by the local-disk probe, so one list serves every flavor of a release. Whether the slab has it is read with `slab volumes`; a slab that cannot list its volumes leaves its optional entries out and says so. Plain entries stay required. A disk whose flow-over was cut short is read together with the clone the boot resumes from (#427). A list that cannot be read is said with why, never as "none"; and a root that names volumes in `/etc/stormblock/mounts` while the boot mounted none stops with a FATAL instead of switching root into a PID 1 with nothing to run (#427, 12.21 on the Dell) |
 | `rd.stormblock.bond=` | `off` | `active-backup` or `802.3ad` to bond the fastest uplinks |
+| `rd.stormblock.port-mtu=<N>\|off` | `9000` | the MTU a physical port is raised to while it is still down, before it goes up (#545); `off` leaves ports at their own. Not with a bond |
 | `rd.stormblock.ntp=off` | on | skip the NTP step (the build-date floor still applies, #251) |
 | `rd.stormblock.ntp=always` | — | step from NTP even when stormbootx says it synced the clock (#253) |
 | `rd.stormblock.portal=`, `iqn=`, `port=`, `layout=` | port `3260` | the old iSCSI boot (`boot-iscsi`: formats a blank target, reopens its own slab, #162) |
@@ -3090,6 +3091,23 @@ anything connects over it: the NVMe/TCP root's path MTU is decided there. A
 declared `[network] mtu` in the node's state wins over the lease's; a value
 outside 576–65535 is ignored and said. The console says `mtu 9000 on stormbr0
 (from DHCP)`, and `/run/stormblock-mtu` holds it.
+
+**Ports up early, jumbo while down** (#545). Every physical port is brought up
+at `Configuring network...`, before the node state read and the storage
+inventory, so the switch's wait after a link comes up (≈3.5 s on the X9s)
+runs beside them instead of inside DHCP. A port still down is first raised to
+`rd.stormblock.port-mtu` (9000): a down port takes an MTU without a reset,
+while an up mlx4 port resets its link for one, and a 9000 lease applied after
+DHCP did that on server8, right before its DNS name lookup (three answers
+lost, the node named `storm-<mac>`). The port's own MTU is kept in
+`/run/stormblock-port-mtu/<port>`; `stormbr0` is pinned to it until a lease or
+`[network] mtu` gives one, so nothing larger leaves before then. The DHCP
+script never lowers a port or bond slave already at or above the MTU (a port
+above its bridge sends nothing larger than the bridge does); an address put on
+the port itself (no bridge, or a path NIC whose lease names no MTU) puts the
+port's own MTU back. The console says `ports up: …` and `mtu 9000 on … while
+down`. A DNS server that answers none of the three name lookups is said as
+`DNS did not answer for <ip>`, apart from `no PTR record`.
 
 **What the node asks DHCP under.** The node asks for its lease as a name, with
 `udhcpc -x hostname:<name>`, so the server's lease table says who holds each
