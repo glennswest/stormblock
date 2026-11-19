@@ -54,6 +54,8 @@ ISO. stormblock's side, in steps (each its own commit):
 - [x] check.sh on sc-build (fb6b7f6f, ALL PASS); v24.30.1 with #677; image requested
 - [x] proof on a node: health `flow_over.finished_at` present after a flow-over (`shipped` set with a get: proof on /api/v1/health, 2026-11-18)
 - [ ] 2026-11-19 reopened: the get: proof cannot hold on a test install. pvetest2 (12.96, 24.33.0) flowed over (`Flow-over complete` on its console), then the install power-cycles to a local boot, and health is read after it: no flow-over in that process, `flow_over` absent. Plan: the `Flow-over complete` line says the frozen span from `FLOW.snapshot()` (seconds, MB/s, started_at/finished_at, as health reports it); re-ship with a `console:` proof on that line, `--commit` the fix
+- [x] `FlowProgress::span_said`, the completion line, the unit test extended; README, CHANGELOG (5bb2d82e, pushed, not yet built)
+- [ ] PAUSED 2026-11-19 for P0 #677: `sc-build 'sh check.sh'` on the push, then `shipped --commit <sha> --proof 'console:Flow-over complete: .* finished_at [0-9]+'`; a patch release with it
 
 ## #616 (again) — the record after a reboot (2026-11-16, P1)
 
