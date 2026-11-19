@@ -348,9 +348,13 @@ all `owner: unclaimed`; the CRD is the API.
   parent, in use, age and creator from creators.json), none deleted
 - [x] check.sh ALL PASS (1346f8e9, 1504 tests); README, CHANGELOG; v24.25.0
 - [x] image build 07209c948ccf; the item waits `--after rustkube-node#372`
-- [ ] shipped with proof
+- [x] shipped with proof
   `api:/apis/storage.storm.io/v1/volumes ~ "owner":\{"kind":"Pod"` once
-  rustkube-node#372 writes Pod owners
+  rustkube-node#372 writes Pod owners; reopened (the apiserver had no `volumes`)
+- [x] 2026-11-19: v24.33.0's publisher (#655) writes the same objects
+  (`volume_objects`, status `owner`/`attachments` kept: the CRD's status
+  preserves unknown fields); stormcos#1050 carries the CRDs (657c4b2);
+  shipped again `--commit 82817c7e` with the same proof
 - [ ] later, once the writers ship: `require_on_clone` on by default
 
 ## #648 — drive error and PI-check counters, per drive, every minute (2026-11-18, P1)
