@@ -1341,7 +1341,7 @@ until A lands. Stormblock's half: follow a record of the cluster, written by sto
       check.sh ALL PASS at c92f8286 (1531/1531); v24.31.1 (8614681a, `--locked` reports 24.31.1); stage 212937325d86;
       closed (C stays out: A is proven live)
 
-### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — PAUSED for P0 #557: v23.22.2 on main, not tagged or staged
+### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — PAUSED for P0 #672 (2026-11-19): v23.22.2 shipped; X9 target met, R6415 unread
 
 Read from server7's and forge1's reboots by line (`.times`): the X9's 8.3 s "clock" is not the clock (firmware
 synced, 0 s): path NIC DHCP 3.2 s + a lost DNS answer 5.1 s, both before the stamp. Not done, on purpose:
@@ -1356,6 +1356,14 @@ NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
       no concurrent modprobe: probe order names sda and ethN), `propose --after-release`
 - [x] the probe's repeated slab opens (a table scan each: SAS's 4.7 s): #556
 - [ ] metal: stamps on an X9 and the R6415 (targets: root ready 40 and 25 s)
+      2026-11-19, read (paused again for P0 #672): **X9 met.** server8, 12.94 (passed install 1795036790), the reboot
+      from its own disk (console server8-20261118-212452.log): handed over 5.0, drivers +11.3, network up +7.9,
+      node named +3.0, clock +0.0, **root ready 39.36 s** (target 40; was 57-64). Left on the X9: `node named` 3.0 s is
+      three 1 s DNS tries all killed (`Terminated` x3, "no PTR record from 192.168.31.252" for 192.168.16.115): the g16
+      DNS gives no answer at all, not NXDOMAIN; check with `dig -x` and file on microdns if it never answers. DHCP took
+      5 discovers (~4 s) after the bridge came up. R6415 (C2NR0Q2): no install since 12.81, all cancelled
+      (stormbootx#212-216), so its 25 s target is unread. **To resume:** check the PTR timing, file microdns if it is
+      silent; then wait for a C2NR0Q2 install and read its `.times`; close when it is under 25 s.
 
 ### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; back 2026-11-07: letting go of a flow-over's sources stalls every reader
 
