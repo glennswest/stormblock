@@ -7,7 +7,13 @@
 # `udhcpc -O mtu` with the initramfs's own `default.script` (taken from the
 # generator, as built) leases on stormbr0. Then the kernel says: the port and
 # the bridge at 9000, the address on, the console line said. And again with
-# a declared `[network] mtu` of 1500, which must win.
+# a declared `[network] mtu` of 1500, which must win on the bridge (the port,
+# already at 9000, is never lowered: #545).
+#
+# Then the early ports (#545), with the generator's own `early ports` and
+# `bridge bring-up` blocks: a port down at 1500 is raised to 9000 before it
+# goes up, the bridge is pinned at 1500; a 9000 lease takes the bridge to
+# 9000 with the port left; a lease with no MTU leaves the bridge at 1500.
 #
 # Unprivileged on a build VM: root only inside the guest.
 #   sc-build 'sh ci-dhcp-mtu-verify.sh'
@@ -48,6 +54,9 @@ sed -n "/<< 'DHCPSCRIPT'/,/^DHCPSCRIPT$/p" scripts/build-stormblock-initramfs.sh
     > "$I/usr/share/udhcpc/default.script"
 chmod 755 "$I/usr/share/udhcpc/default.script"
 grep -q dhcp_mtu "$I/usr/share/udhcpc/default.script" || { echo "FAIL: no dhcp_mtu in the extracted script"; exit 1; }
+sed -n '/# --- BEGIN early ports/,/# --- END early ports/p' scripts/build-stormblock-initramfs.sh | grep -v '^early_ports$' > "$I/early.sh"
+sed -n '/# --- BEGIN bridge bring-up/,/# --- END bridge bring-up/p' scripts/build-stormblock-initramfs.sh > "$I/bridge.sh"
+[ -s "$I/early.sh" ] && [ -s "$I/bridge.sh" ] || { echo "FAIL: could not extract the early ports or bridge blocks"; exit 1; }
 # The generator passes -O mtu everywhere; the guest does what /init does.
 grep -q 'udhcpc -i "$IFACE" -O mtu' scripts/build-stormblock-initramfs.sh || fail "the generator starts udhcpc without -O mtu"
 
@@ -112,7 +121,64 @@ echo 1500 > /run/declared-mtu
 lease
 p=$(cat /sys/class/net/port0/mtu); b=$(cat /sys/class/net/stormbr0/mtu)
 echo "GUEST declared: port0 $p, stormbr0 $b"
-[ "$p" = 1500 ] && [ "$b" = 1500 ] && r declared PASS || r declared "FAIL ($p/$b)"
+[ "$p" = 9000 ] && [ "$b" = 1500 ] && r declared PASS || r declared "FAIL ($p/$b)"
+rm -f /run/declared-mtu
+
+# The early ports (#545). A veth has no `device` link, so early_ports reads a
+# tree naming the real port, with the kernel's own mtu and flags; it sets
+# through busybox ip, on the real port.
+netsay() { echo "$*"; }
+early() { # port: a fresh bridge over it, the port down at 1500, then early ports and the bridge
+    ipr link del stormbr0 2>/dev/null
+    ipr link set "$1" nomaster 2>/dev/null; ipr link set "$1" down; ipr link set "$1" mtu 1500
+    rm -rf /run/fsys /run/stormblock-port-mtu; mkdir -p "/run/fsys/class/net/$1"
+    : > "/run/fsys/class/net/$1/device"
+    cat "/sys/class/net/$1/mtu" > "/run/fsys/class/net/$1/mtu"
+    cat "/sys/class/net/$1/flags" > "/run/fsys/class/net/$1/flags"
+    STORM_SYSFS=/run/fsys
+    . /early.sh
+    early_ports | sed 's/^/GUEST early: /'
+    BRIDGE=stormbr0; NO_BRIDGE=""
+    . /bridge.sh
+    net_bring_up "$1" | sed 's/^/GUEST bridge: /'
+}
+early port0
+p=$(cat /sys/class/net/port0/mtu); b=$(cat /sys/class/net/stormbr0/mtu)
+o=$(cat /sys/class/net/port0/operstate)
+echo "GUEST early: port0 $p ($o), stormbr0 $b, kept $(cat /run/stormblock-port-mtu/port0 2>/dev/null)"
+[ "$p" = 9000 ] && [ "$b" = 1500 ] && r early-raised PASS || r early-raised "FAIL ($p/$b)"
+[ "$(cat /run/stormblock-port-mtu/port0 2>/dev/null)" = 1500 ] && r early-kept PASS || r early-kept FAIL
+lease
+p=$(cat /sys/class/net/port0/mtu); b=$(cat /sys/class/net/stormbr0/mtu)
+echo "GUEST early, 9000 lease: port0 $p, stormbr0 $b"
+[ "$p" = 9000 ] && [ "$b" = 9000 ] && r early-jumbo PASS || r early-jumbo "FAIL ($p/$b)"
+ip -4 addr show stormbr0 | grep -q 'inet 192.168.30.' && r early-address PASS || r early-address FAIL
+
+# A network whose lease names no MTU: the bridge stays at the port's own.
+ipr link add srv2 type veth peer name port1
+ipr link set srv2 up; ipr addr add 192.168.40.252/24 dev srv2
+sed 's/^interface srv$/interface srv2/; s/^start .*/start 192.168.40.2/; s/^end .*/end 192.168.40.20/; /^opt mtu/d; /^opt router/d; s#udhcpd.leases#udhcpd2.leases#' /etc/udhcpd.conf > /etc/udhcpd2.conf
+touch /var/lib/misc/udhcpd2.leases
+udhcpd -f /etc/udhcpd2.conf > /run/udhcpd2.log 2>&1 &
+sleep 1
+ipr link del stormbr0 2>/dev/null
+early port1
+lease
+p=$(cat /sys/class/net/port1/mtu); b=$(cat /sys/class/net/stormbr0/mtu)
+echo "GUEST early, no lease MTU: port1 $p, stormbr0 $b, $(ip -4 addr show stormbr0 | grep -o 'inet [^ ]*')"
+[ "$p" = 9000 ] && [ "$b" = 1500 ] && r early-plain PASS || r early-plain "FAIL ($p/$b)"
+ip -4 addr show stormbr0 | grep -q 'inet 192.168.40.' && r early-plain-address PASS || r early-plain-address FAIL
+
+# No bridge: the address on the port itself, which gets its own MTU back.
+ipr link del stormbr0 2>/dev/null
+ipr link set port1 nomaster; ipr link set port1 down; ipr link set port1 mtu 1500
+rm -rf /run/stormblock-port-mtu; mkdir -p /run/fsys/class/net/port1
+cat /sys/class/net/port1/flags > /run/fsys/class/net/port1/flags; echo 1500 > /run/fsys/class/net/port1/mtu
+early_ports > /dev/null
+NO_BRIDGE=1 net_bring_up port1 | sed 's/^/GUEST nobridge: /'
+p=$(cat /sys/class/net/port1/mtu)
+echo "GUEST no bridge: port1 $p"
+[ "$p" = 1500 ] && r early-nobridge PASS || r early-nobridge "FAIL ($p)"
 echo "GUEST done"
 poweroff -f
 EOF
@@ -124,7 +190,7 @@ timeout 300 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu max -m 512 -smp 2 
     -nographic -no-reboot -kernel "$KERNEL" -initrd "$W/initrd.gz" \
     -append "console=ttyS0 panic=-1 loglevel=4" > "$W/guest.log" 2>&1
 tr -d '\r' < "$W/guest.log" | grep -E '^(RESULT|GUEST|LOG)|panick'
-for c in port bridge address said declared; do
+for c in port bridge address said declared early-raised early-kept early-jumbo early-address early-plain early-plain-address early-nobridge; do
     tr -d '\r' < "$W/guest.log" | grep -q "^RESULT $c PASS" || fail "$c"
 done
 if [ "$FAILS" = 0 ]; then echo "ALL PASS"; exit 0; fi
