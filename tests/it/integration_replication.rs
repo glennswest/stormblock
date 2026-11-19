@@ -1,62 +1,18 @@
-//! `Replication` (#656) between two engines over HTTP: the peer serves its
-//! listing, legs and content as it always has; the replica copies a golden
-//! whole and a clone of it as a clone of its own copy, only what the clone
-//! holds, and the bytes come out the same.
+//! `Replication` (#656) between two engines: the peer serves its listing and
+//! legs over HTTP and the bytes over NVMe/TCP (the transport of
+//! `integration_pull`); the replica copies a golden whole and a clone of it
+//! as a clone of its own copy, only what the clone holds, and the bytes come
+//! out the same.
 
-use crate::common;
-use std::sync::Arc;
-
-use stormblock::mgmt::config::StormBlockConfig;
-use stormblock::mgmt::AppState;
-use stormblock::volume::{VolumeId, VolumeManager, DEFAULT_EXTENT_SIZE};
+use crate::integration_pull::{all_of, by_name, engine, put, serve, served_here};
+use stormblock::volume::DEFAULT_EXTENT_SIZE;
 
 use tempfile::TempDir;
-use tokio::net::TcpListener;
 
-async fn engine(dir: &TempDir) -> Arc<AppState> {
-    let devices = common::create_file_devices(dir, 1, 1024 * 1024 * 1024).await;
-    let mut vm = VolumeManager::new(DEFAULT_EXTENT_SIZE);
-    vm.add_backing_device(stormblock::raid::RaidArrayId(uuid::Uuid::new_v4()), devices[0].clone()).await;
-    let mut config = StormBlockConfig::default();
-    config.management.data_dir = Some(dir.path().to_str().unwrap().to_string());
-    config.management.ublk_transport = false;
-    let slab_registry = vm.registry().clone();
-    let gem = vm.gem().clone();
-    Arc::new(AppState::new(config, vm, slab_registry, gem))
-}
-
-async fn serve(state: Arc<AppState>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let router = stormblock::mgmt::api::router(state);
-    let h = tokio::spawn(async move {
-        axum::serve(listener, router).await.unwrap();
-    });
-    common::wait_for_listener(addr).await;
-    (format!("http://{addr}"), h)
-}
-
-async fn put(state: &AppState, id: VolumeId, at: u64, byte: u8, len: usize) {
-    let dev = state.volume_manager.lock().await.get_volume(&id).unwrap();
-    dev.write(at, &vec![byte; len]).await.unwrap();
-    dev.flush().await.unwrap();
-}
-
-async fn all_of(state: &AppState, id: VolumeId) -> Vec<u8> {
-    let dev = state.volume_manager.lock().await.get_volume(&id).unwrap();
-    let mut b = vec![0u8; dev.capacity_bytes() as usize];
-    dev.read(0, &mut b).await.unwrap();
-    b
-}
-
-async fn by_name(state: &AppState, name: &str) -> Option<VolumeId> {
-    state.volume_manager.lock().await.find_volume(name).await
-}
-
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_golden_and_its_clone_replicated() {
     let (da, db) = (TempDir::new().unwrap(), TempDir::new().unwrap());
-    let (peer, here) = (engine(&da).await, engine(&db).await);
+    let (peer, here) = (engine(&da, true).await, engine(&db, false).await);
     let x = DEFAULT_EXTENT_SIZE;
     // The peer: a golden with data in extents 0 and 2, and a clone of it
     // that rewrote extent 2 and wrote extent 3, both sealed.
@@ -105,6 +61,7 @@ async fn a_golden_and_its_clone_replicated() {
     }
     assert!(all_of(&here, g).await == all_of(&peer, golden).await, "the golden's bytes");
     assert!(all_of(&here, k).await == all_of(&peer, clone).await, "the clone's bytes");
+    assert_eq!(served_here(&peer).await, 0, "every namespace the copies read let go of");
 
     // Again: nothing is copied twice, and it is still Synced.
     let again = c

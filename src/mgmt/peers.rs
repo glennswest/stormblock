@@ -248,7 +248,7 @@ pub async fn host_nqn(state: &AppState) -> String {
 
 /// The client a peer is asked with: this node's certificate when it has
 /// one, and the node CA to check the peer's.
-fn client(state: &AppState) -> Result<crate::http::Client, PeerError> {
+pub fn client(state: &AppState) -> Result<crate::http::Client, PeerError> {
     let (f, m) = (&state.config.fabric, &state.config.management);
     let mut b = crate::http::Client::builder().timeout(std::time::Duration::from_secs(30));
     // These default to the management pair and CA, which on a node appear after
@@ -373,6 +373,21 @@ pub async fn connect(
         .as_str()
         .and_then(|s| s.parse().ok())
         .ok_or_else(|| PeerError::new(502, format!("{peer} answered volume {key} with no id")))?;
+    connect_to(state, &peer, volume, read_only).await.map(Some)
+}
+
+/// Volume `volume` of the named `peer` (its management API), served over
+/// NVMe/TCP to this node's host NQN and connected with the engine's
+/// initiator: the transport a pull copies through (#656). The peer's
+/// namespace is released again when the connect fails; once the caller is
+/// done it lets go with [`release`].
+pub async fn connect_to(
+    state: &AppState,
+    peer: &str,
+    volume: Uuid,
+    read_only: bool,
+) -> Result<(Arc<dyn BlockDevice>, PeerAttach), PeerError> {
+    let peer = peer.to_string();
     let host_nqn = host_nqn(state).await;
     let node = state.v1.lock().await.local_node.clone();
     let holder = format!("peer:{node}");
@@ -427,7 +442,7 @@ pub async fn connect(
         }
     };
     tracing::info!("fabric: volume {volume} on {peer} connected as {host_nqn}: {uri}");
-    Ok(Some((dev, PeerAttach { volume, peer, host_nqn, holder, uri, device_hint: String::new() })))
+    Ok((dev, PeerAttach { volume, peer, host_nqn, holder, uri, device_hint: String::new() }))
 }
 
 fn format_addr(host: &str, port: u16) -> String {
@@ -484,7 +499,7 @@ pub async fn detach(state: &Arc<AppState>, volume: Uuid) -> Option<PeerAttach> {
 }
 
 /// The peer's namespace let go of (this node's hold only).
-async fn release(state: &AppState, peer: &str, volume: Uuid, host_nqn: &str, holder: &str) {
+pub async fn release(state: &AppState, peer: &str, volume: Uuid, host_nqn: &str, holder: &str) {
     let c = match client(state) {
         Ok(c) => c,
         Err(e) => {

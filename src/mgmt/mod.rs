@@ -22,6 +22,7 @@ pub mod slab_report;
 pub mod storage_layout;
 pub mod link;
 pub mod replication;
+pub mod pull;
 pub mod ship;
 pub mod drive_errors;
 pub mod format_job;
@@ -881,6 +882,8 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             if !gone.is_empty() {
                 tracing::info!("retired {} standing clone(s) nobody had claimed", gone.len());
             }
+            // A pull a restart cut short is not left half made (#656).
+            crate::mgmt::pull::resume(&state).await;
             // Every replication not finished, and every mirror, run again (#656).
             crate::mgmt::replication::resume(state.clone());
             // This node's Volume and Replication objects on the cluster's

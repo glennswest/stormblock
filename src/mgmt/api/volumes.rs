@@ -2736,7 +2736,7 @@ pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<Volum
 }
 
 /// [`volume_key`], and a 404 for a UUID no volume has.
-async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Result<VolumeId, Response> {
+pub(crate) async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Result<VolumeId, Response> {
     let id = volume_key(state, key).await?;
     if state.volume_presence.contains(&id) {
         Ok(id)
@@ -3943,6 +3943,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/{id}/mirror", axum::routing::post(crate::mgmt::live_mirror::post).delete(crate::mgmt::live_mirror::delete))
         .route("/unowned", get(unowned_clones))
         .route("/import", get(list_imports).post(start_import))
+        .route("/pull", get(crate::mgmt::pull::get_all).post(crate::mgmt::pull::post))
+        .route("/pull/{job}", get(crate::mgmt::pull::get_one))
         .route("/import/{id}", get(get_import))
         .route("/{id}/fsck", axum::routing::post(fsck_volume))
         .route("/{id}/legs/clear", axum::routing::post(clear_failed_legs))

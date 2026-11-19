@@ -6,24 +6,27 @@
 //! once or following it. Managed through the object, the owner's rule:
 //! `storage.storm.io/v1` `replications`, kept in `<data_dir>/replications.json`.
 //!
-//! **How a volume moves** (thin, lineage kept, nothing new needed on the
-//! peer): the peer's listing (`GET /api/v1/volumes?kind=…`) says each
-//! volume's name, namespace, size, parent, seal, role, filesystem and owner;
-//! its `GET /api/v1/volumes/{id}/legs` lists the extents it maps and where
-//! each lives; `GET /api/v1/volumes/{id}/content` with a `Range` gives a
-//! sealed volume's bytes. A volume with no parent here gets every extent it
-//! maps; a clone whose parent is already here is a copy-on-write clone of
-//! that, given only the extents it holds of its own (a location that is not
-//! its parent's at the same index), and zeros where its parent maps an
-//! extent it does not. 87 GiB moves, not the 6 TB the sizes add to. Parents
-//! go first. A volume already here under the same name and namespace,
-//! sealed, of the same size, is taken as the same and not copied again; one
-//! that differs is an error, never overwritten. Nothing here is ever
-//! deleted because the peer deleted it: the copy is the point.
+//! **How a volume moves** (thin, lineage kept): the peer's listing (`GET
+//! /api/v1/volumes?kind=…`) says each volume's name, namespace, size,
+//! parent, seal, role, filesystem and owner; its `GET
+//! /api/v1/volumes/{id}/legs` lists the extents it maps and where each
+//! lives. The bytes come over **NVMe/TCP** (#656, the master's "registry to
+//! registry" of 2026-11-18): the peer serves the sealed volume read-only to
+//! this node's host NQN (#328's attach), the engine's own initiator reads
+//! the extents the plan names, and the namespace is let go of after. A
+//! volume with no parent here gets every extent it maps; a clone whose
+//! parent is already here is a copy-on-write clone of that, given only the
+//! extents it holds of its own (a location that is not its parent's at the
+//! same index), and zeros where its parent maps an extent it does not. 87 GiB
+//! moves, not the 6 TB the sizes add to. Parents go first. A volume already
+//! here under the same name and namespace, sealed, of the same size, is
+//! taken as the same and not copied again; one that differs is an error,
+//! never overwritten. Nothing here is ever deleted because the peer deleted
+//! it: the copy is the point. One volume by id, without an object, is
+//! [`crate::mgmt::pull`] (`POST /api/v1/volumes/pull`), the same copy.
 //!
 //! **Stage 1** (this): sealed goldens, media and blanks. A writable volume is
-//! reported, not copied: the peer serves no content of a volume that takes
-//! writes. The registry's references (`images`) are stage 2.
+//! reported, not copied: it moves by the live mirror (#295). The registry's references (`images`) are stage 2.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -504,11 +507,13 @@ pub fn ranges(extents: &[u64], extent_bytes: u64, size: u64, max: u64) -> Vec<(u
     out
 }
 
-fn client() -> Result<crate::http::Client, String> {
-    crate::http::Client::builder().timeout(std::time::Duration::from_secs(120)).build().map_err(|e| e.to_string())
+/// The peer is asked as the fabric asks one (#328): this node's
+/// certificate when it has one, the node CA to check the peer's.
+pub fn client(state: &AppState) -> Result<crate::http::Client, String> {
+    crate::mgmt::peers::client(state).map_err(|e| e.message)
 }
 
-async fn get_json(c: &crate::http::Client, url: &str) -> Result<Value, String> {
+pub async fn get_json(c: &crate::http::Client, url: &str) -> Result<Value, String> {
     let r = c.get(url).send().await.map_err(|e| format!("{url}: {e}"))?;
     if !r.status().is_success() {
         return Err(format!("{url}: HTTP {}", r.status().as_u16()));
@@ -516,7 +521,7 @@ async fn get_json(c: &crate::http::Client, url: &str) -> Result<Value, String> {
     r.json().await.map_err(|e| format!("{url}: {e}"))
 }
 
-async fn legs(c: &crate::http::Client, base: &str, id: &str) -> Result<Extents, String> {
+pub async fn legs(c: &crate::http::Client, base: &str, id: &str) -> Result<Extents, String> {
     let mut e = Extents::default();
     let mut start = 0u64;
     loop {
@@ -545,13 +550,18 @@ async fn local_index(state: &AppState) -> HashMap<(String, String), (VolumeId, b
     out
 }
 
-struct Pace {
+/// A bandwidth limit, MiB/s (0: none), kept over a run.
+pub struct Pace {
     start: std::time::Instant,
     bytes: u64,
     limit: u64,
 }
 
 impl Pace {
+    pub fn new(limit_mibps: u64) -> Self {
+        Pace { start: std::time::Instant::now(), bytes: 0, limit: limit_mibps }
+    }
+
     async fn took(&mut self, n: u64) {
         self.bytes += n;
         if self.limit == 0 {
@@ -565,23 +575,85 @@ impl Pace {
     }
 }
 
-/// Copy one peer volume here. The id here, and the bytes moved.
-async fn copy_one(
+/// What a copy says as it goes: its plan (bytes to read, extents copied,
+/// shared with the parent, zeroed), the volume once made, bytes as they land.
+pub struct Hooks<'a> {
+    pub planned: &'a (dyn Fn(u64, u64, u64, u64) + Sync),
+    pub made: &'a (dyn Fn(VolumeId) + Sync),
+    pub moved: &'a (dyn Fn(u64) + Sync),
+}
+
+/// What one copy did.
+#[derive(Debug, Clone)]
+pub struct Copied {
+    pub id: VolumeId,
+    /// The bytes read from the peer and written here.
+    pub bytes: u64,
+    /// The peer volume's extents (kept for its clones' plans).
+    pub extents: Extents,
+    /// Extents copied, and extents its parent maps and it does not (zeroed).
+    pub copied: u64,
+    pub zeroed: u64,
+    /// Extents it shares with its parent's copy here, moved by nothing.
+    pub shared: u64,
+}
+
+/// Copy one sealed peer volume here, through NVMe/TCP (#656): the peer
+/// serves it read-only to this node's host NQN (#328's attach), the engine's
+/// initiator reads only the extents the plan names, and the peer's namespace
+/// is let go of when it ends, however it ends. A copy that did not finish is
+/// deleted, never left half made.
+pub async fn copy_one(
     state: &Arc<AppState>,
     c: &crate::http::Client,
     base: &str,
     v: &PeerVol,
     parent_here: Option<(VolumeId, Extents)>,
     pace: &mut Pace,
-    moved: &(dyn Fn(u64) + Sync),
-) -> Result<(VolumeId, u64, Extents), String> {
+    hooks: &Hooks<'_>,
+) -> Result<Copied, String> {
+    let peer_id: uuid::Uuid = v.id.parse().map_err(|_| format!("{base} names volume {:?}, not a uuid", v.id))?;
     let mine = legs(c, base, &v.id).await?;
     let (copy, zero) = plan(&mine, parent_here.as_ref().map(|p| &p.1));
+    let shared = (mine.at.len() as u64).saturating_sub(copy.len() as u64);
+    let to_read: u64 = ranges(&copy, mine.extent_bytes, v.size, MAX_RANGE).iter().map(|(a, b)| b - a).sum();
+    (hooks.planned)(to_read, copy.len() as u64, shared, zero.len() as u64);
+    // Connected before anything is made here: a peer that will not serve it
+    // leaves nothing behind.
+    let (src, att) = if copy.is_empty() {
+        (None, None)
+    } else {
+        let (d, a) = crate::mgmt::peers::connect_to(state, base, peer_id, true)
+            .await
+            .map_err(|e| format!("attaching it over NVMe/TCP: {}", e.message))?;
+        (Some(d), Some(a))
+    };
+    let r = copy_into(state, v, parent_here.as_ref().map(|p| p.0), src.as_deref(), &mine, &copy, &zero, pace, hooks).await;
+    drop(src);
+    if let Some(a) = att {
+        crate::mgmt::peers::release(state, &a.peer, a.volume, &a.host_nqn, &a.holder).await;
+    }
+    let (id, bytes) = r?;
+    Ok(Copied { id, bytes, extents: mine, copied: copy.len() as u64, zeroed: zero.len() as u64, shared })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn copy_into(
+    state: &Arc<AppState>,
+    v: &PeerVol,
+    parent_here: Option<VolumeId>,
+    src: Option<&dyn BlockDevice>,
+    mine: &Extents,
+    copy: &[u64],
+    zero: &[u64],
+    pace: &mut Pace,
+    hooks: &Hooks<'_>,
+) -> Result<(VolumeId, u64), String> {
     let id = {
         let mut vm = state.volume_manager.lock().await;
-        match &parent_here {
-            Some((p, _)) => {
-                let id = vm.create_snapshot(*p, &v.name).await.map_err(|e| format!("a clone of its parent here: {e}"))?;
+        match parent_here {
+            Some(p) => {
+                let id = vm.create_snapshot(p, &v.name).await.map_err(|e| format!("a clone of its parent here: {e}"))?;
                 if let Some(h) = vm.get_volume_handle(&id) {
                     if v.size > h.capacity_bytes() {
                         vm.resize_volume(id, v.size).await.map_err(|e| format!("grown to {}: {e}", v.size))?;
@@ -605,35 +677,39 @@ async fn copy_one(
             }
         }
     };
+    (hooks.made)(id);
     // A copy that did not finish is not left half made.
     let fail = |e: String| async move {
         let _ = state.volume_manager.lock().await.delete_volume(id).await;
-        Err::<(VolumeId, u64, Extents), String>(e)
+        Err::<(VolumeId, u64), String>(e)
     };
     let dev = match state.volume_manager.lock().await.get_volume(&id) {
         Some(d) => d,
         None => return fail("the new volume is gone".into()).await,
     };
     let mut bytes = 0u64;
-    for (a, b) in ranges(&copy, mine.extent_bytes, v.size, MAX_RANGE) {
-        let url = format!("{base}/api/v1/volumes/{}/content", v.id);
-        let r = match c.get(&url).range(a, b - 1).send().await {
-            Ok(r) if r.status().is_success() => r.bytes(),
-            Ok(r) => return fail(format!("{url} bytes {a}-{}: HTTP {}", b - 1, r.status().as_u16())).await,
-            Err(e) => return fail(format!("{url} bytes {a}-{}: {e}", b - 1)).await,
-        };
-        if r.len() as u64 != b - a {
-            return fail(format!("{url} bytes {a}-{}: {} bytes came (the peer ignored the range?)", b - 1, r.len())).await;
-        }
-        if let Err(e) = dev.write(a, &r).await {
-            return fail(format!("writing {} bytes at {a}: {e}", r.len())).await;
-        }
-        bytes += r.len() as u64;
-        moved(r.len() as u64);
-        pace.took(r.len() as u64).await;
+    let rs = ranges(copy, mine.extent_bytes, v.size, MAX_RANGE);
+    if !rs.is_empty() && src.is_none() {
+        return fail("nothing to read it from".into()).await;
     }
-    for (a, b) in ranges(&zero, mine.extent_bytes, v.size, MAX_RANGE) {
-        if let Err(e) = dev.write(a, &vec![0u8; (b - a) as usize]).await {
+    let mut buf = Vec::new();
+    for (a, b) in rs {
+        let Some(src) = src else { break };
+        buf.resize((b - a) as usize, 0);
+        match src.read(a, &mut buf).await {
+            Ok(n) if n as u64 == b - a => {}
+            Ok(n) => return fail(format!("reading bytes {a}-{} over NVMe/TCP: {n} came", b - 1)).await,
+            Err(e) => return fail(format!("reading bytes {a}-{} over NVMe/TCP: {e}", b - 1)).await,
+        }
+        if let Err(e) = dev.write(a, &buf).await {
+            return fail(format!("writing {} bytes at {a}: {e}", buf.len())).await;
+        }
+        bytes += buf.len() as u64;
+        (hooks.moved)(buf.len() as u64);
+        pace.took(buf.len() as u64).await;
+    }
+    for (a, b) in ranges(zero, mine.extent_bytes, v.size, MAX_RANGE) {
+        if let Err(e) = dev.write_zeroes(a, b - a).await {
             return fail(format!("zeroing {} bytes at {a}: {e}", b - a)).await;
         }
     }
@@ -659,13 +735,13 @@ async fn copy_one(
     } else {
         vm.persist().await;
     }
-    Ok((id, bytes, mine))
+    Ok((id, bytes))
 }
 
 /// One pass over the peer.
 async fn pass(state: &Arc<AppState>, name: &str, generation: u64, spec: &Spec) -> Result<(), String> {
     let base = spec.from.engine.clone().unwrap_or_default().trim_end_matches('/').to_string();
-    let c = client()?;
+    let c = client(state)?;
     set_status(state, name, generation, |s, _| {
         s.phase = "Listing".into();
         s.started = Some(now());
@@ -728,7 +804,7 @@ async fn pass(state: &Arc<AppState>, name: &str, generation: u64, spec: &Spec) -
                     });
                 }
                 Some((id, _, _)) => outcome = Err(format!("a different volume of this name is here ({}): not overwritten", id.0)),
-                None if !v.sealed => outcome = Err("takes writes on the peer: the peer serves no content of a writable volume (stage 2 of #656)".into()),
+                None if !v.sealed => outcome = Err("takes writes on the peer: a writable volume moves by the live mirror (#295), not a copy".into()),
                 None => {
                     // Its parent here, when the parent was replicated.
                     let parent_here = match &v.parent {
@@ -751,8 +827,10 @@ async fn pass(state: &Arc<AppState>, name: &str, generation: u64, spec: &Spec) -
                         done_bytes.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
                         metrics::counter!("storm_replication_bytes_total", "replication" => name.to_string()).increment(n);
                     };
-                    match copy_one(state, &c, &base, v, parent_here, &mut pace, &moved).await {
-                        Ok((id, _, mine)) => {
+                    let (planned, made) = (|_: u64, _: u64, _: u64, _: u64| {}, |_: VolumeId| {});
+                    let hooks = Hooks { planned: &planned, made: &made, moved: &moved };
+                    match copy_one(state, &c, &base, v, parent_here, &mut pace, &hooks).await {
+                        Ok(Copied { id, extents: mine, .. }) => {
                             extents.insert(v.id.clone(), mine);
                             index.insert((v.namespace.clone(), v.name.clone()), (id, v.sealed, v.size));
                             set_status(state, name, generation, |_, m| {
