@@ -37,9 +37,15 @@ pub fn set_adj(path: &Path, value: i32) -> Result<i32, String> {
 /// killed under memory pressure is one an OOM wedges.
 pub fn exempt_node_engine() {
     match set_adj(Path::new(SELF), EXEMPT) {
-        Ok(v) => tracing::info!(
-            "oom: the engine's oom_score_adj is {v}: under memory pressure the kernel takes another process, never the storage every volume needs (#685)"
-        ),
+        Ok(v) => {
+            let line = format!(
+                "oom: the engine's oom_score_adj is {v}: under memory pressure the kernel takes another process, never the storage every volume needs (#685)"
+            );
+            // The console too (it carries WARN and up): once a boot, and
+            // what an install's console shows the exemption by.
+            eprintln!("{line}");
+            tracing::info!("{line}");
+        }
         Err(e) => tracing::warn!(
             "oom: the engine could not be exempted from the OOM killer ({e}): one kill under memory pressure leaves every volume on this node without its server (#685)"
         ),
