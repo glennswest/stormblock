@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.32.0] — 2026-11-19
+
+### Changed
+- #545: the initramfs brings every physical port up when the network starts, raised to MTU 9000 while still down (`rd.stormblock.port-mtu=N|off`), so the switch's wait runs beside the state read and a jumbo lease resets no link; the bridge holds the port's own MTU until a lease or `[network]` gives one; a lease's MTU never lowers a port; DNS that answers none of the three lookups is said as such.
+
 ### 2026-11-19
 - **perf:** #545: every physical port is brought up when the network starts, before the node state read and storage inventory, so the switch's wait after a link comes up no longer sits in DHCP (server8, 12.94: five discovers, ≈3.5 s). A port still down is raised to MTU 9000 first (`rd.stormblock.port-mtu=N|off`), because a down port takes it without a reset. The bridge is pinned to the port's own MTU until a lease or `[network]` gives one, and a lease's MTU never lowers a port (a declared `[network] mtu` still sets it). So a 9000 lease no longer resets an mlx4 link right before the DNS name lookup: on server8 that lost all three answers (3 s), and the node was named `storm-84ae30`, not `server8`. An address on the port itself (no bridge, or a path NIC whose lease names no MTU) puts the port's own MTU back. A DNS server that answers none of the three lookups is now said as `DNS did not answer`, not `no PTR record`. server8's reboot on 12.94 (v23.22.2's path NICs and DNS retries) was root ready at 39.4 s, against a 40 s target.
 - **docs:** #555: forge's trust shown live: on pvetest1 from 12.78.10 to 12.95, stormcert's `PUT /api/v1/forge/trust` is accepted (`gave the storage engine forge's CA and bootstrap token`), with no 403. The first boot's 401 before it is #430.
