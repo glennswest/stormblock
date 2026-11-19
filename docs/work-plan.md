@@ -313,6 +313,25 @@ f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
   (no replications CRD; no object made on pvetest2). Behind #655's owner
   decision (A CRDs / B APIService / C :9090).
 
+- [ ] **2026-11-19, the master's re-scope (issue retitled; comments of
+  2026-11-18 "registry to registry", "thin all the way through")**: the
+  Replication object is the registry's (stormblock-registry#186); the
+  engine's part is the transport: copy a volume from a peer engine over
+  NVMe/TCP by id. Plan:
+  - `peers::connect_to(peer, volume, ro)`: #328's attach against a named
+    peer (the peer serves it to this node's host NQN, the engine's initiator
+    connects), and its `release`;
+  - `replication::copy_one` reads through that NVMe/TCP device instead of
+    HTTP `/content` (the Replication object uses the same transport);
+  - `POST /api/v1/volumes/pull {from, volume, parent?, name?, namespace?,
+    bandwidth_mibps?, owner?}` → 202 job, `GET /api/v1/volumes/pull[/{id}]`,
+    kept in `pull-jobs.json` (a copy cut short by a restart: its half-made
+    volume deleted, the job `failed`); sealed only (a writable volume moves
+    by the live mirror, #295); thin: only mapped extents, a clone as a COW
+    clone of its parent's copy here (`parent`, or the peer parent's
+    name+namespace sealed here), allocated vs virtual on both sides in the job;
+  - test: two engines, the peer with an NVMe/TCP target.
+
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 
 forge1: three HGST 10 TB at 12 Gbit read 64–103 MB/s, the HITACHI at 6 Gbit
