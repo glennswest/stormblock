@@ -1022,10 +1022,16 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
 
     // Checking is I/O over the volume and nothing else, so it holds no lock:
     // an fsck of one template must not stall every other volume operation.
+    // It reads through a read-ahead view (#677): the volume's mapped extents
+    // read first, in order, in 1 MiB I/Os, and the fsck's block-sized reads
+    // answered from memory.
+    let view = check_view(vm, raw, dev).await;
+    let dev: Arc<dyn crate::drive::BlockDevice> = view.clone();
     if template.fs.is_xfs() {
         let checked = seal_check_xfs(&dev, &template.name, force).await?;
         drop(dev);
         let checked_at = started.elapsed();
+        say_check(&template.name, raw, &view, checked_at);
         let apply = move |t: &mut FsTemplate| {
             t.journal = true;
             if let Some(l) = &checked {
@@ -1076,6 +1082,7 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
     }
     drop(dev);
     let checked_at = started.elapsed();
+    say_check(&template.name, raw, &view, checked_at);
     let apply = move |t: &mut FsTemplate| {
         if let Some(l) = &layout {
             t.fs_uuid = Some(l.uuid);
@@ -1089,6 +1096,70 @@ pub async fn seal(vm: &VmLock, store: &StoreLock, id: &Uuid, force: bool) -> Res
         }
     };
     finish_seal(vm, store, id, template, raw, apply, started, checked_at).await
+}
+
+/// The read-ahead view a seal's check reads through (#677), its mapped
+/// extents already read in order. A prefetch that fails is said and left to
+/// the check, which reads on demand and reports the error itself.
+async fn check_view(
+    vm: &VmLock,
+    raw: VolumeId,
+    dev: Arc<dyn crate::drive::BlockDevice>,
+) -> Arc<super::readahead::ReadAhead> {
+    let view = super::readahead::ReadAhead::new(dev);
+    let found = {
+        let m = vm.lock().await;
+        m.get_volume_handle(&raw).map(|h| (h.extent_size(), m.gem().clone()))
+    };
+    let Some((extent_size, gem)) = found else { return view };
+    let _pin = gem.read().await.pin();
+    if let Err(e) = crate::volume::gem::ensure_resident(&gem, raw).await {
+        tracing::info!("fstemplate check of {raw}: its extent map did not load ({e}); reading on demand");
+        return view;
+    }
+    let extents: Vec<u64> = {
+        let g = gem.read().await;
+        g.volume_extents(&raw).map(|it| it.map(|(v, _)| v).collect()).unwrap_or_default()
+    };
+    drop(_pin);
+    let chunk = super::readahead::CHUNK;
+    let offsets = extents.into_iter().flat_map(|e| {
+        let start = e * extent_size;
+        (start..start + extent_size.max(1)).step_by(chunk as usize)
+    });
+    if let Err(e) = view.prefetch(offsets).await {
+        tracing::info!("fstemplate check of {raw}: read-ahead stopped ({e}); the rest on demand");
+    }
+    view
+}
+
+/// A check over this long on a volume this small is said as a WARN, with
+/// what its I/O was and who held the engine's locks (#677).
+const SLOW_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+const SMALL_VOLUME: u64 = 1 << 30;
+
+/// The check's own numbers (#677): bytes, I/Os and their size, MB/s, and
+/// the reads answered from memory.
+fn say_check(name: &str, raw: VolumeId, view: &super::readahead::ReadAhead, took: std::time::Duration) {
+    use crate::drive::BlockDevice as _;
+    let s = view.stats();
+    let line = format!(
+        "fstemplate {name} check of volume {raw}: {} ms, read {} bytes in {} I/O(s) of {} KiB, {:.1} MB/s over {} ms reading; {} of {} read(s) from memory",
+        took.as_millis(),
+        s.bytes,
+        s.ios,
+        s.io_size / 1024,
+        s.mb_per_s(),
+        s.reading.as_millis(),
+        s.hits,
+        s.asked
+    );
+    if took > SLOW_CHECK && view.capacity_bytes() < SMALL_VOLUME {
+        let locks = crate::lockwatch::summary().trim().replace('\n', "; ");
+        tracing::warn!("{line}; slow for a volume under 1 GiB; locks now: {locks}");
+    } else {
+        tracing::info!("{line}");
+    }
 }
 
 /// The end of a seal, once the filesystem checked out.

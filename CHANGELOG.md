@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-19
+- **perf:** #677: the fstemplate seal's check reads the template through a read-ahead view (`src/fs/readahead.rs`): its mapped extents read in order in 1 MiB I/Os, the fsck's 4 KiB reads answered from memory (forge1: 146 MiB took 43–48 s at 3.2 MB/s in 4 KiB reads). The check's bytes, I/Os, I/O size and MB/s are logged; a check over 10 s on a volume under 1 GiB is a WARN naming them and the locks held.
+
 ### 2026-11-18
 - **fix:** #676: health's `flow_over.seconds` stops when the flow-over ends, so `mb_per_s` and `extents_per_s` are of the span it ran (forge1 12.94 said 8545 s / 0.42 MB/s of a 69 s flow-over); `started_at`/`finished_at` added, `pace.state` reads `done` (or `stopped`), `eta_seconds` 0. A later flow-over in the process counts from zero.
 

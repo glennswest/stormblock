@@ -3,6 +3,12 @@
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
 
+
+## #677 — the seal's check on the sequential path (2026-11-19, P0)
+- [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it
+- [x] the check's own line (bytes, I/Os, I/O size, MB/s, hits); WARN past 10 s under 1 GiB with `lockwatch::summary()`. The check itself holds no lock (it did not before either); the #364 flush line on forge1 was another task's
+- [ ] check.sh on sc-build; on forge1: the seal line's check under a few seconds for a 146 MiB golden
+
 ## #676 — health's flow-over span stops at its end (2026-11-18)
 - [x] `FlowProgress::finish("done"|"stopped")`: at the flow-over's completion, its abandonment, and a system move's end; `seconds`/rates over the finished span, `started_at`/`finished_at`, `pace.state` `done`; a later begin counts from zero
 - [x] unit test `a_finished_flow_over_keeps_its_span_and_rates`; README health, CHANGELOG

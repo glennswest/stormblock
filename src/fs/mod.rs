@@ -28,6 +28,7 @@ pub mod ext4;
 /// layout reader, and where free space is on a volume is engine knowledge.
 pub mod ext4_free;
 pub mod files;
+pub mod readahead;
 pub mod grow;
 pub mod template;
 pub mod survey;

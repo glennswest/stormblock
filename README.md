@@ -1909,6 +1909,12 @@ cleanup pending, or anything the check turns up. A template that seals dirty
 fails much later, inside a container, as `Read-only file system`. Pass `?force=true` to override, and
 `{"format": false}` at create time to have an initiator lay the filesystem down
 over an export instead, then `POST /api/v1/fstemplates/{id}/seal`.
+The check reads the volume through a read-ahead view (#677): the extents it
+maps are read first, in order, in 1 MiB I/Os, and the fsck's block-sized
+reads are answered from memory (up to 512 MiB; past that, a chunk at a time).
+It holds no lock. The log says what it read: bytes, I/Os and their size,
+MB/s, reads answered from memory. A check over 10 s on a volume under 1 GiB
+is a WARN naming that and the engine's locks at the time.
 
 **A template is one volume, and deleting it takes that volume with it.** The
 scratch volume a template is formatted on is dropped the moment it is sealed —
