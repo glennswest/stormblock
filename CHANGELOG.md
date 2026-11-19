@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-19
+- **docs:** #680: `docs/history/data-placement.md` no longer says "not implemented": it is a 2026-08-28 design note written before the code, and its History header already names what was built (`docs/redundancy.md`, `docs/multi-drive.md`).
+
 ## [v24.32.0] — 2026-11-19
 
 ### Changed

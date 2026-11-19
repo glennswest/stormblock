@@ -4,6 +4,9 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #680 — stub marker in docs/history/data-placement.md (2026-11-19, P0)
+- [x] line 27 reworded: a design note written before the code; the History header names what was built. No gap to file: its conclusions are built (redundancy, drain, rebuild; #69–#72 closed).
+
 ## #442 — stormdist: allocated-range export, ISO restore, ISO flow-over (2026-11-18, P1)
 stormdist (glennswest/stormdist, format 2, v0.6.0) is the release/backup
 ISO. stormblock's side, in steps (each its own commit):

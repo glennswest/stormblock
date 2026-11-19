@@ -24,8 +24,9 @@
 
 # Where a claim lives, and how it follows a workload
 
-Design, 2026-08-28. Not implemented. Records a decision about the default
-durability shape and what has to be true before it is safe.
+Design, 2026-08-28, written before the code. Records a decision about the
+default durability shape and what has to be true before it is safe; the
+History note at the top says what was built since and where it is documented.
 
 ## The default: RAID 1, one leg local, one leg on an appliance
 
