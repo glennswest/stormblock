@@ -274,8 +274,13 @@ forge1's `registry-data` is 4 GiB; it must hold forge's images.
   kube-system/stormblock and the worker's cluster identity)
 - [x] check.sh ALL PASS on e7b9c2dd (1537 tests); v24.33.0 (82817c7e); image build 1e9b329d012a
 - [x] #655, #649, #656, #658 proposed `--after stormcos#1050`; the master noted
-- [ ] once a release carries stormcos#1050: the master's `sc patch volume`
-  on forge1's registry-data; `shipped` with the `api:` proof
+- [x] stormcos#1050 carried (stormcos 657c4b2, `82-stormblock-crds.yaml`,
+  tested on a real rustkube: engine publishes, storage-admin grows by merge
+  patch); 2026-11-19 #655 proposed `--after-install stormcos>=657c4b2`
+- [ ] once a test machine runs it: `shipped` with
+  `api:/apis/storage.storm.io/v1/volumes ~ "storm.io/name":"registry-data".*"sizeBytes":[0-9]+`;
+  the master's `sc patch volume` on forge1's registry-data
+- [ ] #683 (filed by stormcos): the CRD's `Name` column beside the apiserver's
 
 ## #656 — Replication: sync a store from a peer engine (2026-11-18, P0 hand-off)
 
