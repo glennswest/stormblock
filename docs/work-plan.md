@@ -1314,7 +1314,7 @@ exit`, on the consoles). adopt-ublk's runtime is the same.
       blocking join) must fail `standdown`, then delete the branch; check.sh; a patch release; stage; close. Metal:
       the two adopt lines under 0.5 s apart on a reboot
 
-### A cluster worker cannot review bearers: releasing it fails 503 (2026-11-07, #557, P0, stormcentral#360) — ENGINE HALF DONE (v23.23.0), open behind stormcluster
+### A cluster worker cannot review bearers: releasing it fails 503 (2026-11-07, #557, P0, stormcentral#360) — A LIVE on 12.71-flowsdn; the 503 names a missing record
 
 Read from the code: pointing the engine at the VIP is not enough. A worker keeps its own `sa-token.key`, so its
 tier-0 tokens (`stormblock.token`, `stormcluster.token`) cannot verify at the cluster. Master's decision on #557: **A**,
@@ -1328,6 +1328,13 @@ until A lands. Stormblock's half: follow a record of the cluster, written by sto
 - [x] 2026-11-07: record path checked: stormcluster e9d8d80 writes `/data/stormcert/engine-cluster.json`, stormcos mounts
       `sbcert` (/data/stormcert) at /etc/stormcert beside `stormblock.token`: the default path. Proposed after stormcluster#99
 - [ ] after those: the master reruns `testhost cluster-test`; a real TLS endpoint; close
+- [x] 2026-11-18, the master's 12.69 report (503 at 127.0.0.1:6443): **the record was never written.** 12.69's
+      rustkube-apiserver is stormcos 225795f, before aad1426 (stormcos#838's `serviceaccounts/token` grant), so the
+      seed's TokenRequest was refused and no token or record reached the worker. Same stormcluster (baec70d) and a
+      record-following stormblock in 12.71-flowsdn, whose apiserver (ec92330) carries the grant: its cluster-test
+      dc28256b39 released the worker in 44 s with C gone, so A works live over https (the cluster's VIP :7443)
+- [ ] the 503 says when no record was there (the path, and that stormcluster writes it at a join), so the next
+      such report names its cause; test; check.sh; v24.31.1; stage; close (C stays out: A is proven live)
 
 ### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — PAUSED for P0 #557: v23.22.2 on main, not tagged or staged
 
