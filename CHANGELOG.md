@@ -4,6 +4,12 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.34.1] — 2026-11-19
+
+### Fixed
+- #676: the `Flow-over complete` console line says the ended span as health holds it (seconds, MB/s, started_at, finished_at).
+- #677: the fstemplate seal's check line is printed on the console as well as logged.
+
 ### 2026-11-19
 - **fix:** #677: the fstemplate seal's check line (bytes, I/Os of 1024 KiB, MB/s, reads from memory) is printed on the console as well as logged at INFO: a node's console carries stdout and WARN, so a fast seal's numbers were seen nowhere a person or stormcentral reads.
 - **fix:** #676: the console's `Flow-over complete` line says the finished span as health holds it (`in 31.2s at 52.1 MB/s (health's flow_over: started_at …, finished_at …)`): a test install's health is read after its reboot, where no flow-over is, so the console is where the ended span can be seen.
