@@ -209,7 +209,7 @@ async fn here_by_name(state: &AppState, namespace: &str, name: &str) -> Option<(
 
 /// What a pull answers before it starts: the job, or the copy already here.
 pub enum Started {
-    Job(Job),
+    Job(Box<Job>),
     Here(Uuid),
 }
 
@@ -329,7 +329,7 @@ pub async fn start(state: &Arc<AppState>, req: Request) -> Result<Started, (u16,
     tokio::spawn(async move {
         run(&state, id, &c, &from, v, parent_here, req.bandwidth_mibps).await;
     });
-    Ok(Started::Job(job))
+    Ok(Started::Job(Box::new(job)))
 }
 
 async fn run(
@@ -451,7 +451,7 @@ pub async fn resume(state: &AppState) {
 /// `POST /api/v1/volumes/pull`.
 pub async fn post(State(state): State<Arc<AppState>>, Json(req): Json<Request>) -> Response {
     match start(&state, req).await {
-        Ok(Started::Job(j)) => (axum::http::StatusCode::ACCEPTED, Json(j)).into_response(),
+        Ok(Started::Job(j)) => (axum::http::StatusCode::ACCEPTED, Json(*j)).into_response(),
         Ok(Started::Here(id)) => {
             Json(serde_json::json!({ "state": "done", "volume": id, "message": "the same volume is here already" })).into_response()
         }
