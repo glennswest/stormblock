@@ -638,8 +638,9 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   `"flow_over"` (#401): `moved`, `zeroed` (extents that read all zeros and
   were unmapped, not copied), `bytes`, `started_at` and, once it has
   ended, `finished_at` (unix seconds), `seconds` (the span it ran: it stops
-  when the flow-over ends, #676), `mb_per_s` and `extents_per_s` (over that
-  span) and `eta_seconds` (for what is left, at the rate so far; 0 once ended),
+  when the flow-over ends, #676; the console's `Flow-over complete` line says
+  the same span, rate, `started_at` and `finished_at`), `mb_per_s` and
+  `extents_per_s` (over that span) and `eta_seconds` (for what is left, at the rate so far; 0 once ended),
   and `source_path` when the source is reached over NVMe/TCP (#407): `mtu`
   (the connection's path MTU, `IP_MTU`; 0 unknown), `jumbo` (≥ 9000) and
   `max_transfer` (the bytes one command carries: the target's MDTS, 8 MiB

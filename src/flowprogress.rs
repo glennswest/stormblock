@@ -253,6 +253,17 @@ impl FlowProgress {
         })
     }
 
+    /// The ended span as health reports it (#676), for the console's
+    /// completion line: nothing while the flow-over runs or before one.
+    pub fn span_said(&self) -> Option<String> {
+        let s = self.snapshot()?;
+        let finished_at = s.finished_at?;
+        Some(format!(
+            "in {:.1}s at {:.1} MB/s (health's flow_over: started_at {}, finished_at {})",
+            s.seconds, s.mb_per_s, s.started_at, finished_at
+        ))
+    }
+
     /// Seconds left at the rate so far, for `remaining` extents; 0 once it
     /// has ended.
     pub fn eta_seconds(&self, remaining: u64) -> Option<f64> {
@@ -339,6 +350,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         let running = p.snapshot().unwrap();
         assert!(running.finished_at.is_none());
+        assert!(p.span_said().is_none(), "no span is said while it runs");
         assert_eq!(running.pace.as_ref().unwrap().state, "full");
         p.finish("done");
         let a = p.snapshot().unwrap();
@@ -351,6 +363,14 @@ mod tests {
         let at = b.finished_at.unwrap();
         assert!(at >= b.started_at);
         assert_eq!(b.pace.as_ref().unwrap().state, "done");
+        let said = p.span_said().unwrap();
+        assert_eq!(
+            said,
+            format!(
+                "in {:.1}s at {:.1} MB/s (health's flow_over: started_at {}, finished_at {at})",
+                b.seconds, b.mb_per_s, b.started_at
+            )
+        );
         assert_eq!(p.eta_seconds(100), Some(0.0));
         p.finish("stopped"); // the first end is kept
         assert_eq!(p.snapshot().unwrap().pace.unwrap().state, "done");

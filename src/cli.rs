@@ -9051,7 +9051,10 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             // flow-over that ran, not the time since it started.
             crate::flowprogress::FLOW.finish("done");
             tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
-            println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
+            // The span health now holds still, said where a test install
+            // can see it: its health is read after the reboot (#676).
+            let span = crate::flowprogress::FLOW.span_said().map(|s| format!(" {s}")).unwrap_or_default();
+            println!("Flow-over complete: {moved} extent(s) now on {}{span}", flow.disk);
             // What did not move is what is still on a source (#574), not the
             // failures along the way: a failed extent stays on its source and
             // the next pass moves it.
