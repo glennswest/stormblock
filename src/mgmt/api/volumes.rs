@@ -196,6 +196,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
             secret: false,
             namespace: crate::volume::metadata::DEFAULT_NAMESPACE.to_string(),
             rollback: None,
+            grow: None,
         },
     }
 }

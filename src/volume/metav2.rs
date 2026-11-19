@@ -1374,6 +1374,7 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
     let spread = record.layout == crate::volume::thin::Layout::Spread;
     let secret = record.secret;
     let rollback = record.rollback.take();
+    let grow = record.grow.take();
     // The default namespace is not written: a stormcos volume's header is
     // byte for byte what it was (#408).
     let namespace = record
@@ -1414,7 +1415,8 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
         || spread
         || secret
         || namespace.is_some()
-        || rollback.is_some();
+        || rollback.is_some()
+        || grow.is_some();
     if origin != super::metadata::Origin::Unmarked || later {
         out.extend_from_slice(HEADER_EXT_TAG);
         out.push(origin.code());
@@ -1451,9 +1453,20 @@ pub fn header_bytes(rec: &VolumeRecord, extent_size: u64) -> Vec<u8> {
                 out.extend_from_slice(t.as_bytes());
             }
         }
+        // Last, a grow policy (#690): `G`, max, step.
+        if let Some(g) = grow {
+            out.push(GROW_TAG);
+            out.extend_from_slice(&g.max.to_le_bytes());
+            out.extend_from_slice(&g.step.to_le_bytes());
+        }
     }
     out
 }
+
+/// A volume's grow policy in a header's extension (#690): last.
+const GROW_TAG: u8 = b'G';
+/// The tag, max, step.
+const GROW_LEN: usize = 1 + 8 + 8;
 
 /// A rollback copy's mark in a header's extension (#565): after the namespace.
 const ROLLBACK_TAG: u8 = b'R';
@@ -1545,6 +1558,12 @@ fn header_ext(rest: &[u8], rec: &mut VolumeRecord) {
             } else if let Some((mark, used)) = read_rollback(d) {
                 rec.rollback = Some(mark);
                 d = &d[used..];
+            } else if d.len() >= GROW_LEN && d[0] == GROW_TAG {
+                rec.grow = Some(super::metadata::GrowPolicy {
+                    max: u64::from_le_bytes(d[1..9].try_into().unwrap()),
+                    step: u64::from_le_bytes(d[9..17].try_into().unwrap()),
+                });
+                d = &d[GROW_LEN..];
             } else {
                 break;
             }
@@ -1742,6 +1761,7 @@ mod tests {
             secret: false,
             namespace: None,
             rollback: None,
+            grow: None,
         };
         let doc = VolumeMetadata { extent_size: 1 << 20, arrays: Vec::new(), volumes: vec![rec] };
         let mut entries = document_entries(&doc);
@@ -1794,6 +1814,7 @@ mod tests {
                 secret: false,
                 namespace: None,
                 rollback: None,
+                grow: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = document_of(header_entries(id, &bytes)).unwrap();
@@ -1855,6 +1876,7 @@ mod tests {
                 secret: false,
                 namespace: None,
                 rollback: None,
+                grow: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1905,6 +1927,7 @@ mod tests {
                 secret: false,
                 namespace: None,
                 rollback: None,
+                grow: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -1957,6 +1980,7 @@ mod tests {
                 secret: true,
                 namespace: None,
                 rollback: None,
+                grow: None,
             };
             let bytes = header_bytes(&rec, 1 << 20);
             let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -2016,6 +2040,7 @@ mod tests {
             secret: false,
             namespace: ns.map(String::from),
             rollback: None,
+            grow: None,
         };
         for (d, scheme, layout) in [(None, None, Layout::Affine), (Some(digest), Some(sc), Layout::Spread)] {
             let rec = make(Some("nana"), d, scheme, layout);
@@ -2073,6 +2098,7 @@ mod tests {
             secret: false,
             namespace: Some("nana".into()),
             rollback: Some(mark.clone()),
+            grow: None,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
@@ -2092,6 +2118,61 @@ mod tests {
         let alone = VolumeRecord { rollback: Some(mark.clone()), namespace: None, origin: Origin::Unmarked, ..rec };
         let back = &document_of(header_entries(id, &header_bytes(&alone, 1 << 20))).unwrap().volumes[0];
         assert_eq!(back.rollback.as_ref(), Some(&mark));
+    }
+
+    /// #690: a grow policy rides last, after the rollback mark; a reader
+    /// before it stops at its tag and reads the rest; a volume with none
+    /// writes the header it did.
+    #[test]
+    fn a_grow_policy_rides_last_and_older_readers_keep_the_rest() {
+        use crate::volume::metadata::{GrowPolicy, Origin};
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let g = GrowPolicy { max: 64 << 30, step: 1 << 30 };
+        let rec = VolumeRecord {
+            id,
+            name: "registry-data".into(),
+            virtual_size: 4 << 30,
+            array_id: None,
+            extents: Default::default(),
+            retention: Default::default(),
+            redundancy: Default::default(),
+            parity: Default::default(),
+            failed_slabs: Vec::new(),
+            parent: None,
+            sealed: false,
+            template: false,
+            access: Default::default(),
+            fs: None,
+            owner: None,
+            lba: 4096,
+            extent_size: 0,
+            origin: Origin::Node,
+            tier: None,
+            digest: None,
+            scheme: None,
+            layout: Default::default(),
+            secret: false,
+            namespace: Some("nana".into()),
+            rollback: None,
+            grow: Some(g),
+        };
+        let bytes = header_bytes(&rec, 1 << 20);
+        let back = &document_of(header_entries(id, &bytes)).unwrap().volumes[0];
+        assert_eq!(back.grow, Some(g));
+        assert_eq!((back.origin, back.namespace.as_deref()), (Origin::Node, Some("nana")));
+        let at = bytes.len() - GROW_LEN;
+        assert_eq!(bytes[at], b'G', "the policy last");
+        let mut older = bytes.clone();
+        older[at] = b'?';
+        let back = &document_of(header_entries(id, &older)).unwrap().volumes[0];
+        assert_eq!((back.grow, back.namespace.as_deref(), back.origin), (None, Some("nana"), Origin::Node));
+        // No policy: the header is what it was before #690.
+        let plain = VolumeRecord { grow: None, ..rec.clone() };
+        assert!(header_bytes(&plain, 1 << 20).ends_with(b"N\x04nana"));
+        // A policy alone still rides.
+        let alone = VolumeRecord { namespace: None, origin: Origin::Unmarked, ..rec };
+        let back = &document_of(header_entries(id, &header_bytes(&alone, 1 << 20))).unwrap().volumes[0];
+        assert_eq!(back.grow, Some(g));
     }
 
     /// #349: a volume's origin rides after its header; a reader that knows
@@ -2126,6 +2207,7 @@ mod tests {
             secret: false,
             namespace: None,
             rollback: None,
+            grow: None,
         };
         let bytes = header_bytes(&rec, 1 << 20);
         let doc = document_of(header_entries(id, &bytes)).unwrap();
@@ -2442,6 +2524,7 @@ mod tests {
             secret: false,
             namespace: None,
             rollback: None,
+            grow: None,
         };
         let long = header_entries(id, &header_bytes(&rec(&"a".repeat(5000)), 1 << 20));
         let short = header_entries(id, &header_bytes(&rec("b"), 1 << 20));
@@ -2483,6 +2566,7 @@ mod tests {
             secret: false,
             namespace: None,
             rollback: None,
+            grow: None,
         };
         v.extents.insert(0, ExtentLocation::with_legs(Leg::new(sid, 5_000_000_000), vec![Leg::new(sid, 7)]));
         v.extents.insert(9, ExtentLocation::new(sid, 3));

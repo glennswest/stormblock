@@ -266,6 +266,69 @@ pub struct VolumeRecord {
     /// a format v2 header carries it last, after the namespace.
     #[serde(skip)]
     pub rollback: Option<RollbackMark>,
+    /// How the engine grows the volume as its filesystem fills (#690), when
+    /// something asked. Never written by bincode; a format v2 header carries
+    /// it last, after the rollback mark.
+    #[serde(skip)]
+    pub grow: Option<GrowPolicy>,
+}
+
+/// A volume's grow policy (#690, `spec.grow`): past [`GrowPolicy::AT_PERCENT`]
+/// of its filesystem used, the engine grows it by `step` up to `max`. No
+/// policy, no grow: the conditions alone say it is filling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrowPolicy {
+    /// The most the volume is grown to, in bytes.
+    pub max: u64,
+    /// What one grow adds, in bytes: whole GiB.
+    pub step: u64,
+}
+
+impl GrowPolicy {
+    pub const GIB: u64 = 1 << 30;
+    /// A step when none is said.
+    pub const DEFAULT_STEP: u64 = Self::GIB;
+    /// Used, in percent of the filesystem, from which the volume grows.
+    pub const AT_PERCENT: u64 = 80;
+
+    /// A policy from what a caller asked: `max` and `step` in bytes or
+    /// `64G`/`64Gi` (base 1024). The step is rounded up to whole GiB (1 GiB
+    /// when not said); `max` is at least one step.
+    pub fn parse(max: &serde_json::Value, step: Option<&serde_json::Value>) -> Result<GrowPolicy, String> {
+        fn bytes(v: &serde_json::Value, what: &str) -> Result<u64, String> {
+            match v {
+                serde_json::Value::Number(n) => n.as_u64().ok_or_else(|| format!("spec.grow.{what}: {n} is not a whole number of bytes")),
+                serde_json::Value::String(s) => crate::image::storage::parse_bytes(s).map_err(|e| format!("spec.grow.{what}: {e}")),
+                other => Err(format!("spec.grow.{what}: {other} is neither bytes nor a size like 64G")),
+            }
+        }
+        let max = bytes(max, "max")?;
+        let step = match step {
+            None | Some(serde_json::Value::Null) => Self::DEFAULT_STEP,
+            Some(v) => bytes(v, "step")?,
+        };
+        if step == 0 {
+            return Err("spec.grow.step: 0 grows nothing".into());
+        }
+        let step = step.div_ceil(Self::GIB) * Self::GIB;
+        if max < step {
+            return Err(format!("spec.grow.max: {max} bytes is less than one step ({step})"));
+        }
+        Ok(GrowPolicy { max, step })
+    }
+
+    /// What one grow takes a volume of `capacity` bytes to, within `room`
+    /// bytes its pool can still give: `None` when nothing is to be done
+    /// (at `max`, or no whole GiB of room).
+    pub fn next(&self, capacity: u64, room: u64) -> Option<u64> {
+        if capacity >= self.max {
+            return None;
+        }
+        // The room in whole GiB: a step cut by `max` may end off a GiB, one
+        // cut by the room never does.
+        let by = self.step.min(self.max - capacity).min(room / Self::GIB * Self::GIB);
+        (by > 0).then_some(capacity + by)
+    }
 }
 
 /// A rollback copy (#565): a node volume an install or upgrade renamed aside
@@ -639,6 +702,7 @@ impl From<v8::VolumeMetadata> for VolumeMetadata {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                 })
                 .collect(),
         }
@@ -758,6 +822,7 @@ impl From<v7::VolumeMetadata> for VolumeMetadata {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                 })
                 .collect(),
         }
@@ -829,6 +894,7 @@ impl From<v6::VolumeMetadata> for VolumeMetadata {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                 })
                 .collect(),
         }
@@ -901,6 +967,7 @@ impl From<v5::VolumeMetadata> for VolumeMetadata {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                     })
                 .collect(),
         }
@@ -968,6 +1035,7 @@ impl From<v4::VolumeMetadata> for VolumeMetadata {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                     })
                 .collect(),
         }
@@ -1037,6 +1105,7 @@ impl From<v3::VolumeMetadata> for VolumeMetadata {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                     })
                 .collect(),
         }
@@ -1100,6 +1169,7 @@ impl From<v2::VolumeMetadata> for VolumeMetadata {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                     })
                 .collect(),
         }
@@ -1166,6 +1236,7 @@ impl From<v1::VolumeMetadata> for VolumeMetadata {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                     })
                 .collect(),
         }
@@ -1466,6 +1537,7 @@ mod tests {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                 }],
         }
     }
@@ -1611,6 +1683,7 @@ mod tests {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
             }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1705,6 +1778,7 @@ mod tests {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                 }],
         };
         let back = MetadataStore::decode(&MetadataStore::encode(&meta).unwrap()).unwrap();
@@ -1937,6 +2011,7 @@ mod retention_tests {
                     secret: false,
                     namespace: None,
                     rollback: None,
+                    grow: None,
                 }],
         }
     }

@@ -389,6 +389,8 @@ pub struct VolumeManager {
     namespaces: HashMap<VolumeId, String>,
     /// Rollback copies an install set aside (#565), by volume.
     rollbacks: HashMap<VolumeId, metadata::RollbackMark>,
+    /// Grow policies (#690), by volume. Absent = none: never grown.
+    grows: HashMap<VolumeId, metadata::GrowPolicy>,
     /// Why the last attempt to write this manager's record failed, if it did.
     ///
     /// A background persist cannot fail the call that triggered it — the
@@ -483,6 +485,7 @@ impl VolumeManager {
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             namespaces: HashMap::new(),
             rollbacks: HashMap::new(),
+            grows: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -525,6 +528,7 @@ impl VolumeManager {
             digest_wake: Arc::new(tokio::sync::Notify::new()),
             namespaces: HashMap::new(),
             rollbacks: HashMap::new(),
+            grows: HashMap::new(),
             durability: Arc::new(std::sync::Mutex::new(None)),
             generation: std::sync::atomic::AtomicU64::new(1),
             flowing_into: std::sync::Mutex::new(Vec::new()),
@@ -985,6 +989,24 @@ impl VolumeManager {
         match mark {
             Some(m) => self.rollbacks.insert(id, m),
             None => self.rollbacks.remove(&id),
+        };
+        Ok(())
+    }
+
+    /// A volume's grow policy (#690), when it has one.
+    pub fn grow_policy(&self, id: &VolumeId) -> Option<metadata::GrowPolicy> {
+        self.grows.get(id).copied()
+    }
+
+    /// Set or clear a volume's grow policy (#690); written at the next
+    /// persist. A sealed volume (a blank) takes one too: its clones inherit it.
+    pub fn set_grow_policy(&mut self, id: VolumeId, policy: Option<metadata::GrowPolicy>) -> Result<(), VolumeError> {
+        if !self.volumes.contains_key(&id) {
+            return Err(VolumeError::VolumeNotFound(id));
+        }
+        match policy {
+            Some(p) => self.grows.insert(id, p),
+            None => self.grows.remove(&id),
         };
         Ok(())
     }
@@ -1661,6 +1683,7 @@ impl VolumeManager {
             self.schemes.remove(id);
             self.namespaces.remove(id);
             self.rollbacks.remove(id);
+            self.grows.remove(id);
             self.retentions.remove(id);
             self.secrets.remove(id);
             self.gem.write().await.remove_volume(*id);
@@ -2019,6 +2042,9 @@ impl VolumeManager {
             }
             if let Some(r) = vrec.rollback.clone() {
                 self.rollbacks.insert(vrec.id, r);
+            }
+            if let Some(g) = vrec.grow {
+                self.grows.insert(vrec.id, g);
             }
             self.volumes.insert(vrec.id, handle);
             self.present.insert(vrec.id);
@@ -2590,6 +2616,7 @@ impl VolumeManager {
         self.schemes.remove(&id);
         self.namespaces.remove(&id);
         self.rollbacks.remove(&id);
+        self.grows.remove(&id);
         self.retentions.remove(&id);
         // A secret volume's slots are always overwritten (#74), whatever
         // the node's default.
@@ -3003,6 +3030,11 @@ impl VolumeManager {
         }
         if let Some(fs) = self.fs_info.get(&source).cloned() {
             self.fs_info.insert(child, fs);
+        }
+        // And grows as its source would (#690): a blank's policy reaches
+        // every node's copy of it.
+        if let Some(g) = self.grows.get(&source).copied() {
+            self.grows.insert(child, g);
         }
     }
 
@@ -4113,6 +4145,7 @@ impl VolumeManager {
                 secret: self.secrets.contains(id),
                 namespace: self.namespaces.get(id).cloned(),
                 rollback: self.rollbacks.get(id).cloned(),
+                grow: self.grows.get(id).copied(),
                 lba: handle.lba(),
                 extents: Default::default(),
                 redundancy: handle.redundancy(),
@@ -4182,6 +4215,7 @@ impl VolumeManager {
                 secret: self.secrets.contains(&id),
                 namespace: self.namespaces.get(&id).cloned(),
                 rollback: self.rollbacks.get(&id).cloned(),
+                grow: self.grows.get(&id).copied(),
                 lba,
                 extents: gem
                     .get_volume_map(&id)
@@ -4448,6 +4482,9 @@ impl VolumeManager {
             }
             if let Some(r) = vrec.rollback.clone() {
                 self.rollbacks.insert(vrec.id, r);
+            }
+            if let Some(g) = vrec.grow {
+                self.grows.insert(vrec.id, g);
             }
             restored += 1;
             tracing::info!("Restored volume '{}' ({})", vrec.name, vrec.id);
