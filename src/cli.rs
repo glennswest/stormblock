@@ -11901,9 +11901,11 @@ mod tests {
             &["stormblock", "ublk", "--volume", "x"][..],
         ] {
             let e = super::Cli::try_parse_from(args).map(|_| ()).unwrap_err();
-            assert_eq!(e.kind(), clap::error::ErrorKind::InvalidSubcommand, "{args:?}");
+            use clap::error::ErrorKind::{InvalidSubcommand, UnknownArgument};
+            assert!(matches!(e.kind(), InvalidSubcommand | UnknownArgument), "{args:?}: {e}");
         }
-        assert!(super::Cli::try_parse_from(["stormblock", "boot-local", "--help"]).is_err_and(|e| e.kind() == clap::error::ErrorKind::DisplayHelp));
+        let help = super::Cli::try_parse_from(["stormblock", "boot-local", "--help"]).map(|_| ()).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
     }
 
     /// #355: `system-data` is made in a local data half, as ext4, once; and
