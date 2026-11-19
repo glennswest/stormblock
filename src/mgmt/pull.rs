@@ -25,8 +25,10 @@
 //!
 //! **What does not:** a volume that takes writes on the peer (409: it moves
 //! by the live mirror, #295, which follows its writes). A volume of the same
-//! name and namespace here that is the same (sealed, same size) answers 200,
-//! the copy there already; one that differs is a 409, never overwritten.
+//! name and namespace here that is its copy (a pull made it from that peer
+//! volume; else sealed, the same size and filesystem UUID, and no pull made
+//! it from another) answers 200; one that differs is a 409, never
+//! overwritten.
 //!
 //! Jobs are kept in `<data_dir>/pull-jobs.json`. A copy a restart cut short
 //! has its half-made volume deleted and reads `failed`.
@@ -207,6 +209,25 @@ async fn here_by_name(state: &AppState, namespace: &str, name: &str) -> Option<(
     None
 }
 
+/// Whether volume `id` here (of the peer volume's name and namespace) is the
+/// copy of `v`: a pull made it from that peer volume; else, when no pull made
+/// it from another, it is sealed, of the same size, and its filesystem UUID
+/// (where both are known) is the same.
+async fn same_here(state: &AppState, v: &PeerVol, id: VolumeId, sealed: bool, size: u64) -> bool {
+    let (from_it, from_other) = with(state, |m| {
+        let made: Vec<&Job> = m.values().filter(|j| j.state == "done" && j.volume == Some(id.0)).collect();
+        (made.iter().any(|j| j.peer_volume == v.id), made.iter().any(|j| j.peer_volume != v.id))
+    });
+    if from_it {
+        return true;
+    }
+    if from_other || !sealed || size != v.size {
+        return false;
+    }
+    let here_fs = state.volume_manager.lock().await.fs_info(&id).and_then(|f| f.uuid);
+    !matches!((v.fs.as_ref().and_then(|f| f.uuid), here_fs), (Some(a), Some(b)) if a != b)
+}
+
 /// What a pull answers before it starts: the job, or the copy already here.
 pub enum Started {
     Job(Box<Job>),
@@ -263,12 +284,11 @@ pub async fn start(state: &Arc<AppState>, req: Request) -> Result<Started, (u16,
     if req.owner.is_some() {
         v.owner = req.owner.clone();
     }
-    match here_by_name(state, &v.namespace, &v.name).await {
-        Some((id, true, size)) if size == v.size => return Ok(Started::Here(id.0)),
-        Some((id, _, _)) => {
-            return Err((409, format!("{}/{} is here already and is a different volume ({}): not overwritten", v.namespace, v.name, id.0)))
+    if let Some((id, sealed, size)) = here_by_name(state, &v.namespace, &v.name).await {
+        if same_here(state, &v, id, sealed, size).await {
+            return Ok(Started::Here(id.0));
         }
-        None => {}
+        return Err((409, format!("{}/{} is here already and is a different volume ({}): not overwritten", v.namespace, v.name, id.0)));
     }
     // Its parent here: as asked, else the peer parent's name, sealed here.
     let mut parent_here: Option<(VolumeId, String)> = None;
