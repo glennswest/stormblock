@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18
+- **fix:** #676: health's `flow_over.seconds` stops when the flow-over ends, so `mb_per_s` and `extents_per_s` are of the span it ran (forge1 12.94 said 8545 s / 0.42 MB/s of a 69 s flow-over); `started_at`/`finished_at` added, `pace.state` reads `done` (or `stopped`), `eta_seconds` 0. A later flow-over in the process counts from zero.
+
 ## [v24.30.0] — 2026-11-18
 
 ### Added

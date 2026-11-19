@@ -10,6 +10,7 @@ use std::time::Instant;
 /// The process's flow-over.
 pub static FLOW: FlowProgress = FlowProgress {
     began: Mutex::new(None),
+    ended: Mutex::new(None),
     moved: AtomicU64::new(0),
     zeroed: AtomicU64::new(0),
     bytes: AtomicU64::new(0),
@@ -22,7 +23,11 @@ pub static FLOW: FlowProgress = FlowProgress {
 };
 
 pub struct FlowProgress {
-    began: Mutex<Option<Instant>>,
+    /// When it began, monotonic and wall clock (unix seconds).
+    began: Mutex<Option<(Instant, u64)>>,
+    /// When it ended (#676), and how: `done` or `stopped`. Its span, and so
+    /// its rates, stop there.
+    ended: Mutex<Option<(Instant, u64, &'static str)>>,
     moved: AtomicU64,
     zeroed: AtomicU64,
     bytes: AtomicU64,
@@ -68,7 +73,8 @@ pub struct Pace {
     /// Extents a window moves at once now, and at most.
     pub window: usize,
     pub max_window: usize,
-    /// `full` or `backing_off`.
+    /// `full` or `backing_off` while it moves; `done` or `stopped` once
+    /// it has ended (#676).
     pub state: &'static str,
     /// What the pacing last went by.
     pub reason: String,
@@ -96,7 +102,12 @@ pub struct Snapshot {
     pub zeroed: u64,
     /// Bytes copied.
     pub bytes: u64,
-    /// Since the flow-over began.
+    /// When it began and, once it has ended, when (unix seconds, #676).
+    pub started_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    /// Since the flow-over began, until it ended (#676): a finished
+    /// flow-over's span, not the time since it started.
     pub seconds: f64,
     /// Bytes copied per second, in MB (10^6).
     pub mb_per_s: f64,
@@ -123,10 +134,39 @@ pub struct Snapshot {
 }
 
 impl FlowProgress {
-    /// The flow-over starts (its first half); later calls change nothing.
+    /// The flow-over starts (its first half); later calls change nothing
+    /// while it runs. After [`FlowProgress::finish`] it is a new flow-over,
+    /// counted from zero (#676).
     pub fn begin(&self) {
         let mut b = self.began.lock().unwrap_or_else(|e| e.into_inner());
-        b.get_or_insert_with(Instant::now);
+        let mut e = self.ended.lock().unwrap_or_else(|e| e.into_inner());
+        if e.take().is_some() {
+            *b = None;
+            self.reset_counts();
+        }
+        b.get_or_insert_with(|| (Instant::now(), unix_now()));
+    }
+
+    /// The flow-over has ended (#676): `done` (every half moved) or
+    /// `stopped` (abandoned). Its seconds and rates are of the span it ran,
+    /// and the pace reads the same word. Nothing before a begin; the first
+    /// end is kept.
+    pub fn finish(&self, how: &'static str) {
+        if self.began.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            return;
+        }
+        let mut e = self.ended.lock().unwrap_or_else(|e| e.into_inner());
+        e.get_or_insert_with(|| (Instant::now(), unix_now(), how));
+    }
+
+    fn reset_counts(&self) {
+        for c in [&self.moved, &self.zeroed, &self.bytes, &self.persists, &self.hot] {
+            c.store(0, Relaxed);
+        }
+        *self.source.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.source_device.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.pace.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.validation.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     pub fn moved(&self, extents: u64, bytes: u64) {
@@ -169,25 +209,31 @@ impl FlowProgress {
     #[cfg(test)]
     pub(crate) fn clear_for_test(&self) {
         *self.began.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        for c in [&self.moved, &self.zeroed, &self.bytes, &self.persists, &self.hot] {
-            c.store(0, Relaxed);
-        }
-        *self.source.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.source_device.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.pace.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.validation.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.ended.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.reset_counts();
     }
 
     /// Nothing when no flow-over has begun in this process.
     pub fn snapshot(&self) -> Option<Snapshot> {
-        let began = (*self.began.lock().unwrap_or_else(|e| e.into_inner()))?;
-        let seconds = began.elapsed().as_secs_f64();
+        let (began, started_at) = (*self.began.lock().unwrap_or_else(|e| e.into_inner()))?;
+        let ended = *self.ended.lock().unwrap_or_else(|e| e.into_inner());
+        let seconds = match ended {
+            Some((at, _, _)) => at.saturating_duration_since(began).as_secs_f64(),
+            None => began.elapsed().as_secs_f64(),
+        };
+        let mut pace = self.pace.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let (Some(p), Some((_, _, how))) = (pace.as_mut(), ended) {
+            p.state = how;
+            p.reason = format!("the flow-over has ended; it last went by: {}", p.reason);
+        }
         let (moved, zeroed, bytes) = (self.moved.load(Relaxed), self.zeroed.load(Relaxed), self.bytes.load(Relaxed));
         let per = |n: f64| if seconds > 0.0 { n / seconds } else { 0.0 };
         Some(Snapshot {
             moved,
             zeroed,
             bytes,
+            started_at,
+            finished_at: ended.map(|(_, at, _)| at),
             seconds,
             mb_per_s: per(bytes as f64 / 1e6),
             extents_per_s: per((moved + zeroed) as f64),
@@ -201,17 +247,25 @@ impl FlowProgress {
                 .map(|d| d.fabric_paths())
                 .unwrap_or_default(),
             persists: self.persists.load(Relaxed),
-            pace: self.pace.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            pace,
             validation: self.validation.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             hot_moved: self.hot.load(Relaxed),
         })
     }
 
-    /// Seconds left at the rate so far, for `remaining` extents.
+    /// Seconds left at the rate so far, for `remaining` extents; 0 once it
+    /// has ended.
     pub fn eta_seconds(&self, remaining: u64) -> Option<f64> {
         let s = self.snapshot()?;
+        if s.finished_at.is_some() {
+            return Some(0.0);
+        }
         (s.extents_per_s > 0.0).then(|| remaining as f64 / s.extents_per_s)
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -222,6 +276,7 @@ mod tests {
     fn rates_and_eta_from_what_was_counted() {
         let p = FlowProgress {
             began: Mutex::new(None),
+            ended: Mutex::new(None),
             moved: AtomicU64::new(0),
             zeroed: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
@@ -242,5 +297,66 @@ mod tests {
         assert!(s.mb_per_s > 0.0 && s.extents_per_s > 0.0);
         let eta = p.eta_seconds(100).unwrap();
         assert!((eta - 100.0 / s.extents_per_s).abs() / eta < 0.5, "{eta}");
+    }
+
+    fn fresh() -> FlowProgress {
+        FlowProgress {
+            began: Mutex::new(None),
+            ended: Mutex::new(None),
+            moved: AtomicU64::new(0),
+            zeroed: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            source: Mutex::new(None),
+            source_device: Mutex::new(None),
+            persists: AtomicU64::new(0),
+            pace: Mutex::new(None),
+            validation: Mutex::new(None),
+            hot: AtomicU64::new(0),
+        }
+    }
+
+    /// #676: forge1 12.94 said 8545 s and 0.42 MB/s of a 69 s flow-over two
+    /// and a half hours after it ended. The span stops at the end.
+    #[test]
+    fn a_finished_flow_over_keeps_its_span_and_rates() {
+        let p = fresh();
+        p.finish("done"); // before a begin: nothing
+        assert!(p.snapshot().is_none());
+        p.begin();
+        p.moved(4, 1 << 20);
+        p.pace(Pace {
+            window: 64,
+            max_window: 64,
+            state: "full",
+            reason: "flat out".into(),
+            io_p90_ms: None,
+            flush_p90_ms: None,
+            still_io_p90_ms: None,
+            still_flush_p90_ms: None,
+            pauses: 0,
+            paused_seconds: 0.0,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let running = p.snapshot().unwrap();
+        assert!(running.finished_at.is_none());
+        assert_eq!(running.pace.as_ref().unwrap().state, "full");
+        p.finish("done");
+        let a = p.snapshot().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let b = p.snapshot().unwrap();
+        assert_eq!(a.seconds, b.seconds, "the span stops at the end");
+        assert_eq!(a.mb_per_s, b.mb_per_s);
+        assert_eq!(a.extents_per_s, b.extents_per_s);
+        assert!(b.seconds >= 0.02 && b.seconds < 0.07, "{}", b.seconds);
+        let at = b.finished_at.unwrap();
+        assert!(at >= b.started_at);
+        assert_eq!(b.pace.as_ref().unwrap().state, "done");
+        assert_eq!(p.eta_seconds(100), Some(0.0));
+        p.finish("stopped"); // the first end is kept
+        assert_eq!(p.snapshot().unwrap().pace.unwrap().state, "done");
+        // A later flow-over counts from zero.
+        p.begin();
+        let c = p.snapshot().unwrap();
+        assert!(c.finished_at.is_none() && c.moved == 0 && c.bytes == 0 && c.pace.is_none());
     }
 }

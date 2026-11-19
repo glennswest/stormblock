@@ -637,15 +637,18 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   of this node's volumes still on a remote slab (the appliance's), 0 once the
   flow-over has finished, left out when there is none. Beside it,
   `"flow_over"` (#401): `moved`, `zeroed` (extents that read all zeros and
-  were unmapped, not copied), `bytes`, `seconds`, `mb_per_s`,
-  `extents_per_s` and `eta_seconds` (for what is left, at the rate so far),
+  were unmapped, not copied), `bytes`, `started_at` and, once it has
+  ended, `finished_at` (unix seconds), `seconds` (the span it ran: it stops
+  when the flow-over ends, #676), `mb_per_s` and `extents_per_s` (over that
+  span) and `eta_seconds` (for what is left, at the rate so far; 0 once ended),
   and `source_path` when the source is reached over NVMe/TCP (#407): `mtu`
   (the connection's path MTU, `IP_MTU`; 0 unknown), `jumbo` (≥ 9000) and
   `max_transfer` (the bytes one command carries: the target's MDTS, 8 MiB
   on an engine with #407, 128 KiB on an older one such as forge 13.7). The
   flow-over also says it once per source on the console. `persists` (one
   for a batch of moves, #410) and `pace` (#410): `window`/`max_window`,
-  `state` (`full` or `backing_off`), `reason` (what it last went by),
+  `state` (`full` or `backing_off`; `done` or `stopped` once the flow-over
+  has ended, #676), `reason` (what it last went by),
   `io_p90_ms`/`flush_p90_ms` (the node's own reads/writes and flushes while
   it moves, last 5 s), `still_io_p90_ms`/`still_flush_p90_ms` (the same
   without it), `pauses` and `paused_seconds`. `hot_moved` (#411): extents

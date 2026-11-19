@@ -6877,6 +6877,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 None => anyhow::bail!("the {what} half stopped moving off {from}; it stays the node's"),
             }
         }
+        crate::flowprogress::FLOW.finish("done");
         crate::volume::VolumeManager::persist_detached_checked(&state.volume_manager)
             .await
             .map_err(|e| anyhow::anyhow!("the moved records were not written: {e}"))?;
@@ -9038,6 +9039,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                         flow.disk
                     );
                     println!("WARNING: flow-over onto {} stopped: {why}", flow.disk);
+                    crate::flowprogress::FLOW.finish("stopped");
                     *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
                     install_failed(format!("the flow-over onto {} stopped: {why}", flow.disk)).await;
                     return;
@@ -9066,6 +9068,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                         flow.disk
                     );
                     println!("WARNING: flow-over of the data half onto {} stopped: {why}", flow.disk);
+                    crate::flowprogress::FLOW.finish("stopped");
                     *flow_stalled.lock().unwrap_or_else(|e| e.into_inner()) = Some(why.clone());
                     install_failed(format!("the flow-over of the data half onto {} stopped: {why}", flow.disk)).await;
                     return;
@@ -9079,6 +9082,9 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 failed += f;
             }
             crate::flowhot::set_sources(&[]);
+            // Its span ends here (#676): health's seconds and rates are of the
+            // flow-over that ran, not the time since it started.
+            crate::flowprogress::FLOW.finish("done");
             tracing::info!("flow-over complete: {moved} extent(s) migrated, {failed} failed");
             println!("Flow-over complete: {moved} extent(s) now on {}", flow.disk);
             // What did not move is what is still on a source (#574), not the

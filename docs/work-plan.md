@@ -2,6 +2,12 @@
 
 Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context window, so the session compacted again and again without doing any work. Nothing was removed; this is the full plan and its history, as it was.
 
+
+## #676 — health's flow-over span stops at its end (2026-11-18)
+- [x] `FlowProgress::finish("done"|"stopped")`: at the flow-over's completion, its abandonment, and a system move's end; `seconds`/rates over the finished span, `started_at`/`finished_at`, `pace.state` `done`; a later begin counts from zero
+- [x] unit test `a_finished_flow_over_keeps_its_span_and_rates`; README health, CHANGELOG
+- [ ] check.sh on sc-build; proof on a node: health `flow_over.finished_at` present after a flow-over
+
 ## #616 (again) — the record after a reboot (2026-11-16, P1)
 
 Reopened: pvetest2's record (12.90-flowsdn, an hour after a passed install)
