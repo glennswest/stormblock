@@ -256,6 +256,17 @@ forge1's `registry-data` is 4 GiB; it must hold forge's images.
   owner (wait-owner): A) the engine publishes Volume/Replication as CRDs
   and reconciles spec from there (recommended), B) APIService, C) prove on
   :9090. Same for #649, #656, #658.
+- [ ] **owner chose A (2026-11-19)**: the engine publishes Volume and
+  Replication as CRDs on the cluster's apiserver (`mgmt::kube_publish`):
+  every 15 s the node's objects (label `storm.io/node`) created, their
+  labels/spec and `status` merge-patched when they differ, gone ones
+  deleted; a spec edited on the apiserver (differs from the annotation
+  `storm.io/engine-spec`, what the engine last wrote) applied through the
+  same code as the :9090 PATCH, a refusal said in `status.specError` and the
+  spec put back; a Replication made on the apiserver with this node's label
+  runs here, one deleted there stops here. `deploy/crds.yaml` (the CRDs and
+  the engine's ClusterRole); stormcos issue to carry it (manifest + binding
+  for kube-system/stormblock).
 
 ## #656 — Replication: sync a store from a peer engine (2026-11-18, P0 hand-off)
 
