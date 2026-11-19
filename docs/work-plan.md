@@ -22,11 +22,15 @@ ISO. stormblock's side, in steps (each its own commit):
 - [x] tests/it/integration_stormdist.rs on sc-build (wip/442-stormdist
   2026-11-18: both pass, clippy clean); Cargo.lock made on a build VM
 - [x] check.sh on main (972a8176, ALL PASS), v24.31.0, image requested (stage 08a63f53abaa)
-- [ ] the ISO install boot (initramfs: run from the ISO, flow over, eject):
-  waits for the bootable release ISO, stormdist#10
+- [ ] **next:** the ISO install boot (initramfs: no claim; find the ISO,
+  open it with the release key baked in, the flavour from the install-config,
+  lay the system half (#478), install the flavour's goldens from the ISO,
+  ISO kept until done, then the ordinary local boot). Not blocked:
+  stormdist#10 (writer done, v0.5.0) waits for this and stormcentral#1476
 - [x] stormblock-test Jobs: filed glennswest/stormblock-test#6; a golden's
   LBA missing from the manifest: glennswest/stormdist#17
-- #442 proposed --after stormdist#10 (2026-11-18): only the ISO install boot is left
+- (2026-11-18) `propose --after stormdist#10` was refused as circular: #10's
+  firmware boot waits for this initramfs half, so it is ours to do next
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it

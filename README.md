@@ -3160,8 +3160,8 @@ What earlier docs described and the code does not do, each with its issue:
 
 - **The ISO install boot** (#442): `/init` booting the release ISO, the node
   running from the ISO's goldens before its disk is laid, the flow-over from
-  the ISO (hot extents first) and the eject. It waits for the bootable release
-  ISO (stormdist#10). The restore and upgrade from an ISO on a running engine
+  the ISO (hot extents first) and the eject. Next on #442; stormdist's boot
+  writer is done and its firmware test (stormdist#10) waits for this. The restore and upgrade from an ISO on a running engine
   are built (`/api/v1/stormdist`). A restored golden is presented at the
   default LBA (4096). stormdist's manifest does not carry a golden's LBA
   (#228).
