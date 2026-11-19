@@ -1350,7 +1350,7 @@ until A lands. Stormblock's half: follow a record of the cluster, written by sto
       check.sh ALL PASS at c92f8286 (1531/1531); v24.31.1 (8614681a, `--locked` reports 24.31.1); stage 212937325d86;
       closed (C stays out: A is proven live)
 
-### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — PAUSED for P0 #672 (2026-11-19): v23.22.2 shipped; X9 target met, R6415 unread
+### Initramfs on hardware: 20-35 s before a slab opens (2026-11-06, #545, P2, stormcos#804 fix 9) — v24.32.0 staged (2026-11-19): ports up early, jumbo while down; shipped with server8's DNS name as proof
 
 Read from server7's and forge1's reboots by line (`.times`): the X9's 8.3 s "clock" is not the clock (firmware
 synced, 0 s): path NIC DHCP 3.2 s + a lost DNS answer 5.1 s, both before the stamp. Not done, on purpose:
@@ -1377,12 +1377,17 @@ NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
       DHCP resetting mlx4's eth1 (`Link Down` at 25.5 s) right before the DNS tries: the node was named
       `storm-84ae30`, not server8. And the ports went up only after the state read (21.5 s), so DHCP waited out
       the switch (~3.5 s, five discovers). Plan:
-- [ ] `early ports`: every physical port up at `Configuring network...`; a port still down raised to mtu 9000
+- [x] `early ports`: every physical port up at `Configuring network...`; a port still down raised to mtu 9000
       first (a down port takes it without a reset), its own mtu kept in /run/stormblock-port-mtu; `rd.stormblock.port-mtu=N|off`
-- [ ] the bridge pinned at the port's own mtu until a lease/[network]; an address on the port itself (no bridge,
-      a path NIC with no lease mtu) puts it back; `dhcp_mtu` never lowers a port already at or above it; static_apply's mtu on IFACE
-- [ ] DNS: "no answer" said apart from "no PTR record"
-- [ ] tests (initramfs-early-ports.sh, initramfs-mtu.sh, node-name), check.sh, release, stage
+- [x] the bridge pinned at the port's own mtu until a lease/[network]; an address on the port itself (no bridge,
+      a path NIC with no lease mtu) puts it back; a lease's mtu never lowers a port (a declared one sets it, as
+      ci-boot-nic-verify's 1400 expects); static_apply's mtu on IFACE too
+- [x] DNS: "no answer" said apart from "no PTR record"
+- [x] tests: initramfs-early-ports.sh (new), initramfs-mtu.sh, initramfs-node-name.sh; ci-dhcp-mtu-verify.sh on a
+      real kernel (raised while down, bridge pinned, jumbo/plain leases, no bridge) ALL PASS on ab49e144, with
+      ci-boot-nic-verify ALL PASS; ci-path-nics, ci-node-name, ci-no-appliance ALL PASS on ff393f8b;
+      check.sh ALL PASS on ab49e144 (1531/1531); v24.32.0 (0ea78209, `--locked` says 24.32.0); stage 4176975153a0
+- [ ] metal: server8 named `server8` from DNS on its reboot (`shipped --proof`); R6415 (C2NR0Q2) still unread
 
 ### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; back 2026-11-07: letting go of a flow-over's sources stalls every reader
 
