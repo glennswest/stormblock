@@ -258,6 +258,21 @@ impl KubeAuth {
         target
     }
 
+    /// Why this node's own apiserver was asked, when it could not answer: no
+    /// cluster record was there (#557). On a worker that is the cause (12.69:
+    /// the cluster could not issue its tokens, so stormcluster wrote none),
+    /// and the 503 says so rather than only naming 127.0.0.1:6443.
+    fn why_own(&self, target: &Arc<Target>, why: String) -> String {
+        match &self.record {
+            Some(path) if Arc::ptr_eq(target, &self.own) => format!(
+                "{why} (asked this node's own apiserver: there is no cluster record at {}, which stormcluster writes \
+                 when the node joins a cluster as a worker)",
+                path.display()
+            ),
+            _ => why,
+        }
+    }
+
     /// The cluster's Nodes (#520, `[fabric] peers_from = "kubernetes"`): each
     /// Node's name and its `InternalIP`s, as the apiserver lists them. The
     /// engine's own bearer must be allowed `list nodes`.
@@ -300,7 +315,10 @@ impl KubeAuth {
                 return r.clone();
             }
         }
-        let r = review_uncached(&target, bearer, resource, verb, name, namespace).await;
+        let r = match review_uncached(&target, bearer, resource, verb, name, namespace).await {
+            Review::Unavailable(why) => Review::Unavailable(self.why_own(&target, why)),
+            r => r,
+        };
         if !matches!(r, Review::Unavailable(_)) {
             let mut c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
             c.retain(|_, (at, _)| at.elapsed() < CACHE_TTL);

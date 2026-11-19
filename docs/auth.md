@@ -155,6 +155,13 @@ to `api_url`. There and not usable (no token, no CA, not https), nothing is
 reviewed and the call gets 503, naming the file. While the cluster cannot be
 reached, the call gets 503 too. Only the admin token works then.
 
+When the node's own apiserver cannot answer and no record is there, the 503
+says so: `… (asked this node's own apiserver: there is no cluster record at
+/etc/stormcert/engine-cluster.json, which stormcluster writes when the node
+joins a cluster as a worker)`. On a worker that is the cause: on 12.69 the
+cluster's apiserver lacked the grant to issue a worker's tokens (stormcos#838),
+so stormcluster wrote no record and the worker's release got this 503.
+
 The release's `storage-admin` ClusterRole allows these; `storage-viewer`
 does not. The outcomes:
 - a valid bearer that is not allowed: **403** with the apiserver's reason;

@@ -142,6 +142,20 @@ async fn call(n: &Node, m: reqwest::Method, path: &str, tok: Option<&str>, body:
     r.send().await.unwrap().status().as_u16()
 }
 
+/// [`call`]'s status and body.
+async fn call_text(n: &Node, m: reqwest::Method, path: &str, tok: Option<&str>, body: Option<Value>) -> (u16, String) {
+    let mut r = reqwest::Client::new().request(m, format!("{}{path}", n.base));
+    if let Some(t) = tok {
+        r = r.bearer_auth(t);
+    }
+    if let Some(b) = body {
+        r = r.json(&b);
+    }
+    let resp = r.send().await.unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.text().await.unwrap())
+}
+
 async fn volume(n: &Node, name: &str, sealed: bool) -> String {
     let mut vm = n.state.volume_manager.lock().await;
     let id = vm.create_volume_any(name, 4 * MIB).await.unwrap();
@@ -511,7 +525,10 @@ async fn a_worker_with_no_local_apiserver_reviews_at_the_cluster() {
 
     // Nothing listens at the worker's own 127.0.0.1:6443.
     let worker = node_following(false, Some("http://127.0.0.1:1".into()), Some(rec.to_str().unwrap())).await;
-    assert_eq!(call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 503, "as stormcentral#360 saw");
+    let (status, said) = call_text(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await;
+    assert_eq!(status, 503, "as stormcentral#360 saw");
+    // 12.69 said only the address: the 503 names the missing record (#557).
+    assert!(said.contains("no cluster record at") && said.contains(rec.to_str().unwrap()), "{said}");
 
     write(record.clone());
     let released = call(&worker, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await;
@@ -537,6 +554,11 @@ async fn a_worker_with_no_local_apiserver_reviews_at_the_cluster() {
         write(bad.clone());
         assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 503, "{bad}");
     }
+    // A usable record whose cluster does not answer (its VIP down): no word of a missing record.
+    write(json!({"api_url": "http://127.0.0.1:1", "ca": "", "token": "t"}));
+    let (status, said) = call_text(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await;
+    assert_eq!(status, 503, "the cluster is down");
+    assert!(said.contains("127.0.0.1:1") && !said.contains("no cluster record"), "{said}");
     std::fs::write(&rec, "not json").unwrap();
     assert_eq!(call(&joined, M::POST, "/release", Some("alice-k8s"), Some(json!({"erase": "once", "dry_run": true}))).await, 503, "not json");
 
