@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.34.0] — 2026-11-19
+
+### Added
+- #656: `POST /api/v1/volumes/pull {from, volume}`: a sealed volume copied from a peer engine over NVMe/TCP by id or name, thin (only mapped extents read), a clone arriving as a copy-on-write clone of its parent's copy, the peer's namespace released however it ends; jobs at `GET /api/v1/volumes/pull[/{job}]`. The `Replication` object copies through the same NVMe/TCP transport.
+
 ### 2026-11-19
 - **feat:** #656 (the master's re-scope: the sync is registry to registry, and the engine's part is the transport): `POST /api/v1/volumes/pull {from, volume}` copies a sealed volume from a peer engine over NVMe/TCP, by id or name (`mgmt::pull`, jobs at `GET /api/v1/volumes/pull[/{job}]`, kept in `<data_dir>/pull-jobs.json`). The peer serves it read-only to this node's host NQN (#328's attach, `peers::connect_to`); only the extents its `/legs` maps are read; a clone whose parent is here (`parent`, or the peer parent's name) arrives as a copy-on-write clone of it with only its own extents; the namespace is released however the copy ends. The job says virtual, peer-allocated and allocated-here bytes, and extents copied, shared and zeroed. A writable volume is `409` (the live mirror's, #295); a different volume of the name here is `409`, never overwritten; a restart deletes a half-made copy. The `Replication` object now reads through the same NVMe/TCP transport instead of `GET …/content`, and asks the peer with the fabric's client (certificate and CA).
 
