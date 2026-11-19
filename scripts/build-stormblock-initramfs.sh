@@ -719,12 +719,16 @@ dhcp_mtu() { # interface lease-mtu
         echo "  mtu $_m ($_from) is not a usable MTU: left as it is"
         return 0
     fi
-    # A port or slave already at or above it is left (#545): lowering it
-    # resets an mlx4 link, and a port above its bridge sends nothing larger
-    # than the bridge does.
+    # A lease's MTU never lowers a port or slave already at or above it
+    # (#545): that resets an mlx4 link, and a port above its bridge sends
+    # nothing larger than the bridge does. A declared one is the port's own
+    # statement and is set as it is.
     _set() {
         _cur=$(cat "$_sys/class/net/$1/mtu" 2>/dev/null)
-        case "$_cur" in ''|*[!0-9]*) ;; *) [ "$_cur" -ge "$_m" ] && return 0 ;; esac
+        case "$_cur" in ''|*[!0-9]*) ;; *)
+            [ "$_cur" = "$_m" ] && return 0
+            [ "$_from" = "from DHCP" ] && [ "$_cur" -gt "$_m" ] && return 0 ;;
+        esac
         ip link set "$1" mtu "$_m" 2>/dev/null || echo "  WARNING: $1 does not take mtu $_m"
     }
     for _p in $(ls "$_sys/class/net/$_if/brif" 2>/dev/null); do
@@ -3525,15 +3529,13 @@ static_apply() {
     # port, and putting it on a different one is not a fallback, it is a
     # wrong answer.
     netsay "  static: $BOOT_ADDRS on $BOOT_NIC${BOOT_GW:+, gateway $BOOT_GW}, from $BOOT_FROM"
-    # The port only ever raised (#545): one already at or above the MTU
-    # resets no link for it; the MTU itself goes on what holds the address.
+    # The declared MTU is the port's (a no-op, so no link reset, when early
+    # ports already raised it to it, #545), and then on whatever holds the
+    # address: a bridge raised over an early port is pinned below it.
     if [ -n "$BOOT_MTU" ]; then
-        _sm=$(cat "/sys/class/net/$BOOT_NIC/mtu" 2>/dev/null)
-        case "$_sm" in ''|*[!0-9]*) _sm=0 ;; esac
-        if [ "$_sm" -lt "$BOOT_MTU" ]; then
-            ip link set "$BOOT_NIC" mtu "$BOOT_MTU" 2>/dev/null \
-                || netsay "WARNING: $BOOT_NIC does not take mtu $BOOT_MTU"
-        fi
+        ip link set "$BOOT_NIC" mtu "$BOOT_MTU" 2>/dev/null \
+            || netsay "WARNING: $BOOT_NIC does not take mtu $BOOT_MTU"
+        rm -f "$PORT_MTU_RUN/$BOOT_NIC" 2>/dev/null
     fi
     net_bring_up "$BOOT_NIC"
     if [ -n "$BOOT_MTU" ]; then

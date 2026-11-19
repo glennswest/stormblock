@@ -7,8 +7,8 @@
 # `udhcpc -O mtu` with the initramfs's own `default.script` (taken from the
 # generator, as built) leases on stormbr0. Then the kernel says: the port and
 # the bridge at 9000, the address on, the console line said. And again with
-# a declared `[network] mtu` of 1500, which must win on the bridge (the port,
-# already at 9000, is never lowered: #545).
+# a declared `[network] mtu` of 1500, which must win, on the port too (only a
+# lease's MTU never lowers a port: #545).
 #
 # Then the early ports (#545), with the generator's own `early ports` and
 # `bridge bring-up` blocks: a port down at 1500 is raised to 9000 before it
@@ -121,7 +121,7 @@ echo 1500 > /run/declared-mtu
 lease
 p=$(cat /sys/class/net/port0/mtu); b=$(cat /sys/class/net/stormbr0/mtu)
 echo "GUEST declared: port0 $p, stormbr0 $b"
-[ "$p" = 9000 ] && [ "$b" = 1500 ] && r declared PASS || r declared "FAIL ($p/$b)"
+[ "$p" = 1500 ] && [ "$b" = 1500 ] && r declared PASS || r declared "FAIL ($p/$b)"
 rm -f /run/declared-mtu
 
 # The early ports (#545). A veth has no `device` link, so early_ports reads a

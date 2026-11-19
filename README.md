@@ -3102,8 +3102,9 @@ DHCP did that on server8, right before its DNS name lookup (three answers
 lost, the node named `storm-<mac>`). The port's own MTU is kept in
 `/run/stormblock-port-mtu/<port>`; `stormbr0` is pinned to it until a lease or
 `[network] mtu` gives one, so nothing larger leaves before then. The DHCP
-script never lowers a port or bond slave already at or above the MTU (a port
-above its bridge sends nothing larger than the bridge does); an address put on
+script never lowers a port or bond slave for a lease's MTU (a port above its
+bridge sends nothing larger than the bridge does; a declared `[network] mtu`
+is set on the port as it is); an address put on
 the port itself (no bridge, or a path NIC whose lease names no MTU) puts the
 port's own MTU back. The console says `ports up: …` and `mtu 9000 on … while
 down`. A DNS server that answers none of the three name lookups is said as

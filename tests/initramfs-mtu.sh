@@ -106,6 +106,9 @@ check "a smaller lease: only the bridge" "stormbr0=1500" "$SET"
 echo 1500 > "$S3/class/net/eth1/mtu"
 run_case "$S3" 9000
 check "a port below it is raised" "eth1=9000 stormbr0=9000" "$SET"
+echo 9000 > "$S3/class/net/eth1/mtu"
+run_case "$S3" 9000 1500
+check "a declared MTU lowers the port: the node's own statement" "eth1=1500 stormbr0=1500" "$SET"
 
 echo "udhcpc asks for the MTU:"
 n_all=$(grep -c 'udhcpc -i ' "$GEN")
