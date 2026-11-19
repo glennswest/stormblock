@@ -954,7 +954,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 |---|---|
 | `/api/v1/scrub`, `/api/v1/volumes/{id}/scrub` | the scrub (#160, `docs/redundancy.md`): `GET /api/v1/scrub` (settings, the pass running and its progress, the queue, every volume in short), `DELETE` stops the pass running; `GET …/{id}/scrub` (its last pass: counts and findings), `POST …/{id}/scrub` (scrub it next; `409` for a single copy), `POST …/{id}/scrub/repair-parity` (the same, rewriting parity that does not match; destructive), `POST …/{id}/scrub/repair {extent, from}` (a chosen leg written over the extent's others; destructive). `mirror:3`+ is repaired by majority; `mirror:2` and parity are reported |
 | `/api/v1/drives`, `/arrays`, `/shelves`, `/spares`, `/slabs`, `/rebuilds` | drives (open — what it holds is read: one carrying our slab format is adopted with its volumes, a blank or foreign one is offered (`offer`, `confirm`) and never formatted on its own, #154 —, `format` (`POST …/{id}/format {confirm: <serial, else path>, role?}`: a person formats an offered drive, one at a time, destructive; without `confirm`, 412 naming the risk), label, drain, health, smart, slabs, adopt; a node's system disk, the one its own slabs were opened from at boot, is listed with `"system": true` and read-only: close, drain, adopt, labels, health, emulate and a second open answer `409`, #133), RAID sets (create, `assemble`, `release` to another engine with nothing written to its members (#296), `grow` a RAID-1 into legs made larger (#318), members `{slot}/fail` and `/replace`, `scrub`, `rebuild` rate), shelf layout, hot spares, slabs and the pool (`durability`: `ok`, `fault` and each metadata slab's room; a slab whose own region filled while `metadata.v2` holds the record is `"stale": true` and not counted against `ok`, and is written again once a fifth of the volumes are gone, #583, #587; `{id}/slots`, `{id}/upgrade` to metadata format 2, #158; `rebalance`: `POST {dry_run (default true), pool, max_moves, max_bytes_per_sec}` plans moving extents from fuller slabs onto emptier ones of the same role and slot size, keeping each volume's legs apart at its rung, and with `dry_run: false` runs it in the background with only each extent's fence held and yielding to live I/O; `GET` its progress, `DELETE` stops it, #154), GC, rebuild queue |
-| `/api/v1/volumes` | volumes (every `{id}` is the volume's UUID, its name, or a synonym: a name nothing answers to is `404`, one two volumes share is `409` naming both, #112): create (`id` to take a given one, #83; `placement`: a single-copy volume's layout, `affine` (the default: one drive while it has room) or `spread` (each extent on the most-free slab), #153, shown as `layout`), rename (`PATCH …/{id} {name?, namespace?, force?}`, destructive; a sealed volume only with `force` and never to another namespace, a name its namespace already has `409`, #219, #408), clone, digest (`GET …/{id}/digest`: the sha256 of a sealed volume's every byte, kept for its seal, `?refresh=true`; unsealed `409`, #271; and `seal`, the digest it was sealed with and this copy's verdict, #384), legs (`GET …/{id}/legs[?start=&limit=]`: each mapped extent's legs with their drive and the slot's byte offset on it, and a parity stripe's P/Q, for a reader that takes one good leg rather than reconstruct, #176), `ana` (the NVMe ANA state here, #83), seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, move (`POST …/{id}/move {to?: {slab|drive|array}, except?: {…}}`: onto a named slab, drive or array, or off one, online; `GET` its progress, `DELETE` cancels, `?release=true` clears the target; the target stays and new extents keep to it; `target` on create too; `docs/multi-drive.md`, #426), restripe, resize, attach (`transport`: `ublk`, `nvme_tcp`, or `vhost_user_blk` for a VMM on this node, `docs/vhost-user-blk.md`, #82), fsck, files, cidata (a vfat config drive: `{files, label?, keep_case?}`; paths keep their directories, `keep_case` writes the label and the names as given — cloud-init `CIDATA` by default, combustion `{"label": "combustion", "keep_case": true, "files": [{"path": "/combustion/script", …}]}`, #326), import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`; placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route. The list carries a `generation` (and an `ETag`); `?since=N` or `If-None-Match` answers `304` when nothing it reports has changed. It moves on every metadata persist and on what changes without one (#218): attaches and detaches on every transport (mounts too), slab presence, quarantine and failure, drains, the rebuild queue, RAID member states and owners. Not on `allocated_bytes`, a usage counter that moves with every write |
+| `/api/v1/volumes` | volumes (every `{id}` is the volume's UUID, its name, or a synonym: a name nothing answers to is `404`, one two volumes share is `409` naming both, #112): create (`id` to take a given one, #83; `placement`: a single-copy volume's layout, `affine` (the default: one drive while it has room) or `spread` (each extent on the most-free slab), #153, shown as `layout`), rename (`PATCH …/{id} {name?, namespace?, force?}`, destructive; a sealed volume only with `force` and never to another namespace, a name its namespace already has `409`, #219, #408), clone, digest (`GET …/{id}/digest`: the sha256 of a sealed volume's every byte, kept for its seal, `?refresh=true`; unsealed `409`, #271; and `seal`, the digest it was sealed with and this copy's verdict, #384), legs (`GET …/{id}/legs[?start=&limit=]`: each mapped extent's legs with their drive and the slot's byte offset on it, and a parity stripe's P/Q, for a reader that takes one good leg rather than reconstruct, #176), `ana` (the NVMe ANA state here, #83), seal and unseal (`DELETE …/seal`), access, owner, redundancy, health, resync, `legs/clear`, tier, move (`POST …/{id}/move {to?: {slab|drive|array}, except?: {…}}`: onto a named slab, drive or array, or off one, online; `GET` its progress, `DELETE` cancels, `?release=true` clears the target; the target stays and new extents keep to it; `target` on create too; `docs/multi-drive.md`, #426), restripe, resize, attach (`transport`: `ublk`, `nvme_tcp`, or `vhost_user_blk` for a VMM on this node, `docs/vhost-user-blk.md`, #82), fsck, files, cidata (a vfat config drive: `{files, label?, keep_case?}`; paths keep their directories, `keep_case` writes the label and the names as given — cloud-init `CIDATA` by default, combustion `{"label": "combustion", "keep_case": true, "files": [{"path": "/combustion/script", …}]}`, #326), import, compose (`/compose`, `/compose/pallet`, `/compose/disk`, `/compose/slab`), `snapshots`, pull (`POST /api/v1/volumes/pull {from, volume}`: a sealed volume copied from a peer engine over NVMe/TCP, thin, a clone as a clone of its parent's copy; `GET …/pull[/{job}]`; see "Pulling a volume from a peer", #656); placement is a field of `GET …/{id}` (and `?placement=true` on the list), not a route. The list carries a `generation` (and an `ETag`); `?since=N` or `If-None-Match` answers `304` when nothing it reports has changed. It moves on every metadata persist and on what changes without one (#218): attaches and detaches on every transport (mounts too), slab presence, quarantine and failure, drains, the rebuild queue, RAID member states and owners. Not on `allocated_bytes`, a usage counter that moves with every write |
 | `/api/v1/namespaces` | namespaces (#408, stormcentral#642): a volume belongs to one, `stormcos` (the default) or a family's (`nana`, …), shown as `namespace` on every volume (and the label `storm.io/namespace` on the kube projection). Create, clone (default: its source's), import and `POST /api/v1/goldens` take `namespace`; a name is unique within a namespace other than `stormcos` (`409 name_taken`); `?namespace=` narrows the list and says which volume a name on a `{id}` route means; a sealed volume's namespace never changes. `GET /api/v1/namespaces` (each namespace's `usage`: volumes, goldens, bytes = sealed volumes' allocated + the others' own; and its `quota`), `GET /{ns}`, `PUT/DELETE /{ns}/quota {max_volumes?, max_bytes?}` (destructive, `quotas.json`): past it a create, clone or import is undone and answered `403 quota_exceeded` with the numbers. A Kubernetes bearer is reviewed in the volume's namespace (docs/auth.md) |
 | `/api/v1/release` | a release erase (#291, stormcluster#14): `POST {erase?, force?, dry_run?}` (destructive) answers what a release keeps (the release's sealed goldens, `system-data`), lays again from its golden (the release's unsealed volumes) and erases (everything else, unmarked included), and records a ticket in `stormblock-state` that `boot-local` runs at the next boot from the node's own disk, before anything is mounted; 409 with no state volume, a flow-over moving, or a remote host attached (#292, unless `force`); `GET` the ticket and the last report, `DELETE` cancels. docs/erase.md |
 | `/api/v1/erasures` | secure delete (#286): the node's level, slots waiting, volumes being erased, and the audit record of every finished erase (`erasures.json`). `DELETE /api/v1/volumes/{id}?erase=once\|dod3\|dod7` asks for more than the default |
@@ -1087,6 +1087,64 @@ on a running engine. The ISO install boot (boot the release ISO, run from it
 before the disk is laid, flow over, eject) is not built yet; see "Not built,
 or not wired".
 
+## Pulling a volume from a peer
+
+`POST /api/v1/volumes/pull` (#656) copies one volume from a peer engine,
+by id or name, over **NVMe/TCP**. It is the transport a registry sync
+stands on: the registry's Replication (stormblock-registry#186) asks for
+one image's golden at a time. The master, 2026-11-18: "the forge sync is
+registry to registry … stormblock's part shrinks to the transport primitive".
+
+```json
+{"from": "http://forge.g16.lo:9090", "volume": "golden-stormpanel-25da1f262ed5",
+ "name": null, "namespace": null, "parent": null, "owner": null, "bandwidth_mibps": 0}
+```
+
+`from` and `volume` are required. `name`, `namespace` and `owner` default
+to the peer's. `parent` names a volume here: the copy of the peer volume's
+parent, when its name differs. The answer is `202` with a job; `GET
+/api/v1/volumes/pull` lists the jobs, and `GET …/pull/{job}` reads one.
+
+How a pull runs:
+1. The peer's `GET /api/v1/volumes/{id}/legs` names the extents the volume
+   maps.
+2. The peer serves the volume read-only to this node's host NQN. This is
+   #328's attach: its per-host subsystem, with the DH-HMAC-CHAP secret it
+   hands out.
+3. The engine's own initiator reads only the extents that need to move.
+4. The peer's namespace is let go of when the copy ends, however it ends.
+
+What the copy is:
+- **Thin.** Only mapped extents are read, and holes stay holes.
+- **A clone stays a clone.** When the volume's parent is here already
+  (`parent`, or the peer parent's name and namespace, sealed here), the copy
+  is a copy-on-write clone of it. Only the extents the volume holds of its
+  own are read, and an extent its parent maps and it does not is zeroed. A
+  clone never arrives flattened.
+- **Kept:** names, namespace, LBA size, filesystem record, owner,
+  blank-ness and the seal.
+
+The job says what moved: `virtual_bytes`, `peer_allocated_bytes`,
+`bytes_total`/`bytes_done` (read over NVMe/TCP), `extents_copied`,
+`extents_shared` (with the parent's copy), `extents_zeroed`, and
+`allocated_bytes` here once done. The engine logs the same line.
+
+What a pull refuses:
+- **A volume that takes writes on the peer: `409`.** It moves by the live
+  mirror (`POST /api/v1/volumes/{id}/mirror`, #295), which follows its
+  writes.
+- **A different volume of the same name and namespace here: `409`**, never
+  overwritten.
+- A volume here that is its copy answers `200` with that volume. It is its
+  copy when a pull made it from that peer volume; or, with no pull having
+  made it from another, when it is sealed with the same size and filesystem
+  UUID.
+- A peer that has no such volume: `404`. A `from` that is not
+  `http(s)://host:port`: `422`.
+
+Jobs are kept in `<data_dir>/pull-jobs.json`. When a restart cuts a copy
+short, its half-made volume is deleted and the job reads `failed`.
+
 ## Replication
 
 A `Replication` (#656, `storage.storm.io/v1`) makes this engine's store a
@@ -1114,10 +1172,11 @@ spec:
 `/metrics`: `storm_replication_bytes_total`, `storm_replication_items_total
 {result}`, `storm_replication_lag_seconds`.
 
-**How a volume moves.** Nothing new is needed on the peer. Its listing
-gives each volume's name, namespace, size, parent, seal, role, filesystem
-and owner. `GET …/{id}/legs` gives the extents it maps, and `GET
-…/{id}/content` with a `Range` gives a sealed volume's bytes.
+**How a volume moves.** The same copy as a pull (above), over NVMe/TCP.
+Nothing new is needed on the peer. Its listing gives each volume's name,
+namespace, size, parent, seal, role, filesystem and owner. `GET
+…/{id}/legs` gives the extents it maps, and the peer serves the sealed
+volume read-only to this node's host NQN for the read.
 - A volume with no parent here gets every extent it maps.
 - A clone whose parent is already here is made as a copy-on-write clone of
   that copy. Only the extents it holds of its own are copied (an extent
@@ -1133,8 +1192,8 @@ and owner. `GET …/{id}/legs` gives the extents it maps, and `GET
   here: the copy is the point.
 
 **Not yet (stage 2):**
-- writable volumes: the peer serves no content of a volume that takes
-  writes, so they are listed in `errors`;
+- writable volumes: they move by the live mirror (#295), so they are
+  listed in `errors`;
 - the registry's references (`images`, stormblock-registry#175's peer and
   `/v1/replicate`);
 - events;
