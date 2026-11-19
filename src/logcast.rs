@@ -116,11 +116,15 @@ struct Follow {
     file: Option<std::fs::File>,
     offset: u64,
     partial: Vec<u8>,
+    /// Begin at the file's end as it is at the first open (#685: the node
+    /// engine's follower, whose record already holds the initramfs's lines,
+    /// sent by the initramfs's own logcast).
+    from_end: bool,
 }
 
 impl Follow {
-    fn new(path: PathBuf, tag: String) -> Follow {
-        Follow { path, tag, file: None, offset: 0, partial: Vec::new() }
+    fn new(path: PathBuf, tag: String, from_end: bool) -> Follow {
+        Follow { path, tag, file: None, offset: 0, partial: Vec::new(), from_end }
     }
 
     /// Whatever whole lines were added since the last read. A file that was
@@ -132,6 +136,11 @@ impl Follow {
             // is not.
             self.file = std::fs::File::open(&self.path).ok();
             self.offset = 0;
+            if std::mem::take(&mut self.from_end) {
+                if let Some(m) = self.file.as_ref().and_then(|f| f.metadata().ok()) {
+                    self.offset = m.len();
+                }
+            }
         }
         let mut out = Vec::new();
         let Some(f) = self.file.as_mut() else { return out };
@@ -254,6 +263,9 @@ pub struct Options {
     /// /init's fan-out): those copies, and the follower's `... and N more
     /// line(s) like that` notes, are not sent again.
     pub console_copy: Option<String>,
+    /// Follow each file from its end as it is when first opened, not its
+    /// start (#685).
+    pub from_end: bool,
 }
 
 impl Default for Options {
@@ -271,6 +283,7 @@ impl Default for Options {
             drain: Duration::from_secs(3),
             tick: Duration::from_millis(250),
             console_copy: None,
+            from_end: false,
         }
     }
 }
@@ -310,7 +323,7 @@ fn follower_note(line: &str) -> bool {
 impl Logcast {
     pub fn new(opts: Options) -> Logcast {
         let cmdline = std::fs::read_to_string(&opts.cmdline).unwrap_or_default();
-        let files = opts.follow.iter().map(|(p, t)| Follow::new(p.clone(), t.clone())).collect();
+        let files = opts.follow.iter().map(|(p, t)| Follow::new(p.clone(), t.clone(), opts.from_end)).collect();
         let mut lc = Logcast {
             opts,
             files,
@@ -544,6 +557,51 @@ extern "C" fn on_term(_: libc::c_int) {
     STOP.store(true, Ordering::Relaxed);
 }
 
+/// Whether the node engine's own follower runs ([`follow_node_record`]).
+static NODE_FOLLOWER: AtomicBool = AtomicBool::new(false);
+
+/// How long a dying engine gives its follower to send its last lines: more
+/// than one [`Options::tick`].
+pub const LAST_LINES_WAIT: Duration = Duration::from_millis(600);
+
+/// The node engine's record off the node for as long as the engine runs
+/// (#685). /init's logcast stops at switch_root (above), and what carries the
+/// node's log from there (stormpump) sends to the group only (stormpump#227),
+/// which does not leave the node's subnet: 12.96's pvetest2 and pvetest3
+/// lost their engines and nothing the engines said reached anyone. This
+/// follows `record` from its end as it is now (the initramfs's lines were
+/// sent before switch_root) and sends each line to the same destinations
+/// /init's logcast did: the group, and the collector `stormpump.syslog=` or
+/// an install-config's `syslog:` names. Lines are sent within a tick of being
+/// written, so what the engine wrote before a kill has left the node; a
+/// panic waits [`LAST_LINES_WAIT`] for its own line (see
+/// `logging::abort_on_panic`). Best effort, on a thread of its own: nothing
+/// here blocks the engine.
+pub fn follow_node_record(record: &Path, tag: &str) {
+    let opts = Options {
+        follow: vec![(record.to_path_buf(), tag.to_string())],
+        status: Some(record.with_file_name("logcast-engine.status")),
+        from_end: true,
+        ..Default::default()
+    };
+    let spawned = std::thread::Builder::new().name("logcast".into()).spawn(move || {
+        static NEVER: AtomicBool = AtomicBool::new(false);
+        Logcast::new(opts).run(&NEVER);
+    });
+    match spawned {
+        Ok(_) => {
+            NODE_FOLLOWER.store(true, Ordering::Relaxed);
+            tracing::info!("log: this engine's record goes off the node as it is written, as /init's did (#477, #685)");
+        }
+        Err(e) => tracing::warn!("log: this engine's record stays on the node: no thread for its follower ({e}) (#685)"),
+    }
+}
+
+/// Whether [`follow_node_record`] started a follower in this process.
+pub fn node_follower_running() -> bool {
+    NODE_FOLLOWER.load(Ordering::Relaxed)
+}
+
 /// `stormblock logcast`: follow, buffer, send, until SIGTERM or SIGINT.
 pub fn main(opts: Options) {
     // SAFETY: the handler only stores to an atomic.
@@ -622,6 +680,7 @@ mod tests {
             drain: Duration::from_millis(300),
             tick: Duration::from_millis(10),
             console_copy: None,
+            from_end: false,
         });
         lc.route = net;
         NET.store(false, Ordering::Relaxed);
@@ -679,6 +738,7 @@ mod tests {
             drain: Duration::from_millis(100),
             tick: Duration::from_millis(10),
             console_copy: None,
+            from_end: false,
         };
         let mut lc = Logcast::new(opts.clone());
         lc.route = routes;
@@ -732,6 +792,7 @@ mod tests {
             drain: Duration::from_millis(100),
             tick: Duration::from_millis(10),
             console_copy: Some("stormblock".into()),
+            from_end: false,
         });
         lc.route = routes;
         lc.read(false);
@@ -750,5 +811,46 @@ mod tests {
         // A second "slab 1 not attached" in /init's log has no engine line
         // left to be a copy of: it is /init's.
         assert_eq!(init_lines, vec!["INSTALL: over sda", "slab 1 not attached"]);
+    }
+
+    /// #685: the node engine's follower begins at the record's end as it
+    /// is at adopt (the initramfs's lines went out before switch_root), and
+    /// every line written after it goes.
+    #[test]
+    fn the_node_engines_record_is_followed_from_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("stormblock.log");
+        let host = dir.path().join("hostname");
+        let cmdline = dir.path().join("cmdline");
+        std::fs::write(&host, "pvetest2").unwrap();
+        let (col, at) = collector();
+        std::fs::write(&cmdline, format!("stormpump.syslog={at}")).unwrap();
+        std::fs::write(&record, "initramfs engine: one\ninitramfs engine: two\n").unwrap();
+        let mut lc = Logcast::new(Options {
+            follow: vec![(record.clone(), "stormblock".into())],
+            cmdline,
+            install_configs: vec![],
+            group: "off".into(),
+            hostname: host,
+            status: None,
+            drain: Duration::from_millis(100),
+            tick: Duration::from_millis(10),
+            console_copy: None,
+            from_end: true,
+        });
+        lc.route = routes;
+        lc.read(false);
+        lc.send();
+        assert!(frames(&col).is_empty(), "what the record held at adopt is not sent again");
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&record).unwrap();
+        writeln!(f, "adopt: locked into memory for the handover").unwrap();
+        writeln!(f, "FATAL: adopt-ublk: panic on thread 'x': boom").unwrap();
+        lc.read(false);
+        lc.send();
+        let got = frames(&col);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].ends_with(" adopt: locked into memory for the handover"), "{}", got[0]);
+        assert!(got[1].contains(" pvetest2 stormblock ") && got[1].ends_with("boom"), "{}", got[1]);
     }
 }

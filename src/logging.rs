@@ -76,6 +76,14 @@ fn filter(spec: &str) -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::try_new(spec).unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
 }
 
+/// The record's file this process writes, once [`init`] opened one.
+static RECORD: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The record's file this process writes (a node's), if any.
+pub fn record_path() -> Option<PathBuf> {
+    RECORD.get().cloned()
+}
+
 /// Set up the log for this process. `node`: one of the commands a node
 /// boots with.
 pub fn init(node: bool) {
@@ -91,6 +99,9 @@ pub fn init(node: bool) {
         }
         std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| (path.clone(), e))
     });
+    if let Some(Ok(_)) = &opened {
+        let _ = RECORD.set(p.file.clone().unwrap_or_default());
+    }
     match opened {
         Some(Ok(file)) => {
             tracing_subscriber::registry()
@@ -147,6 +158,9 @@ pub fn abort_on_panic(mode: &'static str) {
             "FATAL: {mode}: panic on thread '{thread}': {info}; aborting so the supervisor restarts the engine (#368)\n{bt}"
         );
         eprintln!("{msg}");
+        // The kernel's log too (#685): dmesg, the node's consoles and a
+        // must-gather keep it after the engine and its files are gone.
+        to_kmsg(&format!("stormblock: FATAL: {mode}: panic on thread '{thread}': {info}"));
         // The record, from a thread of its own and bounded: a panic taken
         // while the log's own lock was held must not keep the abort waiting.
         let (tx, rx) = std::sync::mpsc::channel();
@@ -156,8 +170,35 @@ pub fn abort_on_panic(mode: &'static str) {
             let _ = tx.send(());
         });
         let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
+        if crate::logcast::node_follower_running() {
+            // The follower sends what the record took within a tick (#685).
+            std::thread::sleep(crate::logcast::LAST_LINES_WAIT);
+        }
         std::process::abort();
     }));
+}
+
+/// One line into the kernel's log at `KERN_CRIT`, the text's first line
+/// only and at most [`KMSG_MAX`] bytes (a record is one write). Best
+/// effort: nowhere to write is no error worth having in a panic.
+pub fn to_kmsg(text: &str) {
+    let rec = kmsg_record(text);
+    let _ = std::fs::OpenOptions::new().write(true).open("/dev/kmsg").and_then(|mut f| {
+        use std::io::Write;
+        f.write_all(rec.as_bytes())
+    });
+}
+
+/// A `/dev/kmsg` record's longest text, well under the kernel's 1 KiB.
+pub const KMSG_MAX: usize = 900;
+
+fn kmsg_record(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    let mut end = line.len().min(KMSG_MAX);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("<2>{}\n", &line[..end])
 }
 
 #[cfg(test)]
@@ -166,6 +207,15 @@ mod tests {
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |k| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    #[test]
+    fn a_kmsg_record_is_one_critical_line_bounded() {
+        assert_eq!(kmsg_record("FATAL: boom\nstack backtrace:\n  0: x"), "<2>FATAL: boom\n");
+        let long = "é".repeat(KMSG_MAX);
+        let r = kmsg_record(&long);
+        assert!(r.len() <= KMSG_MAX + 4, "{}", r.len());
+        assert!(r.starts_with("<2>é") && r.ends_with("é\n"));
     }
 
     #[test]

@@ -887,7 +887,14 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   and in the record, with a backtrace whatever `RUST_BACKTRACE` says:
   `FATAL: <mode>: panic on thread '<name>': …; aborting so the supervisor
   restarts the engine`. stormpump restarts it, and `adopt-ublk` takes the
-  ublk devices back. Never alive and silent. Each ublk device's
+  ublk devices back. Never alive and silent. The line also goes to
+  `/dev/kmsg` (#685). On a stormcos node the restart reads the engine's
+  binary from `/pallets/stormblock`, a ublk device the dead engine served,
+  so it comes back only while those pages are still in memory; 12.96's
+  pvetest2 and pvetest3 did not come back (#685). So `adopt-ublk` sets its
+  `oom_score_adj` to -1000 and says so (`oom: the engine's oom_score_adj is
+  -1000 …`, or a WARN naming why not): under memory pressure the kernel
+  takes any other process first. Each ublk device's
   current-thread runtime is named but never dumped (#334). `stalls` also
   names every zoned or drive-managed SMR disk the engine opened (#282).
 - Every API request ends with one line (#365): `api: <method> <path>
@@ -1945,7 +1952,11 @@ rest without naming conventions:
   only what PID 1 sees. A detach refuses a device mounted in any of them. A
   ublk device a `/v1` attach made is keyed by the `/v1` id; it is counted
   for its engine volume, as are the boot devices an adopting engine took
-  over.
+  over. Bounded (#685): at most 50,000 lines of one namespace's table and
+  256 mount points a device are kept, and a namespace with more is named
+  once in a WARN (`mounts: the mount namespace … has more than 50000
+  mounts`), the sign of a mount propagated back into its own tree. While
+  one request reads the tables, the others are given the last ones.
 - Filters: `?kind=volume|golden|blank|media|snapshot|template` (comma-separated),
   `?kind=image` for everything but `volume`, `?in_use=true|false`,
   `?unowned=true`. With no filter the listing is what it always was.
@@ -2962,6 +2973,14 @@ stormcast frame (RFC 5424, `local0`, severity read from the line):
   node's log. It never writes to a console; what it did is in
   `/run/stormblock/logcast.status`, and sent too (APP-NAME
   `stormblock-logcast`).
+- **The node engine's record goes on after it** (#685). `adopt-ublk`
+  follows its own record (`/run/stormblock/stormblock.log`) from its end
+  at start, so the initramfs's lines are not sent twice, and sends every
+  line to the same destinations as /init's logcast, within 250 ms of its
+  being written. stormpump's own lines go to the group only
+  (stormpump#227). Its status is `/run/stormblock/logcast-engine.status`.
+  A panic's FATAL line also goes to `/dev/kmsg` (dmesg and the consoles),
+  and the abort waits 600 ms so the follower can send it.
 
 `tests/initramfs-logcast.sh` pins the blocks with a stand-in logcast. The
 unit tests `logcast::tests` cover the follower on loopback. `ci-logcast-verify.sh`

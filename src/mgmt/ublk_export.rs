@@ -174,32 +174,106 @@ pub fn mounts_of(device_path: &str) -> Vec<String> {
     }
 }
 
-/// One mountinfo table into `out`: `maj:min` → mount points, each once.
-pub fn take_mountinfo(text: &str, out: &mut HashMap<String, Vec<String>>) {
-    for line in text.lines() {
-        let f: Vec<&str> = line.split(' ').collect();
-        if f.len() > 4 {
-            let v = out.entry(f[2].to_string()).or_default();
-            if !v.iter().any(|m| m == f[4]) {
-                v.push(f[4].to_string());
-            }
+/// The node's mounts by device: `maj:min` → mount points, each once, in the
+/// order first seen, at most [`MOUNTS_PER_DEVICE`] each.
+#[derive(Debug, Default)]
+pub struct MountTable {
+    by_dev: HashMap<String, Vec<String>>,
+    seen: std::collections::HashSet<(String, String)>,
+    /// Mounts past [`MOUNTS_PER_DEVICE`] on one device, not kept.
+    pub over: usize,
+}
+
+/// Mount points kept for one device. A device's first mount is what every
+/// caller asks for; dozens are a node's ordinary binds of one volume.
+pub const MOUNTS_PER_DEVICE: usize = 256;
+
+/// Lines read from one namespace's mountinfo (#685). A node has hundreds;
+/// a mount propagated into itself (a Bidirectional hostPath over the tree
+/// it is mounted in) multiplies them without end, and the engine must not
+/// be the process that reads them all into memory it has locked.
+pub const MOUNTINFO_LINES: usize = 50_000;
+
+impl MountTable {
+    fn add(&mut self, dev: &str, mp: &str) {
+        if self.seen.contains(&(dev.to_string(), mp.to_string())) {
+            return;
         }
+        let v = self.by_dev.entry(dev.to_string()).or_default();
+        if v.len() >= MOUNTS_PER_DEVICE {
+            self.over += 1;
+            return;
+        }
+        v.push(mp.to_string());
+        self.seen.insert((dev.to_string(), mp.to_string()));
     }
+
+    /// One mountinfo table's lines, at most `max`; how many were read, and
+    /// whether the table had more.
+    pub fn take(&mut self, lines: impl Iterator<Item = String>, max: usize) -> (usize, bool) {
+        let mut n = 0;
+        for line in lines {
+            if n == max {
+                return (n, true);
+            }
+            n += 1;
+            let mut f = line.split(' ');
+            let (Some(_), Some(_), Some(dev), Some(_), Some(mp)) = (f.next(), f.next(), f.next(), f.next(), f.next()) else { continue };
+            self.add(dev, mp);
+        }
+        (n, false)
+    }
+
+    pub fn get(&self, dev: &str) -> Option<&Vec<String>> {
+        self.by_dev.get(dev)
+    }
+}
+
+/// One mountinfo table's text into `out` (tests).
+pub fn take_mountinfo(text: &str, out: &mut MountTable) {
+    out.take(text.lines().map(str::to_string), usize::MAX);
 }
 
 /// The node's mounts by device, from each mount namespace once (PID 1's
 /// first), read at most every two seconds: a listing or a watch asks for
-/// every volume at once.
+/// every volume at once. While one caller reads the tables, the others are
+/// given the last ones (#685): a slow read never queues the runtime's
+/// threads behind it.
 #[cfg(target_os = "linux")]
-fn mount_table() -> Arc<HashMap<String, Vec<String>>> {
-    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Arc<HashMap<String, Vec<String>>>)>> = std::sync::Mutex::new(None);
-    let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, t)) = g.as_ref() {
+fn mount_table() -> Arc<MountTable> {
+    type Cached = Option<(std::time::Instant, Arc<MountTable>)>;
+    static CACHE: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
+    static READING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let cached = || CACHE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some((at, t)) = cached() {
         if at.elapsed() < std::time::Duration::from_secs(2) {
-            return t.clone();
+            return t;
         }
     }
-    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    let _reading = match READING.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => match cached() {
+            Some((_, t)) => return t,
+            None => READING.lock().unwrap_or_else(|e| e.into_inner()),
+        },
+    };
+    // Read by another caller while this one waited.
+    if let Some((at, t)) = cached() {
+        if at.elapsed() < std::time::Duration::from_secs(2) {
+            return t;
+        }
+    }
+    let t = Arc::new(read_mount_tables());
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), t.clone()));
+    t
+}
+
+#[cfg(target_os = "linux")]
+fn read_mount_tables() -> MountTable {
+    use std::io::BufRead;
+    static SAID: std::sync::Mutex<Option<std::collections::HashSet<std::ffi::OsString>>> = std::sync::Mutex::new(None);
+    let mut out = MountTable::default();
     let mut seen: std::collections::HashSet<std::ffi::OsString> = std::collections::HashSet::new();
     let mut pids: Vec<String> = vec!["1".into(), "self".into()];
     if let Ok(rd) = std::fs::read_dir("/proc") {
@@ -207,16 +281,27 @@ fn mount_table() -> Arc<HashMap<String, Vec<String>>> {
     }
     for pid in pids {
         let Ok(ns) = std::fs::read_link(format!("/proc/{pid}/ns/mnt")) else { continue };
-        if !seen.insert(ns.into_os_string()) {
+        let ns = ns.into_os_string();
+        if !seen.insert(ns.clone()) {
             continue;
         }
-        if let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")) {
-            take_mountinfo(&text, &mut out);
+        let Ok(f) = std::fs::File::open(format!("/proc/{pid}/mountinfo")) else { continue };
+        let lines = std::io::BufReader::new(f).lines().map_while(Result::ok);
+        let (_, more) = out.take(lines, MOUNTINFO_LINES);
+        if more {
+            let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+            if said.get_or_insert_with(Default::default).insert(ns.clone()) {
+                let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+                tracing::warn!(
+                    "mounts: the mount namespace {} of pid {pid} ({}) has more than {MOUNTINFO_LINES} mounts; only the first are read. \
+                     A mount propagated back into its own tree multiplies like this (#685)",
+                    ns.to_string_lossy(),
+                    comm.trim()
+                );
+            }
         }
     }
-    let t = Arc::new(out);
-    *g = Some((std::time::Instant::now(), t.clone()));
-    t
+    out
 }
 
 /// How long a detach waits for its device to be gone before it answers
@@ -961,12 +1046,32 @@ mod tests {
     /// device: each mount point once, the first namespace's first.
     #[test]
     fn mount_tables_merged() {
-        let mut m = std::collections::HashMap::new();
+        let mut m = MountTable::default();
         take_mountinfo("36 25 259:3 / / rw - ext4 /dev/ublkb3 rw\n37 25 259:15 / /state rw - ext4 /dev/ublkb15 rw\n", &mut m);
         take_mountinfo("90 80 259:15 / /state rw - ext4 /dev/ublkb15 rw\n91 80 259:12 / /var/log/pods rw - ext4 /dev/ublkb12 rw\n", &mut m);
-        assert_eq!(m["259:3"], vec!["/".to_string()]);
-        assert_eq!(m["259:15"], vec!["/state".to_string()], "the same mount in two namespaces, once");
-        assert_eq!(m["259:12"], vec!["/var/log/pods".to_string()], "a pod's own namespace counts");
+        assert_eq!(m.get("259:3").unwrap(), &vec!["/".to_string()]);
+        assert_eq!(m.get("259:15").unwrap(), &vec!["/state".to_string()], "the same mount in two namespaces, once");
+        assert_eq!(m.get("259:12").unwrap(), &vec!["/var/log/pods".to_string()], "a pod's own namespace counts");
+    }
+
+    /// #685: a table that multiplied is read only so far, and a device's
+    /// mounts are kept to a bound; the first mount is still the first.
+    #[test]
+    fn a_multiplied_mount_table_is_read_within_bounds() {
+        let lines = (0..200_000).map(|i| format!("{i} 1 259:10 / /var/lib/kubelet{} rw - ext4 /dev/ublkb10 rw", "/x".repeat(i % 7)));
+        let mut m = MountTable::default();
+        let (read, more) = m.take(lines, MOUNTINFO_LINES);
+        assert_eq!((read, more), (MOUNTINFO_LINES, true));
+        let v = m.get("259:10").unwrap();
+        assert_eq!(v.len(), 7, "each distinct mount point once");
+        assert_eq!(v[0], "/var/lib/kubelet");
+
+        let distinct = (0..10_000).map(|i| format!("{i} 1 259:10 / /p/{i} rw - ext4 /dev/ublkb10 rw"));
+        let mut m = MountTable::default();
+        assert_eq!(m.take(distinct, MOUNTINFO_LINES), (10_000, false));
+        assert_eq!(m.get("259:10").unwrap().len(), MOUNTS_PER_DEVICE);
+        assert_eq!(m.over, 10_000 - MOUNTS_PER_DEVICE);
+        assert_eq!(m.get("259:10").unwrap()[0], "/p/0");
     }
 
     use super::*;

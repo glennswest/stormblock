@@ -9545,6 +9545,12 @@ async fn handle_adopt_ublk(
     ) -> anyhow::Result<()> {
         use crate::drive::ublk::UblkServer;
 
+        // This engine's record off the node from its first line (#685):
+        // /init's logcast stopped at switch_root.
+        if let Some(record) = crate::logging::record_path() {
+            crate::logcast::follow_node_record(&record, "stormblock");
+        }
+
         // What to adopt: the incumbent's own record, unless told otherwise.
         //
         // The kernel knows the devices exist and who serves them; only the server
@@ -9644,6 +9650,7 @@ async fn handle_adopt_ublk(
                 std::io::Error::last_os_error()
             );
         }
+        crate::oom::exempt_node_engine();
 
         // The incumbent stands down before anything is adopted. The kernel runs
         // one server per device, so this is the handover's first step rather than
