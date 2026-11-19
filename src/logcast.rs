@@ -848,9 +848,12 @@ mod tests {
         writeln!(f, "FATAL: adopt-ublk: panic on thread 'x': boom").unwrap();
         lc.read(false);
         lc.send();
+        // logcast's own note first, then the two lines and nothing older.
         let got = frames(&col);
-        assert_eq!(got.len(), 2, "{got:?}");
-        assert!(got[0].ends_with(" adopt: locked into memory for the handover"), "{}", got[0]);
-        assert!(got[1].contains(" pvetest2 stormblock ") && got[1].ends_with("boom"), "{}", got[1]);
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert!(got[0].contains(" stormblock-logcast ") && got[0].contains("logcast: the boot's log to 127.0.0.1:"), "{}", got[0]);
+        assert!(got[1].ends_with(" adopt: locked into memory for the handover"), "{}", got[1]);
+        assert!(got[2].contains(" pvetest2 stormblock ") && got[2].ends_with("boom"), "{}", got[2]);
+        assert!(!got.iter().any(|f| f.contains("initramfs engine")), "{got:?}");
     }
 }
