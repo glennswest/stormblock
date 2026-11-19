@@ -196,8 +196,12 @@ closed, so #649's proof is reachable; the master: do #658 with it.
   devices included), each with transport, device, mountedAt, …
 - [x] check.sh ALL PASS (67676d59, 1521 tests); README, CHANGELOG; v24.28.0
 - [x] image build 60d2d4dfdff5; #649 and #658 shipped with their proofs; the master told of `status.attach` as a list
-- [ ] **#649 and #658 reopened 2026-11-18**: their `api:` proofs 404 on the apiserver,
+- [x] **#649 and #658 reopened 2026-11-18**: their `api:` proofs 404 on the apiserver,
   as #655/#656; behind #655's owner decision.
+- [x] 2026-11-19: v24.33.0's publisher (#655) writes the same objects; the
+  CRD's status is untyped (preserve-unknown-fields), so `attach` as a list
+  is kept; stormcos#1050 carries the CRDs (657c4b2); #658 shipped again
+  `--commit 82817c7e` with the same proof
 
 ## #663 — a template is its sealed volume; never kept `broken` (2026-11-18, P0)
 
