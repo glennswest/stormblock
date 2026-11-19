@@ -4,6 +4,26 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #442 — stormdist: allocated-range export, ISO restore, ISO flow-over (2026-11-18, P1)
+stormdist (glennswest/stormdist, format 2, v0.6.0) is the release/backup
+ISO. stormblock's side, in steps (each its own commit):
+- [ ] export: `GET /api/v1/stormdist/goldens/{volume}`: a sealed volume's
+  name, component, commit, size, device sha256 and sorted allocated ranges
+  (the extent map, #399's `changes` with no base); reads are the sealed
+  volume's Range `content`
+- [ ] forge inventory: `<data-dir>/stormdist.json` (retention roots, signed
+  release catalogues); `GET /api/v1/stormdist/forge` exports it,
+  `PUT .../forge/roots`, `POST .../forge/releases` record
+- [ ] the restore adapter: `stormdist::media::Engine` over the
+  VolumeManager: unsealed staging volumes, digest each, seal and rename
+  under one lock and one persist, abort deletes; a golden already sealed
+  with the same digest is kept (idempotent); `POST /api/v1/stormdist/restore`
+  (`install`/`upgrade`/`restore`, an ISO path on the node, a pinned key)
+- [ ] the ISO as a flow-over source on the install boot (initramfs):
+  follow-up, see below
+- [ ] stormblock-test Jobs (offline flow-over, media removal/corruption,
+  diff-base mismatch, backup/restore): an issue on stormblock-test
+
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it
 - [x] the check's own line (bytes, I/Os, I/O size, MB/s, hits); WARN past 10 s under 1 GiB with `lockwatch::summary()`. The check itself holds no lock (it did not before either); the #364 flush line on forge1 was another task's
