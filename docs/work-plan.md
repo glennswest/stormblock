@@ -135,6 +135,15 @@ HDD `cool`).
 - [x] stormdrive#157 (156 was closed: SSD enrolled `fast`, HDD never `cool`),
   stormcos#1039 corrected (`stormblock-fast`), rustkube-node#400 (class tier
   on the clone)
+- 2026-11-19, back after stormdrive#157 went in_release (v0.53.0): nothing
+  left in stormblock. Open elsewhere: stormcos#1039 (the blades' DrivePolicy,
+  `stormblock-fast`, v0.53.0's CRD) and rustkube-node#400 (the class's tier on
+  the clone), neither queued; and server8's move to the HDD: its last install
+  (12.94, 2026-11-18 21:19Z) predates v24.30.0 and it runs on the SSD, so a
+  keep-data reinstall stays there (rule 3); the move needs `system_drive:
+  {model: ST2000DM008-2UB1}` in server8's install-config (rule 1) or a blank
+  SSD, the master's to arrange (noted). Moved `--after` stormcos#1039 and
+  rustkube-node#400.
 
 ## #659 — no stubs (P-1, 2026-11-18)
 
