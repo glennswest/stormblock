@@ -30,7 +30,7 @@ Steps:
   a grown data volume kept by id through install::apply
 - [x] answer the issue (which happened, item 4: the thin 15 TiB volume)
 - [x] grow-then-upgrade on a pve machine: glennswest/stormblock-test#7
-- [ ] check.sh on 73f344fb; v24.34.3; stage; shipped with a console proof
+- [x] check.sh on 73f344fb passed (sc-build, 1191 s); v24.34.3 tagged; stage requested (build 4c748ae155a6); shipped, proof `on any:storage console:KEEP: … carry this node's layout`
 
 ## #685 — 12.96: nextnfs `shared` takes the engine and apiserver down; node wedged (2026-11-19, P1)
 What is known (no node log of the moment exists):
