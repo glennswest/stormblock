@@ -331,6 +331,17 @@ f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
     clone of its parent's copy here (`parent`, or the peer parent's
     name+namespace sealed here), allocated vs virtual on both sides in the job;
   - test: two engines, the peer with an NVMe/TCP target.
+- [x] 9a1b4d54 (+ fixes 0c.., the "same here" rule from pull records)
+  `mgmt::pull` + `peers::connect_to` + replication over NVMe/TCP;
+  `integration_pull` (golden: 2 of 8 extents read, allocated 2 here; clone
+  by name: a COW clone of the golden's copy, 2 copied / 1 shared / 0
+  zeroed, bytes equal, the peer serves nothing to us after; 200 again, 409
+  writable / other volume of the name, 404, 422; restart deletes a
+  half-made copy); integration_replication with a target; targeted
+  sc-build passed (clippy, it, lib); README "Pulling a volume from a peer",
+  CHANGELOG (d7127cfd)
+- [ ] check.sh on d7127cfd; v24.34.0; image; tell stormblock-registry#186
+  the API; shipped with a proof
 
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 
