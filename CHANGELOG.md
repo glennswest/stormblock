@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-19
+- **docs:** #555: forge's trust shown live: on pvetest1 from 12.78.10 to 12.95, stormcert's `PUT /api/v1/forge/trust` is accepted (`gave the storage engine forge's CA and bootstrap token`), with no 403. The first boot's 401 before it is #430.
+
 ## [v24.31.1] — 2026-11-19
 
 ### Fixed

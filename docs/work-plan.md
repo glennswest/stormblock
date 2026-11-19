@@ -1295,13 +1295,16 @@ agent not reachable, 30 s timeout each). A plain pod 4 s earlier got its network
       podCIDRs (stormcos-cilium#51; stormcluster#103 parked behind it). #558 re-proposed after stormcos-cilium#51
 - [ ] when it lands: the next cilium cluster test's `claim on the worker` within ~5 s of a single node; close
 
-### forge's stormcert refused on forge/trust: reviewed as destroy (2026-11-07, #555, P0, stormcos#490) — ENGINE DONE (v23.22.3), open behind the stormcos role
+### forge's stormcert refused on forge/trust: reviewed as destroy (2026-11-07, #555, P0, stormcos#490) — DONE: live since 12.78.10, closed 2026-11-19
 
 The issue's `update` would let every `storage-user` (`update` on `storage.storm.io` `*`) replace the CA and bootstrap
 token handed to booting nodes. So its own verb, `settrust`; DELETE stays `destroy`. Needs stormcos's
 `stormcos:forge-trust` role to add the verb.
 - [x] review_attributes, docs, test; check.sh ALL PASS at 84f806a3 (1363/1363); v23.22.3; stage; stormcos issue
-- [ ] after the role and stormcert#144: a first boot with `[forge]` logs `gave the storage engine forge's CA`; close
+- [x] 2026-11-19: live. pvetest1's installs' `pods.log` (stormcentral bootlog), 12.78.10 through 12.95: `gave the
+      storage engine forge's CA and bootstrap token` on each, `forge/trust: HTTP 403` on none. The first boot's one
+      401 before it (`cannot read CA /etc/stormcert/ca.crt` at the engine's start, so no review until it restarts) is
+      #430's, not this; closed
 
 ### The handover's stand-down: 5.1 s on every boot (2026-11-07, #538, P2, stormcos#804 fix 10) — PAUSED for P0 #555: the fix is on main
 
