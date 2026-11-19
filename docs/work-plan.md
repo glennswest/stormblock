@@ -21,11 +21,12 @@ ISO. stormblock's side, in steps (each its own commit):
   (`install`/`upgrade`/`restore`, an ISO path on the node, a pinned key)
 - [x] tests/it/integration_stormdist.rs on sc-build (wip/442-stormdist
   2026-11-18: both pass, clippy clean); Cargo.lock made on a build VM
-- [ ] check.sh on main, v24.31.0, image
+- [x] check.sh on main (972a8176, ALL PASS), v24.31.0, image requested (stage 08a63f53abaa)
 - [ ] the ISO install boot (initramfs: run from the ISO, flow over, eject):
   waits for the bootable release ISO, stormdist#10
-- [ ] stormblock-test Jobs (offline flow-over, media removal/corruption,
-  diff-base mismatch, backup/restore): an issue on stormblock-test
+- [x] stormblock-test Jobs: filed glennswest/stormblock-test#6; a golden's
+  LBA missing from the manifest: glennswest/stormdist#17
+- #442 proposed --after stormdist#10 (2026-11-18): only the ISO install boot is left
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it
