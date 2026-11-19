@@ -272,7 +272,10 @@ forge1's `registry-data` is 4 GiB; it must hold forge's images.
   grow asked there, refusal put back, Replication made/deleted there);
   e7b9c2dd README/CHANGELOG; stormcos#1050 filed (carry the CRDs, bind
   kube-system/stormblock and the worker's cluster identity)
-- [ ] check.sh; v24.33.0; image; #655 (and #649/#656/#658) `--after stormcos#1050`
+- [x] check.sh ALL PASS on e7b9c2dd (1537 tests); v24.33.0 (82817c7e); image build 1e9b329d012a
+- [x] #655, #649, #656, #658 proposed `--after stormcos#1050`; the master noted
+- [ ] once a release carries stormcos#1050: the master's `sc patch volume`
+  on forge1's registry-data; `shipped` with the `api:` proof
 
 ## #656 — Replication: sync a store from a peer engine (2026-11-18, P0 hand-off)
 
