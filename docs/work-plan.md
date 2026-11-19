@@ -49,7 +49,7 @@ ISO. stormblock's side, in steps (each its own commit):
 - [ ] on forge1: the seal line's check under a few seconds for a 146 MiB golden
 - [ ] 2026-11-19 reopened: the `log:` proof read stormcentral's install log, never the node's. No test install seals (pvetest2 12.96: its blanks come sealed, no seal in its console), and an engine INFO line does not reach a node's console (only WARN and stdout do). Seals run on forge1 (appliance, still 24.29.1). Plan: the check line also printed on stdout (the console, as the flow-over lines); re-ship `--commit` it with `on forge1 console:fstemplate .* check of volume .* I/O\(s\) of 1024 KiB`
 - [x] the line on stdout too (`say_check`); README, CHANGELOG
-- [ ] check.sh on the push (with #676's 5bb2d82e), v24.34.1, stage, re-ship both
+- [x] check.sh on afaf8285 ALL PASS (1627 s); v24.34.1 (e999e23f), stage 6977c0503a34; both re-shipped (#677 `on forge1 console:`, master noted; #676 `console:`)
 
 ## #676 — health's flow-over span stops at its end (2026-11-18)
 - [x] `FlowProgress::finish("done"|"stopped")`: at the flow-over's completion, its abandonment, and a system move's end; `seconds`/rates over the finished span, `started_at`/`finished_at`, `pace.state` `done`; a later begin counts from zero
@@ -58,7 +58,7 @@ ISO. stormblock's side, in steps (each its own commit):
 - [x] proof on a node: health `flow_over.finished_at` present after a flow-over (`shipped` set with a get: proof on /api/v1/health, 2026-11-18)
 - [ ] 2026-11-19 reopened: the get: proof cannot hold on a test install. pvetest2 (12.96, 24.33.0) flowed over (`Flow-over complete` on its console), then the install power-cycles to a local boot, and health is read after it: no flow-over in that process, `flow_over` absent. Plan: the `Flow-over complete` line says the frozen span from `FLOW.snapshot()` (seconds, MB/s, started_at/finished_at, as health reports it); re-ship with a `console:` proof on that line, `--commit` the fix
 - [x] `FlowProgress::span_said`, the completion line, the unit test extended; README, CHANGELOG (5bb2d82e, pushed, not yet built)
-- [ ] PAUSED 2026-11-19 for P0 #677: `sc-build 'sh check.sh'` on the push, then `shipped --commit <sha> --proof 'console:Flow-over complete: .* finished_at [0-9]+'`; a patch release with it
+- [x] check.sh ALL PASS on afaf8285 (with 5bb2d82e); v24.34.1; re-shipped `--commit 5bb2d82e --proof 'console:Flow-over complete: .* finished_at [0-9]+'`
 
 ## #616 (again) — the record after a reboot (2026-11-16, P1)
 
