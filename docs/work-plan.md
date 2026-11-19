@@ -1373,6 +1373,16 @@ NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
       5 discovers (~4 s) after the bridge came up. R6415 (C2NR0Q2): no install since 12.81, all cancelled
       (stormbootx#212-216), so its 25 s target is unread. **To resume:** check the PTR timing, file microdns if it is
       silent; then wait for a C2NR0Q2 install and read its `.times`; close when it is under 25 s.
+      2026-11-19 (resumed): g16 DNS answers server8's PTR in 1 ms from here, so the 3 s was the MTU 9000 from
+      DHCP resetting mlx4's eth1 (`Link Down` at 25.5 s) right before the DNS tries: the node was named
+      `storm-84ae30`, not server8. And the ports went up only after the state read (21.5 s), so DHCP waited out
+      the switch (~3.5 s, five discovers). Plan:
+- [ ] `early ports`: every physical port up at `Configuring network...`; a port still down raised to mtu 9000
+      first (a down port takes it without a reset), its own mtu kept in /run/stormblock-port-mtu; `rd.stormblock.port-mtu=N|off`
+- [ ] the bridge pinned at the port's own mtu until a lease/[network]; an address on the port itself (no bridge,
+      a path NIC with no lease mtu) puts it back; `dhcp_mtu` never lowers a port already at or above it; static_apply's mtu on IFACE
+- [ ] DNS: "no answer" said apart from "no PTR record"
+- [ ] tests (initramfs-early-ports.sh, initramfs-mtu.sh, node-name), check.sh, release, stage
 
 ### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; back 2026-11-07: letting go of a flow-over's sources stalls every reader
 
