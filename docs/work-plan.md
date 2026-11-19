@@ -4,6 +4,36 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #690 — Volume fill conditions and a `spec.grow` policy (2026-11-19, P1)
+Owner (forge1's registry-data filled twice): "We need the ability to enlarge space."
+Design:
+- Fill: every 30 s the engine `statfs`es each volume's filesystem where it is
+  mounted (a ublk device it serves, in any mount namespace, reached through
+  `/proc/<pid>/root`; the mount table (#658) keeps one such path a device).
+  Volume `status.filesystem {sizeBytes, usedBytes, availBytes, usedPercent,
+  mountedAt}`, `status.usedBytes`, `status.conditions` `VolumeFilling` (80 %)
+  and `VolumeFull` (95 %) with reason, message, lastTransitionTime.
+  Metrics `storm_volume_fs_size_bytes`, `storm_volume_fs_used_bytes`,
+  `storm_volume_fs_used_ratio`, `storm_volume_grows_total` by volume and name.
+- Policy: `spec.grow: {max, step}` (bytes, or `64G`/`64Gi`; step whole GiB,
+  default 1 GiB), kept with the volume (a format-2 header block `G`, after
+  the rollback mark; absent = the header as it was), inherited by a clone
+  (so a blank's policy reaches every node's copy), `null` clears it. Set by
+  PATCH on :9090 or on the apiserver's object; allowed on a sealed blank.
+- Grow: at ≥ 80 % and at most once per 5 min a volume, to
+  min(capacity + step, max), within its role's free bytes less a margin
+  (1 GiB or 5 % of what the pool promises); through #655's grow (ublk device
+  told, mounted ext4 grown). `status.grown` keeps the last 10;
+  `status.growBlocked` says why one did not happen.
+Steps:
+- [ ] `GrowPolicy` in the record and the manager (metav2 `G`), clone inherits
+- [ ] spec.grow: PATCH, the object's spec, the apiserver round trip
+- [ ] mount table: a statfs path per device; `mgmt/fill.rs` task, conditions, metrics, the grow
+- [ ] deploy/crds.yaml schema; README, docs; CHANGELOG
+- [ ] check.sh; stormcos issue: image.toml `grow` spelling, set at compose
+- [ ] stormblock-registry: its own grow (#194) can stand down
+- [ ] stormblock-test: fill a 64M volume to 90 %, see VolumeFilling and the grow
+
 ## #689 — forge1's data half re-laid on every release install since 11-17 (2026-11-19, P0)
 What happened (forge1's console, /var/lib/stormcentral/console/forge1-20261119-190826.log):
 - Not the grow. The 12.96 install printed "its data half kept (#311)", then
