@@ -22,14 +22,15 @@ What happened (forge1's console, /var/lib/stormcentral/console/forge1-20261119-1
 - The engine's per-volume keep (install::apply) keeps by name and never
   compares size: a grown volume is kept. The loss was at the drive layer only.
 Steps:
-- [ ] layout: INSTALL_OVER that is the served node-data set is kept (#689)
-- [ ] format/lay: drives of the served set never formatted or laid without
+- [x] layout: INSTALL_OVER that is the served node-data set is kept (#689)
+- [x] format/lay: drives of the served set never formatted or laid without
   the wipe word, whatever the install's intent; checked before the set is let go
-- [ ] KEEP wiring: LOCAL_DISK the set, SYSTEM_DISK the first leg, no force
-- [ ] tests: the 12.96 sequence end to end in tests/initramfs-storage.sh;
+- [x] KEEP wiring: LOCAL_DISK the set, SYSTEM_DISK the first leg, no force
+- [x] tests: the 12.96 sequence end to end in tests/initramfs-storage.sh;
   a grown data volume kept by id through install::apply
-- [ ] answer the issue (which happened, item 4: the thin 15 TiB volume)
-- [ ] grow-then-upgrade on a pve machine: stormblock-test issue
+- [x] answer the issue (which happened, item 4: the thin 15 TiB volume)
+- [x] grow-then-upgrade on a pve machine: glennswest/stormblock-test#7
+- [ ] check.sh on 73f344fb; v24.34.3; stage; shipped with a console proof
 
 ## #685 — 12.96: nextnfs `shared` takes the engine and apiserver down; node wedged (2026-11-19, P1)
 What is known (no node log of the moment exists):
