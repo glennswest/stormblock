@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::drive::BlockDevice;
 use crate::mgmt::api::ApiError;
 use crate::mgmt::replication::{self, Hooks, PeerVol, Pace};
 use crate::mgmt::AppState;
