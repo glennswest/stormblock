@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.31.1] — 2026-11-19
+
+### Fixed
+- #557: a 503 from this node's own apiserver names a missing cluster record (`engine-cluster.json`), which stormcluster writes when the node joins as a worker.
+
 ### 2026-11-18
 - **fix:** #557: a 503 from this node's own apiserver says when there was no cluster record (`engine-cluster.json`, its path), which stormcluster writes when the node joins as a worker. 12.69's worker release said only `cannot review the bearer with https://127.0.0.1:6443`: its cluster could not issue the worker's tokens (no stormcos#838 grant), so no record was written.
 
