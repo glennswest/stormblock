@@ -164,11 +164,14 @@ struct VolumeSnap {
     /// (#138), as the REST listing has them (#649).
     owner: Option<crate::volume::metadata::Owner>,
     usage: super::usage::Usage,
+    /// Its grow policy (#690).
+    grow: Option<crate::volume::metadata::GrowPolicy>,
 }
 
 fn volume_snap(vm: &crate::volume::VolumeManager, id: VolumeId, ctx: &super::usage::Context) -> Option<VolumeSnap> {
     Some(VolumeSnap {
         owner: vm.owner(&id).cloned(),
+        grow: vm.grow_policy(&id),
         usage: ctx.usage(vm, &id),
         id,
         handle: vm.get_volume_handle(&id)?,
@@ -299,6 +302,9 @@ async fn volume_object(s: &VolumeSnap, view: &AttachView) -> Value {
             "retention": s.retention,
             "fs": s.fs,
             "namespace": s.namespace,
+            // How the engine grows it as its filesystem fills (#690); null:
+            // never, the conditions alone say it is filling.
+            "grow": s.grow.map(|g| json!({ "max": g.max, "step": g.step })),
         }),
         json!({
             "health": health.state.to_string(),
@@ -388,6 +394,30 @@ pub(crate) struct VolumeSpecPatch {
     /// smaller, never a sealed one.
     #[serde(default, rename = "sizeBytes")]
     size_bytes: Option<u64>,
+    /// The grow policy (#690): `{max, step}` (bytes, or `64G`), `null` to
+    /// clear it. Absent leaves it as it is.
+    #[serde(default, deserialize_with = "present")]
+    grow: Option<Value>,
+}
+
+/// A field that is there, `null` included (#690: `grow: null` clears).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(d).map(Some)
+}
+
+/// `spec.grow` as asked: `None` clears the policy.
+pub(crate) fn grow_policy_of(v: &Value) -> Result<Option<crate::volume::metadata::GrowPolicy>, String> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Object(m) => {
+            if let Some(k) = m.keys().find(|k| !matches!(k.as_str(), "max" | "step")) {
+                return Err(format!("spec.grow.{k}: not a field (max, step)"));
+            }
+            let max = m.get("max").ok_or("spec.grow.max: required (the most the volume grows to)")?;
+            crate::volume::metadata::GrowPolicy::parse(max, m.get("step")).map(Some)
+        }
+        other => Err(format!("spec.grow: {other} is not {{max, step}} or null")),
+    }
 }
 
 /// Grow a volume through its object (#655): the engine's resize, then the
@@ -456,6 +486,11 @@ async fn grow_volume(state: &AppState, id: VolumeId, to: u64) -> Result<Value, R
 /// edited on the apiserver both come here). Only the fields that are verbs
 /// the engine already has. `Some(lastResize)` when it grew.
 pub(crate) async fn apply_volume_spec(state: &AppState, id: VolumeId, spec: VolumeSpecPatch) -> Result<Option<Value>, Refusal> {
+    // `spec.grow` checked before anything is changed (#690).
+    let grow = match &spec.grow {
+        Some(g) => Some(grow_policy_of(g).map_err(|e| Refusal::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", e))?),
+        None => None,
+    };
     // First, and with no manager held across it (#571): it takes the
     // exports, the ublk table and the mount table.
     let resized = match spec.size_bytes {
@@ -464,6 +499,14 @@ pub(crate) async fn apply_volume_spec(state: &AppState, id: VolumeId, spec: Volu
     };
     let conflict = |e: String| Refusal::new(StatusCode::CONFLICT, "Conflict", e);
     let mut vm = state.volume_manager.lock().await;
+    if let Some(g) = grow {
+        vm.set_grow_policy(id, g).map_err(|e| conflict(e.to_string()))?;
+        vm.persist().await;
+        match g {
+            Some(p) => tracing::info!("volume {id}: grow policy set: up to {} bytes, {} a step (#690)", p.max, p.step),
+            None => tracing::info!("volume {id}: grow policy cleared (#690)"),
+        }
+    }
     if let Some(r) = spec.redundancy {
         let policy = crate::volume::RedundancyPolicy::parse(&r)
             .map_err(|e| Refusal::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec.redundancy: {e}")))?;

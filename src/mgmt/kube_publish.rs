@@ -52,7 +52,7 @@ const GROUP_PATH: &str = "/apis/storage.storm.io/v1";
 const SEEN_FILE: &str = "kube-published.json";
 
 /// A Volume's spec fields that can be changed (the rest are what it is).
-const VOLUME_WRITABLE: [&str; 5] = ["sizeBytes", "sealed", "access", "retention", "redundancy"];
+const VOLUME_WRITABLE: [&str; 6] = ["sizeBytes", "sealed", "access", "retention", "redundancy", "grow"];
 
 /// What one pass did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
