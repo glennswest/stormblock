@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.31.0] — 2026-11-18
+
+### Added
+- #442: `/api/v1/stormdist`: a sealed golden exported as a stormdist recipe input (allocated ranges, device sha256, commit); the forge inventory (retention roots, signed catalogues); restore, install and upgrade from a stormdist ISO, staged, digest-checked and published at once, idempotent.
+
 ### 2026-11-18
 - **feat:** #442: stormdist's side in the engine, at `/api/v1/stormdist`. `GET /goldens/{volume}` exports a sealed golden as a stormdist recipe input: name, component, commit, size, device sha256 and sorted allocated ranges from the extent map. Its bytes are the sealed volume's Range `content`.
 - **feat:** #442: the forge inventory, `stormdist.json`: retention roots and exact signed release catalogues. `GET /forge` exports it for a backup's `FORGE.toml`; `PUT /forge/roots` and `POST /forge/releases` record them.
