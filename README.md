@@ -974,6 +974,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` and `labelSelector` (`k=v`, `k!=v`, `k`, `!k`). A Volume's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` (`transport`, `device`, `mountedAt`, `target`, `port`, `lun`, `nsid`, `state`, `remote`) and `kind` as the REST listing does (#649), and `attach`, the same list with `deviceHint` on a ublk entry (#658; it was one object or null, from the engine's own exports only), and its labels `storm.io/kind` and `storm.io/owner-kind`: `kubectl get volumes -l storm.io/owner-kind=Pod`, `-l '!storm.io/owner-kind,storm.io/kind=volume'` for orphan clones, or `?unowned=true` |
 | `PATCH /apis/storage.storm.io/v1/volumes/{id}` | `spec`: `redundancy`, `sealed`, `access`, `retention`, `resync`, and `sizeBytes` (#655), which grows the volume: thin, never smaller (`422`), never a sealed, exported or mirrored one (`409`). Its ublk device is told the new size. An ext4 the engine sees mounted on it is grown online (`EXT4_IOC_RESIZE_FS`); otherwise (an XFS, a mount in a service's own namespace) the service that mounts it grows it. `status.capacityBytes` follows, and the PATCH's answer carries `status.lastResize` (`from`, `to`, `device`, `filesystem`) |
 | `/apis/storage.storm.io/v1/replications` | `Replication` (#656): sync this engine's store from a peer engine, once or following it; create, replace, patch, delete are the admin's. See "Replication" below |
+| the cluster's apiserver | The engine writes its `Volume` and `Replication` objects there as CRDs (#655, `deploy/crds.yaml`), and takes back a spec changed there. See "On the cluster's apiserver" below |
 | `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
 
 
@@ -1138,6 +1139,44 @@ and owner. `GET …/{id}/legs` gives the extents it maps, and `GET
   `/v1/replicate`);
 - events;
 - `credentialSecret` / `caSecret`: the peer is reached as an open one.
+
+## On the cluster's apiserver
+
+The engine serves its `storage.storm.io/v1` objects on its own port; `kubectl`
+and `sc` ask the cluster's apiserver. So, as stormdrive does with `Drive`, the
+engine writes its `Volume` and `Replication` objects there as CRDs (#655;
+owner: "management = CRDs + controllers"). The CRDs and the engine's
+ClusterRole are `deploy/crds.yaml`; stormcos carries a copy. The engine uses
+the apiserver and bearer it reviews callers with (`[management.kubernetes]`,
+or the cluster's record on a worker, #557). With none configured, nothing is
+published and the start says so.
+
+Every 15 s (`mgmt::kube_publish`):
+- **Volume.** One object a volume, named by its uuid and labelled
+  `storm.io/node` with this node, as the engine's own port renders it. A
+  missing one is created; labels, spec and `status` are merge-patched where
+  they differ, so a quiet volume writes nothing. A volume gone here has its
+  object deleted. Deleting the object deletes no volume: it is written again.
+  Another node's object of the same name is left alone, and said once.
+- **A spec changed on the apiserver**: `sc patch volume <id> -p
+  '{"spec":{"sizeBytes":1099511627776}}'`. The annotation
+  `storm.io/engine-spec` holds the writable fields (`sizeBytes`, `sealed`,
+  `access`, `retention`, `redundancy`) as the engine last wrote them. A field
+  that differs from it was asked there and goes through the same code as the
+  engine's own PATCH. So a grow is thin, its ublk device is told, and an ext4
+  the engine sees mounted is grown online; `status.lastResize` says what
+  happened. `resync: true` runs a resync. A refusal (smaller, sealed,
+  exported, mirrored) is put in `status.specError` (`asked`, `code`,
+  `message`, `at`), and the spec is put back to what the volume is.
+- **Replication.** This node's are written the same way, labelled with the
+  node. One made on the apiserver with this node's `storm.io/node` label runs
+  here; a spec changed there is a new generation here. One the engine had
+  seen there and that is deleted there is deleted here, and one deleted here
+  has its object deleted. The names seen are kept in
+  `<data_dir>/kube-published.json`, so a delete made while the engine was
+  down is taken too. A spec that cannot run is refused on its status
+  (`phase: Failed`, `specError`). One with no `storm.io/node` label runs
+  nowhere, and each engine says so once.
 
 ## Files
 

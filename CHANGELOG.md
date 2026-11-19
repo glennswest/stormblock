@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-19
+- **feat:** #655 (owner's answer A): the engine publishes its `Volume` and `Replication` objects as CRDs on the cluster's apiserver, so `kubectl`/`sc get volumes` list every node's and `sc patch volume <id> -p '{"spec":{"sizeBytes":N}}'` reaches the engine. Every 15 s (`mgmt::kube_publish`) this node's objects (label `storm.io/node`) are created, merge-patched where they differ, and deleted when gone. A spec changed there is told apart by the annotation `storm.io/engine-spec` (what the engine last wrote) and goes through the engine's own PATCH code (`apply_volume_spec`). A refusal is said in `status.specError` and the spec put back; a grow in `status.lastResize`. A Replication made there with this node's label runs here, and one deleted there stops here (`<data_dir>/kube-published.json`). `deploy/crds.yaml` holds the two CRDs and the engine's ClusterRole, for stormcos to carry. `http::Client` sends PATCH (merge patch); `KubeAuth::call`.
 - **docs:** #680: `docs/history/data-placement.md` no longer says "not implemented": it is a 2026-08-28 design note written before the code, and its History header already names what was built (`docs/redundancy.md`, `docs/multi-drive.md`).
 
 ## [v24.32.1] — 2026-11-19
