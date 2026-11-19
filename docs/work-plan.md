@@ -4,6 +4,12 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #681 — `migrate` and `ublk` subcommands were stubs (2026-11-19, P0)
+- [ ] remove both: each logged how to do it elsewhere and exited 0. The work is
+  `migrate-boot` (iSCSI slab → local disk), `boot-local --local-disk` (flow-over),
+  `/api/v1/moves`, `/volumes/{id}/tier`, `/volumes/{id}/attach` and `attach --slab`.
+  No gap to file: nothing they named is unbuilt. README table row dropped.
+
 ## #680 — stub marker in docs/history/data-placement.md (2026-11-19, P0)
 - [x] line 27 reworded: a design note written before the code; the History header names what was built. No gap to file: its conclusions are built (redundancy, drain, rebuild; #69–#72 closed).
 
