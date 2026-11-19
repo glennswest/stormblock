@@ -53,6 +53,28 @@ fn status_error(code: StatusCode, reason: &str, message: impl Into<String>) -> R
         .into_response()
 }
 
+/// A spec change refused: its code, reason and words. The :9090 PATCH
+/// answers it as a Status; the apiserver's object carries it in
+/// `status.specError` (#655).
+#[derive(Debug, Clone)]
+pub struct Refusal {
+    pub code: StatusCode,
+    pub reason: &'static str,
+    pub message: String,
+}
+
+impl Refusal {
+    fn new(code: StatusCode, reason: &'static str, message: impl Into<String>) -> Self {
+        Refusal { code, reason, message: message.into() }
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        status_error(self.code, self.reason, self.message)
+    }
+}
+
 fn list(kind: &str, items: Vec<Value>, rv: u64) -> Value {
     json!({
         "apiVersion": api_version(),
@@ -307,7 +329,7 @@ async fn volume_object(s: &VolumeSnap, view: &AttachView) -> Value {
 }
 
 /// The Volume objects, the manager held only for their snapshots (#571).
-async fn volume_objects(state: &AppState, only: Option<VolumeId>) -> Vec<Value> {
+pub(crate) async fn volume_objects(state: &AppState, only: Option<VolumeId>) -> Vec<Value> {
     // What serves each volume, gathered before the manager is taken (#571).
     let ctx = super::usage::Context::gather(state).await;
     let snaps = volume_snaps(state, only, &ctx).await;
@@ -348,8 +370,8 @@ struct VolumePatch {
     spec: Option<VolumeSpecPatch>,
 }
 
-#[derive(Deserialize, Default)]
-struct VolumeSpecPatch {
+#[derive(Deserialize, Default, Debug)]
+pub(crate) struct VolumeSpecPatch {
     #[serde(default)]
     redundancy: Option<String>,
     #[serde(default)]
@@ -371,36 +393,36 @@ struct VolumeSpecPatch {
 /// Grow a volume through its object (#655): the engine's resize, then the
 /// kernel device told (a ublk export), then an ext4 the engine sees mounted
 /// grown online. What happened, in words, for `status.lastResize`.
-async fn grow_volume(state: &AppState, id: VolumeId, to: u64) -> Result<Value, Response> {
+async fn grow_volume(state: &AppState, id: VolumeId, to: u64) -> Result<Value, Refusal> {
     let uuid = id.0;
     let (sealed, from) = {
         let vm = state.volume_manager.lock().await;
         match vm.get_volume_handle(&id) {
             Some(h) => (h.is_sealed(), h.capacity_bytes()),
-            None => return Err(status_error(StatusCode::NOT_FOUND, "NotFound", format!("volumes \"{uuid}\" not found"))),
+            None => return Err(Refusal::new(StatusCode::NOT_FOUND, "NotFound", format!("volumes \"{uuid}\" not found"))),
         }
     };
     if to == from {
         return Ok(json!({ "from": from, "to": to, "volume": "already that size" }));
     }
     if to < from {
-        return Err(status_error(
+        return Err(Refusal::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid",
             format!("spec.sizeBytes: {to} is smaller than the volume ({from}): a volume grows, never shrinks (a filesystem on it cannot follow)"),
         ));
     }
     if sealed {
-        return Err(status_error(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} is sealed: it takes no writes and is not grown (grow a clone of it)")));
+        return Err(Refusal::new(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} is sealed: it takes no writes and is not grown (grow a clone of it)")));
     }
     if state.exports.read().await.iter().any(|e| e.volume_id == uuid) {
-        return Err(status_error(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} has iSCSI/NVMe exports: their hosts read its size at connect; detach them first")));
+        return Err(Refusal::new(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} has iSCSI/NVMe exports: their hosts read its size at connect; detach them first")));
     }
     if crate::mgmt::live_mirror::is_mirrored(state, uuid).await {
-        return Err(status_error(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} is being mirrored to a peer; stop the mirror first")));
+        return Err(Refusal::new(StatusCode::CONFLICT, "Conflict", format!("volume {uuid} is being mirrored to a peer; stop the mirror first")));
     }
     if let Err(e) = state.volume_manager.lock().await.resize_volume(id, to).await {
-        return Err(status_error(StatusCode::CONFLICT, "Conflict", e.to_string()));
+        return Err(Refusal::new(StatusCode::CONFLICT, "Conflict", e.to_string()));
     }
     let key = uuid.to_string();
     let (device, dev_path) = {
@@ -430,8 +452,47 @@ async fn grow_volume(state: &AppState, id: VolumeId, to: u64) -> Result<Value, R
     Ok(json!({ "from": from, "to": to, "device": device, "filesystem": fs }))
 }
 
+/// Apply a spec change to a volume (#655: the :9090 PATCH and a spec
+/// edited on the apiserver both come here). Only the fields that are verbs
+/// the engine already has. `Some(lastResize)` when it grew.
+pub(crate) async fn apply_volume_spec(state: &AppState, id: VolumeId, spec: VolumeSpecPatch) -> Result<Option<Value>, Refusal> {
+    // First, and with no manager held across it (#571): it takes the
+    // exports, the ublk table and the mount table.
+    let resized = match spec.size_bytes {
+        Some(to) => Some(grow_volume(state, id, to).await?),
+        None => None,
+    };
+    let conflict = |e: String| Refusal::new(StatusCode::CONFLICT, "Conflict", e);
+    let mut vm = state.volume_manager.lock().await;
+    if let Some(r) = spec.redundancy {
+        let policy = crate::volume::RedundancyPolicy::parse(&r)
+            .map_err(|e| Refusal::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec.redundancy: {e}")))?;
+        vm.set_redundancy(id, policy).await.map_err(|e| conflict(e.to_string()))?;
+    }
+    if let Some(sealed) = spec.sealed {
+        let r = if sealed { vm.seal_volume(id, None).await } else { vm.unseal_volume(id).await };
+        r.map_err(|e| conflict(e.to_string()))?;
+    }
+    if let Some(a) = spec.access {
+        let access = crate::volume::Access::parse(&a)
+            .ok_or_else(|| Refusal::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec.access: {a:?} (use rw or ro)")))?;
+        vm.set_access(id, access).await.map_err(|e| conflict(e.to_string()))?;
+    }
+    if let Some(ret) = spec.retention {
+        let r = crate::volume::Retention::parse(&ret)
+            .ok_or_else(|| Refusal::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec.retention: {ret:?}")))?;
+        vm.set_retention(id, r).await;
+    }
+    // A volume the rebuild queue holds is resynced by it.
+    if spec.resync == Some(true) && !state.rebuilds.holds(&id) {
+        vm.resync_volume(id, false)
+            .await
+            .map_err(|e| Refusal::new(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", e.to_string()))?;
+    }
+    Ok(resized)
+}
+
 /// `PATCH /apis/storage.storm.io/v1/volumes/{name}` — merge-patch on `spec`.
-/// Only the fields that are verbs the engine already has.
 async fn patch_volume(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -443,61 +504,11 @@ async fn patch_volume(
     let Some(spec) = patch.spec else {
         return get_volume(State(state), Path(name)).await;
     };
-    // First, and with no manager held across it (#571): it takes the
-    // exports, the ublk table and the mount table.
-    let resized = match spec.size_bytes {
-        Some(to) => match grow_volume(&state, id, to).await {
-            Ok(v) => Some(v),
-            Err(r) => return r,
-        },
-        None => None,
+    let resized = match apply_volume_spec(&state, id, spec).await {
+        Ok(r) => r,
+        Err(r) => return r.into_response(),
     };
-    let mut vm = state.volume_manager.lock().await;
-    if let Some(r) = spec.redundancy {
-        let policy = match crate::volume::RedundancyPolicy::parse(&r) {
-            Ok(p) => p,
-            Err(e) => return status_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec.redundancy: {e}")),
-        };
-        if let Err(e) = vm.set_redundancy(id, policy).await {
-            return status_error(StatusCode::CONFLICT, "Conflict", e.to_string());
-        }
-    }
-    if let Some(sealed) = spec.sealed {
-        let r = if sealed { vm.seal_volume(id, None).await } else { vm.unseal_volume(id).await };
-        if let Err(e) = r {
-            return status_error(StatusCode::CONFLICT, "Conflict", e.to_string());
-        }
-    }
-    if let Some(a) = spec.access {
-        match crate::volume::Access::parse(&a) {
-            Some(access) => {
-                if let Err(e) = vm.set_access(id, access).await {
-                    return status_error(StatusCode::CONFLICT, "Conflict", e.to_string());
-                }
-            }
-            None => {
-                return status_error(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    "Invalid",
-                    format!("spec.access: {a:?} (use rw or ro)"),
-                )
-            }
-        }
-    }
-    if let Some(ret) = spec.retention {
-        match crate::volume::Retention::parse(&ret) {
-            Some(r) => vm.set_retention(id, r).await,
-            None => return status_error(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", format!("spec.retention: {ret:?}")),
-        }
-    }
-    // A volume the rebuild queue holds is resynced by it.
-    if spec.resync == Some(true) && !state.rebuilds.holds(&id) {
-        if let Err(e) = vm.resync_volume(id, false).await {
-            return status_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", e.to_string());
-        }
-    }
     // The object after the manager is let go (#571).
-    drop(vm);
     match volume_objects(&state, Some(id)).await.pop() {
         Some(mut v) => {
             if let Some(r) = resized {

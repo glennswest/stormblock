@@ -243,6 +243,10 @@ impl Client {
         self.request(hyper::Method::PUT, url.as_ref())
     }
 
+    pub fn patch(&self, url: impl AsRef<str>) -> RequestBuilder {
+        self.request(hyper::Method::PATCH, url.as_ref())
+    }
+
     fn request(&self, method: hyper::Method, url: &str) -> RequestBuilder {
         RequestBuilder {
             client: self.clone(),
@@ -285,6 +289,14 @@ impl RequestBuilder {
             .map(Bytes::from)
             .map_err(|e| Error::Serialize(e.to_string()));
         self.content_type = Some("application/json");
+        self
+    }
+
+    /// Send `value` as a JSON merge patch (RFC 7386,
+    /// `application/merge-patch+json`), as an apiserver takes a PATCH (#655).
+    pub fn merge_patch<T: serde::Serialize + ?Sized>(mut self, value: &T) -> Self {
+        self = self.json(value);
+        self.content_type = Some("application/merge-patch+json");
         self
     }
 

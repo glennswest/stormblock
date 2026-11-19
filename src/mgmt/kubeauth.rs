@@ -294,6 +294,40 @@ impl KubeAuth {
         Ok(nodes_of(&v))
     }
 
+    /// One call to the apiserver with the engine's own bearer (#655: the
+    /// engine's objects published as CRDs): `method` is GET, POST, PUT,
+    /// PATCH (a JSON merge patch) or DELETE; `path` starts at `/apis`. The
+    /// HTTP status and the body; an error when nothing answered.
+    pub async fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
+        let t = self.target()?;
+        let url = format!("{}{path}", t.api_url);
+        let c = &t.client;
+        let rb = match method {
+            "GET" => c.get(&url),
+            "POST" => c.post(&url),
+            "PUT" => c.put(&url),
+            "PATCH" => c.patch(&url),
+            "DELETE" => c.delete(&url),
+            m => return Err(format!("{m} {url}: not a method the engine sends")),
+        };
+        let rb = match (method, body) {
+            ("PATCH", Some(b)) => rb.merge_patch(b),
+            (_, Some(b)) => rb.json(b),
+            (_, None) => rb,
+        };
+        // A listing of every volume can be large (forge: thousands).
+        let r = rb
+            .bearer(t.own_token().as_deref())
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| format!("{method} {url}: {e}"))?;
+        let status = r.status().as_u16();
+        let text = r.text().await.map_err(|e| format!("{method} {url}: {e}"))?;
+        let v = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        Ok((status, v))
+    }
+
     /// May `bearer` `verb` the `storage.storm.io` resource `resource` (named
     /// `name`, when there is one)?
     pub async fn review(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>) -> Review {

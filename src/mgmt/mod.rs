@@ -6,6 +6,7 @@ pub mod hba;
 pub mod hotplug;
 pub mod auth;
 pub mod kubeauth;
+pub mod kube_publish;
 pub mod capacity;
 pub mod goldens;
 pub mod boot_override;
@@ -882,6 +883,9 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             }
             // Every replication not finished, and every mirror, run again (#656).
             crate::mgmt::replication::resume(state.clone());
+            // This node's Volume and Replication objects on the cluster's
+            // apiserver, and the spec changes asked there (#655).
+            crate::mgmt::kube_publish::start(&state);
             // Every ship job a restart cut short resumes, or reads failed (#400).
             crate::mgmt::ship::resume(state.clone()).await;
             // And finish the formats a previous run left in the middle (#141).

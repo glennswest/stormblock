@@ -1,0 +1,141 @@
+# The storage engine's kinds on the cluster's apiserver (stormblock#655):
+# Volume and Replication in storage.storm.io/v1. Cluster-scoped, as the
+# engine serves them on its own port (/apis/storage.storm.io/v1, #80, #656).
+# stormcos carries a copy of this file in its manifests, as it does
+# stormdrive's deploy/crds.yaml; re-copy it when this file changes.
+#
+# - Volume: one per engine volume, named by its uuid, written by the engine
+#   of the node that holds it (label storm.io/node; storm.io/name is the
+#   volume's name). Its spec's writable fields are sizeBytes (grow, never
+#   shrink), sealed, access, retention and redundancy, and resync: true (a
+#   verb): changed here, the node's engine applies them within 15 s and
+#   writes back what the volume is; a refused change is put back and said
+#   in status.specError, a grow in status.lastResize. The annotation
+#   storm.io/engine-spec is what the engine last wrote. Deleting the object
+#   deletes no volume: the engine writes it again.
+# - Replication: a sync from a peer engine (#656). It runs on the node its
+#   storm.io/node label names (no label: nowhere). Made, changed or deleted
+#   here, the node's engine follows; one made on the engine's own port is
+#   published here.
+#
+# The engine writes them with its own token (kube-system/stormblock, the one
+# it reviews bearers with): the ClusterRole and binding at the end.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: volumes.storage.storm.io
+  labels:
+    addonmanager.kubernetes.io/mode: Reconcile
+spec:
+  group: storage.storm.io
+  scope: Cluster
+  names:
+    kind: Volume
+    plural: volumes
+    singular: volume
+    shortNames: [vol]
+    categories: [storage]
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - { name: Name, type: string, jsonPath: .spec.name }
+        - { name: Node, type: string, jsonPath: '.metadata.labels.storm\.io/node' }
+        - { name: Size, type: integer, jsonPath: .status.capacityBytes }
+        - { name: Allocated, type: integer, jsonPath: .status.allocatedBytes }
+        - { name: Health, type: string, jsonPath: .status.health }
+        - { name: Sealed, type: boolean, jsonPath: .spec.sealed }
+        - { name: Kind, type: string, jsonPath: .status.kind }
+        - { name: InUse, type: boolean, jsonPath: .status.inUse }
+        - { name: Namespace, type: string, jsonPath: .spec.namespace, priority: 1 }
+        - { name: Role, type: string, jsonPath: .spec.role, priority: 1 }
+        - { name: Error, type: string, jsonPath: .status.specError.message, priority: 1 }
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+              properties:
+                name: { type: string }
+                sizeBytes: { type: integer, format: int64, minimum: 0 }
+                redundancy: { type: string }
+                sealed: { type: boolean }
+                access: { type: string, enum: [rw, ro] }
+                role: { type: string }
+                retention: { type: string }
+                fs: { type: object, nullable: true, x-kubernetes-preserve-unknown-fields: true }
+                namespace: { type: string }
+                resync: { type: boolean }
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: replications.storage.storm.io
+  labels:
+    addonmanager.kubernetes.io/mode: Reconcile
+spec:
+  group: storage.storm.io
+  scope: Cluster
+  names:
+    kind: Replication
+    plural: replications
+    singular: replication
+    shortNames: [repl]
+    categories: [storage]
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - { name: Node, type: string, jsonPath: '.metadata.labels.storm\.io/node' }
+        - { name: From, type: string, jsonPath: .spec.from.engine }
+        - { name: Mode, type: string, jsonPath: .spec.mode }
+        - { name: Phase, type: string, jsonPath: .status.phase }
+        - { name: Done, type: integer, jsonPath: .status.items.done }
+        - { name: Total, type: integer, jsonPath: .status.items.total }
+        - { name: Error, type: string, jsonPath: .status.specError.message, priority: 1 }
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stormcos:stormblock-objects
+  labels:
+    addonmanager.kubernetes.io/mode: Reconcile
+rules:
+  - apiGroups: ["storage.storm.io"]
+    resources: ["volumes", "volumes/status", "replications", "replications/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stormcos:stormblock-objects
+  labels:
+    addonmanager.kubernetes.io/mode: Reconcile
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: stormcos:stormblock-objects
+subjects:
+  - { kind: ServiceAccount, name: stormblock, namespace: kube-system }
