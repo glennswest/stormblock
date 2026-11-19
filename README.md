@@ -344,7 +344,6 @@ Every other command logs to stderr as before.
 | `must-gather` | collect what is needed to debug a node into one directory, read-only |
 | `boot-iscsi` | a partitioned disk on a remote iSCSI target, exported over ublk. A blank target is formatted (a slab with volume records); a slab already there is opened and every partition's volume kept by name; anything else is refused unless `--format`, which destroys it (#162, #366). The records are written at creation and at a stop |
 | `migrate-boot` | copy boot volumes from an iSCSI slab onto a local disk |
-| `ublk`, `migrate` | stubs that print how to do it with a running engine |
 
 `stormblock <subcommand> --help` lists each one's flags.
 

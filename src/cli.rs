@@ -501,29 +501,6 @@ enum SubCommand {
         #[arg(long)]
         force: bool,
     },
-    /// Export a volume via ublk to the local kernel (/dev/ublkbN). Not
-    /// implemented as a subcommand: it needs a running engine, so use
-    /// `POST /api/v1/volumes/{id}/attach` (or `attach --slab` offline).
-    Ublk {
-        /// Volume UUID to export
-        #[arg(long)]
-        volume: String,
-        /// Number of I/O queues (default: 1)
-        #[arg(long, default_value = "1")]
-        queues: u16,
-    },
-    /// Live migrate from iSCSI to local disk. Not implemented as a
-    /// subcommand: a boot volume flows over with `boot-local --local-disk`,
-    /// and a running engine moves volumes with `/api/v1/moves` or
-    /// `/api/v1/volumes/{id}/tier`.
-    Migrate {
-        /// Path to local disk for migration target
-        #[arg(long)]
-        local_disk: String,
-        /// Slab tier for the local device
-        #[arg(long, default_value = "hot")]
-        tier: String,
-    },
     /// Boot from iSCSI — create partitioned disk with ublk devices
     #[cfg(feature = "iscsi")]
     BootIscsi {
@@ -1556,12 +1533,6 @@ pub async fn run() -> anyhow::Result<()> {
                     slab, meta.as_deref(), volumes, *all, mount.as_deref(), *ro, *force,
                 ).await;
             }
-            SubCommand::Ublk { volume: _, queues: _ } => {
-                tracing::info!("ublk export mode — requires running storage engine");
-                tracing::info!("For local-slab boot use: stormblock boot-local --slab <path> --volume <id>");
-                tracing::info!("Requires Linux 6.0+ with ublk_drv module loaded");
-                return Ok(());
-            }
             SubCommand::AdoptUblk { slab, volumes, meta, version_mismatch, api, data_dir } => {
                 return handle_adopt_ublk(
                     slab, volumes, meta.as_deref(), api.as_deref(), data_dir.as_deref(),
@@ -1637,12 +1608,6 @@ pub async fn run() -> anyhow::Result<()> {
                     system_leg,
                     *check,
                 ).await;
-            }
-            SubCommand::Migrate { local_disk, tier } => {
-                tracing::info!("Migration mode: target={}, tier={}", local_disk, tier);
-                tracing::info!("Migration requires a running StormBlock instance.");
-                tracing::info!("A boot volume flows over with `boot-local --local-disk`; a running engine moves volumes with /api/v1/moves or /api/v1/volumes/{{id}}/tier.");
-                return Ok(());
             }
             #[cfg(feature = "iscsi")]
             SubCommand::BootIscsi { portal, port, iqn, layout, ublk, format } => {
@@ -11923,6 +11888,22 @@ mod tests {
         assert!(super::keeps_metrics(&parse(&["stormblock"])), "the daemon");
         assert!(super::keeps_metrics(&parse(&["stormblock", "adopt-ublk"])), "a node's engine");
         assert!(!super::keeps_metrics(&parse(&["stormblock", "slab", "list", "x"])), "a tool");
+    }
+
+    /// #681: what is not built is absent. `migrate` and `ublk` only logged
+    /// where the work is done and exited 0; they are unknown commands now, and
+    /// the commands that do that work parse.
+    #[test]
+    fn the_stub_subcommands_are_unknown() {
+        use clap::Parser;
+        for args in [
+            &["stormblock", "migrate", "--local-disk", "/dev/sdb"][..],
+            &["stormblock", "ublk", "--volume", "x"][..],
+        ] {
+            let e = super::Cli::try_parse_from(args).map(|_| ()).unwrap_err();
+            assert_eq!(e.kind(), clap::error::ErrorKind::InvalidSubcommand, "{args:?}");
+        }
+        assert!(super::Cli::try_parse_from(["stormblock", "boot-local", "--help"]).is_err_and(|e| e.kind() == clap::error::ErrorKind::DisplayHelp));
     }
 
     /// #355: `system-data` is made in a local data half, as ext4, once; and

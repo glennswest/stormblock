@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-19
+- **fix:** #681 ("stubs are lies"): the `migrate` and `ublk` subcommands are gone. Each only logged where the work is done and exited 0. Copying boot volumes from an iSCSI slab to a local disk is `migrate-boot`; a boot volume flows over with `boot-local --local-disk`; a running engine moves volumes with `/api/v1/moves` or `/api/v1/volumes/{id}/tier` and exports one over ublk with `POST /api/v1/volumes/{id}/attach` (offline: `attach --slab`). `stormblock migrate` and `stormblock ublk` are now unknown commands.
 - **docs:** #680: `docs/history/data-placement.md` no longer says "not implemented": it is a 2026-08-28 design note written before the code, and its History header already names what was built (`docs/redundancy.md`, `docs/multi-drive.md`).
 
 ## [v24.32.0] — 2026-11-19
