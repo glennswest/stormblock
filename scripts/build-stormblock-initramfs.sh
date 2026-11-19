@@ -5979,7 +5979,14 @@ STEOF
             fi
             NAMED_DISK="${_st_first##*/}"
             CHOSEN_BY=storage
-            if [ -n "${INSTALL_OVER:-}" ] && ! printf ' %s ' "$STORAGE_DRIVES" | grep -q " $(disk_of "$INSTALL_OVER") "; then
+            # The node-data set this boot serves is no drive storage: names,
+            # and it is this node's data half (#689: forge1's install over it
+            # was taken for a fresh one, and every release since 11-17 laid
+            # the drives again and lost it). It stays what the install is
+            # over: the format below keeps it, or stops.
+            if [ -n "${INSTALL_OVER:-}" ] && [ -n "${STORAGE_SERVED:-}" ] && [ "$INSTALL_OVER" = "$STORAGE_SERVED" ]; then
+                echo "  this node's data half is on $INSTALL_OVER, the node-data set over ${STORAGE_MEMBER_DISKS:-its drives}: an install keeps it (#689)"
+            elif [ -n "${INSTALL_OVER:-}" ] && ! printf ' %s ' "$STORAGE_DRIVES" | grep -q " $(disk_of "$INSTALL_OVER") "; then
                 echo "  this node is on $INSTALL_OVER now; storage: does not take it"
                 INSTALL_OVER=""
             fi
@@ -6629,12 +6636,26 @@ $1|$_svp|$3"
         if [ -z "$_sk_off" ]; then
             STORAGE_KEPT=1
             echo "  KEEP: $STORAGE_DRIVES carry this node's layout ($STORAGE_BLOCK_SIZE-byte blocks, the set at $STORAGE_SERVED): nothing is formatted or laid"
+            # What a lay would have handed boot-local (#689): the data half
+            # on the set, kept; the system half on the first leg, laid again;
+            # the other legs found by system_legs. Never forced.
+            LOCAL_DISK="$STORAGE_SERVED"; LOCAL_DISK_ID=""
+            SYSTEM_DISK=${STORAGE_SYSTEM%% *}; SYSTEM_DISK_ID=""
+            [ -n "$SYSTEM_DISK" ] && [ -e "$SURVEY_SYS/${SYSTEM_DISK##*/}" ] && command -v drive_ident >/dev/null 2>&1 \
+                && SYSTEM_DISK_ID=$(drive_ident "$SURVEY_SYS/${SYSTEM_DISK##*/}")
+            PAIR_DISK=""; PAIR_DISK_ID=""
+            FORCE_LOCAL=""
+            echo "  the data half kept on $LOCAL_DISK; the system half laid again on ${SYSTEM_DISK:-the set} (#689)"
         else
             echo "  storage: in ${STORAGE_FROM##*/} differs from what the drives carry:$_sk_off"
         fi
     fi
+    # This node's data half, served on the drives storage: takes (#689):
+    # kept, or the wipe word, whatever the install's intent. Known before the
+    # set is let go, which forgets it.
+    STORAGE_NODE_DATA="${STORAGE_SERVED:-}${STORAGE_PLAIN:+ $STORAGE_PLAIN}"
+    STORAGE_NODE_DATA="${STORAGE_NODE_DATA# }"
     if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "$STORAGE_KEPT" ]; then
-        command -v storage_unserve >/dev/null 2>&1 && storage_unserve
         # Every drive taken, whatever it is at (owner, #595: "It need to
         # format all the drives"), but those the layout formatted this boot.
         _st_todo=""
@@ -6649,7 +6670,9 @@ $1|$_svp|$3"
         # Any other boot formats only drives that carry nothing at all. The
         # install-config's wipe word (#614) names what it loses.
         _st_full=""
-        if [ -n "$_st_todo" ] && { [ -n "${STORAGE_WIPE:-}" ] || { [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ]; }; }; }; then
+        # A fresh install over this node's served data half is no fresh
+        # install (#689): what the drives hold is looked at as on any other.
+        if [ -n "$_st_todo" ] && { [ -n "${STORAGE_WIPE:-}" ] || { [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ] || [ -n "$STORAGE_NODE_DATA" ]; }; }; }; then
             for _dev in $_st_todo; do
                 if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
                     _st_full="$_st_full $_dev(stormblock slabs)"
@@ -6669,6 +6692,8 @@ $1|$_svp|$3"
                 storage_fail "a layout change over what the drives hold, without the wipe word:$_st_full"
             fi
         fi
+        # Let go of the set only now: a STOP above leaves it served (#689).
+        command -v storage_unserve >/dev/null 2>&1 && storage_unserve
         if [ -n "$_st_todo" ]; then
             storage_format_run "$_st_todo"
             if [ -n "$STORAGE_RENAMED" ]; then
@@ -6840,7 +6865,7 @@ $1|$_svp|$3"
     STORAGE_MEMBERS=""; STORAGE_SET=""
     if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "${STORAGE_KEPT:-}" ]; then
         _sl_full=""
-        if [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ]; }; then
+        if [ -z "$STORAGE_FORCE" ] && { [ -z "${INSTALL_FRESH:-}" ] || [ -n "$INSTALL_KEEP" ] || [ -n "${STORAGE_NODE_DATA:-}" ]; }; then
             for _dev in $STORAGE_DRIVES; do
                 case " $STORAGE_FORMATTED " in *" $_dev "*) continue ;; esac
                 if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then

@@ -177,6 +177,21 @@ the set, a member not taken, another block size) stops as above, naming what
 differs, unless the wipe word is given; the wipe word relays even this node's
 own layout.
 
+**An install over the served set is a keep-data install, whatever the
+install ticket says** (#689). The node-data set is the data half's partner,
+and the probe makes it what the install is over; the set is no drive
+`storage:` names, so `/init` used to say `this node is on /dev/ublkb65535
+now; storage: does not take it`, forget it, find no data slab on the sd
+drives, and take the install for a fresh one, which formats and lays with no
+look at what the drives hold. forge1 lost its whole data half that way on
+every release install from 2026-11-17 to 12.96 (a new set each time). Now
+`/init` says `this node's data half is on /dev/ublkb65535, the node-data set
+over …: an install keeps it`; on `KEEP` boot-local is handed the set as the
+data half (`--local-disk`) and the first leg as the system drive, never
+forced. And a set this boot serves is never formatted, let go or laid without
+the wipe word, whatever the install's intent: a fresh install over it stops
+naming the drives, the set still served.
+
 ## The lay: `image storage-lay`
 
 After the format, every drive taken gets a fresh GPT: a boot area, a

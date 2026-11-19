@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-19
+- **fix:** #689: an install over a node laid by `storage:` keeps its data half. The node-data set (`/dev/ublkb65535`) is what the install is over, and the `storage:` layout dropped it ("storage: does not take it") since it is no sd drive; the install was then taken for a fresh one, and the format and lay guards do not look at what the drives hold on a fresh install. forge1 lost its whole data half that way on every release install from 2026-11-17 to 12.96 (a new set each time; 12.96 took the registry's 68.6 GB). Now the install stays over the set and `KEEP`s the layout (boot-local handed the set as the data half and the first leg as the system drive, no force), and a served set is never formatted, let go or laid without the wipe word, whatever the install's intent: a fresh install over it stops, naming the drives.
+- **test:** #689: the 12.96 sequence in `tests/initramfs-storage.sh` (layout, format, lay); a grown data volume kept by id and size through an install (`an_install_over_a_node_keeps_every_byte_of_its_data_half`).
+
 ## [v24.34.2] — 2026-11-19
 
 ### Fixed

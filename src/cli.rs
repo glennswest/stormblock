@@ -13046,6 +13046,19 @@ file = "{state}"
             v.write(4096, &[mark; 8192]).await.unwrap();
             v.flush().await.unwrap();
         }
+        // #689: the node grew `state` past the release's blank (forge1's
+        // registry-data, 4 -> 128 GiB through spec.sizeBytes, #655) and wrote
+        // past the blank's end. A kept volume is kept by its id whatever its
+        // size against the release's: the size is the node's.
+        let grown = {
+            let id = node.find_volume("state").await.unwrap();
+            let blank = node.get_volume(&id).unwrap().capacity_bytes();
+            node.resize_volume(id, blank * 4).await.unwrap();
+            let v = node.get_volume(&id).unwrap();
+            v.write(blank * 4 - 8192, &[0x5F; 8192]).await.unwrap();
+            v.flush().await.unwrap();
+            blank * 4
+        };
         let pvc = node
             .create_volume_with("pvc-default-db", 16 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::Data))
             .await
@@ -13084,6 +13097,7 @@ file = "{state}"
 
         struct Expect {
             state_id: crate::volume::VolumeId,
+            state_grown: u64,
             logs_id: crate::volume::VolumeId,
             pvc: crate::volume::VolumeId,
             state_before: Vec<u8>,
@@ -13094,6 +13108,8 @@ file = "{state}"
         }
         async fn check(m: &VolumeManager, when: &str, e: &Expect) {
             assert_eq!(m.find_volume("state").await, Some(e.state_id), "{when}: the node's state, by its id");
+            let grown = m.get_volume(&e.state_id).unwrap().capacity_bytes();
+            assert_eq!(grown, e.state_grown, "{when}: the grown state keeps its size (#689)");
             assert_eq!(volume_bytes(m, "state").await.unwrap(), e.state_before, "{when}: state");
             assert_eq!(m.find_volume("logs@11.90").await, Some(e.logs_id), "{when}: the node's logs, aside");
             // A rollback copy, marked so (#565), and the mark kept on disk.
@@ -13113,7 +13129,7 @@ file = "{state}"
             names.dedup();
             assert_eq!(names.len(), all, "{when}: a name answered by two volumes: {names:?}");
         }
-        let e = Expect { state_id, logs_id, pvc, state_before, logs_before, pvc_bytes, n1_svc, n1_logs };
+        let e = Expect { state_id, state_grown: grown, logs_id, pvc, state_before, logs_before, pvc_bytes, n1_svc, n1_logs };
         check(&mgr, "after the install", &e).await;
         super::quarantine_flow_sources(&mgr, &flow).await;
         drop(mgr);

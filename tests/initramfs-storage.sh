@@ -281,6 +281,10 @@ echo "=FORMATTED=$STORAGE_FORMATTED"
 echo "=FORCE_LOCAL=$FORCE_LOCAL"
 echo "=INSTALL_KEEP=$INSTALL_KEEP"
 echo "=DRIVES=$STORAGE_DRIVES"
+echo "=LOCAL_DISK=$LOCAL_DISK"
+echo "=SYSTEM_DISK=${SYSTEM_DISK:-}"
+echo "=SYSTEM_DISK_ID=${SYSTEM_DISK_ID:-}"
+echo "=SERVED=${STORAGE_SERVED:-}"
 EOF
     } > "$WORK/run-format.sh"
     sh "$WORK/run-format.sh" > "$WORK/out" 2>&1 || echo "EXIT $?" >> "$WORK/out"
@@ -458,6 +462,20 @@ layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'INSTALL_OVER=/
 has "a member carries nothing" "$WORK/plan.args" "dev=/dev/sdb;.*carries=;"
 has "the node's own drive still carries nothing" "$WORK/plan.args" "dev=/dev/sda;.*carries=;"
 has "a drive outside the set is said" "$WORK/plan.args" "dev=/dev/sdc;.*carries=stormblock slabs (an install);"
+
+echo "the layout: an install over the node-data set this boot serves is over it still (#689)"
+# forge1 12.96: the probe made the set (the data half's partner) what the
+# install is over; storage: takes its drives, not the set, and the layout
+# said "storage: does not take it" and forgot it: the install was then fresh.
+reset
+printf 'storage:\n  drives: all\n' > "$WORK/install-config.yaml"
+printf "STORAGE_DRIVES='/dev/sda /dev/sdd /dev/sdc /dev/sdb'\nSTORAGE_SYSTEM='/dev/sda /dev/sdd /dev/sdc /dev/sdb'\n" > "$WORK/plan.out"
+layout "$BASE" "INSTALL_CONFIG_STAGED=$WORK/install-config.yaml" 'ASSIMILATE=force INSTALL_OVER=/dev/ublkb65535' \
+    "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb /dev/sdc /dev/sdd'"
+check "still over the set" "/dev/ublkb65535" "$(val INSTALL_OVER)"
+has "said" "$WORK/out" "this node's data half is on /dev/ublkb65535, the node-data set over /dev/sda /dev/sdb /dev/sdc /dev/sdd: an install keeps it (#689)"
+hasnt "never 'does not take it'" "$WORK/out" "storage: does not take it"
+check "the ticket's force is no wipe word" "" "$(val STORAGE_FORCE)"
 
 echo "the layout: the wipe word reaches the engine"
 reset
@@ -848,6 +866,50 @@ check "nothing formatted" "" "$(val FORMATTED)"
 check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
 check "keep-data stands" "1" "$(val INSTALL_KEEP)"
 
+echo "the format: forge1 12.96, an install taken for fresh over the node-data set it serves, stops (#689)"
+# The install's intent lost the data half (INSTALL_OVER cleared, no data slab
+# on sd*): INSTALL_FRESH, no INSTALL_KEEP, no wipe word. Every drive carried
+# a leg and the set; the install discarded them and made a new set.
+reset
+for d in sda sdb sdc sdd; do echo "superblock: slab role=system" > "$WORK/slabs.$d"; done
+format "STORAGE_DRIVES='/dev/sda /dev/sdd /dev/sdc /dev/sdb' STORAGE_SYSTEM='/dev/sda /dev/sdd /dev/sdc /dev/sdb'" \
+    'INSTALL_KEEP="" INSTALL_FRESH=1 STORAGE_FORCE=""' \
+    "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb /dev/sdc /dev/sdd'" \
+    'storage_unserve() { echo "storage: letting go of the node-data set"; STORAGE_SERVED=""; }'
+has "STOP" "$WORK/out" "STOP: storage:"
+has "names what is held" "$WORK/out" "/dev/sda(stormblock slabs)"
+has "rescue" "$WORK/out" "RESCUE"
+hasnt "the set is never let go" "$WORK/out" "letting go of the node-data set"
+check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
+
+echo "the format: the same install keeping the data half: KEEP, and boot-local handed the set and the first leg (#689)"
+reset
+for d in sda sdb sdc sdd; do echo "superblock: slab role=system" > "$WORK/slabs.$d"; done
+format "STORAGE_DRIVES='/dev/sda /dev/sdd /dev/sdc /dev/sdb' STORAGE_SYSTEM='/dev/sda /dev/sdd /dev/sdc /dev/sdb'" \
+    'INSTALL_KEEP=1 INSTALL_FRESH=1 STORAGE_FORCE="" LOCAL_DISK=/dev/ublkb65535 FORCE_LOCAL=1' \
+    "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb /dev/sdc /dev/sdd'" \
+    'storage_unserve() { echo "storage: letting go of the node-data set"; STORAGE_SERVED=""; }'
+has "KEEP said" "$WORK/out" "KEEP: /dev/sda /dev/sdd /dev/sdc /dev/sdb carry this node's layout"
+has "what is handed on, said" "$WORK/out" "the data half kept on /dev/ublkb65535; the system half laid again on /dev/sda (#689)"
+hasnt "no STOP" "$WORK/out" "STOP"
+hasnt "the set is never let go" "$WORK/out" "letting go of the node-data set"
+check "the data half: the set" "/dev/ublkb65535" "$(val LOCAL_DISK)"
+check "the system half: the first leg" "/dev/sda" "$(val SYSTEM_DISK)"
+check "the first leg's identity, for boot-local (#351)" "ID-sda" "$(val SYSTEM_DISK_ID)"
+check "never forced" "" "$(val FORCE_LOCAL)"
+check "the set still served" "/dev/ublkb65535" "$(val SERVED)"
+check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
+
+echo "the format: the wipe word over the served set lets it go and formats (#689)"
+reset
+for d in sda sdb; do echo "superblock: slab role=system" > "$WORK/slabs.$d"; done
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'INSTALL_KEEP="" INSTALL_FRESH=1 STORAGE_FORCE=1 STORAGE_WIPE=install-config' \
+    "STORAGE_SERVED=/dev/ublkb65535 STORAGE_MEMBER_DISKS='/dev/sda /dev/sdb'" \
+    'storage_unserve() { echo "storage: letting go of the node-data set"; STORAGE_SERVED=""; }'
+has "the wipe said" "$WORK/out" "wipe asked by install-config"
+has "the set let go first" "$WORK/out" "letting go of the node-data set"
+check "both formatted" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+
 echo "the format: a keep-data reinstall over another block size stops"
 reset
 echo 512 > "$SYS/sdb/queue/logical_block_size"
@@ -1015,6 +1077,14 @@ lay "$D4" 'INSTALL_KEEP=1 INSTALL_FRESH=""'
 has "STOP" "$WORK/out" "STOP: storage: .* lays /dev/sda"
 has "names it" "$WORK/out" "/dev/sdc(stormblock slabs)"
 has "rescue" "$WORK/out" "RESCUE"
+check "nothing laid" "no" "$([ -e "$WORK/lay.args" ] && echo yes || echo no)"
+
+echo "the lay: a fresh install over this node's served data half lays nothing (#689)"
+reset
+echo "superblock: slab role=system" > "$WORK/slabs.sdc"
+lay "$D4" 'INSTALL_KEEP="" INSTALL_FRESH=1 STORAGE_NODE_DATA=/dev/ublkb65535'
+has "STOP" "$WORK/out" "STOP: storage: .* lays /dev/sda"
+has "names it" "$WORK/out" "/dev/sdc(stormblock slabs)"
 check "nothing laid" "no" "$([ -e "$WORK/lay.args" ] && echo yes || echo no)"
 
 echo "the lay: a kept layout lays nothing"
