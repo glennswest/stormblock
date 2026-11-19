@@ -719,7 +719,12 @@ dhcp_mtu() { # interface lease-mtu
         echo "  mtu $_m ($_from) is not a usable MTU: left as it is"
         return 0
     fi
+    # A port or slave already at or above it is left (#545): lowering it
+    # resets an mlx4 link, and a port above its bridge sends nothing larger
+    # than the bridge does.
     _set() {
+        _cur=$(cat "$_sys/class/net/$1/mtu" 2>/dev/null)
+        case "$_cur" in ''|*[!0-9]*) ;; *) [ "$_cur" -ge "$_m" ] && return 0 ;; esac
         ip link set "$1" mtu "$_m" 2>/dev/null || echo "  WARNING: $1 does not take mtu $_m"
     }
     for _p in $(ls "$_sys/class/net/$_if/brif" 2>/dev/null); do
@@ -821,7 +826,16 @@ case "$1" in
             ip route del "$_net" dev "$interface" 2>/dev/null
             ip route add "$_net" dev "$interface" src "$ip" metric 1024 2>/dev/null
         fi
-        [ -n "${mtu:-}" ] && ip link set "$interface" mtu "$mtu" 2>/dev/null
+        # The lease's MTU, or the port's own when early ports raised it and
+        # the lease names none (#545): the address is on the port itself.
+        _own="${STORM_PORT_MTU_RUN:-/run/stormblock-port-mtu}/$interface"
+        if [ -n "${mtu:-}" ]; then
+            ip link set "$interface" mtu "$mtu" 2>/dev/null
+            rm -f "$_own"
+        elif [ -s "$_own" ]; then
+            ip link set "$interface" mtu "$(cat "$_own")" 2>/dev/null
+            rm -f "$_own"
+        fi
         mkdir -p "$RUN/path-nics"
         printf '{"interface": "%s", "address": "%s", "prefix": %s, "server": "%s", "lease_secs": %s, "leased_at": %s}\n' \
             "$interface" "$ip" "${mask:-24}" "${serverid:-}" "${lease:-0}" "$(date +%s)" > "$RUN/path-nics/$interface.json"
@@ -1277,6 +1291,9 @@ for param in $(cat /proc/cmdline); do
         # sit behind one.
         rd.stormblock.allow-external=*) ALLOW_EXTERNAL="${param#*=}" ;;
         rd.stormblock.bond=*)        BOND_MODE="${param#*=}" ;;
+        # The MTU a port is raised to while it is still down (#545), or
+        # `off`. Default 9000.
+        rd.stormblock.port-mtu=*)    PORT_MTU="${param#*=}" ;;
         # `off`: no NTP step in the initramfs (#251); the build-date floor
         # still applies.
         rd.stormblock.ntp=*)         NTP_MODE="${param#*=}" ;;
@@ -2306,6 +2323,64 @@ ip link set lo up
 # node routes to its own loopback.
 ip addr add 169.254.169.254/32 dev lo 2>/dev/null || true
 
+# --- BEGIN early ports (covered by tests/initramfs-early-ports.sh)
+# Every physical port up now, before the node state read and the storage
+# inventory (#545): an X9's switch forwards ~3.5 s after a port comes up, and
+# that wait was in DHCP's time (five discovers) when the ports went up only
+# at the uplink selection.
+#
+# A port still down is raised to PORT_MTU (9000) first. A down port takes a
+# new MTU without a reset; an up mlx4 port resets its link for one, and a
+# 9000 lease applied after DHCP did exactly that on server8, right before the
+# DNS name lookup: three lost answers (3 s) and the node named after its MAC.
+# The port's own MTU is kept in PORT_MTU_RUN/<port>: the bridge is pinned to
+# it until a lease or [network] says otherwise, and an address put on the
+# port itself (no bridge, a path NIC whose lease names no MTU) puts it back.
+# A port above its bridge sends nothing larger than the bridge does.
+# Not with a bond: enslaving sets a slave to the bond's MTU, a reset of its own.
+PORT_MTU="${PORT_MTU:-9000}"
+PORT_MTU_RUN="${STORM_PORT_MTU_RUN:-/run/stormblock-port-mtu}"
+early_ports() {
+    _es="${STORM_SYSFS:-/sys}/class/net"
+    _eu=""; _er=""
+    for _ed in "$_es"/*; do
+        _en=${_ed##*/}
+        [ "$_en" = lo ] && continue
+        [ -e "$_ed/device" ] || continue
+        case "$PORT_MTU" in ''|off|*[!0-9]*) ;; *)
+            if [ "${BOND_MODE:-off}" = off ]; then
+                _em=$(cat "$_ed/mtu" 2>/dev/null)
+                _ef=$(cat "$_ed/flags" 2>/dev/null)
+                case "$_ef" in 0x*) ;; *) _ef=0x1 ;; esac
+                case "$_em" in ''|*[!0-9]*) ;; *)
+                    if [ "$_em" -lt "$PORT_MTU" ] && [ $(( $_ef & 1 )) -eq 0 ] \
+                       && ip link set "$_en" mtu "$PORT_MTU" 2>/dev/null; then
+                        mkdir -p "$PORT_MTU_RUN" 2>/dev/null
+                        echo "$_em" > "$PORT_MTU_RUN/$_en" 2>/dev/null
+                        _er="$_er $_en"
+                    fi ;;
+                esac
+            fi ;;
+        esac
+        ip link set "$_en" up 2>/dev/null && _eu="$_eu $_en"
+    done
+    [ -n "$_eu" ] && echo "  ports up:$_eu (the switch's wait runs beside the rest, #545)"
+    [ -n "$_er" ] && echo "  mtu $PORT_MTU on$_er while down: a jumbo lease resets no link; each holds its own MTU on the bridge until a lease or [network] gives one (#545)"
+    return 0
+}
+# A port's own MTU, from before early_ports raised it; nothing if it did not.
+port_mtu_own() { cat "$PORT_MTU_RUN/$1" 2>/dev/null; }
+# An address goes on the port itself: back to its own MTU.
+port_mtu_restore() {
+    _pm=$(port_mtu_own "$1")
+    [ -n "$_pm" ] || return 0
+    rm -f "$PORT_MTU_RUN/$1"
+    ip link set "$1" mtu "$_pm" 2>/dev/null && echo "  mtu $_pm back on $1: the address is on the port itself"
+    return 0
+}
+early_ports
+# --- END early ports
+
 # Pick an uplink: carrier first, then speed.
 #
 # This used to take the first non-loopback interface. "First" is a kernel
@@ -3262,11 +3337,19 @@ net_bring_up() {
             # its ports.
             netsay "  bridged: $_up is a port of $BRIDGE"
             IFACE="$BRIDGE"
+            # The port was raised while down (#545, early ports): the bridge
+            # holds the port's own MTU, not the raised one, until a lease or
+            # [network] gives it one. Set by hand, it no longer follows its
+            # ports.
+            _bo=$(port_mtu_own "$_up")
+            [ -n "$_bo" ] && ip link set "$BRIDGE" mtu "$_bo" 2>/dev/null
         else
             netsay "WARNING: could not enslave $_up to $BRIDGE - no VM networking"
             ip link del "$BRIDGE" 2>/dev/null || true
         fi
     fi
+    [ "$IFACE" = "$_up" ] && port_mtu_restore "$_up"
+    return 0
 }
 
 # Undo a failed attempt, so the next candidate starts clean rather than
@@ -3442,11 +3525,21 @@ static_apply() {
     # port, and putting it on a different one is not a fallback, it is a
     # wrong answer.
     netsay "  static: $BOOT_ADDRS on $BOOT_NIC${BOOT_GW:+, gateway $BOOT_GW}, from $BOOT_FROM"
+    # The port only ever raised (#545): one already at or above the MTU
+    # resets no link for it; the MTU itself goes on what holds the address.
     if [ -n "$BOOT_MTU" ]; then
-        ip link set "$BOOT_NIC" mtu "$BOOT_MTU" 2>/dev/null \
-            || netsay "WARNING: $BOOT_NIC does not take mtu $BOOT_MTU"
+        _sm=$(cat "/sys/class/net/$BOOT_NIC/mtu" 2>/dev/null)
+        case "$_sm" in ''|*[!0-9]*) _sm=0 ;; esac
+        if [ "$_sm" -lt "$BOOT_MTU" ]; then
+            ip link set "$BOOT_NIC" mtu "$BOOT_MTU" 2>/dev/null \
+                || netsay "WARNING: $BOOT_NIC does not take mtu $BOOT_MTU"
+        fi
     fi
     net_bring_up "$BOOT_NIC"
+    if [ -n "$BOOT_MTU" ]; then
+        ip link set "$IFACE" mtu "$BOOT_MTU" 2>/dev/null \
+            || netsay "WARNING: $IFACE does not take mtu $BOOT_MTU"
+    fi
     for _a in $BOOT_ADDRS; do
         ip addr add "$_a" dev "$IFACE" || netsay "WARNING: could not add $_a to $IFACE"
     done
@@ -3702,11 +3795,16 @@ if [ -n "$NETADDR" ]; then
             # A second each, three times, with a fresh query (#545): a lost
             # answer was a 5 s wait in nslookup itself, on an X9's every boot.
             # What DNS did answer, even "no such name", is not asked again.
+            # Three tries that all timed out leave `$_nr/dns-silent`: no
+            # answer is not "no such name" (#545: server8's three were lost
+            # to its own link reset, and the console said "no PTR record").
+            rm -f "$_nr/dns-silent"
             ns_ask() {
                 for _na in 1 2 3; do
-                    _no=$(${STORM_DNS_TIMEOUT-timeout 1} nslookup "$1" 2>/dev/null); _nr=$?
-                    [ "$_nr" -lt 124 ] && break
+                    _no=$(${STORM_DNS_TIMEOUT-timeout 1} nslookup "$1" 2>/dev/null); _nc=$?
+                    [ "$_nc" -lt 124 ] && break
                 done
+                [ "$_nc" -ge 124 ] && : > "$_nr/dns-silent"
                 printf '%s\n' "$_no"
             }
             # With or without the root's dot (#559): bind's nslookup prints
@@ -3728,7 +3826,9 @@ if [ -n "$NETADDR" ]; then
             # So the name has to round-trip: whatever the PTR says must
             # resolve back to the address asking. A stale record fails that,
             # and the node falls through to naming itself.
-            if [ -z "$PTRNAME" ]; then
+            if [ -z "$PTRNAME" ] && [ -e "$_nr/dns-silent" ]; then
+                echo "  DNS did not answer for $MYIP (3 tries of 1 s to $(awk '/^nameserver/ { printf "%s%s", sep, $2; sep = " " }' "$_resolv" 2>/dev/null)): no name from DNS"
+            elif [ -z "$PTRNAME" ]; then
                 echo "  DNS has no name for $MYIP (no PTR record from $(awk '/^nameserver/ { printf "%s%s", sep, $2; sep = " " }' "$_resolv" 2>/dev/null))"
             else
                 # Among its addresses, not equal to the last of them.

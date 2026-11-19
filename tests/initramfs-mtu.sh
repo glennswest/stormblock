@@ -95,6 +95,18 @@ unset REFUSE
 check "the bridge still tried" "stormbr0=9000" "$SET"
 case "$OUT" in *"WARNING: enp1s0 does not take mtu 9000"*) echo "  ok    named";; *) echo "  FAIL  $OUT"; fail=1;; esac
 
+echo "a port at or above the MTU is left (#545: lowering or setting it again resets an mlx4 link):"
+S3="$WORK/sys3"
+mkdir -p "$S3/class/net/stormbr0/brif/eth1" "$S3/class/net/eth1"
+echo 9000 > "$S3/class/net/eth1/mtu"; echo 1500 > "$S3/class/net/stormbr0/mtu"
+run_case "$S3" 9000
+check "a raised port: only the bridge" "stormbr0=9000" "$SET"
+run_case "$S3" 1500
+check "a smaller lease: only the bridge" "stormbr0=1500" "$SET"
+echo 1500 > "$S3/class/net/eth1/mtu"
+run_case "$S3" 9000
+check "a port below it is raised" "eth1=9000 stormbr0=9000" "$SET"
+
 echo "udhcpc asks for the MTU:"
 n_all=$(grep -c 'udhcpc -i ' "$GEN")
 n_mtu=$(grep -c 'udhcpc -i [^ ]* -O mtu ' "$GEN")

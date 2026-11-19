@@ -101,6 +101,11 @@ fi
 r=$(LOST=2 PTR=stormblock1.g16.lo BACK=192.168.30.2 DNS=192.168.31.252 name)
 check "answers lost twice: asked again, and named (#545)" "stormblock1|stormblock1|g16.lo" "$r"
 
+r=$(LOST=3 PTR=stormblock1.g16.lo BACK=192.168.30.2 DNS=192.168.31.252 name)
+check "answers lost three times: the MAC" "storm-06f96d|storm-06f96d|" "$r"
+contains "  said as no answer, not as no PTR (#545)" "DNS did not answer for 192.168.30.2 (3 tries of 1 s to 192.168.31.252)" "$(cat "$WORK/name.out")"
+case "$(cat "$WORK/name.out")" in *"no PTR record"*) echo "  FAIL  silence said as no PTR"; fail=1 ;; *) echo "  ok    not said as no PTR" ;; esac
+
 r=$(OPT12=stormblock1 DOMAIN=g16.lo DNS=192.168.31.252 name)
 check "option 12 names the node, with the lease's domain" "stormblock1|stormblock1|g16.lo" "$r"
 contains "and the console says where the name came from" "name from DHCP: stormblock1 (option 12)" "$(cat "$WORK/name.out")"
