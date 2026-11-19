@@ -1262,6 +1262,48 @@ impl VolumeManager {
         Ok(())
     }
 
+    /// Give sealed volumes their final names, all of them or none (#442: a
+    /// stormdist restore publishes its staged goldens). Every name is
+    /// checked free in the volume's namespace first; the renames are then
+    /// written by one persist, and put back if it fails, so a golden is
+    /// never found by its name before every one of the set is.
+    pub async fn publish_sealed(&mut self, items: &[(VolumeId, String)]) -> Result<(), VolumeError> {
+        let mut handles = Vec::with_capacity(items.len());
+        let mut wanted = std::collections::HashSet::new();
+        for (id, name) in items {
+            let h = self.volumes.get(id).ok_or(VolumeError::VolumeNotFound(*id))?.clone();
+            if !h.is_sealed() {
+                return Err(VolumeError::AllocatorError(format!("volume {id} is not sealed: only a sealed volume is published")));
+            }
+            if name.is_empty() || !wanted.insert((self.namespace(id).to_string(), name.clone())) {
+                return Err(VolumeError::AllocatorError(format!("{name:?} is empty or named twice in one publication")));
+            }
+            let ns = self.namespace(id).to_string();
+            for (other, oh) in &self.volumes {
+                if other != id && self.namespace(other) == ns && oh.name().await == *name {
+                    return Err(VolumeError::AllocatorError(format!("volume {other} is already called {name}")));
+                }
+            }
+            handles.push((h.clone(), h.name().await));
+        }
+        for ((_, name), (h, _)) in items.iter().zip(&handles) {
+            h.set_name(name).await;
+        }
+        if let Err(e) = self.persist_checked().await {
+            for (h, old) in &handles {
+                h.set_name(old).await;
+            }
+            return Err(VolumeError::AllocatorError(format!(
+                "{} volumes renamed in memory, but the record was not written ({e}); their names are put back",
+                items.len()
+            )));
+        }
+        for (id, _) in items {
+            self.rollbacks.remove(id);
+        }
+        Ok(())
+    }
+
     /// Register a pre-formatted slab directly.
     pub async fn add_slab(&mut self, slab: Slab) {
         let id = slab.slab_id();

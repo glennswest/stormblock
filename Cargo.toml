@@ -57,6 +57,12 @@ hex = "0.4"
 hyper = "1"
 tower = "0.5"
 
+# stormdist (#442): the release and backup ISO's format, its verified
+# reader and the restore transaction (`media::Engine`), by rev (#480).
+# ed25519-dalek is what its pinned keys are (`VerifyingKey`).
+stormdist = { git = "https://github.com/glennswest/stormdist", rev = "8e645d18b9cc17c192b3d6c899f195dc606d1dbe" }
+ed25519-dalek = "2"
+
 # The boot and install screen's look (#618, #637): palette, typeface, grid,
 # frame and shapes, one no_std spec that stormbootx's panel builds from too.
 stormblock-screen-spec = { path = "crates/screen-spec" }

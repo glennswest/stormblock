@@ -458,6 +458,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
             return true;
         }
     }
+    // stormdist (#442): a restore writes and publishes goldens; roots and
+    // catalogues are what a backup keeps.
+    if *method != Method::GET && *method != Method::HEAD && (p == "/api/v1/stormdist" || p.starts_with("/api/v1/stormdist/")) {
+        return true;
+    }
     // A host record's removal (#416): its creator (#422, `mgmt::auth`) or
     // the admin.
     if *method == Method::DELETE && seg.len() == 5 && seg[1] == "api" && seg[2] == "v1" && seg[3] == "boothost" {

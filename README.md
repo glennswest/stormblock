@@ -1023,6 +1023,70 @@ zero_bytes, ranges, message, next_offset, …}`.
 The engine's own NVMe/TCP target does WRITE ZEROES now (ONCS bit 3). With
 DEAC the range is deallocated first, then zeroed.
 
+## stormdist: goldens out on an ISO, and back in (#442)
+
+[stormdist](https://github.com/glennswest/stormdist) (format 2) carries a
+release, or a forge backup, as a signed ISO of content-addressed chunks of
+each golden's allocated ranges. This engine's side, under
+`/api/v1/stormdist` (every verb but `GET` needs the admin token):
+
+**`GET /goldens/{volume}`**, a sealed golden by name or id, is a stormdist
+recipe `Input` without its `image`:
+`{name, component, commit, size, device_sha256, ranges: [{offset, length}],
+allocated_bytes, extent_size_bytes, provenance_from, volume_id, content}`.
+- `ranges` are its extent map (sorted, contiguous extents merged); nothing is
+  read for them.
+- `device_sha256` is every byte of its size (the cached seal digest, #271).
+- `component`/`commit` come from its `goldens.json` provenance
+  (`provenance_from: record`), else from its name,
+  `golden-<component>-<commit>` (`name`); with neither it is 409.
+- Its bytes are `content` (`GET /api/v1/volumes/{id}/content` with `Range`).
+  Sealed, they cannot change between range reads.
+- An unsealed or secret volume is 409.
+
+**The forge inventory**, `<data_dir>/stormdist.json`, is what a backup ISO
+carries as its `FORGE.toml`: retention roots and signed release catalogues.
+- `GET /forge` returns `{forge: {roots, releases: [{release,
+  signature_hex}]}, missing_roots}`.
+- `PUT /forge/roots {roots}` replaces the roots.
+- `POST /forge/releases {release, signature_hex, key?}` keeps a
+  `RELEASE.toml`'s exact bytes and signature. The release is parsed and
+  validated; with `key`, the signature is checked against it.
+
+**`POST /restores {iso, base?, key, mode?, flavour?, current?}`** answers 202
+with a job; `GET /restores[/{id}]` reads it (`running|done|failed`, `report:
+{written, kept, bytes_written, steps}`, `error`). The job is stormdist's own
+`restore` (mode `restore`, every golden and the forge inventory), `install`
+(a full ISO's `flavour`) or `upgrade` (diffs from `current`, the installed
+release's identity), run against this engine.
+- `iso` is a file or a device on this node (`/dev/sr0`).
+- `base` lists a diff ISO's bases, oldest first.
+- `key` is the pinned Ed25519 public key (hex). A key from the media is never
+  used.
+- The media is verified first: signatures, manifests, the base's identity,
+  and every chunk and device hash. A wrong key, a corrupt chunk or a diff on
+  the wrong base fails here, before anything is written.
+- Each golden is written into an unsealed staging volume
+  (`stormdist-staging-<txn>-<golden>`). At commit each is flushed and sealed,
+  and the engine's own copy is digested. It must equal the manifest's
+  `device_sha256`, or nothing is published.
+- Then every golden takes its name in one metadata persist
+  (`VolumeManager::publish_sealed`), all or none. Then the goldens'
+  `goldens.json` records are written, then the inventory: the ISO's
+  catalogue, and a backup's roots and catalogues.
+- Any failure deletes the staging volumes. One left by a restore cut short
+  (a power cut) is deleted when the next begins.
+- A golden already here, sealed, with the same size and digest, is kept and
+  not written: a repeated restore writes nothing. One here with other content
+  refuses the restore.
+- One restore runs at a time.
+
+Tested end to end in `tests/it/integration_stormdist.rs`: stormdist's own
+`make` and `diff` build the ISOs from this engine's export. The restore runs
+on a running engine. The ISO install boot (boot the release ISO, run from it
+before the disk is laid, flow over, eject) is not built yet; see "Not built,
+or not wired".
+
 ## Replication
 
 A `Replication` (#656, `storage.storm.io/v1`) makes this engine's store a
@@ -3094,6 +3158,13 @@ every unit there and fails one at or below the budget.
 
 What earlier docs described and the code does not do, each with its issue:
 
+- **The ISO install boot** (#442): `/init` booting the release ISO, the node
+  running from the ISO's goldens before its disk is laid, the flow-over from
+  the ISO (hot extents first) and the eject. It waits for the bootable release
+  ISO (stormdist#10). The restore and upgrade from an ISO on a running engine
+  are built (`/api/v1/stormdist`). A restored golden is presented at the
+  default LBA (4096). stormdist's manifest does not carry a golden's LBA
+  (#228).
 - **RAID sets** (`docs/raid-sets.md` "Not here"): no reshape or growth of a
   parity set (#387); bay LEDs are
   stormdrive's (stormdrive#44).

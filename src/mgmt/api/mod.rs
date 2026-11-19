@@ -28,6 +28,7 @@ pub mod system;
 pub mod release_stage;
 pub mod releases;
 pub mod goldens;
+pub mod stormdist;
 pub mod kernel;
 pub mod forge;
 #[cfg(feature = "iscsi")]
@@ -846,6 +847,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/system", system::router(state.clone()))
         .nest("/api/v1/releases", releases::router(state.clone()))
         .nest("/api/v1/goldens", goldens::router(state.clone()))
+        .nest("/api/v1/stormdist", stormdist::router(state.clone()))
         .nest("/api/v1/kernel", kernel::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)

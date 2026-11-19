@@ -83,6 +83,7 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
   (`PUT`/`DELETE /api/v1/forge/trust`, #381);
 - a release erase asked or cancelled (`POST`/`DELETE /api/v1/release`, #291);
 - pruning rollback copies (`POST /api/v1/rollback/prune`, #565);
+- every verb but `GET` under `/api/v1/stormdist` (#442): a restore writes and publishes goldens; roots and catalogues are what a backup keeps;
 - the pallet verbs that write a partition table (`gpt`, `convert`, `prune`,
   `adopt`);
 - building or converting an image (`POST /api/v1/images/build`,

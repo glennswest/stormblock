@@ -41,6 +41,7 @@ pub mod volume_move;
 pub mod creators;
 pub mod namespaces;
 pub mod rollback;
+pub mod stormdist;
 #[cfg(feature = "ui")]
 pub mod ui;
 

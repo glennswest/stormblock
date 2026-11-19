@@ -4,6 +4,12 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-18
+- **feat:** #442: stormdist's side in the engine, at `/api/v1/stormdist`. `GET /goldens/{volume}` exports a sealed golden as a stormdist recipe input: name, component, commit, size, device sha256 and sorted allocated ranges from the extent map. Its bytes are the sealed volume's Range `content`.
+- **feat:** #442: the forge inventory, `stormdist.json`: retention roots and exact signed release catalogues. `GET /forge` exports it for a backup's `FORGE.toml`; `PUT /forge/roots` and `POST /forge/releases` record them.
+- **feat:** #442: `POST /restores` runs stormdist's `restore`, `install` or `upgrade` from an ISO on the node, against this engine (`stormdist::media::Engine`). Goldens are staged unsealed, sealed and checked against `device_sha256`, then published under their names by one persist, then the catalogues are kept. Any failure deletes the staging volumes. A golden already here with the same digest is kept, so a repeated restore writes nothing.
+- **build:** #442: new dependencies `stormdist` (git, by rev 8e645d1, #480) and `ed25519-dalek` 2.
+
 ## [v24.30.1] — 2026-11-18
 
 ### Fixed
