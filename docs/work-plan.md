@@ -4,6 +4,33 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #685 — 12.96: nextnfs `shared` takes the engine and apiserver down; node wedged (2026-11-19, P1)
+What is known (no node log of the moment exists):
+- 12.95's runs never reached the claim (setup failed on rustkube#256); 12.96
+  is the first release where the suite ran its RWX path. stormblock went
+  894cec0 → a5f40df between them (#655's publisher, #677, #442, #545, #557).
+- :9090 and :6443 refused (processes gone); every other service accepts TCP
+  and never answers: what a node looks like when the engine is gone and its
+  ublk devices queue I/O for a server that does not come back.
+- The engine cannot come back: its root (`/pallets/stormblock`) and the log
+  volumes are its own ublk devices, so a restart faults on pages nothing serves.
+- It locks every allocation (`mlockall(MCL_FUTURE)`), so under memory
+  pressure it is the OOM killer's likeliest pick: one kill wedges the node.
+- Its log leaves the node only until switch_root (logcast stops there, #477;
+  stormpump's lines go to the group only, stormpump#227), so nothing survived.
+- stormcos#1237 suspects nfsop-csi-node's Bidirectional /var/lib/kubelet
+  multiplying mounts; #658's `mount_table()` reads every namespace's whole
+  mountinfo, deduping per device by a linear scan, under a lock, on the
+  runtime's threads, every 2 s at most (sbregistry polls /api/v1/volumes).
+Steps:
+- [ ] the node engine OOM-exempt: `oom_score_adj` -1000 at adopt, said
+- [ ] the node engine's record sent off the node after switch_root (logcast
+  following the record from its end at adopt); a panic's FATAL to /dev/kmsg too
+- [ ] `mount_table()` bounded: a set per device, a cap per table with a WARN
+  naming the namespace, a caller never waits on another's read
+- [ ] check.sh; tag; image; comment with what is and is not known; the
+  proof is nextnfs `shared` on a release carrying this
+
 ## #681 — `migrate` and `ublk` subcommands were stubs (2026-11-19, P0) — DONE (v24.32.1)
 - [x] remove both: each logged how to do it elsewhere and exited 0. The work is
   `migrate-boot` (iSCSI slab → local disk), `boot-local --local-disk` (flow-over),
