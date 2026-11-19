@@ -267,6 +267,12 @@ forge1's `registry-data` is 4 GiB; it must hold forge's images.
   runs here, one deleted there stops here. `deploy/crds.yaml` (the CRDs and
   the engine's ClusterRole); stormcos issue to carry it (manifest + binding
   for kube-system/stormblock).
+- [x] b56852a6 `mgmt::kube_publish` + `deploy/crds.yaml` + test
+  `integration_kube_publish` (a stand-in apiserver: publish, quiet pass,
+  grow asked there, refusal put back, Replication made/deleted there);
+  e7b9c2dd README/CHANGELOG; stormcos#1050 filed (carry the CRDs, bind
+  kube-system/stormblock and the worker's cluster identity)
+- [ ] check.sh; v24.33.0; image; #655 (and #649/#656/#658) `--after stormcos#1050`
 
 ## #656 — Replication: sync a store from a peer engine (2026-11-18, P0 hand-off)
 
