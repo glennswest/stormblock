@@ -340,8 +340,12 @@ f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
   half-made copy); integration_replication with a target; targeted
   sc-build passed (clippy, it, lib); README "Pulling a volume from a peer",
   CHANGELOG (d7127cfd)
-- [ ] check.sh on d7127cfd; v24.34.0; image; tell stormblock-registry#186
-  the API; shipped with a proof
+- [x] check.sh ALL PASS on d7127cfd; v24.34.0 (e4dd920f); image build
+  f9074122104d; stormblock-registry#186 told the API
+- [ ] **wait-owner (2026-11-19)**: which Replication is the object: A both,
+  in different groups (recommended), B only the registry's (the engine's
+  removed), C only the engine's. Then: shipped with a proof once the
+  registry pulls through it (`log:pull .* read over NVMe/TCP`)
 
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 
