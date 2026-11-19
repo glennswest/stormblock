@@ -4,6 +4,33 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #689 — forge1's data half re-laid on every release install since 11-17 (2026-11-19, P0)
+What happened (forge1's console, /var/lib/stormcentral/console/forge1-20261119-190826.log):
+- Not the grow. The 12.96 install printed "its data half kept (#311)", then
+  "this node is on /dev/ublkb65535 now; storage: does not take it",
+  "policy is 'force'", "letting go of the node-data set", discarded all four
+  drives and created a NEW node-data set (987d57ca…). Every data volume came
+  back as the claimed release's blank (registry-data 4.0 GB).
+- Every forge1 release install since 2026-11-17 did the same (sets 4cacbf12,
+  e5979f0e, f0359c82, a1c0a6ac, 987d57ca); 12.95 "lost nothing" only because
+  the registry's sync started after it (01:00Z).
+- Cause, /init: INSTALL_OVER is the node-data set (the data half's partner);
+  the storage: layout block cleared it because disk_of(/dev/ublkb65535) is
+  not one of the sd drives storage: takes. The intent block then found no
+  data slab on sd* (it lives on the set), took the install as fresh, and the
+  format/lay guards skip their "what the drives hold" check on a fresh install.
+- The engine's per-volume keep (install::apply) keeps by name and never
+  compares size: a grown volume is kept. The loss was at the drive layer only.
+Steps:
+- [ ] layout: INSTALL_OVER that is the served node-data set is kept (#689)
+- [ ] format/lay: drives of the served set never formatted or laid without
+  the wipe word, whatever the install's intent; checked before the set is let go
+- [ ] KEEP wiring: LOCAL_DISK the set, SYSTEM_DISK the first leg, no force
+- [ ] tests: the 12.96 sequence end to end in tests/initramfs-storage.sh;
+  a grown data volume kept by id through install::apply
+- [ ] answer the issue (which happened, item 4: the thin 15 TiB volume)
+- [ ] grow-then-upgrade on a pve machine: stormblock-test issue
+
 ## #685 — 12.96: nextnfs `shared` takes the engine and apiserver down; node wedged (2026-11-19, P1)
 What is known (no node log of the moment exists):
 - 12.95's runs never reached the claim (setup failed on rustkube#256); 12.96
