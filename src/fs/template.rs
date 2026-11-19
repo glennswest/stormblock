@@ -1159,6 +1159,9 @@ fn say_check(name: &str, raw: VolumeId, view: &super::readahead::ReadAhead, took
         tracing::warn!("{line}; slow for a volume under 1 GiB; locks now: {locks}");
     } else {
         tracing::info!("{line}");
+        // On the console too (#677): a node's console carries stdout and
+        // WARN, not INFO, and the console is where a seal is seen.
+        println!("{line}");
     }
 }
 

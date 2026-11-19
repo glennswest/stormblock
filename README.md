@@ -2074,7 +2074,7 @@ over an export instead, then `POST /api/v1/fstemplates/{id}/seal`.
 The check reads the volume through a read-ahead view (#677): the extents it
 maps are read first, in order, in 1 MiB I/Os, and the fsck's block-sized
 reads are answered from memory (up to 512 MiB; past that, a chunk at a time).
-It holds no lock. The log says what it read: bytes, I/Os and their size,
+It holds no lock. The log and the console (stdout) say what it read: bytes, I/Os and their size,
 MB/s, reads answered from memory. A check over 10 s on a volume under 1 GiB
 is a WARN naming that and the engine's locks at the time.
 

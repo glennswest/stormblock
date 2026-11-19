@@ -48,6 +48,8 @@ ISO. stormblock's side, in steps (each its own commit):
 - [x] check.sh on sc-build (c7ca3b9c, ALL PASS)
 - [ ] on forge1: the seal line's check under a few seconds for a 146 MiB golden
 - [ ] 2026-11-19 reopened: the `log:` proof read stormcentral's install log, never the node's. No test install seals (pvetest2 12.96: its blanks come sealed, no seal in its console), and an engine INFO line does not reach a node's console (only WARN and stdout do). Seals run on forge1 (appliance, still 24.29.1). Plan: the check line also printed on stdout (the console, as the flow-over lines); re-ship `--commit` it with `on forge1 console:fstemplate .* check of volume .* I/O\(s\) of 1024 KiB`
+- [x] the line on stdout too (`say_check`); README, CHANGELOG
+- [ ] check.sh on the push (with #676's 5bb2d82e), v24.34.1, stage, re-ship both
 
 ## #676 — health's flow-over span stops at its end (2026-11-18)
 - [x] `FlowProgress::finish("done"|"stopped")`: at the flow-over's completion, its abandonment, and a system move's end; `seconds`/rates over the finished span, `started_at`/`finished_at`, `pace.state` `done`; a later begin counts from zero
