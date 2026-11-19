@@ -14,7 +14,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 - [x] `FlowProgress::finish("done"|"stopped")`: at the flow-over's completion, its abandonment, and a system move's end; `seconds`/rates over the finished span, `started_at`/`finished_at`, `pace.state` `done`; a later begin counts from zero
 - [x] unit test `a_finished_flow_over_keeps_its_span_and_rates`; README health, CHANGELOG
 - [x] check.sh on sc-build (fb6b7f6f, ALL PASS); v24.30.1 with #677; image requested
-- [ ] proof on a node: health `flow_over.finished_at` present after a flow-over
+- [ ] proof on a node: health `flow_over.finished_at` present after a flow-over (`shipped` set with a get: proof on /api/v1/health, 2026-11-18)
 
 ## #616 (again) — the record after a reboot (2026-11-16, P1)
 
