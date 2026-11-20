@@ -420,6 +420,15 @@ ISO. stormblock's side, in steps (each its own commit):
     stormdist `make` from a composed test disk, opens it as `stormdist://`,
     runs a slab open and a boot-local flow-over from it, and checks a
     corrupt chunk fails the read. Add an initramfs test for the ISO branch.
+- (2026-11-20) built: `drive::isodev` (`stormdist://`, chunk LRU, writes in
+  4 KiB pages in memory), `/init`'s `rd.stormblock.iso` (iso claim block,
+  `STORMBLOCK_RELEASE_KEY` → `/etc/stormblock/release-key.pub`, flavour from
+  `networking.networkType`), tests/it/integration_isodev.rs,
+  tests/initramfs-iso.sh. stormcentral#1556 names the disk (`stormcos-sno`,
+  `stormcos-sno-<flavour>`). **Blocker found:** mkfs.iso.rs's `Medium for
+  File` sizes a block device as 0, so /dev/sr0 and a USB stick cannot be read
+  (filed mkfs.iso.rs#35). Then stormdist takes the tag, then this repo the
+  stormdist pin. The restore's README line (`/dev/sr0`) corrected.
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it

@@ -1123,7 +1123,7 @@ with a job; `GET /restores[/{id}]` reads it (`running|done|failed`, `report:
 `restore` (mode `restore`, every golden and the forge inventory), `install`
 (a full ISO's `flavour`) or `upgrade` (diffs from `current`, the installed
 release's identity), run against this engine.
-- `iso` is a file or a device on this node (`/dev/sr0`).
+- `iso` is a file on this node. A device (`/dev/sr0`, a USB stick) is not read yet: stormdist's reader takes a block device's size as 0 (mkfs.iso.rs#35).
 - `base` lists a diff ISO's bases, oldest first.
 - `key` is the pinned Ed25519 public key (hex). A key from the media is never
   used.
@@ -1147,9 +1147,39 @@ release's identity), run against this engine.
 
 Tested end to end in `tests/it/integration_stormdist.rs`: stormdist's own
 `make` and `diff` build the ISOs from this engine's export. The restore runs
-on a running engine. The ISO install boot (boot the release ISO, run from it
-before the disk is laid, flow over, eject) is not built yet; see "Not built,
-or not wired".
+on a running engine.
+
+**An install from the release ISO** (owner's option 1 on #442: the ISO
+carries each flavour's composed, tested disk, flowed over exactly as a forge
+clone is):
+- **`stormdist://<iso>?flavour=<f>&key=<file>`** (`drive::isodev`) is a drive
+  like any other. It reads the flavour's disk off the ISO: the flavour's
+  member named `stormcos-sno` (cilium) or `stormcos-sno-<flavour>`, by golden
+  name, component or `<name>-<version>` (stormcentral#1556). `member=<name or
+  component>` names another.
+- The catalogue's signature is checked with the key file (64 hex digits)
+  before anything is read. Every chunk is checked by its sha256 on every
+  read, and a changed chunk fails its read. Holes read as zeros, and 16
+  verified chunks are kept.
+- Writes are kept in this process's memory, in 4 KiB pages, and never reach
+  the ISO: the node runs from the disk while the flow-over copies it.
+- **`/init`**: `rd.stormblock.iso=<device>` (or `auto`, the first CD with
+  media) asks no appliance. Its claim is that `stormdist://` source, the
+  flavour the install-config's `networking.networkType` (cilium when none),
+  the key `/etc/stormblock/release-key.pub`, built in from
+  `STORMBLOCK_RELEASE_KEY` (64 hex digits) by
+  `scripts/build-stormblock-initramfs.sh`. With no key, an ISO is refused.
+- From there it is the forge path unchanged: `slab holds` (the same release
+  boots the disk), the install over the node's disk, boot-local's flow-over.
+  The ISO stays attached until the flow-over ends, because the device stays
+  open until then.
+- `tests/it/integration_isodev.rs`: a laid system drive with a volume, made
+  into an ISO by stormdist's `make`, reads back byte for byte, and its slab and
+  volume adopt from it. A write reads back with the ISO untouched. A wrong
+  key, a flavour with no disk and a corrupt chunk are refused.
+  `tests/initramfs-iso.sh` covers `/init`'s claim.
+- **Not yet from a CD or USB stick:** stormdist's reader takes a block
+  device's size as 0 (mkfs.iso.rs#35). A file works.
 
 ## Pulling a volume from a peer
 
@@ -3436,11 +3466,12 @@ every unit there and fails one at or below the budget.
 
 What earlier docs described and the code does not do, each with its issue:
 
-- **The ISO install boot** (#442): `/init` booting the release ISO, the node
-  running from the ISO's goldens before its disk is laid, the flow-over from
-  the ISO (hot extents first) and the eject. Next on #442; stormdist's boot
-  writer is done and its firmware test (stormdist#10) waits for this. The restore and upgrade from an ISO on a running engine
-  are built (`/api/v1/stormdist`). A restored golden is presented at the
+- **The ISO install from a CD or USB stick** (#442): built for an ISO file
+  (`stormdist://`, `rd.stormblock.iso`). A block device is not read until
+  stormdist's reader sizes one (mkfs.iso.rs#35), and no release ISO carries
+  a flavour's disk until stormcentral#1556. The eject after the flow-over is
+  not built: the ISO is left attached. The restore and upgrade from an ISO on
+  a running engine are built (`/api/v1/stormdist`). A restored golden is presented at the
   default LBA (4096). stormdist's manifest does not carry a golden's LBA
   (#228).
 - **RAID sets** (`docs/raid-sets.md` "Not here"): no reshape or growth of a

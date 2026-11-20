@@ -21,6 +21,7 @@ pub mod read_test;
 pub mod designation;
 pub mod handover;
 pub mod httpdev;
+pub mod isodev;
 pub mod partition;
 pub mod ridethrough;
 pub mod discover;
@@ -509,6 +510,12 @@ pub async fn open_one_drive_with_secret(
     if let Some(spec) = emulated::EmulatedSpec::parse(path) {
         return Ok(Box::new(emulated::open(&spec?)?));
     }
+    // A volume on a stormdist release ISO (#442): the flavour's composed
+    // disk read off the attached media, every chunk checked by its hash.
+    if let Some(spec) = isodev::IsoSpec::parse(path) {
+        let spec = spec.map_err(|e| DriveError::Other(anyhow::anyhow!(e)))?;
+        return Ok(Box::new(isodev::IsoDevice::open(&spec).await?));
+    }
     // Fabric URIs first — a remote namespace attached as a drive
     // (stormblock#73). The same string works everywhere a device path
     // does: config `[[drives]]`, POST /api/v1/drives, RAID members.
@@ -602,9 +609,9 @@ pub async fn open_path(path: &str, read_only: bool) -> DriveResult<std::sync::Ar
 
 fn supported_uri_schemes() -> &'static str {
     #[cfg(feature = "iscsi")]
-    return "nvme-tcp://host:port/nqn?nsid=N, iscsi://host:port/iqn, emulated://name?size=1P";
+    return "nvme-tcp://host:port/nqn?nsid=N, iscsi://host:port/iqn, emulated://name?size=1P, stormdist://<iso>?flavour=F&key=FILE";
     #[cfg(not(feature = "iscsi"))]
-    return "nvme-tcp://host:port/nqn?nsid=N, emulated://name?size=1P";
+    return "nvme-tcp://host:port/nqn?nsid=N, emulated://name?size=1P, stormdist://<iso>?flavour=F&key=FILE";
 }
 
 /// Parse `iscsi://host:port/iqn` into (host, port, iqn).

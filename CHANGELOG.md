@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **feat:** #442: an install from the release ISO (owner's option 1: the ISO carries each flavour's composed disk). `stormdist://<iso>?flavour=<f>&key=<file>` is a drive (`drive::isodev`). It reads the flavour's disk (`stormcos-sno` or `stormcos-sno-<flavour>`, stormcentral#1556) off the ISO with the release key, checks every chunk by its hash, and keeps writes in memory. `/init`'s `rd.stormblock.iso=<device>|auto` claims it with no appliance: flavour from `networking.networkType`, key built in from `STORMBLOCK_RELEASE_KEY`. Then the forge path runs unchanged: `slab holds`, the install, the flow-over, with the ISO attached until it ends. Reading from a CD or USB stick waits on mkfs.iso.rs#35 (a block device's size reads as 0).
+- **docs:** #442: the README no longer says a restore reads an ISO from a device; it reads a file until mkfs.iso.rs#35.
+
 ## [v24.43.1] — 2026-11-20
 
 ### Fixed

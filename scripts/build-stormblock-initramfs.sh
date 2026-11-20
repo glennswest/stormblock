@@ -195,6 +195,17 @@ mkdir -p "$INITRD_DIR/etc/stormblock/boot.d"
 BUILD_EPOCH="${SOURCE_DATE_EPOCH:-$(date -u +%s)}"
 echo "$BUILD_EPOCH" > "$INITRD_DIR/etc/stormblock/build-date"
 [ -n "${USERLAND_WORK:-}" ] && cp "$USERLAND_WORK/packages.tsv" "$INITRD_DIR/etc/stormblock/userland-packages.tsv"
+# The release key an attached release ISO is checked with (#442): 64 hex
+# digits, an Ed25519 public key, from STORMBLOCK_RELEASE_KEY. Without one the
+# image boots from no ISO (rd.stormblock.iso is refused, said).
+if [ -n "${STORMBLOCK_RELEASE_KEY:-}" ]; then
+    case "$STORMBLOCK_RELEASE_KEY" in
+    *[!0-9a-fA-F]*) echo "STORMBLOCK_RELEASE_KEY is not hex" >&2; exit 1 ;;
+    esac
+    [ "${#STORMBLOCK_RELEASE_KEY}" -eq 64 ] || { echo "STORMBLOCK_RELEASE_KEY is not 64 hex digits (an Ed25519 public key)" >&2; exit 1; }
+    echo "$STORMBLOCK_RELEASE_KEY" > "$INITRD_DIR/etc/stormblock/release-key.pub"
+    echo "Release key for an attached ISO: ${STORMBLOCK_RELEASE_KEY%"${STORMBLOCK_RELEASE_KEY#????????????????}"}…"
+fi
 
 # Busybox (static) + a symlink for **every applet it has**.
 #
@@ -1247,6 +1258,7 @@ PORT="3260"
 IP_CONF=""
 SLAB=""
 BOOTHOST=""
+ISO=""
 ENGINE_LOG="${STORM_ENGINE_LOG:-/run/stormblock/engine.log}"
 BOOTTAG=""
 BOOTTAG_FROM=""
@@ -1279,6 +1291,9 @@ for param in $(cat /proc/cmdline); do
         # cmdline is baked into the image and identical on every node that
         # boots it, so it names the appliance, never the namespace.
         rd.stormblock.boothost=*)    BOOTHOST="${param#*=}" ;;
+        # The release from an attached stormdist ISO (#442): a device, or
+        # `auto` (the first CD with media). No appliance is asked.
+        rd.stormblock.iso=*)         ISO="${param#*=}" ;;
         rd.stormblock.discover=*)    DISCOVER="${param#*=}" ;;
         rd.stormblock.bootport=*)    BOOTPORT="${param#*=}" ;;
         # ASSIMILATE is rewritten below (an install ticket makes it force,
@@ -4070,7 +4085,11 @@ if [ "$BOOT_MODE" = "local" ]; then
     # Why there is no appliance, when there is none: said again wherever it
     # matters (the release check it skips, a disk that cannot boot, #294).
     BOOTHOST_WHY=""
-    if [ -z "$BOOTHOST" ]; then
+    if [ -n "${ISO:-}" ] && [ -z "$BOOTHOST" ]; then
+        BOOTHOST_WHY="booting the release from the ISO (rd.stormblock.iso=$ISO): no appliance is asked"
+        echo "No appliance: $BOOTHOST_WHY (#442)"
+    fi
+    if [ -z "$BOOTHOST" ] && [ -z "${ISO:-}" ]; then
         # The boot port first (#524): :9090 goes TLS, which this cannot speak,
         # and an engine with no boot port still answers plain there.
         BOOTPORTS="${BOOTPORT:-9089 9090}"
@@ -4267,8 +4286,56 @@ if [ "$BOOT_MODE" = "local" ]; then
     # Returns non-zero, having said why, rather than dropping to a shell: the
     # probe's caller still has a local disk to boot.
     CLAIMED=""
+    # --- BEGIN iso claim (covered by tests/initramfs-iso.sh)
+    # An install from an attached release ISO (#442; owner's option 1): the
+    # flavour's composed disk on it is the claim, read off the ISO as a drive
+    # (`stormdist://`, every chunk checked against the release key built into
+    # this image) and flowed over exactly as a forge clone is. The flavour is
+    # the install-config's networking.networkType, cilium when it says none.
+    iso_flavour() {
+        _ifc=""
+        for _f in "${INSTALL_CONFIG_STAGED:-}" "${INSTALL_CONFIG_FORGE:-}"; do
+            [ -n "$_f" ] && [ -f "$_f" ] && { _ifc="$_f"; break; }
+        done
+        _ifv=""
+        [ -n "$_ifc" ] && _ifv=$(awk '
+            /^[^ \t#]/ { net = ($0 ~ /^networking:/) }
+            net && /^[ \t]+networkType:/ { v = $0; sub(/^[ \t]+networkType:[ \t]*/, "", v); sub(/[ \t]+#.*$/, "", v)
+                gsub(/["'"'"']/, "", v); print v; exit }' "$_ifc")
+        case "$_ifv" in ''|*[!a-z0-9-]*) echo cilium ;; *) echo "$_ifv" ;; esac
+    }
+    iso_claim() {
+        _ik="${STORM_RELEASE_KEY:-/etc/stormblock/release-key.pub}"
+        if [ ! -s "$_ik" ]; then
+            echo "ISO: this initramfs carries no release key - an ISO is never read unchecked (#442)"
+            return 1
+        fi
+        _idev="$ISO"
+        if [ "$_idev" = auto ]; then
+            _idev=""
+            for _s in "${STORM_SYS_BLOCK:-/sys/block}"/sr*; do
+                [ -e "$_s/size" ] || continue
+                [ "$(cat "$_s/size" 2>/dev/null || echo 0)" -gt 0 ] || continue
+                _idev="${STORM_DEV:-/dev}/${_s##*/}"
+                break
+            done
+            if [ -z "$_idev" ]; then
+                echo "ISO: no CD with media (rd.stormblock.iso=auto); name the device: rd.stormblock.iso=/dev/sdX"
+                return 1
+            fi
+        fi
+        _ifl=$(iso_flavour)
+        CLAIMED="stormdist://$_idev?flavour=$_ifl&key=$_ik"
+        echo "ISO: the release on $_idev, flavour $_ifl: its disk is read off the ISO and flowed over;"
+        echo "  the ISO stays attached until the flow-over ends (#442)"
+    }
+    # --- END iso claim
     boothost_claim() {
         [ -n "$CLAIMED" ] && return 0
+        if [ -n "${ISO:-}" ]; then
+            iso_claim
+            return $?
+        fi
         # The identity is not worked out here. stormbootx named the machine
         # and claimed on it before Linux existed; this asks again in its own
         # right — the firmware's block device went with the UEFI that
@@ -4700,7 +4767,7 @@ if [ "$BOOT_MODE" = "local" ]; then
     # drop a node that can boot to a shell.
     INSTALL_OVER=""
     # A diagnostic boot (#629) always asks: it boots the claimed image.
-    if [ -n "$SLAB" ] && [ -n "$BOOTHOST" ] \
+    if [ -n "$SLAB" ] && { [ -n "$BOOTHOST" ] || [ -n "${ISO:-}" ]; } \
        && { [ -n "${DIAGNOSTIC:-}" ] || { [ -z "$HOOK_DECIDED" ] && [ "${ASSIMILATE:-}" != off ]; }; }; then
         case "$SLAB" in
         *://*) ;;
@@ -4810,14 +4877,14 @@ if [ "$BOOT_MODE" = "local" ]; then
     # afresh, and the mounts are numbered for the image that boots.
     launch_local() {
         # Its data over NVMe/TCP: by every path it has (#450, #545).
-        case "${SLAB:-}" in *://*) command -v path_nics_join >/dev/null 2>&1 && path_nics_join ;; esac
+        case "${SLAB:-}" in nvme-tcp://*) command -v path_nics_join >/dev/null 2>&1 && path_nics_join ;; esac
     # Diskless: this machine's slab is a namespace on the appliance, and which
     # one is a per-machine fact the baked-in cmdline cannot carry. Ask, keyed
     # on the service tag. The firmware made the same claim a stage earlier to
     # load the kernel, but what it published was a UEFI block device and that
     # ceased to exist when the kernel started, so the node asks in its own
     # right rather than inheriting anything.
-    if [ -z "$SLAB" ] && [ -n "$BOOTHOST" ]; then
+    if [ -z "$SLAB" ] && { [ -n "$BOOTHOST" ] || [ -n "${ISO:-}" ]; }; then
         if ! boothost_claim; then
             echo "FATAL: $BOOTHOST gave this machine no image to boot"
             rescue_shell
@@ -7189,7 +7256,7 @@ root_fallback() { # why
     if [ "${BOOT_MODE:-}" != local ] || [ -z "${LOCAL_ROOT_SLAB:-}" ]; then
         echo "  this root was not a local disk's - nothing to fall back to"; return 1
     fi
-    if [ -z "${BOOTHOST:-}" ]; then
+    if [ -z "${BOOTHOST:-}" ] && [ -z "${ISO:-}" ]; then
         echo "  no appliance (${BOOTHOST_WHY:-none was found}) - nothing to fall back to"; return 1
     fi
     if identity_guessed 2>/dev/null; then

@@ -59,6 +59,7 @@ mod integration_serve_in_use;
 mod integration_serve_own_exports;
 mod integration_ship;
 mod integration_serve_mounted;
+mod integration_isodev;
 mod integration_stormdist;
 mod integration_stormfs;
 mod integration_synonyms;
