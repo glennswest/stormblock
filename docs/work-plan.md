@@ -356,8 +356,12 @@ ordinary one; the install's `laid` (20:04) and `booted` (20:06) were lost.
   `hba firmware`
 - [x] check.sh ALL PASS (9282107); v24.22.0; stormdrive#150 (the Drive CR's
   format/firmware on these jobs), stormconsole#340 (buttons, bars)
-- [ ] proof on forge1: a drive set back to 512 (an owner's word: it is a
-  laid node's drive), formatted from the running node, ready at 4096 + PI
+- [x] ~~proof on forge1: a drive set back to 512~~ (owner, 2026-11-20,
+  decision 5: "Just approve it for now, and when we are bringing up another
+  machine we can test it"): shipped on the fakes' tests. The shipped proof is
+  the node's engine at >= 24.22 (`/api/v1/health` version). The live proof is
+  a `DriveOperation` format (stormdrive#150) on a drive that holds no data,
+  at the next machine bring-up. No curl, and no node-data drive set back to 512.
 
 ## #629 — the diagnostic boot, `mode: diagnostic` (2026-11-17, P0)
 
