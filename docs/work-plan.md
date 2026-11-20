@@ -11,12 +11,19 @@ carries, but nothing ever writes one into the image: neither `image build`
 uses) can set it, and the release image has no service in it to derive one
 from (pallet members have roles, not services). So the owner is said where
 the release is written, explicitly, and travels with the clone:
-- [ ] `owner = { kind, namespace, name }` on a golden entry of `image build`
+- [x] `owner = { kind, namespace, name }` on a golden entry of `image build`
   and of `compose/slab`; set on every clone the entry takes (not the golden)
-- [ ] stage and install: a node volume kept by name with no owner takes the
+- [x] stage and install: a node volume kept by name with no owner takes the
   release's copy's owner (forge1's unclaimed clones claimed on the next release);
   a claimed one is never overwritten
-- [ ] tests, CHANGELOG, README/docs; stormcos issue to write `owner` per service
+- [x] tests, CHANGELOG, README/docs (a60b5389)
+- [ ] `sc-build 'sh check.sh'` on a60b5389 passed (started 2026-11-19; paused
+  for P0 #656 before it reported: run it again if no result is recorded)
+- [ ] file the stormcos issue (draft: image.toml `owner` per service clone/data/
+  logs; compose-release.py's slab_volume() passes `owner`; only after the
+  appliance engine carries a60b5389, compose/slab refuses unknown fields)
+- [ ] request the stage; `shipped --proof` cadvisor-logs owned by Service cadvisor
+- Owner's stormd#75 answer (A/B/C) still open; A and B need this, C is not harmed.
 - No uid: stage knows no Service object, and Owner's rule is absent, not guessed.
 
 ## #692 — compose/slab carries a golden's grow policy (2026-11-19, P1)
