@@ -14,8 +14,8 @@ deletes what it laid (the record saved per volume), and the job is then
 cleared, so `GET` is a 404. A new stage while one is cancelling is a 409.
 Tests: the stage loop cut after its first volume, deleted to nothing; the
 API path with the stage held behind the volume manager's lock.
-- [ ] code, tests, docs (staging.md, README), CHANGELOG
-- [ ] check.sh on a build VM
+- [x] code, tests, docs (staging.md, README), CHANGELOG (951f03ef)
+- [x] check.sh ALL PASS on a build VM (1563 tests; both release-stage tests); v24.41.0
 
 ## #693 — a per-node backup-store credential (2026-11-20, P0; stormcos#1027, owner's B)
 What a backup client calls on the store (stormvm `crates/stormvm-block/src/backup.rs`
