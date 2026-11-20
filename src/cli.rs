@@ -12965,7 +12965,12 @@ file = "{state}"
             for (vol, bytes, is_data) in files {
                 let f = p(&format!("{name}-{vol}.img"));
                 std::fs::write(&f, bytes).unwrap();
-                let entry = format!("[[{}.golden]]\nname = \"{vol}\"\nfile = \"{f}\"\n", if is_data { "data_slab" } else { "slab" });
+                let mut entry = format!("[[{}.golden]]\nname = \"{vol}\"\nfile = \"{f}\"\n", if is_data { "data_slab" } else { "slab" });
+                // #670: N+1 says whose each clone is; N (as forge1's
+                // releases before it) says nothing.
+                if name == "11.91" {
+                    entry += &format!("owner = {{ kind = \"Service\", namespace = \"kube-system\", name = \"{vol}\" }}\n");
+                }
                 if is_data { data += &entry } else { sys += &entry }
             }
             let spec = format!("name = \"rel-{name}\"\nsize = \"1G\"\n[slab]\nsize = \"rest\"\n{sys}[data_slab]\nsize = \"512M\"\n{data}");
@@ -13117,6 +13122,9 @@ file = "{state}"
             let grown = m.get_volume(&e.state_id).unwrap().capacity_bytes();
             assert_eq!(grown, e.state_grown, "{when}: the grown state keeps its size (#689)");
             assert_eq!(m.grow_policy(&e.state_id), Some(e.policy), "{when}: the release's grow policy on the kept state (#690)");
+            // #670: the kept state, unowned on the node, is claimed as N+1 says.
+            let o = m.owner(&e.state_id).unwrap_or_else(|| panic!("{when}: the kept state has no owner"));
+            assert_eq!((o.kind.as_str(), o.namespace.as_str(), o.name.as_str()), ("Service", "kube-system", "state"), "{when}");
             assert_eq!(volume_bytes(m, "state").await.unwrap(), e.state_before, "{when}: state");
             assert_eq!(m.find_volume("logs@11.90").await, Some(e.logs_id), "{when}: the node's logs, aside");
             // A rollback copy, marked so (#565), and the mark kept on disk.
@@ -14205,6 +14213,12 @@ file = "{state}"
             v.write(4096, &[mark; 8192]).await.unwrap();
             v.flush().await.unwrap();
         }
+        // #670: the node's state was claimed before N+1 said whose it is;
+        // a claim is never replaced by the release's.
+        let mut node = node;
+        let claim = crate::volume::metadata::Owner { kind: "PersistentVolumeClaim".into(), namespace: "default".into(), name: "mine".into(), uid: Some("u1".into()) };
+        let state_id = node.find_volume("state").await.unwrap();
+        node.set_owner(state_id, Some(claim.clone())).await.unwrap();
         let state_before = volume_bytes(&node, "state").await.unwrap();
         let logs_before = volume_bytes(&node, "logs").await.unwrap();
         let node = crate::lockwatch::TrackedMutex::new(node);
@@ -14222,6 +14236,19 @@ file = "{state}"
         assert!(action("kubelet-data").unwrap().1.is_some(), "a volume N+1 adds is staged");
         assert!(matches!(action("svc").unwrap().0, stage::Action::Clone { .. }), "a clone is a clone of its staged golden");
         assert_eq!(gen.kept, vec!["state".to_string()]);
+        {
+            // #670: every staged clone is born with N+1's owner; a golden
+            // has none; the node's kept state keeps the claim it had.
+            let m = node.lock().await;
+            for vol in ["svc", "logs", "kubelet-data"] {
+                let id = m.find_volume(&format!("{vol}@11.91")).await.unwrap_or_else(|| panic!("{vol}@11.91"));
+                let o = m.owner(&id).unwrap_or_else(|| panic!("{vol}@11.91 was staged unowned"));
+                assert_eq!((o.kind.as_str(), o.namespace.as_str(), o.name.as_str()), ("Service", "kube-system", vol));
+            }
+            let g = m.find_volume("svc.golden@11.91").await.unwrap();
+            assert_eq!(m.owner(&g), None, "a golden is the release's, owned by no service");
+            assert_eq!(m.owner(&state_id), Some(&claim), "a claim is never replaced");
+        }
         {
             let m = node.lock().await;
             let v = m.find_volume("svc.golden@11.91").await.expect("the staged golden");

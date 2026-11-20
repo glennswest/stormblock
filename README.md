@@ -2010,6 +2010,13 @@ rest without naming conventions:
   (`422`, `a clone names its owner`). It is off until every writer sets one
   (stormd#75, rustkube-node#372, stormblock-registry#174, stormvm#129,
   stormblock-csi#69).
+- **A release's clones are born claimed** (#670): `owner` on a golden entry
+  (`[[slab.golden]]` in an image spec, a `compose/slab` golden) is set on
+  every clone the entry takes, never the golden, and kept in the slab's
+  record. A stage or install carries it to the node's copy; a volume the
+  node keeps by name with no owner takes the release's, a claimed one keeps
+  its claim. The release's writer says the service (stormcos's image spec):
+  the image itself has no service to derive one from.
 - **The orphans** (#649, #115): `GET /api/v1/volumes/unowned` lists every
   writable clone no owner claimed, largest first: its name, namespace,
   parent (id and name), virtual and allocated bytes, whether it is in use
@@ -2713,7 +2720,9 @@ stormupdate:
    slabs as `<name>@<v>`:
    - goldens go under the release's own ids, sealed only when whole;
    - clones become copy-on-write clones of their staged or shared parent;
-   - volumes the node already has by id are shared, not copied.
+   - volumes the node already has by id are shared, not copied;
+   - each staged copy keeps the owner N+1's carries, and a kept volume with
+     no owner takes N+1's (#670).
 
    It also copies N+1's boot pallet in below the active one.
 2. The release's root volume says what happens to each data volume, in

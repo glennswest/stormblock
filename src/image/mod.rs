@@ -306,6 +306,49 @@ pub struct GoldenSpec {
     /// 1 GiB and is rounded up to whole GiB; `max` is at least one step.
     #[serde(default)]
     pub grow: Option<GrowSpec>,
+    /// Who the clones belong to (#670): `owner = { kind = "Service",
+    /// namespace = "kube-system", name = "fastetcd" }`. Set on every clone
+    /// this entry takes, never on the golden (a golden is the release's), so
+    /// no clone is born unclaimed; stage and install carry it to each node.
+    #[serde(default)]
+    pub owner: Option<OwnerSpec>,
+}
+
+/// An owner said by a golden entry (#670): a volume's `owner`, written by
+/// whoever writes the release, which is the one place that knows which
+/// service a clone is for. An unknown field is refused, never dropped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerSpec {
+    pub kind: String,
+    /// Empty for a cluster-scoped owner.
+    #[serde(default)]
+    pub namespace: String,
+    pub name: String,
+    /// The owner's uid, when the writer knows it; absent rather than guessed.
+    #[serde(default)]
+    pub uid: Option<String>,
+}
+
+impl OwnerSpec {
+    /// The volume owner it says, or why it says none: a kind and a name are
+    /// both needed (a partial owner looks like an answer), and a namespace
+    /// is a DNS label.
+    pub fn owner(&self) -> std::result::Result<crate::volume::metadata::Owner, String> {
+        let (kind, name, ns) = (self.kind.trim(), self.name.trim(), self.namespace.trim());
+        if kind.is_empty() || name.is_empty() {
+            return Err("an owner needs a kind and a name".into());
+        }
+        if !ns.is_empty() && !crate::volume::metadata::valid_namespace(ns) {
+            return Err(format!("owner namespace '{ns}' is not a DNS label"));
+        }
+        Ok(crate::volume::metadata::Owner {
+            kind: kind.to_string(),
+            namespace: ns.to_string(),
+            name: name.to_string(),
+            uid: self.uid.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(str::to_string),
+        })
+    }
 }
 
 /// A size in an image spec: bytes, or `64G` / `64Gi` (base 1024).
@@ -361,12 +404,15 @@ impl ImageSpec {
                 ))
             })?;
         }
-        // A grow policy that cannot be applied is refused before anything
-        // is laid down, not when the golden is (#691).
+        // A grow policy (#691) or an owner (#670) that cannot be applied is
+        // refused before anything is laid down, not when the golden is.
         for slab in self.slab.iter().chain(self.data_slab.iter()) {
             for g in &slab.goldens {
                 if let Some(grow) = &g.grow {
                     grow.policy().map_err(|e| ImageError::Spec(format!("golden '{}': grow: {e}", g.name)))?;
+                }
+                if let Some(o) = &g.owner {
+                    o.owner().map_err(|e| ImageError::Spec(format!("golden '{}': owner: {e}", g.name)))?;
                 }
             }
         }

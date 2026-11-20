@@ -3628,9 +3628,21 @@ pub struct ComposeSlabGoldenRequest {
     /// node's copy (#692). Absent: the source volume's own policy, if any.
     #[serde(default)]
     pub grow: Option<serde_json::Value>,
+    /// `{kind, namespace, name, uid?}`: who the clones belong to (#670), set
+    /// on each clone (never the golden) so none is born unclaimed.
+    #[serde(default)]
+    pub owner: Option<crate::image::OwnerSpec>,
 }
 
 impl ComposeSlabGoldenRequest {
+    /// The owner asked, checked as `PUT …/owner` checks one.
+    fn owner(&self) -> Result<Option<crate::volume::metadata::Owner>, String> {
+        match &self.owner {
+            None => Ok(None),
+            Some(o) => o.owner().map(Some).map_err(|e| format!("golden '{}': owner: {e}", self.name)),
+        }
+    }
+
     /// The `grow` asked, by `spec.grow`'s rules; `null` is the same as
     /// absent (the source's own policy is carried).
     fn grow_policy(&self) -> Result<Option<crate::volume::metadata::GrowPolicy>, String> {
@@ -3921,6 +3933,10 @@ async fn compose_slab(
             Ok(p) => p,
             Err(e) => return ApiError::bad_request(e),
         };
+        let owner = match g.owner() {
+            Ok(o) => o,
+            Err(e) => return ApiError::bad_request(e),
+        };
         goldens.push(SlabGolden {
             name: g.name.clone(),
             source,
@@ -3931,6 +3947,7 @@ async fn compose_slab(
             secret: g.secret,
             size,
             grow,
+            owner,
         });
     }
 
@@ -4051,5 +4068,20 @@ mod compose_slab_request_tests {
         assert!(e.contains("every"), "{e}");
         let e = golden(json!({"name": "d", "volume": "v", "grwo": {"max": "1T"}})).unwrap_err().to_string();
         assert!(e.contains("grwo"), "an unknown field is refused: {e}");
+    }
+
+    /// #670: a golden entry's `owner` is read and checked; a partial one or
+    /// an unknown key in it is refused, never dropped.
+    #[test]
+    fn a_golden_entrys_owner_is_read_and_checked() {
+        let g = golden(json!({"name": "fastetcd-data", "volume": "v",
+            "owner": {"kind": "Service", "namespace": "kube-system", "name": "fastetcd"}})).unwrap();
+        let o = g.owner().unwrap().unwrap();
+        assert_eq!((o.kind.as_str(), o.namespace.as_str(), o.name.as_str(), o.uid), ("Service", "kube-system", "fastetcd", None));
+        assert_eq!(golden(json!({"name": "d", "volume": "v"})).unwrap().owner().unwrap(), None);
+        let e = golden(json!({"name": "d", "volume": "v", "owner": {"kind": "Service", "name": " "}})).unwrap().owner().unwrap_err();
+        assert!(e.contains("golden 'd'") && e.contains("kind and a name"), "{e}");
+        let e = golden(json!({"name": "d", "volume": "v", "owner": {"kind": "Service", "name": "x", "uuid": "u"}})).unwrap_err().to_string();
+        assert!(e.contains("uuid"), "an unknown key in owner is refused: {e}");
     }
 }

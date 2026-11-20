@@ -230,11 +230,15 @@ POST /api/v1/volumes/compose/slab
 ```
 
 A golden entry takes `name`, `volume`, `golden_name`, `clone`, `clones`,
-`template`, `secret`, `size` and `grow`; any other field is refused (`400`),
-so a compose never drops what it was asked (#692). Every clone takes the
-golden's grow policy, each node's copy of the slab carries it, and an install
-that keeps a node's own volume of that name gives it the release's policy
-(#690). The report's volumes say their `grow`.
+`template`, `secret`, `size`, `grow` and `owner`; any other field is refused
+(`400`), so a compose never drops what it was asked (#692). Every clone takes
+the golden's grow policy, each node's copy of the slab carries it, and an
+install that keeps a node's own volume of that name gives it the release's
+policy (#690). `owner` (`{kind, namespace, name, uid?}`, #670) is set on each
+clone of the entry, never on the golden: a release's service clones are born
+claimed, and a stage or install that keeps a node's unowned volume of that
+name gives it the release's owner (a claimed one keeps its own). A partial
+owner is `400`. The report's volumes say their `grow` and `owner`.
 
 A slab is formatted inside a fresh volume of `size`: superblock, metadata
 region, slot table. Then, for each golden in order, its slots are **taken

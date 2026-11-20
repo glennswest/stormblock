@@ -93,6 +93,9 @@ pub struct VolumeReport {
     /// Its grow policy, when it has one (#691).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grow: Option<crate::volume::metadata::GrowPolicy>,
+    /// Who it belongs to, when the spec said (#670).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::volume::metadata::Owner>,
 }
 
 /// Whether the path names a block device, as opposed to a file to create.
@@ -719,12 +722,23 @@ impl ImageBuilder {
                     return Err(ImageError::TooSmall { need, have: free_bytes });
                 }
             }
+            let owner = match &g.owner {
+                Some(o) => Some(o.owner().map_err(|e| ImageError::Spec(format!("golden '{}': owner: {e}", g.name)))?),
+                None => None,
+            };
             let mut clones = Vec::with_capacity(clone_names.len());
             for clone_name in &clone_names {
                 let clone_id = mgr
                     .create_snapshot(golden_id, clone_name)
                     .await
                     .map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
+                // Born claimed (#670): the clone is the service's from the
+                // build on, on every node that takes the image.
+                if owner.is_some() {
+                    mgr.set_owner(clone_id, owner.clone())
+                        .await
+                        .map_err(|e| ImageError::Other(format!("owner of clone '{clone_name}': {e}")))?;
+                }
                 if g.secret {
                     mgr.mark_secret(clone_id).map_err(|e| ImageError::Other(format!("clone '{clone_name}': {e}")))?;
                 }
@@ -793,6 +807,7 @@ impl ImageBuilder {
                     sealed: mgr.is_sealed(&id),
                     fs_uuid: mgr.fs_info(&id).and_then(|f| f.uuid),
                     grow: mgr.grow_policy(&id),
+                    owner: mgr.owner(&id).cloned(),
                 });
             }
         }
@@ -1417,6 +1432,7 @@ pub async fn slabs_in(image: &Path) -> Result<Vec<SlabContents>> {
                     sealed: v.sealed,
                     fs_uuid: v.fs.as_ref().and_then(|f| f.uuid),
                     grow: v.grow,
+                    owner: v.owner,
                 });
             }
             volumes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1722,5 +1738,89 @@ clones = ["registry-data-b"]
         let e = spec(r#"grow = { max = "1T", every = "8G" }"#).unwrap_err().to_string();
         assert!(e.contains("every"), "an unknown key in grow is refused: {e}");
         assert!(spec(r#"grow = { step = "8G" }"#).is_err(), "max is required");
+    }
+
+    /// #670: `owner = {kind, namespace, name}` on a golden is set on every
+    /// clone the entry takes, never on the golden, and is in the slab's own
+    /// record (what stage and install carry to a node). A partial owner or
+    /// an unknown key is refused at load.
+    #[tokio::test]
+    async fn a_goldens_owner_is_on_every_clone_and_not_the_golden() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let blank = dir.path().join("blank.img").display().to_string();
+        {
+            let dev: std::sync::Arc<dyn crate::drive::BlockDevice> = std::sync::Arc::new(
+                crate::drive::filedev::FileDevice::open_with_capacity(&blank, 32 << 20).await.unwrap(),
+            );
+            crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default()).await.unwrap();
+        }
+        let spec = |owner: &str| {
+            crate::image::ImageSpec::from_toml(&format!(
+                r#"
+size = "512M"
+[slab]
+size = "128M"
+[[slab.golden]]
+name = "plain"
+file = "{blank}"
+[[slab.golden]]
+name = "stormvm-logs"
+file = "{blank}"
+owner = {{ kind = "Service", namespace = "kube-system", name = "stormvm" }}
+[data_slab]
+size = "256M"
+[[data_slab.golden]]
+name = "fastetcd-data"
+file = "{blank}"
+clones = ["fastetcd-data-b"]
+{owner}
+"#
+            ))
+        };
+        let out = dir.path().join("image.img");
+        let report = crate::image::ImageBuilder::new(spec(r#"owner = { kind = "Service", namespace = "kube-system", name = "fastetcd" }"#).unwrap())
+            .build(&out)
+            .await
+            .unwrap();
+        let svc = |name: &str| crate::volume::metadata::Owner {
+            kind: "Service".into(),
+            namespace: "kube-system".into(),
+            name: name.into(),
+            uid: None,
+        };
+        let vols: Vec<&super::VolumeReport> = report.partitions.iter().flat_map(|p| p.volumes.iter()).collect();
+        let want = [
+            ("fastetcd-data", Some(svc("fastetcd"))),
+            ("fastetcd-data-b", Some(svc("fastetcd"))),
+            ("fastetcd-data.golden", None),
+            ("stormvm-logs", Some(svc("stormvm"))),
+            ("stormvm-logs.golden", None),
+            ("plain", None),
+            ("plain.golden", None),
+        ];
+        for (name, owner) in &want {
+            let v = vols.iter().find(|v| v.name == *name).unwrap_or_else(|| panic!("{name} in {vols:?}"));
+            assert_eq!(&v.owner, owner, "{name} in the build's report");
+        }
+        // Written: the slabs' own records say it, as a node attaching them reads.
+        let slabs = super::slabs_in(&out).await.unwrap();
+        let recorded: Vec<&super::VolumeReport> = slabs.iter().flat_map(|s| s.volumes.iter()).collect();
+        for (name, owner) in &want {
+            let v = recorded.iter().find(|v| v.name == *name).unwrap_or_else(|| panic!("{name} in {recorded:?}"));
+            assert_eq!(&v.owner, owner, "{name} in the slab's record");
+        }
+
+        // Refused at load, naming the golden.
+        for bad in [
+            r#"owner = { kind = "Service", name = "" }"#,
+            r#"owner = { kind = "", name = "fastetcd" }"#,
+            r#"owner = { kind = "Service", namespace = "Kube_System", name = "fastetcd" }"#,
+        ] {
+            let e = spec(bad).unwrap_err().to_string();
+            assert!(e.contains("fastetcd-data") && e.contains("owner"), "{bad}: {e}");
+        }
+        let e = spec(r#"owner = { kind = "Service", name = "fastetcd", nmae = "x" }"#).unwrap_err().to_string();
+        assert!(e.contains("nmae"), "an unknown key in owner is refused: {e}");
+        assert!(spec(r#"owner = { kind = "Service" }"#).is_err(), "name is required");
     }
 }

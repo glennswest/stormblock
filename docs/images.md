@@ -302,6 +302,7 @@ Each `[[slab.golden]]` does two things:
 | `golden_name` | `<name>.golden` | the golden's volume name |
 | `size` | content, rounded up to a slot | the volume's virtual size |
 | `grow` | none | `{ max = "1T", step = "8G" }` (bytes, or `64G`/`64Gi`, base 1024; `step` whole GiB, 1 GiB when not said): the grow policy of a Volume's `spec.grow` (#690), set on the golden before its clones are taken, so every clone — the image's and each node's — grows by `step` up to `max` once its filesystem is 80 % used (#691). A policy that cannot apply (`max` under a step, `step = 0`, an unknown key) refuses the spec |
+| `owner` | none | `{ kind = "Service", namespace = "kube-system", name = "fastetcd", uid? }`: who the clones belong to (#670), set on every clone the entry takes and never on the golden, and written in the slab's record, so a node's clone is born claimed (stage and install carry it; a kept volume with no owner takes it). A missing kind or name, a namespace that is not a DNS label or an unknown key refuses the spec |
 
 Two volumes may not end up with the same name: a boot resolves a volume *by
 name*, so a collision is refused at build time rather than discovered at 3am.

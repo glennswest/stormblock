@@ -452,6 +452,17 @@ pub async fn stage(
         if !v.sealed && effective == Policy::Keep && local_names.contains(&v.name) {
             item.action = Action::Kept;
             gen.kept.push(v.name.clone());
+            // The node's keeps its bytes, and takes the release's owner when
+            // it has none (#670): a clone made before releases said whose it
+            // is is claimed by the first that does. A claim is never replaced.
+            if let Some(o) = &v.owner {
+                let mut m = vm.lock().await;
+                if let Some(local) = m.find_volume(&v.name).await {
+                    if m.owner(&local).is_none() && m.set_owner(local, Some(o.clone())).await.is_ok() {
+                        tracing::info!("stage: {} kept, and claimed as the release says: {} {} (#670)", v.name, o.kind, o.name);
+                    }
+                }
+            }
             plan.push(item);
             progress.volumes_done.fetch_add(1, Ordering::Relaxed);
             continue;

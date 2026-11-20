@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-19
+- **feat:** #670: `owner = {kind, namespace, name, uid?}` on a golden entry (`[[slab.golden]]` of `image build`, a `compose/slab` golden), set on every clone the entry takes (never the golden) and kept in the slab's record, so a release's service clones are born claimed; stage and install give a kept node volume with no owner the release's (a claim is never replaced). A partial owner or an unknown key in it is refused.
+
 ## [v24.38.0] — 2026-11-19
 
 ### Added

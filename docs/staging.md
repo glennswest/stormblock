@@ -44,6 +44,8 @@ The image's slabs are opened in a volume manager of their own. Nothing is copied
 | an unsealed volume, policy **keep**, which the node has by name | kept: the node's volume stays, and N+1's is not staged |
 | anything else (replace, migrate, or a volume N+1 adds) | `<name>@<v>`, copied |
 
+Every staged volume takes the owner N+1's copy carries (`owner` on the golden entry that made it, #670), so a service's clone is staged claimed. A kept volume with no owner takes N+1's; one already claimed keeps its claim.
+
 N+1's boot pallet is copied into the disk's boot area **just below** the pallet the disk boots now. The ESP is not touched. The disk is the slab path the engine was started with that carries a node layout, or `disk` in the request.
 
 A stage replaces anything staged before it, whole or not. It also deletes the generation before the current one, keeping one previous generation (the owner's rule). A volume something else is still cloned from is kept: for example N's data golden, while the node's kept volume is its clone.

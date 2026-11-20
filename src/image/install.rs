@@ -581,6 +581,17 @@ pub async fn adopt(
                         tracing::info!("install: {name} kept, and grows as the release says: up to {} bytes, {} a step (#690)", g.max, g.step);
                     }
                 }
+                // And its owner (#670), when it has none: a volume made
+                // before releases said whose it is is claimed by the release
+                // that does. One claimed already keeps its claim.
+                if mgr.owner(node_id).is_none() {
+                    if let Some(o) = mgr.owner(&rel_id).cloned() {
+                        let (kind, owner) = (o.kind.clone(), o.name.clone());
+                        if mgr.set_owner(*node_id, Some(o)).await.is_ok() {
+                            tracing::info!("install: {name} kept, and claimed as the release says: {kind} {owner} (#670)");
+                        }
+                    }
+                }
                 // The release's was this boot's fresh clone of its blank,
                 // and nothing has used it.
                 if let Err(e) = mgr.delete_volume(rel_id).await {

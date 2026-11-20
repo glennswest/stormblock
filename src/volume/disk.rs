@@ -747,6 +747,8 @@ pub struct SlabGolden {
     /// clones, and each node's copy, inherit it. `None` carries the source
     /// volume's own policy, when it has one.
     pub grow: Option<crate::volume::metadata::GrowPolicy>,
+    /// Who its clones belong to (#670): set on each clone, never the golden.
+    pub owner: Option<crate::volume::metadata::Owner>,
 }
 
 /// What to compose a slab out of.
@@ -786,6 +788,9 @@ pub struct ComposedSlabVolume {
     /// Its grow policy in the slab's record (#692).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grow: Option<crate::volume::metadata::GrowPolicy>,
+    /// Its owner in the slab's record (#670): a clone's, when asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<crate::volume::metadata::Owner>,
 }
 
 /// What composing a slab produced.
@@ -912,6 +917,7 @@ impl VolumeManager {
                 secret: g.secret,
                 digest: self.seal_digest(&g.source),
                 grow: g.grow.or_else(|| self.grow_policy(&g.source)),
+                owner: g.owner.clone(),
             });
         }
 
@@ -1092,6 +1098,8 @@ struct Planned {
     digest: Option<crate::volume::metadata::SealDigest>,
     /// What the golden grows by in the slab (#692): asked, or the source's.
     grow: Option<crate::volume::metadata::GrowPolicy>,
+    /// Who its clones belong to (#670).
+    owner: Option<crate::volume::metadata::Owner>,
 }
 
 /// A slab compose, planned (#418).
@@ -1278,12 +1286,18 @@ impl SlabPlan {
                 template: p.template,
                 fs_uuid: fs.as_ref().and_then(|f| f.uuid),
                 grow: p.grow,
+                owner: None,
             });
 
             for cname in &p.clone_names {
                 let cid = nested.create_snapshot(gid, cname).await?;
                 if p.secret {
                     nested.mark_secret(cid)?;
+                }
+                // Born claimed (#670): the service's on every node that
+                // takes the image.
+                if p.owner.is_some() {
+                    nested.set_owner(cid, p.owner.clone()).await?;
                 }
                 // A clone is a filesystem of its own (#76). Stamping it
                 // is the one write a clone costs: the slot the superblock
@@ -1317,6 +1331,7 @@ impl SlabPlan {
                     template: false,
                     fs_uuid: fresh,
                     grow: nested.grow_policy(&cid),
+                    owner: nested.owner(&cid).cloned(),
                 });
             }
         }
@@ -1722,6 +1737,8 @@ mod tests {
         let bs = crate::volume::metadata::GrowPolicy { max: 32 * G, step: 2 * G };
         vm.set_grow_policy(b, Some(bs)).unwrap();
 
+        // #670: a's clones are a service's.
+        let svc = crate::volume::metadata::Owner { kind: "Service".into(), namespace: "kube-system".into(), name: "a".into(), uid: None };
         let spec = SlabVolumeSpec {
             name: "system-1".into(),
             size: 96 * SLOT,
@@ -1740,6 +1757,7 @@ mod tests {
                     secret: false,
                     size: None,
                     grow: Some(asked),
+                    owner: Some(svc.clone()),
                 },
                 SlabGolden {
                     name: "b".into(),
@@ -1751,6 +1769,7 @@ mod tests {
                     secret: false,
                     size: None,
                     grow: None,
+                    owner: None,
                 },
             ],
         };
@@ -1812,6 +1831,13 @@ mod tests {
             let v = node.find_volume(n).await.unwrap();
             assert_eq!(node.grow_policy(&v), Some(want), "{n} on the node");
             assert_eq!(by(n), Some(want), "{n} in the report");
+        }
+        // The owner (#670): on a's clones, in the slab's record and the
+        // report; never on a golden; b said none.
+        for (n, want) in [("a.golden", None), ("a", Some(&svc)), ("a-two", Some(&svc)), ("bee.golden", None), ("bee", None)] {
+            let v = node.find_volume(n).await.unwrap();
+            assert_eq!(node.owner(&v), want, "{n} on the node");
+            assert_eq!(report.volumes.iter().find(|v| v.name == n).unwrap().owner.as_ref(), want, "{n} in the report");
         }
         let clone = node.get_volume(&node.find_volume("a").await.unwrap()).unwrap();
         let mut buf = vec![0u8; 4096];
@@ -1877,6 +1903,7 @@ mod tests {
                     secret: false,
                     size: None,
                     grow: None,
+                    owner: None,
                 },
                 SlabGolden {
                     name: "dense".into(),
@@ -1888,6 +1915,7 @@ mod tests {
                     secret: false,
                     size: None,
                     grow: None,
+                    owner: None,
                 },
             ],
         };
@@ -1962,6 +1990,7 @@ mod tests {
                 secret: false,
                 size: None,
                 grow: None,
+                owner: None,
             }],
         };
         let report = vm.compose_slab(spec).await.expect("a 64 GiB blank in a 32 MiB slab");
