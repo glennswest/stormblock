@@ -266,6 +266,12 @@ pub struct Options {
     /// Follow each file from its end as it is when first opened, not its
     /// start (#685).
     pub from_end: bool,
+    /// The collector as settled, the address alone (#685): written when one
+    /// is found in an install-config, read before them. /init deletes the
+    /// install-configs before switch_root (their secrets), so the node
+    /// engine's follower finds its collector here, under `/run`, which
+    /// switch_root keeps.
+    pub target_file: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -284,9 +290,13 @@ impl Default for Options {
             tick: Duration::from_millis(250),
             console_copy: None,
             from_end: false,
+            target_file: Some(TARGET_FILE.into()),
         }
     }
 }
+
+/// Where the settled collector is kept (`Options::target_file`).
+pub const TARGET_FILE: &str = "/run/stormblock/logcast.target";
 
 /// The follower: lines in, frames out.
 pub struct Logcast {
@@ -379,6 +389,18 @@ impl Logcast {
             return;
         }
         let mut found = cmdline_target(&self.cmdline).map(|t| (t, "the kernel command line".to_string()));
+        // What /init's logcast settled (#685): an address, or `off`.
+        if found.is_none() {
+            if let Some(p) = self.opts.target_file.as_ref() {
+                if let Ok(text) = std::fs::read_to_string(p) {
+                    let v = text.trim();
+                    if !v.is_empty() {
+                        found = Some((parse_target(v), format!("the collector settled at boot, {}", p.display())));
+                    }
+                }
+            }
+        }
+        let mut from_config = false;
         if found.is_none() {
             for p in &self.opts.install_configs {
                 // Its content is never printed: an install-config carries
@@ -386,12 +408,29 @@ impl Logcast {
                 if let Ok(text) = std::fs::read_to_string(p) {
                     if let Some(v) = yaml_syslog(&text) {
                         found = Some((parse_target(v), format!("syslog in {}", p.display())));
+                        from_config = true;
                         break;
                     }
                 }
             }
         }
         let Some((t, from)) = found else { return };
+        // Kept for the node engine's follower (#685): the address alone,
+        // never the install-config it came from.
+        if from_config {
+            if let Some(p) = self.opts.target_file.clone() {
+                let v = match &t {
+                    Target::Off => Some("off".to_string()),
+                    Target::At(spec) => Some(spec.clone()),
+                    Target::None => None,
+                };
+                if let Some(v) = v {
+                    if let Err(e) = std::fs::write(&p, format!("{v}\n")) {
+                        self.note(format!("logcast: the collector not kept for the node engine ({}: {e})", p.display()));
+                    }
+                }
+            }
+        }
         match &t {
             Target::Off => {
                 self.dests.clear();
@@ -681,6 +720,7 @@ mod tests {
             tick: Duration::from_millis(10),
             console_copy: None,
             from_end: false,
+            target_file: None,
         });
         lc.route = net;
         NET.store(false, Ordering::Relaxed);
@@ -739,6 +779,7 @@ mod tests {
             tick: Duration::from_millis(10),
             console_copy: None,
             from_end: false,
+            target_file: None,
         };
         let mut lc = Logcast::new(opts.clone());
         lc.route = routes;
@@ -758,6 +799,71 @@ mod tests {
         lc.read(false);
         lc.send();
         assert!(lc.sent().is_empty(), "off: no destination at all, the group included");
+    }
+
+    /// #685: /init's logcast settles the collector from forge's
+    /// install-config and keeps the address (only) in the target file; /init
+    /// then deletes the install-config before switch_root. The node engine's
+    /// follower, started after, has no install-config to read and still
+    /// sends to that collector. `off` is kept as `off`.
+    #[test]
+    fn the_node_engines_follower_finds_the_collector_init_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let init = dir.path().join("init.log");
+        let record = dir.path().join("stormblock.log");
+        let host = dir.path().join("hostname");
+        let cfg = dir.path().join("install-config.forge.yaml");
+        let target = dir.path().join("logcast.target");
+        std::fs::write(&host, "pvetest2").unwrap();
+        std::fs::write(&init, "before switch_root\n").unwrap();
+        let (col, at) = collector();
+        std::fs::write(&cfg, format!("pullSecret: secret\nsyslog: {at}\n")).unwrap();
+        let init_opts = Options {
+            follow: vec![(init.clone(), "stormblock-init".into())],
+            cmdline: dir.path().join("none"),
+            install_configs: vec![cfg.clone()],
+            group: "off".into(),
+            hostname: host.clone(),
+            status: None,
+            drain: Duration::from_millis(100),
+            tick: Duration::from_millis(10),
+            console_copy: None,
+            from_end: false,
+            target_file: Some(target.clone()),
+        };
+        let mut lc = Logcast::new(init_opts.clone());
+        lc.route = routes;
+        lc.read(false);
+        lc.send();
+        assert_eq!(frames(&col).len(), 1, "/init's own line");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), format!("{at}\n"), "the address alone is kept");
+
+        // switch_root: the install-config is gone; the engine's record has
+        // the initramfs's lines, then the engine's.
+        std::fs::remove_file(&cfg).unwrap();
+        std::fs::write(&record, "an initramfs line, sent already\n").unwrap();
+        let mut node = Logcast::new(Options {
+            follow: vec![(record.clone(), "stormblock".into())],
+            from_end: true,
+            status: None,
+            ..init_opts.clone()
+        });
+        node.route = routes;
+        node.read(false);
+        std::fs::write(&record, "an initramfs line, sent already\noom: the engine's oom_score_adj is -1000\n").unwrap();
+        node.read(false);
+        node.send();
+        let got = frames(&col);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains(" pvetest2 stormblock - - - oom: the engine's oom_score_adj is -1000"), "{}", got[0]);
+
+        // `off` settled at boot: the node engine sends nothing either.
+        std::fs::write(&target, "off\n").unwrap();
+        let mut node = Logcast::new(Options { follow: vec![(record, "stormblock".into())], group: stormcast::DEFAULT_GROUP.into(), ..init_opts });
+        node.route = routes;
+        node.read(false);
+        node.send();
+        assert!(node.sent().is_empty(), "off: no destination at all, the group included");
     }
 
     /// #477: the engine's lines reach /init's log too (the follower writes
@@ -793,6 +899,7 @@ mod tests {
             tick: Duration::from_millis(10),
             console_copy: Some("stormblock".into()),
             from_end: false,
+            target_file: None,
         });
         lc.route = routes;
         lc.read(false);
@@ -837,6 +944,7 @@ mod tests {
             tick: Duration::from_millis(10),
             console_copy: None,
             from_end: true,
+            target_file: None,
         });
         lc.route = routes;
         lc.read(false);

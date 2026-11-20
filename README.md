@@ -3077,7 +3077,11 @@ stormcast frame (RFC 5424, `local0`, severity read from the line):
   follows its own record (`/run/stormblock/stormblock.log`) from its end
   at start, so the initramfs's lines are not sent twice, and sends every
   line to the same destinations as /init's logcast, within 250 ms of its
-  being written. stormpump's own lines go to the group only
+  being written. /init deletes the install-configs before `switch_root`
+  (their secrets), so /init's logcast keeps the collector it settled from
+  one, the address alone (or `off`), in `/run/stormblock/logcast.target`,
+  and the engine's follower reads it there (12.97 sent nothing after
+  `switch_root` without it). stormpump's own lines go to the group only
   (stormpump#227). Its status is `/run/stormblock/logcast-engine.status`.
   A panic's FATAL line also goes to `/dev/kmsg` (dmesg and the consoles),
   and the abort waits 600 ms so the follower can send it.

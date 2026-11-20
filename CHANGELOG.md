@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** #685: the node engine's record reaches the collector after `switch_root`: /init deletes the install-configs before it (their secrets), so the engine's follower found no collector and sent to the group only (12.97's pvetest2: no line after 05:24:01Z). /init's logcast now keeps the collector it settled, the address alone (or `off`), in `/run/stormblock/logcast.target`, and the follower reads it.
+
 ## [v24.40.0] — 2026-11-20
 
 ### Added
