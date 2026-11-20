@@ -4,6 +4,14 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.37.0] — 2026-11-19
+
+### Added
+- #692: `compose/slab` carries a golden's grow policy into the slab (the entry's `grow`, or the source's own); its clones and every node's copy inherit it.
+
+### Changed
+- #692: a `compose/slab` golden entry with an unknown field is refused (`400`), never silently dropped. stormcentral's compose sends only known fields.
+
 ### 2026-11-19
 - **feat:** #692: `POST /api/v1/volumes/compose/slab` carries a golden's grow policy into the slab: a golden entry's `grow: {max, step}` (the rules of a Volume's `spec.grow`), or else the source volume's own policy, is set on the slab's `<name>.golden` before its clones, so they and every node's copy inherit it, and an install that keeps the node's own volume gives it the policy (#690). The report's volumes say their `grow`.
 - **BREAKING:** #692: a `compose/slab` golden entry with a field it does not know is refused (`400`) instead of silently dropped.
