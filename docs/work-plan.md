@@ -4,6 +4,31 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #693 — a per-node backup-store credential (2026-11-20, P0; stormcos#1027, owner's B)
+What a backup client calls on the store (stormvm `crates/stormvm-block/src/backup.rs`
+at 449c57b, driven by rustkube-node#380): `GET /v1/volumes/{name|id}`,
+`POST /v1/volumes` (a blank target, owner `VirtualMachineBackup`),
+`DELETE /api/v1/volumes/{id}` (a target too small), `POST /v1/volumes/{id}/attach`
+(nvme_tcp to the node's host NQN), `POST|GET /v1/group-snapshots` and
+`DELETE /v1/group-snapshots/{id}` (a point, the list, prune); a restore ships
+from the store: `POST /v1/snapshots/{id}/ship`, `GET|DELETE /v1/ship-jobs/{id}`.
+Its names carry no node (`<ns>.<vm>.<disk>.backup`, `<ns>.<vm>.backup.<name>`),
+so the scope is **by creator, not name prefix**: what a credential makes is
+recorded (#422's creators) as `backup:<node>`, and it reaches only that.
+- [ ] `mgmt::backup_creds`: `<data_dir>/backup-credentials.json` (sha256 only,
+  0600); `POST /api/v1/backup-credentials {node}` (admin; the bearer once;
+  again = rotate), `GET` (who holds one, created, last used, uses),
+  `DELETE …/{node}` (admin)
+- [ ] the middleware: a bearer that is a backup credential reaches the verb
+  list above and nothing else (403 naming why); each object checked to be
+  `backup:<node>`'s; a create has no source, is not secret, names the owner
+  kind `VirtualMachineBackup`, takes no name another holds; an attach is
+  nvme_tcp; the list of points filtered to its own; what it makes recorded
+- [ ] every use in the audit log and a log line with its node; `/metrics`
+  `storm_backup_credential_requests_total{node,result}`
+- [ ] tests (mint/revoke/rotate; each verb allowed on its own, refused on
+  another node's and on everything else; admin verbs refused), README, CHANGELOG
+
 ## #670 — every service clone born with its owner (2026-11-19)
 Premise check: stage (`src/image/stage.rs`) copies the owner an image volume
 carries, but nothing ever writes one into the image: neither `image build`
