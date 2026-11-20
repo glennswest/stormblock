@@ -82,6 +82,26 @@ Steps, each its own commit and check:
   boot-local, as now, with only the system half's lay and flow-over at
   runtime; (2) the running node, remounting live services; (3) two boots.
   A fresh install is fully runtime either way. Step 3 starts once answered.
+- (2026-11-20) **answered: option 1** (the master, quoting the owner's
+  rule): a keep-data reinstall keeps the data half attached at boot (/init
+  serves the set, boot-local adopts it, as now); a fresh install is fully
+  runtime. Step 3 design (fresh install, from the running node):
+  1. a switch in the words, `storage.runtime: true` (`StorageSpec`), wired
+     only when every step works (no stubs); `/init` then boots the claim with
+     the drives untouched, as diagnostic does, and keeps the words (step 2);
+  2. the engine (`mgmt::node_install` job): the plan (step 2), then a
+     `format_job` per taken drive not at the plan's format, waited for;
+  3. `run_storage_lay(system_bytes, legs, drives)` (cli.rs) on the drives;
+  4. the set: a RaidSet on the apiserver (`role: node-data`, parity, pi, the
+     data regions by `<wwn>-partN`) built by stormraid's `daemon --kube`;
+     waits on **stormraid#96** (no `spec.role`, so a RaidSet set would not be
+     the node-data set the next boot finds);
+  5. `take_local_disks(vm, data = the set's device, system = leg 1)`, the
+     other legs' slabs registered, then `spawn_flow_over` (mirroring to the
+     legs, the local boot area, the install report);
+  6. reboot to local once the flow-over is proved (stormpump's boot intent),
+     done when Ready from its own disk; NodeInstall status follows each step.
+  Proposed `--after stormraid#96`.
 - (2026-11-20) held behind #700 (the master: forge first). Next is step 2:
   /init keeps the install-config's non-secret `mode` and `storage:` for the
   node (it deletes the whole file before switch_root, #685). The engine
