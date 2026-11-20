@@ -12,7 +12,7 @@ stormcos#1049 wants `grow = { max = "1T", step = "8G" }` on a
 - [x] `image build` sets it on the golden before its clones (they inherit
   it, #690); the build report and `slabs_in` show `grow`
 - [x] test `a_goldens_grow_policy_is_on_the_golden_and_every_clone`; docs/images.md, CHANGELOG
-- [ ] check.sh on the pushed commit, release, close
+- [x] check.sh ALL PASS on 063b8434 (1099 s); v24.36.0 (7780790e) tagged; stage b39a5c531bc6; stormcos#1049 told; shipped, proof: registry-data's spec.grow {1T, 8G} on the node apiserver's volumes (holds once stormcos#1049 adds the key)
 
  conditions and a `spec.grow` policy (2026-11-19, P1)
 Owner (forge1's registry-data filled twice): "We need the ability to enlarge space."
