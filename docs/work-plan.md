@@ -32,7 +32,7 @@ Steps:
 - [x] deploy/crds.yaml schema; README, docs; CHANGELOG
 - [x] stormcos#1049 answered: the spelling, set on the blank at compose
 - [x] install: a kept volume takes the release copy's policy; a spec.sizeBytes grow reaches the ext4 through its own namespace (fstatfs magic)
-- [ ] check.sh; v24.35.0; stage; shipped
+- [x] check.sh passed (1141 s); v24.35.0 tagged; stage requested (fde55bef9d22); shipped, proof: VolumeFilling on the node apiserver's volumes
 - [x] stormblock-registry#206: its own grow can stand down
 - [x] stormblock-test#8: fill a 64M volume to 90 %, see VolumeFilling and the grow
 
