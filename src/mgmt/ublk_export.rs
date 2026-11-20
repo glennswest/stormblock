@@ -155,6 +155,27 @@ pub fn mounted_at(device_path: &str) -> Option<String> {
     mounts_of(device_path).into_iter().next()
 }
 
+/// Where `device_path` is first mounted, and a path this process reaches it
+/// by (`/proc/<pid>/root/<mount point>`, any mount namespace): what the fill
+/// of a volume is read from (#690).
+pub fn reach_of(device_path: &str) -> Option<(String, String)> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(device_path).ok()?;
+        let rdev = m.rdev();
+        let want = format!("{}:{}", libc::major(rdev), libc::minor(rdev));
+        let t = mount_table();
+        let at = t.get(&want)?.first()?.clone();
+        Some((at, t.reach(&want)?.clone()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device_path;
+        None
+    }
+}
+
 /// Every place `device_path` is mounted on the node, in every mount
 /// namespace (#658): a service's `/state`, a pod's `/var/log/pods`, not only
 /// what PID 1 and this engine see. The node's own namespace first.
@@ -182,6 +203,9 @@ pub struct MountTable {
     seen: std::collections::HashSet<(String, String)>,
     /// Mounts past [`MOUNTS_PER_DEVICE`] on one device, not kept.
     pub over: usize,
+    /// Per device, its first mount as a path this process reaches (#690):
+    /// `/proc/<pid>/root` + the mount point in that pid's namespace.
+    reach: HashMap<String, String>,
 }
 
 /// Mount points kept for one device. A device's first mount is what every
@@ -195,7 +219,10 @@ pub const MOUNTS_PER_DEVICE: usize = 256;
 pub const MOUNTINFO_LINES: usize = 50_000;
 
 impl MountTable {
-    fn add(&mut self, dev: &str, mp: &str) {
+    fn add(&mut self, dev: &str, mp: &str, root: Option<&str>) {
+        if let Some(root) = root {
+            self.reach.entry(dev.to_string()).or_insert_with(|| format!("{root}{mp}"));
+        }
         if self.seen.contains(&(dev.to_string(), mp.to_string())) {
             return;
         }
@@ -211,6 +238,12 @@ impl MountTable {
     /// One mountinfo table's lines, at most `max`; how many were read, and
     /// whether the table had more.
     pub fn take(&mut self, lines: impl Iterator<Item = String>, max: usize) -> (usize, bool) {
+        self.take_in(None, lines, max)
+    }
+
+    /// [`MountTable::take`] for the namespace `root` (`/proc/<pid>/root`)
+    /// reaches, so a mount there can be `statfs`ed from here (#690).
+    pub fn take_in(&mut self, root: Option<&str>, lines: impl Iterator<Item = String>, max: usize) -> (usize, bool) {
         let mut n = 0;
         for line in lines {
             if n == max {
@@ -219,13 +252,18 @@ impl MountTable {
             n += 1;
             let mut f = line.split(' ');
             let (Some(_), Some(_), Some(dev), Some(_), Some(mp)) = (f.next(), f.next(), f.next(), f.next(), f.next()) else { continue };
-            self.add(dev, mp);
+            self.add(dev, mp, root);
         }
         (n, false)
     }
 
     pub fn get(&self, dev: &str) -> Option<&Vec<String>> {
         self.by_dev.get(dev)
+    }
+
+    /// The path that reaches `dev`'s first mount from this process (#690).
+    pub fn reach(&self, dev: &str) -> Option<&String> {
+        self.reach.get(dev)
     }
 }
 
@@ -287,7 +325,8 @@ fn read_mount_tables() -> MountTable {
         }
         let Ok(f) = std::fs::File::open(format!("/proc/{pid}/mountinfo")) else { continue };
         let lines = std::io::BufReader::new(f).lines().map_while(Result::ok);
-        let (_, more) = out.take(lines, MOUNTINFO_LINES);
+        let root = format!("/proc/{pid}/root");
+        let (_, more) = out.take_in(Some(&root), lines, MOUNTINFO_LINES);
         if more {
             let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
             if said.get_or_insert_with(Default::default).insert(ns.clone()) {

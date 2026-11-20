@@ -25,6 +25,7 @@ pub mod replication;
 pub mod pull;
 pub mod ship;
 pub mod drive_errors;
+pub mod fill;
 pub mod format_job;
 pub mod tls;
 pub mod plain;
@@ -378,6 +379,8 @@ pub struct AppState {
     pub rebalance: tokio::sync::Mutex<crate::rebalance::Rebalance>,
     /// Per-volume rebuilds after a drive fails (#146).
     pub rebuilds: Arc<crate::rebuild::Rebuilds>,
+    /// Each mounted volume's fill, conditions and grows (#690).
+    pub fill: std::sync::Mutex<fill::Fill>,
     /// Disk images being imported into goldens.
     pub imports: tokio::sync::RwLock<crate::image::import::Imports>,
     /// Who made each volume, synonym and host record (#422).
@@ -682,6 +685,7 @@ impl AppState {
             volume_moves: Default::default(),
             rebalance: tokio::sync::Mutex::new(crate::rebalance::Rebalance::default()),
             rebuilds,
+            fill: Default::default(),
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
             drive_offers: std::sync::Mutex::new(HashMap::new()),
             creators: std::sync::Mutex::new(creators::Creators::load(
@@ -889,6 +893,8 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             // This node's Volume and Replication objects on the cluster's
             // apiserver, and the spec changes asked there (#655).
             crate::mgmt::kube_publish::start(&state);
+            // Each mounted volume's fill read, and grown by its policy (#690).
+            crate::mgmt::fill::spawn(state.clone());
             // Every ship job a restart cut short resumes, or reads failed (#400).
             crate::mgmt::ship::resume(state.clone()).await;
             // And finish the formats a previous run left in the middle (#141).

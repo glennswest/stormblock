@@ -342,7 +342,10 @@ pub(crate) async fn volume_objects(state: &AppState, only: Option<VolumeId>) -> 
     let view = attach_view(state).await;
     let mut out = Vec::with_capacity(snaps.len());
     for s in &snaps {
-        out.push(volume_object(s, &view).await);
+        let mut v = volume_object(s, &view).await;
+        // Its filesystem's fill and conditions, its grows (#690).
+        crate::mgmt::fill::annotate(state, s.id, &mut v);
+        out.push(v);
     }
     out
 }
@@ -423,7 +426,7 @@ pub(crate) fn grow_policy_of(v: &Value) -> Result<Option<crate::volume::metadata
 /// Grow a volume through its object (#655): the engine's resize, then the
 /// kernel device told (a ublk export), then an ext4 the engine sees mounted
 /// grown online. What happened, in words, for `status.lastResize`.
-async fn grow_volume(state: &AppState, id: VolumeId, to: u64) -> Result<Value, Refusal> {
+pub(crate) async fn grow_volume(state: &AppState, id: VolumeId, to: u64) -> Result<Value, Refusal> {
     let uuid = id.0;
     let (sealed, from) = {
         let vm = state.volume_manager.lock().await;
