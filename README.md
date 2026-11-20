@@ -1155,7 +1155,8 @@ clone is):
 - **`stormdist://<iso>?flavour=<f>&key=<file>`** (`drive::isodev`) is a drive
   like any other. It reads the flavour's disk off the ISO: the flavour's
   member named `stormcos-sno` (cilium) or `stormcos-sno-<flavour>`, by golden
-  name, component or `<name>-<version>` (stormcentral#1556). `member=<name or
+  name or component (stormcentral#1556; a stormdist name has no dots, so the
+  disk goes on the ISO under its component's name). `member=<name or
   component>` names another.
 - The catalogue's signature is checked with the key file (64 hex digits)
   before anything is read. Every chunk is checked by its sha256 on every

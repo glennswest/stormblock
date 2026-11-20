@@ -95,12 +95,12 @@ async fn a_flavours_disk_reads_off_the_iso_as_a_drive() {
     let recipe = Recipe {
         version: "12.99".into(),
         flavour: vec![
-            Flavour { name: "cilium".into(), members: vec!["stormcos-sno-12.99".into(), "golden-demo-0123456789ab".into()] },
+            Flavour { name: "cilium".into(), members: vec!["stormcos-sno".into(), "golden-demo-0123456789ab".into()] },
             Flavour { name: "flowsdn".into(), members: vec!["golden-demo-0123456789ab".into()] },
         ],
         kind: Kind::Full,
         volumes: vec![
-            input("stormcos-sno-12.99", "stormcos-sno", &disk),
+            input("stormcos-sno", "stormcos-sno", &disk),
             input("golden-demo-0123456789ab", "demo", &other),
         ],
         forge: None,

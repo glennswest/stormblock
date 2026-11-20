@@ -22,8 +22,9 @@
 //!
 //! The flavour's disk is the flavour's member named `stormcos-sno` (the
 //! cilium flavour) or `stormcos-sno-<flavour>` (any other, e.g.
-//! `stormcos-sno-flowsdn`), matched by its golden name, its component, or
-//! `<name>-<release version>` (stormcentral#1556).
+//! `stormcos-sno-flowsdn`), matched by its golden name or its component
+//! (stormcentral#1556). A stormdist name has no dots, so a forge disk's
+//! `stormcos-sno-12.78` goes on the ISO under its component's name.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -93,16 +94,11 @@ pub fn disk_name(flavour: &str) -> String {
     }
 }
 
-/// The flavour's disk among its members: exactly one, by name, component or
-/// `<name>-<version>`.
+/// The flavour's disk among its members: exactly one, by name or component.
 pub fn disk_member(media: &Media, flavour: &str) -> Result<Golden, String> {
     let goldens = media.flavour_goldens(flavour).map_err(|e| format!("flavour {flavour}: {e}"))?;
     let want = disk_name(flavour);
-    let versioned = format!("{want}-{}", media.release.version);
-    let found: Vec<&Golden> = goldens
-        .iter()
-        .filter(|g| g.name == want || g.component == want || g.name == versioned)
-        .collect();
+    let found: Vec<&Golden> = goldens.iter().filter(|g| g.name == want || g.component == want).collect();
     match found.as_slice() {
         [g] => Ok((*g).clone()),
         [] => Err(format!(
