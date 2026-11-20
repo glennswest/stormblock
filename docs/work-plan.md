@@ -4,6 +4,41 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #623 — the install done by the running node (2026-11-20, P0)
+The shape comes from the owner (2026-11-16, 11-17) and the master's comments.
+`/init` keeps one decision: a laid local system leg boots local; anything
+else boots the image it was given (forge's clone, or the stormdist media,
+#442). That node then installs itself with runtime actions, and its API is
+the apiserver (no new engine REST write endpoint). Who does what:
+- **format**: stormdrive's `DriveOperation` (stormdrive#150), over #621's
+  jobs, which are done;
+- **the data set**: a `RaidSet` on the apiserver, built by stormraid's
+  `daemon --kube`;
+- **the rest** (lay, system legs, flow-over, boot area, reboot local):
+  stormblock's, recorded in a `NodeInstall` object (`storage.storm.io/v1`,
+  one per node, named after it).
+
+Steps, each its own commit and check:
+- [ ] 1. `NodeInstall` published by the engine (kube_publish). Its status is
+  `install_progress::record` (stage, steps, drives, layout): the one source
+  for the screen, the page and stormcentral. CRD and ClusterRole go in
+  `deploy/crds.yaml`; stormcos carries them (an issue there).
+- [ ] 2. `spec`, seeded from the install-config on the node (`mode`,
+  `storage:`); `status.plan` is `image storage-plan` over the live drives.
+- [ ] 3. The runtime lay. When `spec.mode: install` and the drives are at
+  their format, the engine lays the ESP and pallets, the system legs and the
+  data regions, on drives with no slab open. It then makes the RaidSet and
+  waits for stormraid's device.
+- [ ] 4. The runtime flow-over: the new system slab(s) and the data slab on
+  the set are opened in the live engine, and the existing flow machinery
+  moves the system half and the data half, with progress in status.
+- [ ] 5. The boot area, then a reboot to local (stormpump's boot intent).
+  The install is done when the node is Ready from its own disk.
+- [ ] 6. `/init`: `mode: install` boots the claimed image with the drives
+  untouched, as diagnostic does. The initramfs path stays until forge1
+  proves 1–5, and is then removed. stormcentral's stages follow (an issue
+  there).
+
 ## #695 — a running stage discarded at once (2026-11-20, stormupdate#36)
 
 Plan: `stage::Progress` gets a cancel flag; `stage::stage` checks it before
