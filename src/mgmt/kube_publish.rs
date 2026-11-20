@@ -26,10 +26,17 @@
 //!   made while the engine was down is taken too). One with no
 //!   `storm.io/node` label runs nowhere, and every engine says so once.
 //!
+//! - **NodeInstall** (#623): one object per node, named after it, whose
+//!   status is the node's install record (`/api/v1/install/progress`, #616),
+//!   as [`node_install_object`] renders it. It is written only when the node
+//!   has an install record; its spec names the node and nothing else yet. Its errors (the
+//!   CRD not on the cluster yet) are said once and never stop the Volume and
+//!   Replication objects.
+//!
 //! The engine's bearer is the one it reviews callers with
 //! (`[management.kubernetes]`, or the cluster's record on a worker, #557);
 //! it must be allowed volumes, volumes/status, replications and
-//! replications/status in `storage.storm.io` (`deploy/crds.yaml` has the
+//! replications/status (and nodeinstalls, nodeinstalls/status) in `storage.storm.io` (`deploy/crds.yaml` has the
 //! ClusterRole). Nothing is published when no apiserver is configured.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +84,8 @@ pub struct Publisher {
     seen: Option<BTreeSet<String>>,
     /// Said once each: an unlabelled Replication, a name another node holds.
     said: BTreeSet<String>,
+    /// The NodeInstall's last error, said when it changes (#623).
+    install_error: Option<String>,
     /// The last error, said when it changes.
     last_error: Option<String>,
 }
@@ -306,7 +315,94 @@ pub async fn pass(state: &Arc<AppState>, p: &mut Publisher) -> Result<Summary, S
     let mut s = Summary::default();
     volumes(state, p, &mut s).await?;
     replications(state, p, &mut s).await?;
+    match node_install(state, &mut s).await {
+        Ok(()) => {
+            if p.install_error.take().is_some() {
+                tracing::info!("kubernetes: the NodeInstall object is published again (#623)");
+            }
+        }
+        Err(e) => {
+            if p.install_error.as_deref() != Some(e.as_str()) {
+                tracing::warn!("kubernetes: publishing the NodeInstall object: {e} (#623)");
+                p.install_error = Some(e);
+            }
+        }
+    }
     Ok(s)
+}
+
+/// The fields of a drive in the install record that its NodeInstall status
+/// carries: what it is and where its install is, not the card's whole row.
+const INSTALL_DRIVE_FIELDS: [&str; 11] =
+    ["sas", "dev", "slot", "model", "bytes", "state", "percent", "eta_s", "elapsed_s", "format", "said"];
+
+/// This node's NodeInstall object, from its install record (#623); `None`
+/// when the record holds nothing (no stage, no drive, no step reported): a
+/// node with no install record has no object, rather than one that says
+/// `starting` for ever. The record's own clock fields (`at`, `eta`) are left
+/// out, so an unchanged install writes nothing.
+pub fn node_install_object(node: &str, record: &Value) -> Option<Value> {
+    let stages = record["stages"].as_array().map_or(0, Vec::len);
+    let drives = record["drives"].as_array().cloned().unwrap_or_default();
+    let reported = record["layout"].as_array().into_iter().flatten().any(|s| s["state"] != json!("pending"));
+    if stages == 0 && drives.is_empty() && !reported {
+        return None;
+    }
+    let drives: Vec<Value> = drives
+        .iter()
+        .map(|d| {
+            let mut o = Map::new();
+            for k in INSTALL_DRIVE_FIELDS {
+                if !d[k].is_null() {
+                    o.insert(k.into(), d[k].clone());
+                }
+            }
+            // The last format line only: the record keeps five.
+            if let Some(l) = d["lines"].as_array().and_then(|l| l.last()) {
+                o.insert("line".into(), l.clone());
+            }
+            Value::Object(o)
+        })
+        .collect();
+    let formatting = drives.iter().filter(|d| d["state"] == json!("formatting")).count();
+    Some(json!({
+        "metadata": { "name": node, "labels": { NODE_LABEL: node } },
+        // An empty spec reads back as none, which would differ every pass.
+        "spec": { "node": node },
+        "status": {
+            "state": record["state"],
+            "stage": record["stage"],
+            "started": record["started"],
+            "etaSeconds": record["eta_s"],
+            "steps": record["layout"],
+            "drivesTotal": drives.len(),
+            "drivesFormatting": formatting,
+            "drives": drives,
+            "set": record["set"],
+            "systemLegs": record["system_legs"],
+        },
+    }))
+}
+
+/// This node's NodeInstall written, when it has an install record (#623).
+async fn node_install(state: &Arc<AppState>, s: &mut Summary) -> Result<(), String> {
+    let node = state.local_node_name();
+    let run = std::path::PathBuf::from(crate::install_progress::RUN);
+    let record = tokio::task::spawn_blocking(move || crate::install_progress::record(&run, crate::install_progress::now()))
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(want) = node_install_object(&node, &record) else {
+        return Ok(());
+    };
+    let have = match call(state, "GET", &format!("{GROUP_PATH}/nodeinstalls/{node}"), None).await {
+        Ok(v) => Some(v),
+        Err((404, _)) => None,
+        Err((_, e)) => return Err(e),
+    };
+    let (c, pa) = write(state, "nodeinstalls", "NodeInstall", &want, have.as_ref()).await?;
+    s.created += usize::from(c);
+    s.patched += usize::from(pa);
+    Ok(())
 }
 
 fn mine(obj: &Value, node: &str) -> bool {
@@ -524,6 +620,45 @@ async fn replications(state: &Arc<AppState>, p: &mut Publisher, s: &mut Summary)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #623: the install record as a NodeInstall: none with no record, the
+    /// drives cut to what they are and where they are, no clock fields.
+    #[test]
+    fn a_node_install_is_the_install_record() {
+        let empty = crate::install_progress::record(std::path::Path::new("/nonexistent/stormblock-623"), 100);
+        assert!(node_install_object("n1", &empty).is_none(), "no record, no object");
+
+        let w = tempfile::tempdir().unwrap();
+        crate::install_progress::append(w.path(), "stage", "formatting", "running", "2 drives", 10).unwrap();
+        crate::install_progress::append(w.path(), "step", "format", "running", "", 11).unwrap();
+        let rec = crate::install_progress::record(w.path(), 200);
+        let o = node_install_object("n1", &rec).expect("a record makes an object");
+        assert_eq!(o["metadata"]["name"], json!("n1"));
+        assert_eq!(o["metadata"]["labels"][NODE_LABEL], json!("n1"));
+        let st = &o["status"];
+        assert_eq!(st["stage"]["stage"], json!("formatting"));
+        assert!(st["steps"].as_array().unwrap().iter().any(|s| s["step"] == json!("format") && s["state"] == json!("running")));
+        assert!(st.get("at").is_none() && st.get("console").is_none(), "{st}");
+        // Read again later: the same object, so nothing is written.
+        let again = node_install_object("n1", &crate::install_progress::record(w.path(), 900)).unwrap();
+        assert!(same(&o, &again), "the clock alone changes nothing");
+
+        let rec = json!({
+            "state": "formatting", "stage": {"stage": "formatting"}, "started": 10, "eta_s": 600,
+            "stages": [], "layout": [],
+            "drives": [{"sas": "0x5000cca26801b649", "dev": "sda", "state": "formatting", "percent": 40,
+                        "eta_s": 600, "card": {"phys": 8}, "lines": ["a", "b", "FORMAT: 40%"]},
+                       {"sas": null, "dev": "sdb", "state": "laid"}],
+        });
+        let st = node_install_object("n2", &rec).unwrap()["status"].clone();
+        assert_eq!(st["drivesTotal"], json!(2));
+        assert_eq!(st["drivesFormatting"], json!(1));
+        assert_eq!(st["etaSeconds"], json!(600));
+        let d0 = &st["drives"][0];
+        assert_eq!(d0["line"], json!("FORMAT: 40%"));
+        assert!(d0.get("card").is_none() && d0.get("lines").is_none(), "{d0}");
+        assert!(st["drives"][1].get("sas").is_none(), "nulls left out");
+    }
 
     #[test]
     fn same_ignores_nulls_and_number_spelling() {

@@ -23,6 +23,12 @@
 #   storm.io/node label names (no label: nowhere). Made, changed or deleted
 #   here, the node's engine follows; one made on the engine's own port is
 #   published here.
+# - NodeInstall: one per node, named after it (#623), written by that node's
+#   engine. Its status is the node's install record (GET
+#   /api/v1/install/progress, #616): state, stage, the layout's steps, each
+#   drive's state and format progress, the set and the system legs. It is
+#   written only when the node has an install record. Its spec names the
+#   node and nothing else yet: nothing is asked through it.
 #
 # The engine writes them with its own token (kube-system/stormblock, the one
 # it reviews bearers with): the ClusterRole and binding at the end.
@@ -130,6 +136,45 @@ spec:
               type: object
               x-kubernetes-preserve-unknown-fields: true
 ---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodeinstalls.storage.storm.io
+  labels:
+    addonmanager.kubernetes.io/mode: Reconcile
+spec:
+  group: storage.storm.io
+  scope: Cluster
+  names:
+    kind: NodeInstall
+    plural: nodeinstalls
+    singular: nodeinstall
+    shortNames: [ni]
+    categories: [storage]
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - { name: State, type: string, jsonPath: .status.state }
+        - { name: Stage, type: string, jsonPath: .status.stage.stage }
+        - { name: Drives, type: integer, jsonPath: .status.drivesTotal }
+        - { name: Formatting, type: integer, jsonPath: .status.drivesFormatting }
+        - { name: ETA, type: integer, jsonPath: .status.etaSeconds }
+        - { name: Started, type: integer, jsonPath: .status.started, priority: 1 }
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -138,7 +183,7 @@ metadata:
     addonmanager.kubernetes.io/mode: Reconcile
 rules:
   - apiGroups: ["storage.storm.io"]
-    resources: ["volumes", "volumes/status", "replications", "replications/status"]
+    resources: ["volumes", "volumes/status", "replications", "replications/status", "nodeinstalls", "nodeinstalls/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

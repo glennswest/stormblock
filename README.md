@@ -982,7 +982,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` and `labelSelector` (`k=v`, `k!=v`, `k`, `!k`). A Volume's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` (`transport`, `device`, `mountedAt`, `target`, `port`, `lun`, `nsid`, `state`, `remote`) and `kind` as the REST listing does (#649), and `attach`, the same list with `deviceHint` on a ublk entry (#658; it was one object or null, from the engine's own exports only), and its labels `storm.io/kind` and `storm.io/owner-kind`: `kubectl get volumes -l storm.io/owner-kind=Pod`, `-l '!storm.io/owner-kind,storm.io/kind=volume'` for orphan clones, or `?unowned=true` |
 | `PATCH /apis/storage.storm.io/v1/volumes/{id}` | `spec`: `redundancy`, `sealed`, `access`, `retention`, `resync`, and `sizeBytes` (#655), which grows the volume: thin, never smaller (`422`), never a sealed, exported or mirrored one (`409`). Its ublk device is told the new size. An ext4 mounted on it, in any mount namespace (reached through `/proc/<pid>/root`, #690), is grown online (`EXT4_IOC_RESIZE_FS`); anything else (an XFS) is left to the service that mounts it. `grow` (#690) sets or clears the volume's grow policy (below). `status.capacityBytes` follows, and the PATCH's answer carries `status.lastResize` (`from`, `to`, `device`, `filesystem`) |
 | `/apis/storage.storm.io/v1/replications` | `Replication` (#656): sync this engine's store from a peer engine, once or following it; create, replace, patch, delete are the admin's. See "Replication" below |
-| the cluster's apiserver | The engine writes its `Volume` and `Replication` objects there as CRDs (#655, `deploy/crds.yaml`), and takes back a spec changed there. See "On the cluster's apiserver" below |
+| the cluster's apiserver | The engine writes its `Volume`, `Replication` and `NodeInstall` objects there as CRDs (#655, #623, `deploy/crds.yaml`), and takes back a spec changed there. See "On the cluster's apiserver" below |
 | `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
 
 
@@ -1285,6 +1285,14 @@ or the cluster's record on a worker, #557). With none configured, nothing is
 published and the start says so.
 
 Every 15 s (`mgmt::kube_publish`):
+- **NodeInstall** (#623). One object per node, named after it, whose
+  `status` is the node's install record (`/api/v1/install/progress`, #616):
+  `state`, `stage`, `steps`, each drive's state, format percent, ETA and last
+  format line, `drivesTotal`, `drivesFormatting`, `etaSeconds`, the set and
+  the system legs. `kubectl get nodeinstalls` (`ni`) lists them. A node with
+  no install record has none. Its spec names the node and nothing else yet:
+  the install is not driven through it. Its errors (the CRD not on the
+  cluster yet) are said once and never stop the other objects.
 - **Volume.** One object a volume, named by its uuid and labelled
   `storm.io/node` with this node, as the engine's own port renders it. A
   missing one is created; labels, spec and `status` are merge-patched where

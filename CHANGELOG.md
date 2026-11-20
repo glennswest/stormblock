@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **feat:** #623 step 1: a `NodeInstall` object per node on the cluster's apiserver (`storage.storm.io/v1`, `deploy/crds.yaml` with its ClusterRole rules). The node's engine writes the node's install record there (`/api/v1/install/progress`, #616): state, stage, steps, each drive's state and format progress, the set and the system legs. It is written only when the node has a record, and only when the record changes. A missing CRD is said once and never stops the Volume and Replication objects.
+
 ## [v24.41.0] — 2026-11-20
 
 ### Added
