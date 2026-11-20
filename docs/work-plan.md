@@ -13,7 +13,8 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   first: an I/O error, nothing touched, when the mark is not durable
 - [x] tests: stripelog (failed mark, retry, reload; failed clear; marks from
   8 threads), volume (`a_parity_write_with_no_durable_mark_is_refused_and_the_retry_marks_it`)
-- [ ] check.sh; release; close #708
+- [x] check.sh ALL PASS on 2298335f (1582/1582, 2105 s); v24.44.2 (1970d420),
+  stage 92fe2ce48ab3; #708 closed
 
 ## #603 — C2NR0Q2's local pallets: 'no kernel inside the kernel member' (2026-11-20, P1)
 Cause in stormuefi (one unaligned whole-member BlockIO read the PERC
