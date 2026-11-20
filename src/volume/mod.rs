@@ -5667,19 +5667,29 @@ mod redundancy_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// #694: a volume's owner and retention come back from its slab's own
-    /// record whichever way the slab is opened: a restore (an engine's
-    /// restart) and an adopt (an install's data half, a stage's image).
+    /// #694: a volume's owner and retention come back from its record
+    /// whichever way it is read: a restore (an engine's restart, from its
+    /// data directory or a slab's own record) and an adopt (an install's
+    /// data half, a stage's image).
     #[tokio::test]
     async fn owner_and_retention_survive_a_restore_and_an_adopt() {
+        use crate::drive::slab::SlabFormat;
         use crate::volume::metadata::{Owner, Retention};
         let d = dir();
+        let meta = d.join("meta");
         let slot = 4096u64;
-        let (slab, path) = file_slab(&d, "own", slot).await;
-        let slab_id = slab.slab_id();
+        let path = d.join("own.bin").to_str().unwrap().to_string();
         let owner = Owner { kind: "Service".into(), namespace: "kube-system".into(), name: "cadvisor".into(), uid: Some("u".into()) };
-        let (owned, scratch) = {
-            let mut mgr = VolumeManager::new(slot);
+        let open = |path: String| async move {
+            let dev = FileDevice::open(&path).await.unwrap();
+            Slab::open(Arc::new(dev)).await.unwrap()
+        };
+        let (slab_id, owned, scratch) = {
+            let dev = FileDevice::open_with_capacity(&path, 8 * 1024 * 1024).await.unwrap();
+            let fmt = SlabFormat::new(slot, StorageTier::Hot).with_auto_metadata(8 * 1024 * 1024);
+            let slab = Slab::format_with(Arc::new(dev), fmt).await.unwrap();
+            let slab_id = slab.slab_id();
+            let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
             mgr.add_slab(slab).await;
             mgr.persist_to_slab(slab_id);
             let owned = mgr.create_volume_with("cadvisor-logs", 1 << 20, CreateOptions::default()).await.unwrap();
@@ -5692,26 +5702,32 @@ mod redundancy_tests {
             mgr.set_owner(owned, Some(owner.clone())).await.unwrap();
             mgr.set_retention(scratch, Retention::Ephemeral).await;
             mgr.persist_checked().await.unwrap();
-            (owned, scratch)
+            (slab_id, owned, scratch)
         };
-        let mut restored = VolumeManager::new(slot);
-        restored.add_slab(Slab::open(Arc::new(FileDevice::open(&path).await.unwrap())).await.unwrap()).await;
-        restored.persist_to_slab(slab_id);
-        restored.restore().await.unwrap();
-        assert!(restored.get_volume_handle(&owned).is_some(), "restore: the volume is back");
-        assert_eq!(restored.owner(&owned), Some(&owner), "restore: the owner");
-        assert_eq!(restored.owner(&scratch), None);
-        assert_eq!(restored.retention(&scratch), Retention::Ephemeral, "restore: the retention");
-        drop(restored);
+
+        // A restart from the data directory, and from the slab's own record.
+        for from_dir in [true, false] {
+            let mut restored = if from_dir {
+                VolumeManager::with_data_dir(slot, meta.clone()).unwrap()
+            } else {
+                VolumeManager::new(slot)
+            };
+            restored.add_slab(open(path.clone()).await).await;
+            restored.persist_to_slab(slab_id);
+            restored.restore().await.unwrap();
+            let how = if from_dir { "restore from the data directory" } else { "restore from the slab" };
+            assert!(restored.get_volume_handle(&owned).is_some(), "{how}: the volume is back");
+            assert_eq!(restored.owner(&owned), Some(&owner), "{how}: the owner");
+            assert_eq!(restored.owner(&scratch), None, "{how}");
+            assert_eq!(restored.retention(&scratch), Retention::Ephemeral, "{how}: the retention");
+        }
 
         let mut adopted = VolumeManager::new(slot);
         adopted
-            .adopt_slabs(vec![crate::drive::discover::FoundSlab {
-                label: "own".into(),
-                slab: Slab::open(Arc::new(FileDevice::open(&path).await.unwrap())).await.unwrap(),
-            }])
+            .adopt_slabs(vec![crate::drive::discover::FoundSlab { label: "own".into(), slab: open(path.clone()).await }])
             .await
             .unwrap();
+        assert!(adopted.get_volume_handle(&owned).is_some(), "adopt: the volume is there");
         assert_eq!(adopted.owner(&owned), Some(&owner), "adopt: the owner");
         assert_eq!(adopted.retention(&scratch), Retention::Ephemeral, "adopt: the retention");
         assert_eq!(adopted.retention(&owned), Retention::Keep);
