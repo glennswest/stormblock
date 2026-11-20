@@ -429,6 +429,14 @@ ISO. stormblock's side, in steps (each its own commit):
   File` sizes a block device as 0, so /dev/sr0 and a USB stick cannot be read
   (filed mkfs.iso.rs#35). Then stormdist takes the tag, then this repo the
   stormdist pin. The restore's README line (`/dev/sr0`) corrected.
+- (2026-11-20) a stormdist name has no dots: the disk is matched by name or
+  component only (09f41485; said on stormcentral#1556). check.sh ALL PASS on
+  09f41485 (1579/1579, 2475 s); v24.44.0 (9b015684), stage 035f135b11ef.
+  **Next**, once mkfs.iso.rs#35 is tagged and stormdist takes it: bump this
+  repo's stormdist pin (`cargo update -p stormdist` on a build VM), then the
+  proof is a boot from a release ISO carrying the disk (stormcentral#1556,
+  the key and `rd.stormblock.iso=auto` from #1476). Held `--after`
+  mkfs.iso.rs#35 and stormcentral#1556.
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it
