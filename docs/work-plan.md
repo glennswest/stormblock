@@ -16,7 +16,7 @@ golden never read the source's policy.
   clone's policy, and the clone inherits from the slab's golden (no new code)
 - [x] tests (`a_composed_slab_opens_as_a_slab_and_shares_its_goldens`,
   `a_golden_entrys_grow_is_read_and_an_unknown_field_refused`), docs/composed-disks.md, CHANGELOG
-- [ ] check.sh, release, ship
+- [x] check.sh ALL PASS on 002694b1 (1108 s, 1555 tests); v24.37.0 (fc5493b8); stage 2af567dedfce; stormcentral#1510 told; shipped with the registry-data spec.grow proof
 
  `grow = {max, step}` on an image spec's golden (2026-11-19, P1)
 stormcos#1049 wants `grow = { max = "1T", step = "8G" }` on a
