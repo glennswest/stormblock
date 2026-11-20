@@ -26,13 +26,15 @@ Design:
   told, mounted ext4 grown). `status.grown` keeps the last 10;
   `status.growBlocked` says why one did not happen.
 Steps:
-- [ ] `GrowPolicy` in the record and the manager (metav2 `G`), clone inherits
-- [ ] spec.grow: PATCH, the object's spec, the apiserver round trip
-- [ ] mount table: a statfs path per device; `mgmt/fill.rs` task, conditions, metrics, the grow
-- [ ] deploy/crds.yaml schema; README, docs; CHANGELOG
-- [ ] check.sh; stormcos issue: image.toml `grow` spelling, set at compose
-- [ ] stormblock-registry: its own grow (#194) can stand down
-- [ ] stormblock-test: fill a 64M volume to 90 %, see VolumeFilling and the grow
+- [x] `GrowPolicy` in the record and the manager (metav2 `G`), clone inherits
+- [x] spec.grow: PATCH, the object's spec, the apiserver round trip
+- [x] mount table: a statfs path per device; `mgmt/fill.rs` task, conditions, metrics, the grow
+- [x] deploy/crds.yaml schema; README, docs; CHANGELOG
+- [x] stormcos#1049 answered: the spelling, set on the blank at compose
+- [x] install: a kept volume takes the release copy's policy; a spec.sizeBytes grow reaches the ext4 through its own namespace (fstatfs magic)
+- [ ] check.sh; v24.35.0; stage; shipped
+- [x] stormblock-registry#206: its own grow can stand down
+- [x] stormblock-test#8: fill a 64M volume to 90 %, see VolumeFilling and the grow
 
 ## #689 — forge1's data half re-laid on every release install since 11-17 (2026-11-19, P0)
 What happened (forge1's console, /var/lib/stormcentral/console/forge1-20261119-190826.log):
