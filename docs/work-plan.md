@@ -522,8 +522,10 @@ f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
 - [x] 7234de28 + 993e474d; targeted sc-build (clippy -D warnings, lib
   replication/pull, it integration_pull/replication) passed; check.sh ALL
   PASS on 993e474d (1247 s); v24.38.0 (a74b6fe1); image build 90e227f9dbb7.
-- [ ] held `--after stormblock-registry#186`: the live proof is the
-  registry's pull through it (`log:pull .* verified: the peer's`), on forge1.
+- [x] held `--after stormblock-registry#186` (registered 2026-11-20: it had
+  not been, so the item came back as a P0; it now also waits behind
+  stormcos#1050): the live proof is the registry's pull through it
+  (`log:pull .* verified: the peer's`), on forge1.
 
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 
