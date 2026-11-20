@@ -15,6 +15,13 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// Where a volume's dirty stripes are kept between a crash and its restart.
+///
+/// `dirty` holds only what is durable (#708, finding 07322d3af07a): a stripe
+/// joins it after the file that names it is written, synced and renamed into
+/// place, never before. A mark that fails leaves nothing behind, so a retry
+/// writes the file again rather than finding the stripe "already marked".
+/// The file is written under `dirty`'s lock, so two marks never write the
+/// same temporary file at once.
 pub struct StripeLog {
     path: Option<PathBuf>,
     dirty: std::sync::Mutex<BTreeSet<u64>>,
@@ -40,14 +47,20 @@ impl StripeLog {
         self.path.is_some()
     }
 
-    /// Mark a stripe dirty. Persists only when the stripe was clean.
+    /// Mark a stripe dirty, durably: `Ok` only once the log on disk names it
+    /// (one write the first time a stripe goes dirty since the last clear).
+    /// On an error the stripe is not marked, and the caller must not touch
+    /// the stripe (#708).
     pub fn mark(&self, stripe: u64) -> std::io::Result<()> {
-        let newly = self.dirty.lock().unwrap().insert(stripe);
-        if newly {
-            self.persist()
-        } else {
-            Ok(())
+        let mut dirty = self.dirty.lock().unwrap();
+        if dirty.contains(&stripe) {
+            return Ok(());
         }
+        let mut next = dirty.clone();
+        next.insert(stripe);
+        self.write(&next)?;
+        *dirty = next;
+        Ok(())
     }
 
     /// Everything that is dirty right now.
@@ -56,9 +69,13 @@ impl StripeLog {
     }
 
     /// Forget every mark — after a flush, or after the stripes were verified.
+    /// When the file cannot be removed the marks are kept: a restart then
+    /// verifies stripes that are fine, never misses one that is not.
     pub fn clear(&self) -> std::io::Result<()> {
-        self.dirty.lock().unwrap().clear();
-        self.persist()
+        let mut dirty = self.dirty.lock().unwrap();
+        self.write(&BTreeSet::new())?;
+        dirty.clear();
+        Ok(())
     }
 
     /// What a previous run left behind, if anything. Loads it into the set
@@ -77,9 +94,14 @@ impl StripeLog {
         out
     }
 
-    fn persist(&self) -> std::io::Result<()> {
+    /// The log on disk made to name exactly `set`, durably. Called with
+    /// `dirty`'s lock held.
+    fn write(&self, set: &BTreeSet<u64>) -> std::io::Result<()> {
         let Some(path) = &self.path else { return Ok(()) };
-        let set: Vec<u64> = self.dirty.lock().unwrap().iter().copied().collect();
+        #[cfg(test)]
+        if let Some(e) = tests::injected_failure() {
+            return Err(e);
+        }
         if set.is_empty() {
             match std::fs::remove_file(path) {
                 Ok(()) => {}
@@ -92,7 +114,7 @@ impl StripeLog {
         {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(MAGIC)?;
-            for s in &set {
+            for s in set {
                 f.write_all(&s.to_le_bytes())?;
             }
             f.sync_all()?;
@@ -108,8 +130,74 @@ impl StripeLog {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        static FAIL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Fail the next `n` log writes on this thread (ENOSPC), as a full or
+    /// failing data directory would.
+    pub(crate) fn fail_writes(n: u32) {
+        FAIL.with(|f| f.set(n));
+    }
+
+    pub(super) fn injected_failure() -> Option<std::io::Error> {
+        FAIL.with(|f| {
+            let n = f.get();
+            (n > 0).then(|| {
+                f.set(n - 1);
+                std::io::Error::from_raw_os_error(28)
+            })
+        })
+    }
+
+    /// #708 (finding 07322d3af07a): a mark whose write fails is no mark: it
+    /// says so, leaves no entry behind, and the retry writes the file, which
+    /// a restart then reads.
+    #[test]
+    fn a_mark_that_cannot_be_written_is_not_a_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let log = StripeLog::at(dir.path(), id);
+        log.mark(1).unwrap();
+        fail_writes(1);
+        assert!(log.mark(5).is_err(), "the write failed");
+        assert_eq!(log.dirty(), vec![1], "no entry for a stripe whose mark is not on disk");
+        assert_eq!(StripeLog::at(dir.path(), id).load(), vec![1], "the file is the last good one");
+        log.mark(5).unwrap();
+        assert_eq!(StripeLog::at(dir.path(), id).load(), vec![1, 5], "the retry is durable");
+        // A clear that cannot remove the file keeps the marks.
+        fail_writes(1);
+        assert!(log.clear().is_err());
+        assert_eq!(log.dirty(), vec![1, 5]);
+        log.clear().unwrap();
+        assert!(StripeLog::at(dir.path(), id).load().is_empty());
+    }
+
+    /// Marks from many threads at once each land in the file (#708: the
+    /// temporary file was written by any of them at once).
+    #[test]
+    fn marks_from_many_threads_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let log = std::sync::Arc::new(StripeLog::at(dir.path(), id));
+        let hs: Vec<_> = (0..8u64)
+            .map(|t| {
+                let log = log.clone();
+                std::thread::spawn(move || {
+                    for i in 0..16 {
+                        log.mark(t * 100 + i).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        assert_eq!(StripeLog::at(dir.path(), id).load().len(), 128);
+    }
 
     #[test]
     fn marks_survive_and_clear_removes_the_file() {

@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** #708 (finding 07322d3af07a, major): a parity volume's write (and an unmap that changes its stripe's parity) is refused with an I/O error, before the stripe is touched, when the stripe's dirty mark cannot be made durable. It used to warn and write anyway, so a power cut could leave a half-written stripe that no mark named and that recovery would trust. The dirty-stripe log now holds a stripe only once the file naming it is synced, so a failed mark leaves nothing that a retry could take for a durable one. Its file is written under one lock, where two marks at once had written the same temporary file. A clear that cannot remove the file keeps the marks.
+
 ## [v24.44.1] — 2026-11-20
 
 ### Fixed

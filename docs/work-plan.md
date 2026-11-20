@@ -4,6 +4,17 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #708 — finding 07322d3af07a: parity writes after a failed dirty mark (2026-11-20, P1)
+- [x] `StripeLog`: a stripe is in the set only once the file naming it is
+  synced (`write` under the set's lock: no in-memory mark that a retry could
+  take for a durable one, no two marks writing one tmp file); a failed clear
+  keeps the marks
+- [x] `write_parity_member` and `release_parity_member` call `mark_stripe`
+  first: an I/O error, nothing touched, when the mark is not durable
+- [x] tests: stripelog (failed mark, retry, reload; failed clear; marks from
+  8 threads), volume (`a_parity_write_with_no_durable_mark_is_refused_and_the_retry_marks_it`)
+- [ ] check.sh; release; close #708
+
 ## #603 — C2NR0Q2's local pallets: 'no kernel inside the kernel member' (2026-11-20, P1)
 Cause in stormuefi (one unaligned whole-member BlockIO read the PERC
 refuses), fixed in stormuefi 0.15.1 (stormuefi#76, OVMF negative control

@@ -2340,6 +2340,16 @@ impl ThinVolumeHandle {
         Ok(())
     }
 
+    /// Mark `stripe` dirty in the stripe log before its data or parity
+    /// changes (#708, finding 07322d3af07a). A mark that cannot be made
+    /// durable is an I/O error, and nothing of the stripe is touched.
+    fn mark_stripe(&self, stripe: u64) -> DriveResult<()> {
+        self.stripe_log.read().unwrap().mark(stripe).map_err(|e| {
+            tracing::warn!(volume = %self.id, stripe, "dirty-stripe log could not be written: {e}; the stripe is not written");
+            DriveError::Io(std::io::Error::new(e.kind(), format!("stripe {stripe}: its dirty mark could not be made durable: {e}")))
+        })
+    }
+
     /// The whole write path of a parity volume for one extent range, under
     /// the stripe lock.
     async fn write_parity_member(
@@ -2360,10 +2370,10 @@ impl ThinVolumeHandle {
         let _f = self.fenced_stripe(stripe, width).await;
 
         // The write hole, bounded: say which stripe is mid-write before it
-        // is, so a restart verifies this one and not the whole volume.
-        if let Err(e) = self.stripe_log.read().unwrap().mark(stripe) {
-            tracing::warn!(volume = %self.id, stripe, "dirty-stripe log could not be written: {e}");
-        }
+        // is, so a restart verifies this one and not the whole volume. No
+        // durable mark, no write (#708): a stripe changed with no mark could
+        // be left half-written by a power cut and trusted by the recovery.
+        self.mark_stripe(stripe)?;
 
         let (loc, group) = {
             let gem = self.gem.read().await;
@@ -2512,6 +2522,8 @@ impl ThinVolumeHandle {
             (gem.lookup(self.id, vext), gem.lookup_parity(self.id, stripe).cloned())
         };
         let Some(loc) = loc else { return Ok(()) };
+        // Its parity changes below: marked first, as a write's is (#708).
+        self.mark_stripe(stripe)?;
 
         // The member's content is the delta back to zero.
         let members = self.assemble_stripe(stripe, width).await?;

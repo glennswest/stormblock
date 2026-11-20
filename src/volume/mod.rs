@@ -6287,6 +6287,57 @@ mod redundancy_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// #708 (finding 07322d3af07a): a parity write whose dirty mark cannot
+    /// be made durable is refused before it touches the stripe: the data and
+    /// the stripe's parity are as they were, no mark is left in memory to
+    /// pass for a durable one, and the retry writes and marks it, so a
+    /// restart sees the stripe to verify.
+    #[tokio::test]
+    async fn a_parity_write_with_no_durable_mark_is_refused_and_the_retry_marks_it() {
+        let d = dir();
+        let meta = d.join("meta");
+        let slot = 4096u64;
+        let mut mgr = VolumeManager::with_data_dir(slot, meta.clone()).unwrap();
+        for n in ["a", "b", "c"] {
+            let (s, _) = file_slab(&d, n, slot).await;
+            mgr.add_slab(s).await;
+        }
+        let id = mgr.create_volume_with("p", 1 << 20, CreateOptions::redundant(RedundancyPolicy::parity(2, 1))).await.unwrap();
+        let h = mgr.get_volume_handle(&id).unwrap();
+        h.write(0, &[1u8; 4096]).await.unwrap();
+        h.write(slot, &[2u8; 4096]).await.unwrap();
+        h.flush().await.unwrap();
+        assert!(h.dirty_stripes().is_empty());
+        let parity_leg = mgr.gem().read().await.lookup_parity(id, 0).unwrap().legs[0];
+        let parity_of = |mgr: &VolumeManager| {
+            let reg = mgr.registry().clone();
+            async move {
+                let mut p = vec![0u8; 4096];
+                reg.read().await.get(&parity_leg.slab_id).unwrap().read_slot(parity_leg.slot_idx, 0, &mut p).await.unwrap();
+                p
+            }
+        };
+        let parity_before = parity_of(&mgr).await;
+        assert_eq!(parity_before, vec![1u8 ^ 2; 4096]);
+
+        // The log's write fails (a full data directory): the write is refused.
+        crate::volume::stripelog::tests::fail_writes(1);
+        let e = h.write(0, &[9u8; 4096]).await.expect_err("no durable mark, no write");
+        assert!(e.to_string().contains("dirty mark"), "{e}");
+        assert!(h.dirty_stripes().is_empty(), "no mark left to pass for a durable one");
+        let mut got = [0u8; 4096];
+        h.read(0, &mut got).await.unwrap();
+        assert_eq!(got, [1u8; 4096], "the data as it was");
+        assert_eq!(parity_of(&mgr).await, parity_before, "the parity as it was");
+
+        // The retry marks it durably and writes.
+        h.write(0, &[9u8; 4096]).await.unwrap();
+        assert_eq!(h.dirty_stripes(), vec![0]);
+        assert_eq!(crate::volume::stripelog::StripeLog::at(&meta, id.0).load(), vec![0], "a restart verifies stripe 0");
+        assert_eq!(parity_of(&mgr).await, vec![9u8 ^ 2; 4096]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The dirty-stripe log: a parity write marks its stripe, a flush clears
     /// it, and a restart with marks left over verifies exactly those stripes
     /// and leaves nothing behind.
