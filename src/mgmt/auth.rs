@@ -511,6 +511,19 @@ pub async fn require_token(
             }
         }
     }
+    // A node's backup credential, minted by this engine as its store (#693):
+    // its own backups and nothing else (`mgmt::backup_creds`).
+    if !is_admin && !is_node && class != Class::Public {
+        if let Some(bearer) = presented.as_deref() {
+            let holder = state.backup_creds.lock().unwrap_or_else(|e| e.into_inner()).holder(bearer);
+            if let Some(node) = holder {
+                if let Some(s) = &slot {
+                    s.set("backup");
+                }
+                return super::backup_creds::serve(&state, node, req, next).await;
+            }
+        }
+    }
     // A node forge enrolled (#383): its certificate reads a sealed volume's
     // content and a release's manifest, and nothing else.
     if !is_admin

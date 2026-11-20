@@ -96,6 +96,11 @@ impl Creators {
         }
     }
 
+    /// How many objects `who` made that are still recorded (#693).
+    pub fn count_by(&self, who: &str) -> usize {
+        self.map.values().filter(|c| c.who == who).count()
+    }
+
     /// Keys whose labels carry `label=value`.
     pub fn labelled(&self, label: &str, value: &str) -> Vec<String> {
         let mut v: Vec<String> =

@@ -372,6 +372,11 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if *method != Method::GET && *method != Method::HEAD && (p == "/apis/storage.storm.io/v1/replications" || p.starts_with("/apis/storage.storm.io/v1/replications/")) {
         return true;
     }
+    // Minting a backup credential (#693): a bearer that writes this store.
+    // (Revoking is a DELETE, the admin's already.)
+    if *method == Method::POST && p == "/api/v1/backup-credentials" {
+        return true;
+    }
     if *method == Method::POST {
         // A golden from a VM's disk, and a ticket to pull it (#143).
         if p == "/api/v1/goldens" || (seg.len() == 6 && seg[3] == "goldens" && seg[5] == "ticket") {

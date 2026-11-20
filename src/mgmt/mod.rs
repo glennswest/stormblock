@@ -41,6 +41,7 @@ pub mod kernelopt;
 pub mod peers;
 pub mod live_mirror;
 pub mod volume_move;
+pub mod backup_creds;
 pub mod creators;
 pub mod namespaces;
 pub mod rollback;
@@ -385,6 +386,8 @@ pub struct AppState {
     pub imports: tokio::sync::RwLock<crate::image::import::Imports>,
     /// Who made each volume, synonym and host record (#422).
     pub creators: std::sync::Mutex<creators::Creators>,
+    /// Per-node backup credentials this engine minted as a store (#693).
+    pub backup_creds: std::sync::Mutex<backup_creds::BackupCreds>,
     /// Peers' volumes attached here as ublk devices (#328).
     pub peer_attaches: tokio::sync::Mutex<peers::PeerAttaches>,
     /// The cluster's Nodes as fabric peers, as last listed (#520).
@@ -689,6 +692,9 @@ impl AppState {
             imports: tokio::sync::RwLock::new(crate::image::import::Imports::default()),
             drive_offers: std::sync::Mutex::new(HashMap::new()),
             creators: std::sync::Mutex::new(creators::Creators::load(
+                config.management.data_dir.as_deref().map(std::path::Path::new),
+            )),
+            backup_creds: std::sync::Mutex::new(backup_creds::BackupCreds::load(
                 config.management.data_dir.as_deref().map(std::path::Path::new),
             )),
             peer_attaches: tokio::sync::Mutex::new(peers::PeerAttaches::load(

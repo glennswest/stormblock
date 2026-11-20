@@ -850,6 +850,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/stormdist", stormdist::router(state.clone()))
         .nest("/api/v1/kernel", kernel::router(state.clone()))
         .nest("/api/v1/discovery", discovery::router(state.clone()))
+        // Per-node backup credentials, this engine as a store (#693).
+        .nest("/api/v1/backup-credentials", crate::mgmt::backup_creds::router(state.clone()))
         // CSI/wander-operator contract surface (stormblock-csi docs/stormblock-api.md)
         .nest("/v1", v1::router(state.clone()))
         // Kubernetes-shaped resources, served by the engine itself (#80).
