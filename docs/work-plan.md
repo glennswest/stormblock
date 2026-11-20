@@ -4,6 +4,21 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #670 — every service clone born with its owner (2026-11-19)
+Premise check: stage (`src/image/stage.rs`) copies the owner an image volume
+carries, but nothing ever writes one into the image: neither `image build`
+(`[[slab.golden]]`) nor `compose/slab` (what stormcos's compose-release.py
+uses) can set it, and the release image has no service in it to derive one
+from (pallet members have roles, not services). So the owner is said where
+the release is written, explicitly, and travels with the clone:
+- [ ] `owner = { kind, namespace, name }` on a golden entry of `image build`
+  and of `compose/slab`; set on every clone the entry takes (not the golden)
+- [ ] stage and install: a node volume kept by name with no owner takes the
+  release's copy's owner (forge1's unclaimed clones claimed on the next release);
+  a claimed one is never overwritten
+- [ ] tests, CHANGELOG, README/docs; stormcos issue to write `owner` per service
+- No uid: stage knows no Service object, and Owner's rule is absent, not guessed.
+
 ## #692 — compose/slab carries a golden's grow policy (2026-11-19, P1)
 stormcentral#1510: a release's data slab is `POST /api/v1/volumes/compose/slab`;
 its golden entries had no `grow`, dropped unknown fields, and the slab's
