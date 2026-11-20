@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-19
+- **fix:** #694: a volume's `owner` is read back by a restore (an engine restart, an install's claim): it was written in every record since #115 but read only by an adopt, so every restart left every volume unclaimed (#649's owners included). An adopt reads `retention` as a restore does (an adopted ephemeral volume was taken as keep). Found by #670's tests.
 - **feat:** #670: `owner = {kind, namespace, name, uid?}` on a golden entry (`[[slab.golden]]` of `image build`, a `compose/slab` golden), set on every clone the entry takes (never the golden) and kept in the slab's record, so a release's service clones are born claimed; stage and install give a kept node volume with no owner the release's (a claim is never replaced). A partial owner or an unknown key in it is refused.
 
 ## [v24.38.0] — 2026-11-19

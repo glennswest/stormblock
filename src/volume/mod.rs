@@ -2020,6 +2020,9 @@ impl VolumeManager {
             if let Some(owner) = vrec.owner.clone() {
                 self.owners.insert(vrec.id, owner);
             }
+            // Its retention (#694), as a restore reads it: an adopted
+            // ephemeral volume was taken as keep.
+            self.retentions.insert(vrec.id, vrec.retention);
             if vrec.origin != crate::volume::metadata::Origin::Unmarked {
                 self.origins.insert(vrec.id, vrec.origin);
             }
@@ -4447,6 +4450,12 @@ impl VolumeManager {
             if let Some(fs) = vrec.fs.clone() {
                 self.fs_info.insert(vrec.id, fs);
             }
+            // Who it belongs to (#694): written in every record since #115,
+            // and until now read back only by an adopt, so a restart left
+            // every volume unclaimed.
+            if let Some(owner) = vrec.owner.clone() {
+                self.owners.insert(vrec.id, owner);
+            }
             // Not for a scheme this engine does not read (#159): verifying
             // its stripes would recompute P and Q over them.
             let read_here = vrec.scheme.is_none_or(|sc| sc.known());
@@ -5655,6 +5664,51 @@ mod redundancy_tests {
         mgr.remove_array(&array).await.unwrap();
         assert!(mgr.registry().read().await.get(&aslab).is_none(), "the slab went with the array");
         assert!(!mgr.is_metadata_slab(&aslab));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #694: a volume's owner and retention come back from its slab's own
+    /// record whichever way the slab is opened: a restore (an engine's
+    /// restart) and an adopt (an install's data half, a stage's image).
+    #[tokio::test]
+    async fn owner_and_retention_survive_a_restore_and_an_adopt() {
+        use crate::volume::metadata::{Owner, Retention};
+        let d = dir();
+        let slot = 4096u64;
+        let (slab, path) = file_slab(&d, "own", slot).await;
+        let slab_id = slab.slab_id();
+        let owner = Owner { kind: "Service".into(), namespace: "kube-system".into(), name: "cadvisor".into(), uid: Some("u".into()) };
+        let (owned, scratch) = {
+            let mut mgr = VolumeManager::new(slot);
+            mgr.add_slab(slab).await;
+            mgr.persist_to_slab(slab_id);
+            let owned = mgr.create_volume_with("cadvisor-logs", 1 << 20, CreateOptions::default()).await.unwrap();
+            let scratch = mgr.create_volume_with("scratch", 1 << 20, CreateOptions::default()).await.unwrap();
+            mgr.set_owner(owned, Some(owner.clone())).await.unwrap();
+            mgr.set_retention(scratch, Retention::Ephemeral).await;
+            mgr.persist_checked().await.unwrap();
+            (owned, scratch)
+        };
+        let mut restored = VolumeManager::new(slot);
+        restored.add_slab(Slab::open(Arc::new(FileDevice::open(&path).await.unwrap())).await.unwrap()).await;
+        restored.persist_to_slab(slab_id);
+        restored.restore().await.unwrap();
+        assert_eq!(restored.owner(&owned), Some(&owner), "restore: the owner");
+        assert_eq!(restored.owner(&scratch), None);
+        assert_eq!(restored.retention(&scratch), Retention::Ephemeral, "restore: the retention");
+        drop(restored);
+
+        let mut adopted = VolumeManager::new(slot);
+        adopted
+            .adopt_slabs(vec![crate::drive::discover::FoundSlab {
+                label: "own".into(),
+                slab: Slab::open(Arc::new(FileDevice::open(&path).await.unwrap())).await.unwrap(),
+            }])
+            .await
+            .unwrap();
+        assert_eq!(adopted.owner(&owned), Some(&owner), "adopt: the owner");
+        assert_eq!(adopted.retention(&scratch), Retention::Ephemeral, "adopt: the retention");
+        assert_eq!(adopted.retention(&owned), Retention::Keep);
         let _ = std::fs::remove_dir_all(&d);
     }
 
