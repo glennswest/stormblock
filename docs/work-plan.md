@@ -17,8 +17,11 @@ the release is written, explicitly, and travels with the clone:
   release's copy's owner (forge1's unclaimed clones claimed on the next release);
   a claimed one is never overwritten
 - [x] tests, CHANGELOG, README/docs (a60b5389)
-- [ ] `sc-build 'sh check.sh'` on a60b5389 passed (started 2026-11-19; paused
-  for P0 #656 before it reported: run it again if no result is recorded)
+- [x] check.sh on a60b5389 FAILED (#694): two of #670's new assertions found
+  that `restore()` never read a volume's `owner` (only `adopt_slabs` did), so
+  every restart left every volume unclaimed; and `adopt_slabs` never read
+  `retention`. Fixed in aa36ce0c, test 6db56655; check.sh ALL PASS on
+  6db56655 (closed #694, #696); v24.39.0 (5b2c36fe), build 18591f1d6849.
 - [ ] file the stormcos issue (draft: image.toml `owner` per service clone/data/
   logs; compose-release.py's slab_volume() passes `owner`; only after the
   appliance engine carries a60b5389, compose/slab refuses unknown fields)
