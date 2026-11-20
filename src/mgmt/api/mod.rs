@@ -457,18 +457,21 @@ async fn hba_action(
     }
 }
 
-/// The drives among `drives` this engine has a slab open on, each said
-/// (`0x… is /dev/sdb, which holds a slab this engine has open`).
+/// The drives among `drives` that something on this node depends on, each
+/// said with every reason (`mgmt::drive_busy`, #701: a slab the engine has
+/// open, a member of one of its arrays, this node's layout, a stormraid
+/// member, the kernel's holders or a mount). A drive Linux has no block
+/// device for holds nothing anything here reads.
 async fn in_use(state: &AppState, drives: &[u64]) -> Vec<String> {
     let rows = super::hba::report()["rows"].as_array().cloned().unwrap_or_default();
-    let reg = state.slab_registry.read().await;
     let mut out = Vec::new();
     for a in drives {
         let want = format!("0x{a:016x}");
         let Some(b) = rows.iter().find(|r| r["sas_address"] == want.as_str()).and_then(|r| r["block"].as_str()) else { continue };
         let dev = format!("/dev/{b}");
-        if reg.iter().any(|(_, s)| crate::mgmt::storage_layout::on_drive(&s.device().id().path, &dev)) {
-            out.push(format!("{want} is {dev}, which holds a slab this engine has open"));
+        let why = super::drive_busy::reasons(state, &dev).await;
+        if !why.is_empty() {
+            out.push(format!("{want} is {dev}, in use: {}", why.join("; ")));
         }
     }
     out
@@ -686,21 +689,10 @@ async fn hba_write_test(
         )
             .into_response();
     }
-    // Never a drive in use: its block device, by the card's row, against
-    // every slab this engine has open.
-    let block = super::hba::report()["rows"]
-        .as_array()
-        .and_then(|rows| rows.iter().find(|r| r["sas_address"] == want.as_str()).and_then(|r| r["block"].as_str().map(str::to_string)));
-    if let Some(b) = block {
-        let dev = format!("/dev/{b}");
-        let reg = state.slab_registry.read().await;
-        if reg.iter().any(|(_, s)| crate::mgmt::storage_layout::on_drive(&s.device().id().path, &dev)) {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({"error": format!("{want} is {dev}, which holds a slab this engine has open: not tested")})),
-            )
-                .into_response();
-        }
+    // Never a drive in use (#701): a slab open on it, a member of an array,
+    // this node's layout, a stormraid member, the kernel's or a mount.
+    if let Some(r) = in_use(&state, &[a]).await.into_iter().next() {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"error": format!("{r}: not tested")}))).into_response();
     }
     tracing::warn!(drive = %want, "the write-test matrix on the card's drive (#627)");
     match tokio::task::spawn_blocking(move || super::hba::write_test(a)).await {

@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** #701 (finding 661ff070abe6, critical): a runtime format (#621), a card action's format (#611), a write test (#627) and a firmware download no longer take a drive that something on the node depends on. The check compared only the engine's slab paths with `/dev/sdX`, and a slab on one of the engine's RAID arrays is `raid:<id>`, so a live array member could be formatted under the running engine. Now `mgmt::drive_busy` refuses, and names, a drive that holds a slab the engine has open (by path or by the drive under it), is a member of one of the engine's arrays, is laid by this node's storage layout (a system leg and the node-data set's member), carries a stormraid superblock on a partition, or is held by the kernel or mounted.
+
 ## [v24.43.0] — 2026-11-20
 
 ### Added

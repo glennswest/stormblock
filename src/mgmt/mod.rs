@@ -24,6 +24,7 @@ pub mod link;
 pub mod replication;
 pub mod pull;
 pub mod ship;
+pub mod drive_busy;
 pub mod drive_errors;
 pub mod fill;
 pub mod format_job;

@@ -576,3 +576,29 @@ async fn mgmt_create_volume_names_its_role() {
 
     server.abort();
 }
+
+/// #701 (finding 661ff070abe6): a live array's member drive is in use. Its
+/// volumes are on a slab whose path is `raid:<id>`, so checking slab paths
+/// alone never found the member drives, and a runtime format took one.
+#[tokio::test]
+async fn a_live_array_member_is_in_use_and_another_drive_is_not() {
+    let dir = TempDir::new().unwrap();
+    let state = setup_state_with_array(&dir).await;
+    let members: Vec<String> = {
+        let arrays = state.arrays.read().await;
+        let info = arrays.values().next().expect("the array");
+        info.array.drive_ids().into_iter().map(|d| d.path).collect()
+    };
+    assert_eq!(members.len(), 2);
+    // The engine's slabs are on the array, not on a member's path.
+    {
+        let reg = state.slab_registry.read().await;
+        assert!(reg.iter().all(|(_, s)| !members.contains(&s.device().id().path)), "the slab is the array's");
+    }
+    for m in &members {
+        let why = stormblock::mgmt::drive_busy::engine_reasons(&state, m).await;
+        assert!(why.iter().any(|w| w.contains("member of array")), "{m}: {why:?}");
+    }
+    let other = dir.path().join("not-a-member.img").display().to_string();
+    assert!(stormblock::mgmt::drive_busy::engine_reasons(&state, &other).await.is_empty());
+}

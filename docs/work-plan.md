@@ -4,6 +4,18 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #701 — finding 661ff070abe6: a runtime format could take a live array member (2026-11-20, P0)
+The in-use check compared slab paths with `/dev/sdX`. A slab on an engine
+array is `raid:<id>`, so no member matched, and the node-data set
+(stormraid, served at /dev/ublkb65535) was never seen either.
+- [x] `mgmt::drive_busy::reasons`: slabs (path and drive), engine arrays'
+  members, the layout's drives, stormraid superblocks on partitions, kernel
+  holders, mounts; `in_use` (format, card action, shelf, firmware) and the
+  write test use it
+- [x] tests: kernel/partition reasons, layout reasons, a live array member
+  (tests/it, `a_live_array_member_is_in_use_and_another_drive_is_not`)
+- [ ] check.sh; close #701 naming the finding
+
 ## #700 — the kept-data install brings the old system half back through its legs (2026-11-20, P0 for forge1, 12.98)
 Cause, read from forge1's consoles: `29edf745` is the system slab the 12.96
 install laid on /dev/sda (`forge1-1795115304` line 427), not a boot clone's.

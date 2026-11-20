@@ -725,8 +725,8 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     address); a format runs as a format job (below). `POST …/hba/{sas}/write-test` (admin, `confirm`, #627) runs the
     write-test matrix (WRPROTECT 0/1 at LBA 0 and the last LBA, read back
     with RDPROTECT 0/1, the card's link after each step, the mode and log
-    pages before and after; two blocks overwritten, a drive with an open
-    slab refused); `GET` answers the last run. The details carry the mode
+    pages before and after; two blocks overwritten, a drive in use refused);
+    `GET` answers the last run. The details carry the mode
     pages (`mode_pages`). [docs/storage-layout.md](docs/storage-layout.md#the-cards-rows-611).
   - The runtime format (#621): `POST …/hba/{sas}/format` (admin, `confirm` =
     the SAS address) and `POST /api/v1/storage/enclosures/{id}/format`
@@ -739,13 +739,19 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     write-tested; when its firmware refuses writes, it is formatted again at
     the next fallback. Hotplug then offers it. Progress (percent, ETA,
     elapsed, its lines) is in the row's `format_job`, in `GET
-    /api/v1/storage/formats` and in health's `formats`. Drives with an open
-    slab are refused or left out. Each row has `vendor`, `product`,
+    /api/v1/storage/formats` and in health's `formats`. A drive in use is
+    refused, or left out of a shelf, with every reason said
+    (`mgmt::drive_busy`, #701): a slab the engine has open on it (by path or
+    the drive under it), a member of one of the engine's RAID arrays, a drive
+    this node's storage layout lays (a system leg and the node-data set's
+    member), a partition with a stormraid superblock, or the kernel's holders
+    or a mount. The same check guards the write test, a card action's format
+    and the firmware download. Each row has `vendor`, `product`,
     `revision`, `block_size`, `pi_type` (read each minute) and `offered`
     (`format` for a NOT READY or wrong-format drive). `POST
     …/hba/{sas}/firmware?confirm=<sas>` (admin; the body is the vendor's
     image) and `stormblock hba firmware` download drive microcode with WRITE
-    BUFFER, the revision read before and after.
+    BUFFER, the revision read before and after, refused on a drive in use.
     [docs/storage-layout.md](docs/storage-layout.md#the-runtime-format-621).
   - The install's page and record (#616): `GET /` (or `/install`) is a page
     and `GET /api/v1/install/progress` its record: every drive (found by
