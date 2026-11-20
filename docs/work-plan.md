@@ -19,8 +19,11 @@ under them.
   its extent count (`volumes_with_extents_on`)
 - [x] tests: `install_boot`, a leg laid again with its old volume gone,
   `volumes_with_extents_on`
-- [ ] check.sh; tag; stage build; say so on #700; shipped with the proof
-  `System leg .*: laid again with the system half` on forge1's next install
+- [x] check.sh ALL PASS on 945171b0 (1567/1567, 1694 s; build-failures #704
+  and #705 from the earlier attempts closed themselves); v24.42.0 (017df118);
+  stage build 7d0362c8f5c7 (carries #689 too, one wave); said on #700;
+  shipped with `on forge1 console:System leg /dev/sd[a-z]+: laid again with
+  the system half`
 
 ## #623 — the install done by the running node (2026-11-20, P0)
 The shape comes from the owner (2026-11-16, 11-17) and the master's comments.
@@ -242,7 +245,8 @@ Steps:
   17.3 TB. That install failed only on #700. Re-ship with
   `on forge1 console:KEEP: .* carry this node.s layout` and
   `--commit 54adecfc` (#700), once #700's check passes and its stage is
-  requested.
+  requested. Done: re-shipped with `--commit 945171b0` (v24.42.0, stage
+  7d0362c8f5c7).
 ## #685 — 12.96: nextnfs `shared` takes the engine and apiserver down; node wedged (2026-11-19, P1)
 What is known (no node log of the moment exists):
 - 12.95's runs never reached the claim (setup failed on rustkube#256); 12.96
