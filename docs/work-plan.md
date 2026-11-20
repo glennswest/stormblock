@@ -236,6 +236,13 @@ Steps:
 - [x] grow-then-upgrade on a pve machine: glennswest/stormblock-test#7
 - [x] check.sh on 73f344fb passed (sc-build, 1191 s); v24.34.3 tagged; stage requested (build 4c748ae155a6); shipped, proof `on any:storage console:KEEP: … carry this node's layout`
 
+- (2026-11-20) proof failed on pvetest3 12.97 (a fresh install: no `KEEP:`
+  line). Seen working on forge1's 12.97 install (`forge1-1795179973`):
+  `KEEP: … carry this node's layout`, no new set, registry-data adopted at
+  17.3 TB. That install failed only on #700. Re-ship with
+  `on forge1 console:KEEP: .* carry this node.s layout` and
+  `--commit 54adecfc` (#700), once #700's check passes and its stage is
+  requested.
 ## #685 — 12.96: nextnfs `shared` takes the engine and apiserver down; node wedged (2026-11-19, P1)
 What is known (no node log of the moment exists):
 - 12.95's runs never reached the claim (setup failed on rustkube#256); 12.96
