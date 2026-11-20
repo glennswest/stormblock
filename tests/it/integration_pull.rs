@@ -138,6 +138,23 @@ async fn a_golden_and_its_clone_pulled_over_nvme_tcp() {
     put(&peer, clone, 3 * x, 0x44, 4096).await;
     peer.volume_manager.lock().await.seal_volume(clone, None).await.unwrap();
     let scratch = peer.volume_manager.lock().await.create_volume_any("scratch", x).await.unwrap();
+    // A golden whose digest on the peer is not its content: what a corrupt
+    // copy looks like from the other side.
+    let bad = peer.volume_manager.lock().await.create_volume_any("golden-bad-cccc", 2 * x).await.unwrap();
+    put(&peer, bad, 0, 0x55, 4096).await;
+    peer.volume_manager.lock().await.seal_volume(bad, None).await.unwrap();
+    // The peer's digester, as the daemon runs it after a seal.
+    assert_eq!(stormblock::volume::digest::digest_sealed(&peer.volume_manager).await, 3);
+    let sha_of = |id: VolumeId| {
+        let peer = peer.clone();
+        async move { peer.volume_manager.lock().await.seal_digest(&id).unwrap().hex() }
+    };
+    let (golden_sha, clone_sha) = (sha_of(golden).await, sha_of(clone).await);
+    {
+        let mut vm = peer.volume_manager.lock().await;
+        vm.set_seal_digest(bad, Some(stormblock::volume::metadata::SealDigest::new([7u8; 32])));
+        vm.publish_catalog();
+    }
 
     let (purl, ph) = serve(peer.clone()).await;
     let (hurl, hh) = serve(here.clone()).await;
@@ -155,6 +172,9 @@ async fn a_golden_and_its_clone_pulled_over_nvme_tcp() {
     assert_eq!(job["bytes_total"], 2 * x, "only the mapped extents: {job}");
     assert_eq!(job["bytes_done"], 2 * x, "{job}");
     assert_eq!(job["allocated_bytes"], 2 * x, "as thin here as on the peer: {job}");
+    assert_eq!(job["peer_sha256"], golden_sha.as_str(), "the peer's seal digest: {job}");
+    assert_eq!(job["sha256"], golden_sha.as_str(), "the copy read back here: {job}");
+    assert_eq!(job["verified"], true, "{job}");
     let g = by_name(&here, "golden-base-aaaa").await.expect("the golden is here");
     assert_eq!(job["volume"], g.0.to_string());
     assert!(here.volume_manager.lock().await.is_sealed(&g));
@@ -171,9 +191,12 @@ async fn a_golden_and_its_clone_pulled_over_nvme_tcp() {
     assert_eq!(job["state"], "done", "{job}");
     assert_eq!((job["extents_copied"].as_u64(), job["extents_shared"].as_u64(), job["extents_zeroed"].as_u64()), (Some(2), Some(1), Some(0)), "{job}");
     assert_eq!(job["bytes_done"], 2 * x, "never the whole golden again: {job}");
+    assert_eq!((job["sha256"].as_str(), job["verified"].as_bool()), (Some(clone_sha.as_str()), Some(true)), "{job}");
     let k = by_name(&here, "golden-app-bbbb").await.expect("the clone is here");
     {
         let vm = here.volume_manager.lock().await;
+        let d = vm.seal_digest(&k).expect("the copy keeps the digest it was read back with");
+        assert_eq!((d.hex(), d.verdict.as_str()), (clone_sha.clone(), "intact"));
         assert!(vm.is_sealed(&k));
         assert_eq!(vm.parent(&k), Some(g), "a clone of the golden's copy, not a flattened copy");
     }
@@ -198,6 +221,18 @@ async fn a_golden_and_its_clone_pulled_over_nvme_tcp() {
     assert_eq!(r.status(), 422);
     let list: serde_json::Value = c.get(&pull).send().await.unwrap().json().await.unwrap();
     assert_eq!(list["count"], 2, "{list}");
+
+    // A copy whose sha is not the peer's: deleted, the job failed with both.
+    let r = c.post(&pull).json(&serde_json::json!({ "from": purl, "volume": "golden-bad-cccc" })).send().await.unwrap();
+    assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+    let job: serde_json::Value = r.json().await.unwrap();
+    let job = wait_job(&c, &format!("{pull}/{}", job["id"].as_str().unwrap())).await;
+    assert_eq!(job["state"], "failed", "{job}");
+    assert_eq!(job["verified"], false, "{job}");
+    let m = job["message"].as_str().unwrap_or_default();
+    assert!(m.contains(&"07".repeat(32)) && m.contains("not the peer's volume"), "both shas named: {job}");
+    assert!(by_name(&here, "golden-bad-cccc").await.is_none(), "never kept");
+    assert_eq!(served_here(&peer).await, 0);
     ph.abort();
     hh.abort();
 }

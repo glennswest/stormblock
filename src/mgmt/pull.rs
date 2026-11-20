@@ -30,6 +30,17 @@
 //! it from another) answers 200; one that differs is a 409, never
 //! overwritten.
 //!
+//! **Verified by sha** (owner, 2026-11-18: "each has a sha, we can verify
+//! by sha"): the peer's answer carries the volume's seal digest (`seal`,
+//! `sb-seal-1`: the content's sha256 wherever its extents are); the copy is
+//! read back here and hashed before it is sealed, and only an equal sha
+//! counts (`verified`, `sha256`, `peer_sha256`). A different sha deletes the
+//! copy and fails the job, naming both. A peer that gives no digest (one
+//! before it, or whose digester has not reached the volume) leaves
+//! `verified: false` and says so. The copy keeps the digest it was read
+//! back with, `intact`, so the digester does not read it again; a volume
+//! here whose digest differs from the peer's is never "the same here".
+//!
 //! Jobs are kept in `<data_dir>/pull-jobs.json`. A copy a restart cut short
 //! has its half-made volume deleted and reads `failed`.
 
@@ -101,6 +112,18 @@ pub struct Job {
     /// What the copy holds allocated here, once done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allocated_bytes: Option<u64>,
+    /// The peer's sha256 of the volume (`sb-seal-1`, its seal digest), when
+    /// the peer gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_sha256: Option<String>,
+    /// The copy's, read back here before it was sealed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// The two are equal: only then is the copy the peer's (owner,
+    /// 2026-11-18: "each has a sha, we can verify by sha"). A different sha
+    /// deletes the copy and fails the job.
+    #[serde(default)]
+    pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     pub created_at: u64,
@@ -218,6 +241,9 @@ async fn same_here(state: &AppState, v: &PeerVol, id: VolumeId, sealed: bool, si
         let made: Vec<&Job> = m.values().filter(|j| j.state == "done" && j.volume == Some(id.0)).collect();
         (made.iter().any(|j| j.peer_volume == v.id), made.iter().any(|j| j.peer_volume != v.id))
     });
+    if replication::sha_differs(state, id, v).await.is_some() {
+        return false;
+    }
     if from_it {
         return true;
     }
@@ -326,6 +352,7 @@ pub async fn start(state: &Arc<AppState>, req: Request) -> Result<Started, (u16,
         parent: parent_here.as_ref().map(|p| p.0 .0),
         virtual_bytes: v.size,
         peer_allocated_bytes: v.allocated,
+        peer_sha256: v.seal_sha256.clone(),
         created_at: now(),
         ..Default::default()
     };
@@ -397,6 +424,8 @@ async fn run(
             update(state, id, |j| {
                 j.volume = Some(done.id.0);
                 j.allocated_bytes = Some(allocated);
+                j.sha256 = Some(done.sha.here.clone());
+                j.verified = done.sha.verified;
             });
             finish(state, id, Ok(()));
         }
@@ -423,7 +452,7 @@ fn finish(state: &AppState, id: Uuid, r: Result<(), String>) {
         match r {
             Ok(()) => tracing::info!(
                 "pull {id}: {}/{} here as {}: {} read over NVMe/TCP, {} allocated here of {} virtual ({} on the peer); \
-                 extents copied {}, shared with its parent {}, zeroed {} (#656)",
+                 extents copied {}, shared with its parent {}, zeroed {}; sha256 {} {} (#656)",
                 j.namespace,
                 j.name,
                 j.volume.map(|v| v.to_string()).unwrap_or_default(),
@@ -434,6 +463,11 @@ fn finish(state: &AppState, id: Uuid, r: Result<(), String>) {
                 j.extents_copied,
                 j.extents_shared,
                 j.extents_zeroed,
+                j.sha256.as_deref().unwrap_or("-"),
+                match (&j.peer_sha256, j.verified) {
+                    (Some(_), true) => "verified: the peer's",
+                    _ => "not verified: the peer gave no digest",
+                },
             ),
             Err(e) => tracing::warn!("pull {id}: {}/{} from {}: {e} (#656)", j.namespace, j.name, j.from),
         }

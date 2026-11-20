@@ -374,6 +374,20 @@ pub struct PeerVol {
     pub role: Option<String>,
     pub fs: Option<crate::volume::metadata::FsInfo>,
     pub owner: Option<crate::volume::metadata::Owner>,
+    /// The peer's seal digest (`sb-seal-1`, #384), when it gives one: what
+    /// the copy here is checked against (#656).
+    pub seal_sha256: Option<String>,
+}
+
+/// A volume's seal digest as its answer gives it, in the scheme this engine
+/// hashes (another scheme is no digest to check against).
+fn seal_of(i: &Value) -> Option<String> {
+    let s = i.get("seal")?;
+    if s["scheme"].as_str() != Some(crate::volume::digest::SCHEME) {
+        return None;
+    }
+    let h = s["sha256"].as_str()?;
+    (h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())).then(|| h.to_ascii_lowercase())
 }
 
 fn fs_of(v: &Value) -> Option<crate::volume::metadata::FsInfo> {
@@ -410,6 +424,7 @@ pub fn parse_listing(v: &Value) -> Vec<PeerVol> {
                         role: i["role"].as_str().map(str::to_string),
                         fs: i.get("fs").filter(|f| f.is_object()).and_then(fs_of),
                         owner: i.get("owner").filter(|o| o.is_object()).and_then(|o| serde_json::from_value(o.clone()).ok()),
+                        seal_sha256: seal_of(i),
                     })
                 })
                 .collect()
@@ -596,6 +611,27 @@ pub struct Copied {
     pub zeroed: u64,
     /// Extents it shares with its parent's copy here, moved by nothing.
     pub shared: u64,
+    /// The copy's content as read back here, and whether it is the peer's.
+    pub sha: Sha,
+}
+
+/// The copy's sha256 (`sb-seal-1`) read back here, beside the peer's (#656;
+/// owner, 2026-11-18: "each has a sha, we can verify by sha"). `verified`
+/// only when the peer gave its digest and the two are equal: a copy whose
+/// sha differs is deleted, never kept.
+#[derive(Debug, Clone, Default)]
+pub struct Sha {
+    pub here: String,
+    pub peer: Option<String>,
+    pub verified: bool,
+}
+
+/// The sha256 of volume `id` here when it is not the peer volume's: both
+/// digests known and different (#656). Unknown on either side says nothing.
+pub async fn sha_differs(state: &AppState, id: VolumeId, v: &PeerVol) -> Option<String> {
+    let peer = v.seal_sha256.as_deref()?;
+    let here = state.volume_manager.lock().await.seal_digest(&id)?.hex();
+    (here != peer).then_some(here)
 }
 
 /// Copy one sealed peer volume here, through NVMe/TCP (#656): the peer
@@ -633,8 +669,8 @@ pub async fn copy_one(
     if let Some(a) = att {
         crate::mgmt::peers::release(state, &a.peer, a.volume, &a.host_nqn, &a.holder).await;
     }
-    let (id, bytes) = r?;
-    Ok(Copied { id, bytes, extents: mine, copied: copy.len() as u64, zeroed: zero.len() as u64, shared })
+    let (id, bytes, sha) = r?;
+    Ok(Copied { id, bytes, extents: mine, copied: copy.len() as u64, zeroed: zero.len() as u64, shared, sha })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -648,7 +684,7 @@ async fn copy_into(
     zero: &[u64],
     pace: &mut Pace,
     hooks: &Hooks<'_>,
-) -> Result<(VolumeId, u64), String> {
+) -> Result<(VolumeId, u64, Sha), String> {
     let id = {
         let mut vm = state.volume_manager.lock().await;
         match parent_here {
@@ -681,7 +717,7 @@ async fn copy_into(
     // A copy that did not finish is not left half made.
     let fail = |e: String| async move {
         let _ = state.volume_manager.lock().await.delete_volume(id).await;
-        Err::<(VolumeId, u64), String>(e)
+        Err::<(VolumeId, u64, Sha), String>(e)
     };
     let dev = match state.volume_manager.lock().await.get_volume(&id) {
         Some(d) => d,
@@ -720,6 +756,28 @@ async fn copy_into(
         // `settle` has deleted it already.
         return Err(format!("namespace {}: {}", v.namespace, r.message));
     }
+    // Read back and hashed before the seal (#656): only the peer's sha is
+    // the peer's volume. Wherever the extents landed, `sb-seal-1` hashes the
+    // content, so the two compare.
+    let read = match crate::volume::digest::compute(&state.volume_manager, id).await {
+        Ok(r) => r,
+        Err(e) => return fail(format!("reading the copy back for its sha256: {e}")).await,
+    };
+    let here = crate::volume::metadata::SealDigest {
+        verdict: crate::volume::metadata::Verdict::Intact,
+        checked_at: now(),
+        ..crate::volume::metadata::SealDigest::new(read.sha256)
+    };
+    let sha = Sha { here: here.hex(), peer: v.seal_sha256.clone(), verified: v.seal_sha256.as_deref() == Some(here.hex().as_str()) };
+    if let Some(p) = sha.peer.as_deref() {
+        if !sha.verified {
+            return fail(format!(
+                "its sha256 here is {} and on the peer {p}: the copy is not the peer's volume, and was deleted",
+                sha.here
+            ))
+            .await;
+        }
+    }
     let mut vm = state.volume_manager.lock().await;
     if v.owner.is_some() {
         let _ = vm.set_owner(id, v.owner.clone()).await;
@@ -728,6 +786,9 @@ async fn copy_into(
         vm.mark_template(id);
     }
     if v.sealed {
+        // The digest it was read back with, checked now: the digester need
+        // not read it again.
+        vm.set_seal_digest(id, Some(here));
         if let Err(e) = vm.seal_volume(id, v.fs.clone()).await {
             drop(vm);
             return fail(format!("seal: {e}")).await;
@@ -735,7 +796,7 @@ async fn copy_into(
     } else {
         vm.persist().await;
     }
-    Ok((id, bytes))
+    Ok((id, bytes, sha))
 }
 
 /// One pass over the peer.
@@ -797,7 +858,20 @@ async fn pass(state: &Arc<AppState>, name: &str, generation: u64, spec: &Spec) -
         let mut outcome: Result<(), String> = Ok(());
         if !here_ok {
             set_status(state, name, generation, |s, _| s.current = Some(reference.clone()));
-            match index.get(&(v.namespace.clone(), v.name.clone())).copied() {
+            let found = index.get(&(v.namespace.clone(), v.name.clone())).copied();
+            let differs = match found {
+                Some((id, true, size)) if size == v.size => sha_differs(state, id, v).await,
+                _ => None,
+            };
+            match found {
+                Some((id, true, size)) if size == v.size && differs.is_some() => {
+                    let here = differs.unwrap_or_default();
+                    outcome = Err(format!(
+                        "a volume of this name is here ({}) with sha256 {here}, the peer's is {}: not the same, not overwritten",
+                        id.0,
+                        v.seal_sha256.as_deref().unwrap_or_default()
+                    ));
+                }
                 Some((id, true, size)) if size == v.size => {
                     set_status(state, name, generation, |_, m| {
                         m.insert(v.id.clone(), id.0.to_string());
@@ -944,6 +1018,18 @@ pub fn resume(state: Arc<AppState>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The peer's seal digest is read only in this engine's scheme.
+    #[test]
+    fn a_seal_digest_is_read_in_this_scheme_only() {
+        let sha = "ab".repeat(32);
+        let item = |seal: Value| json!({"id": "i", "name": "golden-x", "virtual_size_bytes": 4096, "sealed": true, "seal": seal});
+        let one = |v: Value| parse_listing(&json!({ "items": [v] })).remove(0).seal_sha256;
+        assert_eq!(one(item(json!({"sha256": sha.to_uppercase(), "scheme": "sb-seal-1", "verdict": "intact"}))), Some(sha.clone()));
+        assert_eq!(one(item(json!({"sha256": sha, "scheme": "sb-seal-2"}))), None, "another scheme is no digest to check against");
+        assert_eq!(one(item(json!({"sha256": "abc", "scheme": "sb-seal-1"}))), None);
+        assert_eq!(one(json!({"id": "i", "name": "golden-x", "virtual_size_bytes": 4096})), None, "a peer before digests");
+    }
 
     #[test]
     fn globs() {

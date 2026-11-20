@@ -113,6 +113,13 @@ pub struct VolumeResponse {
     /// from which release, its generation. `kind` says `rollback`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback: Option<crate::volume::metadata::RollbackMark>,
+    /// A sealed volume's digest (#384): `sha256` of its content as the
+    /// `scheme` hashes it (wherever its extents are, whatever their size),
+    /// what the last read of this copy found (`verdict`) and when
+    /// (`checked_at`). What a pull checks its copy against (#656). Absent
+    /// until the digester has taken it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal: Option<serde_json::Value>,
     /// Where the volume lives — slabs, drives, RAID partners and the state of
     /// each (#136). Always on the single-volume GET; on the listing only with
     /// `?placement=true`, since it walks the volume's extent map.
@@ -147,6 +154,7 @@ struct Described {
     namespace: String,
     rollback: Option<crate::volume::metadata::RollbackMark>,
     owner: Option<crate::volume::metadata::Owner>,
+    seal: Option<crate::volume::metadata::SealDigest>,
 }
 
 async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -> Described {
@@ -174,6 +182,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
                 secret: vm.is_secret(id),
                 namespace: vm.namespace(id).to_string(),
                 rollback: vm.rollback(id).cloned(),
+                seal: vm.seal_digest(id),
             }
         }
         None => Described {
@@ -196,6 +205,7 @@ async fn describe(vm: &impl crate::volume::catalog::VolumeView, id: &VolumeId) -
             secret: false,
             namespace: crate::volume::metadata::DEFAULT_NAMESPACE.to_string(),
             rollback: None,
+            seal: None,
         },
     }
 }
@@ -594,6 +604,7 @@ async fn list_from(
             secret: d.secret,
             namespace: d.namespace.clone(),
             rollback: d.rollback.clone(),
+            seal: d.seal.map(|s| s.json()),
         });
         if q.placement {
             let p = super::placement::of_volume(state, vm, *id).await;
@@ -744,6 +755,7 @@ async fn get_from(
             secret: d.secret,
             namespace: d.namespace.clone(),
             rollback: d.rollback.clone(),
+            seal: d.seal.map(|s| s.json()),
             };
             Json(resp).into_response()
         }
@@ -1116,6 +1128,7 @@ async fn create_volume(
             secret: d.secret,
             namespace: d.namespace.clone(),
             rollback: d.rollback.clone(),
+            seal: d.seal.map(|s| s.json()),
         };
         metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
         return (axum::http::StatusCode::CREATED, Json(resp)).into_response();
@@ -2102,6 +2115,7 @@ async fn clone_volume(
             secret: d.secret,
             namespace: d.namespace.clone(),
             rollback: d.rollback.clone(),
+            seal: d.seal.map(|s| s.json()),
             };
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
         }
@@ -3039,6 +3053,7 @@ async fn create_snapshot(
             secret: d.secret,
             namespace: d.namespace.clone(),
             rollback: d.rollback.clone(),
+            seal: d.seal.map(|s| s.json()),
             };
             metrics::gauge!("stormblock_volumes_total").set(vm.list_volumes().await.len() as f64);
             (axum::http::StatusCode::CREATED, Json(resp)).into_response()
@@ -3127,6 +3142,7 @@ async fn resize_volume(
             secret: d.secret,
             namespace: d.namespace.clone(),
             rollback: d.rollback.clone(),
+            seal: d.seal.map(|s| s.json()),
             };
             Json(resp).into_response()
         }
@@ -3689,6 +3705,7 @@ async fn volume_response(vm: &crate::volume::VolumeManager, id: VolumeId) -> Opt
             secret: d.secret,
             namespace: d.namespace.clone(),
             rollback: d.rollback.clone(),
+            seal: d.seal.map(|s| s.json()),
     })
 }
 

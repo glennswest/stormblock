@@ -40,6 +40,8 @@ pub trait VolumeView {
     /// A rollback copy's mark (#565).
     fn rollback(&self, id: &VolumeId) -> Option<&super::metadata::RollbackMark>;
     fn is_template(&self, id: &VolumeId) -> bool;
+    /// A sealed volume's digest and verdict (#384).
+    fn seal_digest(&self, id: &VolumeId) -> Option<super::metadata::SealDigest>;
     fn is_sealed(&self, id: &VolumeId) -> bool {
         self.get_volume_handle(id).map(|h| h.is_sealed()).unwrap_or(false)
     }
@@ -75,6 +77,7 @@ struct Entry {
     secret: bool,
     namespace: String,
     rollback: Option<super::metadata::RollbackMark>,
+    seal: Option<super::metadata::SealDigest>,
 }
 
 /// The volumes as the manager last published them.
@@ -106,6 +109,7 @@ impl Catalog {
                         secret: m.is_secret(&id),
                         namespace: m.namespace(&id).to_string(),
                         rollback: m.rollback(&id).cloned(),
+                        seal: m.seal_digest(&id),
                     },
                 ))
             })
@@ -149,6 +153,9 @@ impl VolumeView for Catalog {
     }
     fn is_template(&self, id: &VolumeId) -> bool {
         self.templates.contains(id)
+    }
+    fn seal_digest(&self, id: &VolumeId) -> Option<super::metadata::SealDigest> {
+        self.entries.get(id).and_then(|e| e.seal)
     }
     fn volume_ids(&self) -> Vec<VolumeId> {
         self.entries.keys().copied().collect()
@@ -197,6 +204,9 @@ impl VolumeView for super::VolumeManager {
     }
     fn is_template(&self, id: &VolumeId) -> bool {
         super::VolumeManager::is_template(self, id)
+    }
+    fn seal_digest(&self, id: &VolumeId) -> Option<super::metadata::SealDigest> {
+        super::VolumeManager::seal_digest(self, id)
     }
     fn is_sealed(&self, id: &VolumeId) -> bool {
         super::VolumeManager::is_sealed(self, id)
@@ -266,6 +276,9 @@ macro_rules! view_through {
             }
             fn is_template(&self, id: &VolumeId) -> bool {
                 VolumeView::is_template(&**self, id)
+            }
+            fn seal_digest(&self, id: &VolumeId) -> Option<super::metadata::SealDigest> {
+                VolumeView::seal_digest(&**self, id)
             }
             fn is_sealed(&self, id: &VolumeId) -> bool {
                 VolumeView::is_sealed(&**self, id)
