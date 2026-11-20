@@ -946,6 +946,7 @@ async fn compose_volume(
         secret: vm.is_secret(&id),
         namespace: vm.namespace(&id).to_string(),
         rollback: vm.rollback(&id).cloned(),
+        seal: vm.seal_digest(&id).map(|s| s.json()),
         access: crate::volume::Access::ReadWrite.to_string(),
         writable: true,
         role: vm
@@ -1281,6 +1282,7 @@ async fn create_volume(
                 secret: req.secret,
                 namespace: vm.namespace(&vol_id).to_string(),
                 rollback: vm.rollback(&vol_id).cloned(),
+                seal: vm.seal_digest(&vol_id).map(|s| s.json()),
                 access: crate::volume::Access::ReadWrite.to_string(),
                 writable: true,
                 // What it was actually placed in, which is not always what
