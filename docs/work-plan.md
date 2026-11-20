@@ -4,6 +4,24 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #700 — the kept-data install brings the old system half back through its legs (2026-11-20, P0 for forge1, 12.98)
+Cause, read from forge1's consoles: `29edf745` is the system slab the 12.96
+install laid on /dev/sda (`forge1-1795115304` line 427), not a boot clone's.
+On 12.97's install boot, boot-local opened the old legs sdb/sdc/sdd beside
+the claim and restored their records: the old system half, with legs on
+sda's slab. take_split's `release` set (mgr's names) then held those names,
+so `plan_split` neither carried nor dropped them, and sda was laid again
+under them.
+- [x] install boot: the legs' records are not read; after the system half is
+  laid, each leg's system slab is laid again (`relay_system_legs`), and with
+  none laid the legs are left alone
+- [x] the "not in this machine's image either" warning names each volume and
+  its extent count (`extents_on`)
+- [x] tests: `install_boot`, a leg laid again with its old volume gone,
+  `extents_on`
+- [ ] check.sh; tag; stage build; say so on #700; shipped with the proof
+  `System leg .*: laid again with the system half` on forge1's next install
+
 ## #623 — the install done by the running node (2026-11-20, P0)
 The shape comes from the owner (2026-11-16, 11-17) and the master's comments.
 `/init` keeps one decision: a laid local system leg boots local; anything
@@ -19,7 +37,7 @@ the apiserver (no new engine REST write endpoint). Who does what:
   one per node, named after it).
 
 Steps, each its own commit and check:
-- [x] 1. (7e54c610; check.sh run started 2026-11-20, result to be read; stormcos#1050 told) `NodeInstall` published by the engine (kube_publish). Its status is
+- [x] 1. (7e54c610; check.sh ALL PASS, 2071 s; stormcos#1050 told) `NodeInstall` published by the engine (kube_publish). Its status is
   `install_progress::record` (stage, steps, drives, layout): the one source
   for the screen, the page and stormcentral. CRD and ClusterRole go in
   `deploy/crds.yaml`; stormcos carries them (an issue there).

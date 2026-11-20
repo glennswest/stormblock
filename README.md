@@ -3201,6 +3201,16 @@ the system volumes: `/init` names the other legs to `boot-local` as
 `--system-leg DEV`, the handover record keeps them, and after the flow-over
 and at each start every system volume is mirrored `mirror:N` across them; a
 leg missing says `WARNING: SYSTEM LEGS DEGRADED` (`docs/storage-layout.md`).
+On an install (boot-local booting the claimed image, with a drive to lay), the
+legs' records are the old system half's and are **not read** (#700). Once the
+system half is laid, each leg's system slab is laid again, its table and boot
+area kept, and mirrored from the new release (`System leg …: laid again with
+the system half`). With no system half laid, the legs are left as they are.
+Before #700 the old records came back beside the claim. They put the old
+release's volumes back live with legs on the system slab the install had just
+laid again (forge1 12.97: 16 volumes, EBADMSG logs, rustkube-node ENOEXEC).
+When the records name a slab that is nowhere, the warning names each volume
+with extents there, with counts.
 
 `ci-split-verify.sh` boots the shipped initramfs in QEMU from the two drives
 the split install test leaves: either drive named, and the data drive alone.

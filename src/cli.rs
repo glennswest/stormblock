@@ -4213,6 +4213,25 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
         out
     }
 
+    /// Per volume, how many of its extents have a leg on one of `slabs`
+    /// (#700): what a missing slab costs, said by name.
+    fn extents_on(
+        docs: &[Option<crate::volume::metadata::VolumeMetadata>],
+        slabs: &std::collections::HashSet<crate::drive::slab::SlabId>,
+    ) -> Vec<(String, usize)> {
+        let mut out = Vec::new();
+        for d in docs.iter().flatten() {
+            for v in &d.volumes {
+                let n = v.extents.values().filter(|loc| loc.legs().any(|l| slabs.contains(&l.slab_id))).count()
+                    + v.parity.values().filter(|g| g.legs.iter().any(|l| slabs.contains(&l.slab_id))).count();
+                if n > 0 {
+                    out.push((v.name.clone(), n));
+                }
+            }
+        }
+        out
+    }
+
     /// Every slab a set of volume records places an extent on.
     fn slabs_named(docs: &[Option<crate::volume::metadata::VolumeMetadata>]) -> std::collections::HashSet<crate::drive::slab::SlabId> {
         let mut ids = std::collections::HashSet::new();
@@ -4569,6 +4588,15 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                                 "WARNING: {} slab(s) the records need are not in this machine's image either: {}",
                                 missing.len(),
                                 missing.iter().map(|m| m.0.to_string()).collect::<Vec<_>>().join(", ")
+                            );
+                            // Who has extents there, and how many (#700).
+                            let on = extents_on(&embedded, &missing);
+                            let total: usize = on.iter().map(|(_, n)| n).sum();
+                            println!(
+                                "  {total} extent(s) of {} volume(s) have a leg there: {}{}",
+                                on.len(),
+                                on.iter().take(20).map(|(v, n)| format!("{v} ({n})")).collect::<Vec<_>>().join(", "),
+                                if on.len() > 20 { ", ..." } else { "" }
                             );
                         }
                     }
@@ -11289,6 +11317,62 @@ async fn system_legs_checked(
     out
 }
 
+/// Whether this boot-local is an install (#700): it boots the claimed image
+/// (every slab a fabric URI) and has a local drive to lay a system half on.
+fn install_boot(slab_paths: &[String], lays_local: bool, check: bool) -> bool {
+    !check && lays_local && !slab_paths.is_empty() && slab_paths.iter().all(|p| p.contains("://"))
+}
+
+/// An install's system legs laid again (#700): each leg's system slab
+/// formatted afresh, its table and boot area kept, and added to the engine,
+/// as the system drive's is. A leg that will not lay is said and left out:
+/// the system half runs without it, as with a leg that will not open.
+async fn relay_system_legs(
+    mgr: &crate::volume::VolumeManager,
+    legs: Vec<(String, Vec<crate::drive::slab::SlabId>)>,
+    local_tier: &str,
+) -> Vec<(String, Vec<crate::drive::slab::SlabId>)> {
+    let tier = match parse_tier(local_tier) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("WARNING: system legs: not laid again ({e}); the system half runs without them (#700)");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for (leg, old) in legs {
+        match relay_system_leg(mgr, &leg, mgr.slot_size(), tier).await {
+            Ok(id) => {
+                println!(
+                    "System leg {leg}: laid again with the system half (was slab {}, now {}) (#700)",
+                    old.iter().map(|i| i.0.to_string()).collect::<Vec<_>>().join(", "),
+                    id.0
+                );
+                out.push((leg, vec![id]));
+            }
+            Err(e) => println!("WARNING: system leg {leg}: not laid again ({e}); the system half runs without it (#700)"),
+        }
+    }
+    out
+}
+
+/// One leg of [`relay_system_legs`]: its new system slab's id.
+async fn relay_system_leg(
+    mgr: &crate::volume::VolumeManager,
+    leg: &str,
+    slot_size: u64,
+    tier: StorageTier,
+) -> anyhow::Result<crate::drive::slab::SlabId> {
+    let dev = open_storage(leg).await?;
+    let mut layout = crate::image::local::LocalLayout::for_drive(dev.capacity_bytes());
+    layout.slot_size = slot_size;
+    layout.tier = tier;
+    let sys = crate::image::local::reformat_system_drive(dev, &layout).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let id = sys.system.slab_id();
+    mgr.registry().write().await.add(sys.system);
+    Ok(id)
+}
+
 async fn handle_boot_local(
     slab_paths: &[String],
     meta: Option<&str>,
@@ -11336,7 +11420,26 @@ async fn handle_boot_local(
         .chain(pair_disk)
         .collect();
     let legs = system_legs_checked(system_legs, &named).await;
-    let open_paths: Vec<String> = slab_paths.iter().cloned().chain(legs.iter().map(|(p, _)| p.clone())).collect();
+    // An install boot (#700): the legs are the old system half's mirrors,
+    // and their records are that half's. Read beside the claim, they put the
+    // old release's volumes back live, with legs on the system slab the
+    // install lays again (forge1 12.97: 16 volumes on sda's old slab, logs
+    // EBADMSG, rustkube-node ENOEXEC), and their names hid them from the
+    // install's carry and drop. So their records are not read: once the
+    // system half is laid, each leg's system slab is laid again too.
+    let install = install_boot(slab_paths, local_disk.is_some() || system_disk.is_some() || pair_disk.is_some(), check);
+    if install && !legs.is_empty() {
+        println!(
+            "System legs {}: an install - their records are the old system half's and are not read; \
+             each is laid again with the system half (#700)",
+            legs.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(" ")
+        );
+    }
+    let open_paths: Vec<String> = slab_paths
+        .iter()
+        .cloned()
+        .chain(legs.iter().filter(|_| !install).map(|(p, _)| p.clone()))
+        .collect();
     let (mut mgr, resumed) = open_slabs_resuming(&open_paths, meta, true).await?;
     // Everything in the release image this boot claimed is the release's
     // (#349), whatever the engine that composed it recorded: an install drops
@@ -11454,6 +11557,21 @@ async fn handle_boot_local(
             }
         }
     }
+
+    // The legs of an install (#700): laid again once the system half is,
+    // then mirrored from it as on any boot. With no system half laid (the
+    // disk refused), they are left as they are and not opened: the node
+    // runs from the claim, and its next local boot opens them as before.
+    let legs = if !install {
+        legs
+    } else if laid_flow_over.is_some() {
+        relay_system_legs(&mgr, legs, local_tier).await
+    } else {
+        if !legs.is_empty() {
+            println!("System legs: no system half was laid this boot - left as they are, not opened (#700)");
+        }
+        Vec::new()
+    };
 
     let mut exports: Vec<(u32, String, Arc<dyn BlockDevice>)> = vec![(
         0,
@@ -11876,6 +11994,97 @@ async fn handle_migrate_boot(
 #[cfg(test)]
 mod tests {
     use super::note_no_intent;
+
+    /// #700: an install boot is the claim alone with a drive to lay; a
+    /// node booting its own disk, or a check, is none.
+    #[test]
+    fn an_install_boot_is_the_claim_with_a_drive_to_lay() {
+        let claim = vec!["nvme-tcp://192.0.2.1:4420/nqn.x?nsid=88".to_string()];
+        assert!(super::install_boot(&claim, true, false));
+        assert!(!super::install_boot(&claim, false, false), "no drive to lay: diskless");
+        assert!(!super::install_boot(&claim, true, true), "a check lays nothing");
+        assert!(!super::install_boot(&["/dev/sda".to_string()], true, false), "the node's own disk");
+        let both = vec![claim[0].clone(), "/dev/sda".to_string()];
+        assert!(!super::install_boot(&both, true, false), "a resumed flow-over holds the node's disk");
+        assert!(!super::install_boot(&[], true, false));
+    }
+
+    /// #700 (forge1 12.97): an install's system leg is laid again, its old
+    /// system half's volumes gone with it, its table and boot area kept, and
+    /// the new slab given to the engine.
+    #[tokio::test]
+    async fn an_install_lays_a_system_leg_again_and_its_old_volumes_go() {
+        use crate::placement::topology::StorageTier;
+        let dir = tempfile::tempdir().unwrap();
+        let leg = dir.path().join("sdb.raw").display().to_string();
+        let dev: std::sync::Arc<dyn crate::drive::BlockDevice> = std::sync::Arc::new(
+            crate::drive::filedev::FileDevice::open_with_capacity(&leg, 4 << 30).await.unwrap(),
+        );
+        let mut layout = crate::image::local::LocalLayout::for_drive(dev.capacity_bytes());
+        layout.slot_size = crate::volume::DEFAULT_EXTENT_SIZE;
+        let laid = crate::image::local::lay_system_drive(dev.clone(), &layout).await.unwrap();
+        let old_id = laid.system.slab_id();
+        // The old release's volume on the leg, written and recorded there.
+        {
+            let mut old = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
+            old.add_slab(laid.system).await;
+            let v = old.create_volume_any("stormd-logs", 64 << 20).await.unwrap();
+            let d = old.get_volume(&v).unwrap();
+            let bytes: Vec<u8> = (0..1usize << 20).map(|_| 0x5a).collect();
+            d.write(0, &bytes).await.unwrap();
+            d.flush().await.unwrap();
+            old.persist().await;
+        }
+        let parts_before = crate::pallet::gpt::Gpt::read(&dev).await.unwrap().entries.len();
+        let found = crate::drive::discover::slabs_in_partitions(&dev).await;
+        assert_eq!(found.len(), 1);
+        let doc = crate::volume::metav2::read_slab(&found[0].slab).await.unwrap().expect("its records");
+        assert!(doc.volumes.iter().any(|v| v.name == "stormd-logs"), "the old volume is recorded on the leg");
+
+        let mgr = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
+        let id = super::relay_system_leg(&mgr, &leg, crate::volume::DEFAULT_EXTENT_SIZE, StorageTier::Hot).await.unwrap();
+        assert_ne!(id, old_id, "a new system slab");
+        assert!(mgr.registry().read().await.iter().any(|(i, _)| *i == id), "given to the engine");
+        assert_eq!(crate::pallet::gpt::Gpt::read(&dev).await.unwrap().entries.len(), parts_before, "the table kept");
+        let found = crate::drive::discover::slabs_in_partitions(&dev).await;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].slab.slab_id(), id);
+        assert_eq!(found[0].slab.role(), crate::drive::slab::SlabRole::System);
+        let doc = crate::volume::metav2::read_slab(&found[0].slab).await.unwrap();
+        assert!(doc.is_none_or(|d| d.volumes.is_empty()), "no old volume left on the leg");
+        assert_eq!(found[0].slab.free_slots(), found[0].slab.total_slots(), "nothing allocated");
+    }
+
+    /// #700: the warning for a slab nowhere names who has extents there.
+    #[tokio::test]
+    async fn the_volumes_on_a_missing_slab_are_counted_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.raw").display().to_string();
+        let dev: std::sync::Arc<dyn crate::drive::BlockDevice> = std::sync::Arc::new(
+            crate::drive::filedev::FileDevice::open_with_capacity(&path, 512 << 20).await.unwrap(),
+        );
+        let fmt = crate::drive::slab::SlabFormat::new(crate::volume::DEFAULT_EXTENT_SIZE, crate::placement::topology::StorageTier::Hot)
+            .with_auto_metadata(dev.capacity_bytes());
+        let slab = crate::drive::slab::Slab::format_with(dev, fmt).await.unwrap();
+        let sid = slab.slab_id();
+        let mut mgr = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
+        mgr.add_slab(slab).await;
+        let v = mgr.create_volume_any("pod-logs", 16 << 20).await.unwrap();
+        let d = mgr.get_volume(&v).unwrap();
+        d.write(0, &[1u8; 4096]).await.unwrap();
+        d.write(crate::volume::DEFAULT_EXTENT_SIZE, &[1u8; 4096]).await.unwrap();
+        mgr.create_volume_any("empty", 16 << 20).await.unwrap();
+        mgr.persist().await;
+        let doc = {
+            let reg = mgr.registry().read().await;
+            let s = reg.iter().find(|(i, _)| **i == sid).map(|(_, s)| s).unwrap();
+            crate::volume::metav2::read_slab(s).await.unwrap()
+        };
+        let missing: std::collections::HashSet<_> = [sid].into_iter().collect();
+        assert_eq!(super::extents_on(&[doc.clone()], &missing), vec![("pod-logs".to_string(), 2)]);
+        let other: std::collections::HashSet<_> = [crate::drive::slab::SlabId(uuid::Uuid::new_v4())].into_iter().collect();
+        assert!(super::extents_on(&[doc], &other).is_empty());
+    }
 
     /// #625: a drive the kernel removed after its write (it left the SAS
     /// link) is told from one that is still there.
