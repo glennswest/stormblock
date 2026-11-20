@@ -8,13 +8,15 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 stormcentral#1510: a release's data slab is `POST /api/v1/volumes/compose/slab`;
 its golden entries had no `grow`, dropped unknown fields, and the slab's
 golden never read the source's policy.
-- [ ] `ComposeSlabGoldenRequest.grow` (`{max, step}`, `grow_policy_of`'s rules),
+- [x] `ComposeSlabGoldenRequest.grow` (`{max, step}`, `grow_policy_of`'s rules),
   `deny_unknown_fields` on the golden entry
-- [ ] `SlabGolden.grow`; the slab's `<name>.golden` takes it, else the
+- [x] `SlabGolden.grow`; the slab's `<name>.golden` takes it, else the
   source volume's own policy; clones inherit (`record_lineage`); report `grow`
-- [ ] the kept volume at install: #690's adopt already takes the release
-  clone's policy; test it through a composed slab
-- [ ] tests, docs (README compose/slab), CHANGELOG, check.sh, release, ship
+- [x] the kept volume at install: #690's adopt already takes the release
+  clone's policy, and the clone inherits from the slab's golden (no new code)
+- [x] tests (`a_composed_slab_opens_as_a_slab_and_shares_its_goldens`,
+  `a_golden_entrys_grow_is_read_and_an_unknown_field_refused`), docs/composed-disks.md, CHANGELOG
+- [ ] check.sh, release, ship
 
  `grow = {max, step}` on an image spec's golden (2026-11-19, P1)
 stormcos#1049 wants `grow = { max = "1T", step = "8G" }` on a

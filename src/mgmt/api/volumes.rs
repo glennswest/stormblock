@@ -3582,7 +3582,10 @@ pub struct ComposeDiskResponse {
     pub disk: crate::volume::disk::DiskReport,
 }
 
+/// A golden entry of a slab compose. An unknown field is refused (#692): a
+/// compose never drops what it was asked.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ComposeSlabGoldenRequest {
     /// Base name: the golden is `<name>.golden`, the first clone `<name>`.
     pub name: String,
@@ -3602,6 +3605,22 @@ pub struct ComposeSlabGoldenRequest {
     /// Size inside the slab. Defaults to the volume's, rounded to a slot.
     #[serde(default)]
     pub size: Option<String>,
+    /// `{max, step}` (bytes or `64G`, as a Volume's `spec.grow`): the
+    /// golden's grow policy in the slab, inherited by its clones and each
+    /// node's copy (#692). Absent: the source volume's own policy, if any.
+    #[serde(default)]
+    pub grow: Option<serde_json::Value>,
+}
+
+impl ComposeSlabGoldenRequest {
+    /// The `grow` asked, by `spec.grow`'s rules; `null` is the same as
+    /// absent (the source's own policy is carried).
+    fn grow_policy(&self) -> Result<Option<crate::volume::metadata::GrowPolicy>, String> {
+        match &self.grow {
+            None => Ok(None),
+            Some(v) => super::kube::grow_policy_of(v).map_err(|e| format!("golden '{}': grow: {e}", self.name)),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3879,6 +3898,10 @@ async fn compose_slab(
             Ok(v) => v,
             Err(e) => return ApiError::bad_request(format!("golden '{}': {e}", g.name)),
         };
+        let grow = match g.grow_policy() {
+            Ok(p) => p,
+            Err(e) => return ApiError::bad_request(e),
+        };
         goldens.push(SlabGolden {
             name: g.name.clone(),
             source,
@@ -3888,6 +3911,7 @@ async fn compose_slab(
             template: g.template,
             secret: g.secret,
             size,
+            grow,
         });
     }
 
@@ -3978,4 +4002,35 @@ async fn namespace_scope(req: axum::extract::Request, next: axum::middleware::Ne
 
 fn request_namespace() -> Option<String> {
     REQUEST_NAMESPACE.try_with(|n| n.clone()).ok().flatten()
+}
+
+#[cfg(test)]
+mod compose_slab_request_tests {
+    use super::ComposeSlabGoldenRequest;
+    use crate::volume::metadata::GrowPolicy;
+    use serde_json::json;
+
+    fn golden(v: serde_json::Value) -> Result<ComposeSlabGoldenRequest, serde_json::Error> {
+        serde_json::from_value(v)
+    }
+
+    /// #692: a golden entry's `grow` is read as a Volume's `spec.grow`; a
+    /// field the entry does not know is refused, never dropped.
+    #[test]
+    fn a_golden_entrys_grow_is_read_and_an_unknown_field_refused() {
+        const G: u64 = GrowPolicy::GIB;
+        let g = golden(json!({"name": "registry-data", "volume": "v", "grow": {"max": "1T", "step": "8G"}})).unwrap();
+        assert_eq!(g.grow_policy().unwrap(), Some(GrowPolicy { max: 1024 * G, step: 8 * G }));
+        let g = golden(json!({"name": "d", "volume": "v", "grow": {"max": 32 * G}})).unwrap();
+        assert_eq!(g.grow_policy().unwrap(), Some(GrowPolicy { max: 32 * G, step: G }), "a step is 1 GiB unsaid");
+        for absent in [json!({"name": "d", "volume": "v"}), json!({"name": "d", "volume": "v", "grow": null})] {
+            assert_eq!(golden(absent).unwrap().grow_policy().unwrap(), None);
+        }
+        let e = golden(json!({"name": "d", "volume": "v", "grow": {"max": "512M"}})).unwrap().grow_policy().unwrap_err();
+        assert!(e.contains("golden 'd'") && e.contains("less than one step"), "{e}");
+        let e = golden(json!({"name": "d", "volume": "v", "grow": {"max": "1T", "every": 1}})).unwrap().grow_policy().unwrap_err();
+        assert!(e.contains("every"), "{e}");
+        let e = golden(json!({"name": "d", "volume": "v", "grwo": {"max": "1T"}})).unwrap_err().to_string();
+        assert!(e.contains("grwo"), "an unknown field is refused: {e}");
+    }
 }

@@ -743,6 +743,10 @@ pub struct SlabGolden {
     pub secret: bool,
     /// Volume size inside the slab. Defaults to the source, rounded to a slot.
     pub size: Option<u64>,
+    /// The golden's grow policy in the slab (#692, #690's `spec.grow`); its
+    /// clones, and each node's copy, inherit it. `None` carries the source
+    /// volume's own policy, when it has one.
+    pub grow: Option<crate::volume::metadata::GrowPolicy>,
 }
 
 /// What to compose a slab out of.
@@ -779,6 +783,9 @@ pub struct ComposedSlabVolume {
     pub template: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fs_uuid: Option<Uuid>,
+    /// Its grow policy in the slab's record (#692).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grow: Option<crate::volume::metadata::GrowPolicy>,
 }
 
 /// What composing a slab produced.
@@ -904,6 +911,7 @@ impl VolumeManager {
                 template: g.template,
                 secret: g.secret,
                 digest: self.seal_digest(&g.source),
+                grow: g.grow.or_else(|| self.grow_policy(&g.source)),
             });
         }
 
@@ -1082,6 +1090,8 @@ struct Planned {
     /// The source's digest (#384): the composed golden is its content, so it
     /// carries it, unchecked, to every node that installs the image.
     digest: Option<crate::volume::metadata::SealDigest>,
+    /// What the golden grows by in the slab (#692): asked, or the source's.
+    grow: Option<crate::volume::metadata::GrowPolicy>,
 }
 
 /// A slab compose, planned (#418).
@@ -1254,6 +1264,10 @@ impl SlabPlan {
             if p.template {
                 nested.mark_template(gid);
             }
+            // Before any clone is taken: each inherits it (#692).
+            if p.grow.is_some() {
+                nested.set_grow_policy(gid, p.grow)?;
+            }
             volumes.push(ComposedSlabVolume {
                 id: gid.0,
                 name: p.golden_name.clone(),
@@ -1263,6 +1277,7 @@ impl SlabPlan {
                 clone_of: None,
                 template: p.template,
                 fs_uuid: fs.as_ref().and_then(|f| f.uuid),
+                grow: p.grow,
             });
 
             for cname in &p.clone_names {
@@ -1301,6 +1316,7 @@ impl SlabPlan {
                     clone_of: Some(gid.0),
                     template: false,
                     fs_uuid: fresh,
+                    grow: nested.grow_policy(&cid),
                 });
             }
         }
@@ -1700,6 +1716,11 @@ mod tests {
             checked_at: 5,
         };
         vm.set_seal_digest(a, Some(sealed_with));
+        // #692: a's grow asked in the compose; b's source has its own.
+        const G: u64 = crate::volume::metadata::GrowPolicy::GIB;
+        let asked = crate::volume::metadata::GrowPolicy { max: 1024 * G, step: 8 * G };
+        let bs = crate::volume::metadata::GrowPolicy { max: 32 * G, step: 2 * G };
+        vm.set_grow_policy(b, Some(bs)).unwrap();
 
         let spec = SlabVolumeSpec {
             name: "system-1".into(),
@@ -1718,6 +1739,7 @@ mod tests {
                     template: false,
                     secret: false,
                     size: None,
+                    grow: Some(asked),
                 },
                 SlabGolden {
                     name: "b".into(),
@@ -1728,6 +1750,7 @@ mod tests {
                     template: true,
                     secret: false,
                     size: None,
+                    grow: None,
                 },
             ],
         };
@@ -1782,6 +1805,14 @@ mod tests {
         assert_eq!(node.seal_digest(&ag), Some(sealed_with.unchecked()));
         let bg = node.find_volume("bee.golden").await.unwrap();
         assert_eq!(node.seal_digest(&bg), None, "b had none");
+        // The grow policy is in the slab's record (#692): asked for a, the
+        // source's own for b, and every clone of each inherits it.
+        let by = |n: &str| report.volumes.iter().find(|v| v.name == n).unwrap().grow;
+        for (n, want) in [("a.golden", asked), ("a", asked), ("a-two", asked), ("bee.golden", bs), ("bee", bs)] {
+            let v = node.find_volume(n).await.unwrap();
+            assert_eq!(node.grow_policy(&v), Some(want), "{n} on the node");
+            assert_eq!(by(n), Some(want), "{n} in the report");
+        }
         let clone = node.get_volume(&node.find_volume("a").await.unwrap()).unwrap();
         let mut buf = vec![0u8; 4096];
         clone.read(0, &mut buf).await.unwrap();
@@ -1845,6 +1876,7 @@ mod tests {
                     template: true,
                     secret: false,
                     size: None,
+                    grow: None,
                 },
                 SlabGolden {
                     name: "dense".into(),
@@ -1855,6 +1887,7 @@ mod tests {
                     template: false,
                     secret: false,
                     size: None,
+                    grow: None,
                 },
             ],
         };
@@ -1928,6 +1961,7 @@ mod tests {
                 template: true,
                 secret: false,
                 size: None,
+                grow: None,
             }],
         };
         let report = vm.compose_slab(spec).await.expect("a 64 GiB blank in a 32 MiB slab");

@@ -229,6 +229,13 @@ POST /api/v1/volumes/compose/slab
 }
 ```
 
+A golden entry takes `name`, `volume`, `golden_name`, `clone`, `clones`,
+`template`, `secret`, `size` and `grow`; any other field is refused (`400`),
+so a compose never drops what it was asked (#692). Every clone takes the
+golden's grow policy, each node's copy of the slab carries it, and an install
+that keeps a node's own volume of that name gives it the release's policy
+(#690). The report's volumes say their `grow`.
+
 A slab is formatted inside a fresh volume of `size`: superblock, metadata
 region, slot table. Then, for each golden in order, its slots are **taken
 explicitly** from that nested slab — a thin volume maps nothing until it is
@@ -254,7 +261,9 @@ with its journal (a million slots of the test's 64 KiB) is placed in a 32 MiB
 slab, and the clone a node opens passes a full fsck.
 
 The golden is sealed with the filesystem the probe finds through the map,
-marked a template when asked (#100), and the first clone — `<name>`, what the
+marked a template when asked (#100), given its grow policy (#692: the
+entry's `grow: {max, step}`, bytes or `64G` as a Volume's `spec.grow` takes
+it; absent or `null`, the source volume's own policy, if any), and the first clone — `<name>`, what the
 kernel command line resolves — is a CoW snapshot inside the slab, stamped its
 own identity (#76). That stamp is the one write a clone costs: the slot the
 superblock sits in. `volumes.dat` is written last, into the slab's own
