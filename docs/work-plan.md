@@ -4,6 +4,19 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #695 — a running stage discarded at once (2026-11-20, stormupdate#36)
+
+Plan: `stage::Progress` gets a cancel flag; `stage::stage` checks it before
+each volume and between extents of a copy, and returns `stage::Cancelled`.
+`DELETE /api/v1/releases/{v}/stage` on a running stage sets it and answers
+202 with the job `cancelled`; the job, when it stops (or finishes anyway),
+deletes what it laid (the record saved per volume), and the job is then
+cleared, so `GET` is a 404. A new stage while one is cancelling is a 409.
+Tests: the stage loop cut after its first volume, deleted to nothing; the
+API path with the stage held behind the volume manager's lock.
+- [ ] code, tests, docs (staging.md, README), CHANGELOG
+- [ ] check.sh on a build VM
+
 ## #693 — a per-node backup-store credential (2026-11-20, P0; stormcos#1027, owner's B)
 What a backup client calls on the store (stormvm `crates/stormvm-block/src/backup.rs`
 at 449c57b, driven by rustkube-node#380): `GET /v1/volumes/{name|id}`,
