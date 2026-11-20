@@ -13,9 +13,10 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   PATCH and `…/seal`; test `a_kube_volume_patch_is_the_admins_both_ways`
 - [ ] check.sh on d051aee9: the three new tests passed; one timing test
   (`integration_locks::listings_keep_their_time_while_builds_and_creates_flush_a_slow_disk`,
-  1.54 s) failed, sc-build reruns it (tmp/check-709.log). Paused for the P0
-  #623 (2026-11-20). Next: read that run, or run check.sh again; then
-  release (patch), stage, close #709 naming both findings.
+  1.54 s) failed on the first run; the second run passed (1584/1584,
+  1994 s; sc-build: a flake, not filed). Paused for the P0 #623
+  (2026-11-20). Next: release (patch) d051aee9 or later, stage, close #709
+  naming both findings.
 
 ## #708 — finding 07322d3af07a: parity writes after a failed dirty mark (2026-11-20, P1)
 - [x] `StripeLog`: a stripe is in the set only once the file naming it is
