@@ -541,6 +541,10 @@ f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
   reopened on its 502, v0.74.1 e9badfd shipped; stormcos#1050 open); nothing
   left on the engine side; re-proposed `--after stormblock-registry#186
   --after stormcos#1050`
+- [x] 2026-11-20 (later): the hold was wrong: the registry never calls
+  `/api/v1/volumes/pull` (whole-device copy in compgolden.rs), filed
+  stormblock-registry#217; master noted to create `Replication forge` on
+  forge1; `shipped` with proof `on forge1 get::9090/apis/storage.storm.io/v1/replications/forge ~ "phase":"Synced"…`
 
 - [ ] **2026-11-19, the master's re-scope (issue retitled; comments of
   2026-11-18 "registry to registry", "thin all the way through")**: the
