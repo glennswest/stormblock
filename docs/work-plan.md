@@ -9,7 +9,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   `backup_creds::engine_volume`, already resolved names)
 - [x] test: integration_backup_creds: the target by name with its node's
   bearer is the same id; a name nobody holds is 404
-- [ ] check.sh; release; close #699
+- [x] check.sh ALL PASS on 168c739f (1579/1579); v24.44.1; stage requested; #699 closed
 
 ## #481 — declare a licence (2026-11-20)
 Six manifests say `license = "TBD"`: the root, tests-runtime, benches,
