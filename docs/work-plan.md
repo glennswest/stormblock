@@ -59,6 +59,13 @@ the release is written, explicitly, and travels with the clone:
 - Owner's stormd#75 answer (A/B/C) still open; A and B need this, C is not harmed.
 - No uid: stage knows no Service object, and Owner's rule is absent, not guessed.
 
+## #664 — a way to mark an fstemplate broken (2026-11-20) — CLOSED, obsolete
+- Since #663 (4ac00e7d, v24.27.1) there is no `broken` state: `TemplateState`
+  is `AwaitingFormat`, `AwaitingSeed` or `Ready`, and a template whose sealed
+  volume is gone is settled by the engine (re-found, minted again, dropped).
+  A route setting `broken` would put back a state nothing else can produce.
+  rustkube-node#383 is closed and seen working (12.93). Closed with that.
+
 ## #691 — `grow` on an image spec's golden (2026-11-20: reopened by its proof)
 - [x] v24.36.0 (063b8434, check.sh ALL PASS); shipped with
   `api:/apis/storage.storm.io/v1/volumes ~ "grow":{"max":1099511627776,"step":8589934592}`
