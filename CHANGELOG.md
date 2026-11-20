@@ -4,6 +4,14 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.42.0] — 2026-11-20
+
+### Fixed
+- #700: an install no longer brings the old system half back through its system legs. On an install boot, the legs' records (the old release's system volumes, with legs on the system slab the install lays again) are not read. Once the system half is laid, each leg's system slab is laid again and mirrored from the new release. When the records name a slab that is nowhere, the warning names each volume with extents there. On forge1 12.97, 16 volumes went live on sda's old slab `29edf745`: logs EBADMSG, rustkube-node ENOEXEC, six services down.
+
+### Added
+- #623 step 1: `NodeInstall` (`storage.storm.io/v1`), one per node, whose status is the node's install record (`/api/v1/install/progress`), written by the node's engine (`deploy/crds.yaml`, ClusterRole).
+
 ### 2026-11-20
 - **fix:** #700: a kept-data install no longer brings the old system half back through its system legs. On an install boot, boot-local opened the legs (`--system-leg`) beside the claim and restored their records. Those were the old release's system volumes, with legs on the system slab the install lays again (sda's `29edf745` on forge1 12.97). They also hid from the install's carry and drop, because their names were taken as the release's. They went live with a leg on a slab that was gone: 16 volumes, logs EBADMSG/ENOSPC, rustkube-node ENOEXEC, six services down. Now the legs' records are not read on an install. Once the system half is laid, each leg's system slab is laid again (table and boot area kept) and mirrored from the new release. A leg that will not lay is said and left out. When the records name a slab that is nowhere, the warning names each volume with extents there and how many.
 - **feat:** #623 step 1: a `NodeInstall` object per node on the cluster's apiserver (`storage.storm.io/v1`, `deploy/crds.yaml` with its ClusterRole rules). The node's engine writes the node's install record there (`/api/v1/install/progress`, #616): state, stage, steps, each drive's state and format progress, the set and the system legs. It is written only when the node has a record, and only when the record changes. A missing CRD is said once and never stops the Volume and Replication objects.
