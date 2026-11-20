@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::drive::BlockDevice;
 use crate::mgmt::AppState;
 use crate::volume::metadata::GrowPolicy;
 use crate::volume::VolumeId;
