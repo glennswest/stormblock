@@ -14,7 +14,8 @@ array is `raid:<id>`, so no member matched, and the node-data set
   write test use it
 - [x] tests: kernel/partition reasons, layout reasons, a live array member
   (tests/it, `a_live_array_member_is_in_use_and_another_drive_is_not`)
-- [ ] check.sh; close #701 naming the finding
+- [x] check.sh ALL PASS on c9eb0b34 (1577/1577, 2277 s); v24.43.1 (7b52adfb),
+  stage 0d4f0f7b9386; #701 closed naming the finding
 
 ## #700 — the kept-data install brings the old system half back through its legs (2026-11-20, P0 for forge1, 12.98)
 Cause, read from forge1's consoles: `29edf745` is the system slab the 12.96
