@@ -69,6 +69,10 @@ the release is written, explicitly, and travels with the clone:
   change; held `--after stormcos#1049` (registered 2026-11-20).
 
 ## #692 — compose/slab carries a golden's grow policy (2026-11-19, P1)
+- [x] 2026-11-20: reopened by its proof on 12.97, as #691: no release declares
+  a grow yet (stormcos#1049 on `wip/1049-grow`, held for forge's engine
+  upgrade, 24.2.2 → ≥24.37.0). Nothing for stormblock; held `--after
+  stormcos#1049` (registered 2026-11-20).
 stormcentral#1510: a release's data slab is `POST /api/v1/volumes/compose/slab`;
 its golden entries had no `grow`, dropped unknown fields, and the slab's
 golden never read the source's policy.
