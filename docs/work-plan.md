@@ -170,6 +170,15 @@ Steps:
 - [x] check.sh ALL PASS on fbeaa8b0 (1547/1547); v24.34.2 (2c773dad); stage
   92308f235bcb; comments on #685, stormcos#1237 (the self-served root makes
   any engine death a wedge), stormpump#227
+- [x] 12.97 carries it (stormblock@451b7c5): pvetest2's 12.97 install console
+  (05:13Z) shows `oom: the engine's oom_score_adj is -1000` after adopt
+- [ ] **found 2026-11-20: the engine's record still does not leave the node.**
+  stormcentral has no pvetest2 line between switch_root (05:24:01Z) and the
+  next install. The follower finds the collector in the cmdline or
+  `/run/stormblock/install-config*.yaml`, and /init deletes forge's
+  install-config before switch_root (line ~7786, its secrets), so the follower
+  sends to the group only. Fix: /init's logcast writes the settled collector
+  (the address only) to `/run/stormblock/logcast.target`, the follower reads it.
 - [ ] **waits** for a pve install carrying 2c773dad, then nextnfs `shared`
   (its session holds that run behind stormcos#1237); the cause is decided by
   pvetest2's collect card or the next run's syslog (`oom`, `mounts: the mount
