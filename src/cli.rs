@@ -12028,12 +12028,13 @@ mod tests {
         {
             let mut old = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
             old.add_slab(laid.system).await;
+            old.keep_metadata_in_first(&[old_id]);
             let v = old.create_volume_any("stormd-logs", 64 << 20).await.unwrap();
             let d = old.get_volume(&v).unwrap();
             let bytes: Vec<u8> = (0..1usize << 20).map(|_| 0x5a).collect();
             d.write(0, &bytes).await.unwrap();
             d.flush().await.unwrap();
-            old.persist().await;
+            old.persist_checked().await.unwrap();
         }
         let parts_before = crate::pallet::gpt::Gpt::read(&dev).await.unwrap().entries.len();
         let found = crate::drive::discover::slabs_in_partitions(&dev).await;
@@ -12069,12 +12070,13 @@ mod tests {
         let sid = slab.slab_id();
         let mut mgr = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
         mgr.add_slab(slab).await;
+        mgr.keep_metadata_in_first(&[sid]);
         let v = mgr.create_volume_any("pod-logs", 16 << 20).await.unwrap();
         let d = mgr.get_volume(&v).unwrap();
         d.write(0, &[1u8; 4096]).await.unwrap();
         d.write(crate::volume::DEFAULT_EXTENT_SIZE, &[1u8; 4096]).await.unwrap();
         mgr.create_volume_any("empty", 16 << 20).await.unwrap();
-        mgr.persist().await;
+        mgr.persist_checked().await.unwrap();
         let doc = {
             let reg = mgr.registry().read().await;
             let s = reg.iter().find(|(i, _)| **i == sid).map(|(_, s)| s).unwrap();
