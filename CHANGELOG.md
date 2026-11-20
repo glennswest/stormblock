@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** #699: `GET /v1/volumes/{key}` takes a volume's name as well as its `/v1` id (an id wins). stormvm's backup finds its target by name (`<ns>.<vm>.<disk>.backup`); the 404 every lookup got made it create the target again, take it as new and copy the whole disk, so every backup after the first was a full copy, not #400's incremental one. stormvm needs no change.
+
 ## [v24.44.0] — 2026-11-20
 
 ### Added

@@ -98,6 +98,12 @@ async fn a_backup_credential_reaches_its_own_nodes_backups_and_nothing_else() {
     let vol8 = v["id"].as_str().unwrap().to_string();
     let (s, _) = api.call("GET", &format!("/v1/volumes/{vol8}"), &b8, None).await;
     assert_eq!(s, 200);
+    // By its name, as stormvm's backup finds its target (#699): the same
+    // volume, so the next backup is incremental, not a full copy.
+    let (s, v) = api.call("GET", "/v1/volumes/default.vm.root.backup", &b8, None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["id"].as_str(), Some(vol8.as_str()), "{v}");
+    assert_eq!(api.call("GET", "/v1/volumes/default.vm.none.backup", &b8, None).await.0, 404, "a name nobody holds");
 
     // Only a blank backup volume: an owner of the backup kind, no source,
     // not secret.

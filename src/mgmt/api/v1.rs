@@ -1583,6 +1583,10 @@ async fn list_volumes(
     ))
 }
 
+/// `GET /v1/volumes/{key}`: `key` a `/v1` id, else a `/v1` volume's name
+/// (#699: stormvm's backup finds its target, `<ns>.<vm>.<disk>.backup`, by
+/// name; an id-only lookup answered 404 every time, so every backup after the
+/// first was a full copy). An id wins over a name that happens to equal one.
 async fn get_volume(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1591,6 +1595,7 @@ async fn get_volume(
     expire_windows(&state, &mut v1).await;
     v1.volumes
         .get(&id)
+        .or_else(|| v1.volume_by_name(&id))
         .map(|r| Json(r.vol.clone()))
         .ok_or_else(|| V1Error::NotFound(format!("volume {id}")))
 }

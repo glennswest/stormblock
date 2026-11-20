@@ -4,6 +4,13 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #699 — GET /v1/volumes/{key} by name (2026-11-20, P1)
+- [x] `get_volume`: a `/v1` id, else `volume_by_name` (the backup gate,
+  `backup_creds::engine_volume`, already resolved names)
+- [x] test: integration_backup_creds: the target by name with its node's
+  bearer is the same id; a name nobody holds is 404
+- [ ] check.sh; release; close #699
+
 ## #481 — declare a licence (2026-11-20)
 Six manifests say `license = "TBD"`: the root, tests-runtime, benches,
 crates/pallet-format (stormuefi links it, MIT), crates/screen-spec (stormbootx,
