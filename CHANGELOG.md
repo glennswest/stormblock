@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.43.0] — 2026-11-20
+
+### Added
+- #623 step 2: the NodeInstall's `status.install`: this boot's install words (`mode`, `system_drive`, `storage:` without the wipe word, kept by `/init` with the new `stormblock image install-intent`) and the plan they make over the drives the running node sees (`plan`, or `planError`). Nothing is laid by it.
+
 ### 2026-11-20
 - **feat:** #623 step 2: the NodeInstall's `status.install` is this boot's install words and the plan they make over the drives the running node sees now. `/init` keeps the install-config's `mode`, `system_drive` and `storage:` (never the wipe word, nothing else) in `/run/stormblock/install-intent.yaml` with the new `stormblock image install-intent` before it deletes the file. The engine describes the drives as `/init` does (`image::storage::seen_in`, sysfs) and runs the same `plan`: `plan` (drives taken, system legs, format, set, what it says) or `planError`. Nothing is laid by it.
 
