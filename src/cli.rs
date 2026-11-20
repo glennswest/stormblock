@@ -12081,7 +12081,7 @@ mod tests {
             crate::volume::metav2::read_slab(s).await.unwrap()
         };
         let missing: std::collections::HashSet<_> = [sid].into_iter().collect();
-        assert_eq!(super::volumes_with_extents_on(&[doc.clone()], &missing), vec![("pod-logs".to_string(), 2)]);
+        assert_eq!(super::volumes_with_extents_on(std::slice::from_ref(&doc), &missing), vec![("pod-logs".to_string(), 2)]);
         let other: std::collections::HashSet<_> = [crate::drive::slab::SlabId(uuid::Uuid::new_v4())].into_iter().collect();
         assert!(super::volumes_with_extents_on(&[doc], &other).is_empty());
     }
