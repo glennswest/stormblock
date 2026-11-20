@@ -5684,6 +5684,11 @@ mod redundancy_tests {
             mgr.persist_to_slab(slab_id);
             let owned = mgr.create_volume_with("cadvisor-logs", 1 << 20, CreateOptions::default()).await.unwrap();
             let scratch = mgr.create_volume_with("scratch", 1 << 20, CreateOptions::default()).await.unwrap();
+            for v in [owned, scratch] {
+                let h = mgr.get_volume(&v).unwrap();
+                h.write(0, &[0x67u8; 4096]).await.unwrap();
+                h.flush().await.unwrap();
+            }
             mgr.set_owner(owned, Some(owner.clone())).await.unwrap();
             mgr.set_retention(scratch, Retention::Ephemeral).await;
             mgr.persist_checked().await.unwrap();
@@ -5693,6 +5698,7 @@ mod redundancy_tests {
         restored.add_slab(Slab::open(Arc::new(FileDevice::open(&path).await.unwrap())).await.unwrap()).await;
         restored.persist_to_slab(slab_id);
         restored.restore().await.unwrap();
+        assert!(restored.get_volume_handle(&owned).is_some(), "restore: the volume is back");
         assert_eq!(restored.owner(&owned), Some(&owner), "restore: the owner");
         assert_eq!(restored.owner(&scratch), None);
         assert_eq!(restored.retention(&scratch), Retention::Ephemeral, "restore: the retention");
