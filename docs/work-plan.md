@@ -62,6 +62,13 @@ Steps, each its own commit and check:
   untouched, as diagnostic does. The initramfs path stays until forge1
   proves 1–5, and is then removed. stormcentral's stages follow (an issue
   there).
+- (2026-11-20) step 2 check.sh ALL PASS on 49478f5f (1574/1574); v24.43.0
+  (5828e935), stage ea6e29b129bf.
+- (2026-11-20) **waits on the owner** (needs-owner): on a keep-data
+  reinstall, who attaches the data half? (1, recommended) /init and
+  boot-local, as now, with only the system half's lay and flow-over at
+  runtime; (2) the running node, remounting live services; (3) two boots.
+  A fresh install is fully runtime either way. Step 3 starts once answered.
 - (2026-11-20) held behind #700 (the master: forge first). Next is step 2:
   /init keeps the install-config's non-secret `mode` and `storage:` for the
   node (it deletes the whole file before switch_root, #685). The engine
