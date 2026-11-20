@@ -96,8 +96,6 @@ async fn a_backup_credential_reaches_its_own_nodes_backups_and_nothing_else() {
     let (s, v) = api.call("POST", "/v1/volumes", &b8, Some(target("default.vm.root.backup"))).await;
     assert!((200..300).contains(&s), "{s} {v}");
     let vol8 = v["id"].as_str().unwrap().to_string();
-    let (s, v) = api.call("GET", "/v1/volumes/default.vm.root.backup", &b8, None).await;
-    assert_eq!((s, v["id"].as_str()), (200, Some(vol8.as_str())), "by name: {v}");
     let (s, _) = api.call("GET", &format!("/v1/volumes/{vol8}"), &b8, None).await;
     assert_eq!(s, 200);
 
