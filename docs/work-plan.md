@@ -10,7 +10,9 @@ refuses), fixed in stormuefi 0.15.1 (stormuefi#76, OVMF negative control
 reproduces it); the stage that missed it is stormcentral#1407 (closed).
 Nothing in stormblock changes. Waits `--after stormuefi#76` (its metal boot
 on C2NR0Q2: `SELECTED` from device 1 after a hard-off); close #603 on that
-console.
+console. (2026-11-20, handed back with nothing changed: `wait-hardware
+--machine C2NR0Q2` with the media and the lines the boot must show, so the
+master runs the boot.)
 
 ## #699 — GET /v1/volumes/{key} by name (2026-11-20, P1)
 - [x] `get_volume`: a `/v1` id, else `volume_by_name` (the backup gate,
