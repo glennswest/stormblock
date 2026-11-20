@@ -4,6 +4,15 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.35.0] — 2026-11-19
+
+### Added
+- #690: `VolumeFilling` (80 %) and `VolumeFull` (95 %) conditions, `status.filesystem` and `status.usedBytes` on every mounted volume's object, from `statfs` every 30 s; `storm_volume_fs_*` metrics.
+- #690: `spec.grow: {max, step}`: the engine grows a volume past 80 % used by a step up to `max`, within its pool's room; kept with the volume, inherited by a clone and by a kept volume at install.
+
+### Fixed
+- #690: a `spec.sizeBytes` grow reaches the ext4 mounted on the volume through its own mount namespace.
+
 ### 2026-11-19
 - **feat:** #690: every volume served here as a ublk device and mounted on the node is `statfs`ed every 30 s (any mount namespace, through `/proc/<pid>/root`). Its Volume object carries `status.filesystem`, `status.usedBytes`, and the conditions `VolumeFilling` (80 %) and `VolumeFull` (95 %) with reason, message and `lastTransitionTime`. Metrics: `storm_volume_fs_{size,used}_bytes`, `storm_volume_fs_used_ratio`, `storm_volume_grows_total`.
 - **feat:** #690: `spec.grow: {max, step}` on a Volume. Once the volume's filesystem is 80 % used, the engine grows it by a step up to `max`, at most every 5 minutes, within its pool's room less a margin; `status.grown` and `status.growBlocked` say what happened. The policy is kept with the volume (header block `G`; a volume without one writes the header it did) and inherited by a clone. `deploy/crds.yaml` carries the schema and a `Used%` column.
