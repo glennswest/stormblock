@@ -52,10 +52,12 @@ the release is written, explicitly, and travels with the clone:
   every restart left every volume unclaimed; and `adopt_slabs` never read
   `retention`. Fixed in aa36ce0c, test 6db56655; check.sh ALL PASS on
   6db56655 (closed #694, #696); v24.39.0 (5b2c36fe), build 18591f1d6849.
-- [ ] file the stormcos issue (draft: image.toml `owner` per service clone/data/
-  logs; compose-release.py's slab_volume() passes `owner`; only after the
-  appliance engine carries a60b5389, compose/slab refuses unknown fields)
-- [ ] request the stage; `shipped --proof` cadvisor-logs owned by Service cadvisor
+- [x] filed stormcos#1455 (2026-11-20): image.toml `owner` per service
+  clone/data/logs; compose-release.py's slab_volume() passes it; after forge's
+  engine is ≥ 24.39.0 (compose/slab refuses unknown fields)
+- [x] stage: v24.39.0 (5b2c36fe), build 18591f1d6849
+- [ ] held `--after stormcos#1455` (registered 2026-11-20); then shipped with
+  `api:/apis/storage.storm.io/v1/volumes ~ "storm.io/owner-kind":"Service"`
 - Owner's stormd#75 answer (A/B/C) still open; A and B need this, C is not harmed.
 - No uid: stage knows no Service object, and Owner's rule is absent, not guessed.
 
