@@ -473,6 +473,21 @@ f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
   removed), C only the engine's. Then: shipped with a proof once the
   registry pulls through it (`log:pull .* read over NVMe/TCP`)
 
+- [x] **answered 2026-11-19: A** (two objects, two groups; the engine's
+  `storage.storm.io/v1 Replication` stays, the registry's is
+  `registry.storm.io/v1`, both through `POST /api/v1/volumes/pull`).
+- [ ] **2026-11-19, verified by sha (owner, 11-18: "each has a sha, we can
+  verify by sha")**: the transport's own part of it. A volume's answer
+  carries its `seal` digest (`sb-seal-1`, location-independent, the
+  digester's); a pull reads the peer's, hashes its copy here before the
+  seal, and only an equal sha counts: `sha256`, `peer_sha256`, `verified`
+  on the job; a different sha deletes the copy and fails the job with both
+  shas; the copy keeps the digest `intact` with `checked_at` (no second
+  read by the digester). A peer that gives no digest (forge 24.2.2): the
+  copy's own sha taken, `verified: false`, said. A copy here whose digest
+  differs from the peer's is not "the same here". Test: integration_pull
+  (sha equal; a peer digest made wrong → failed, nothing left here).
+
 ## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
 
 forge1: three HGST 10 TB at 12 Gbit read 64–103 MB/s, the HITACHI at 6 Gbit
