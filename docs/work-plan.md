@@ -4,6 +4,14 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #603 — C2NR0Q2's local pallets: 'no kernel inside the kernel member' (2026-11-20, P1)
+Cause in stormuefi (one unaligned whole-member BlockIO read the PERC
+refuses), fixed in stormuefi 0.15.1 (stormuefi#76, OVMF negative control
+reproduces it); the stage that missed it is stormcentral#1407 (closed).
+Nothing in stormblock changes. Waits `--after stormuefi#76` (its metal boot
+on C2NR0Q2: `SELECTED` from device 1 after a hard-off); close #603 on that
+console.
+
 ## #699 — GET /v1/volumes/{key} by name (2026-11-20, P1)
 - [x] `get_volume`: a `/v1` id, else `volume_by_name` (the backup gate,
   `backup_creds::engine_volume`, already resolved names)
