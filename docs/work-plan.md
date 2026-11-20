@@ -4,6 +4,15 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #709 — findings 2e2144771e67, d893aaefa0ff in mgmt/api/kube.rs (2026-11-20, P1)
+- [x] 2e2144771e67 (registry before manager in `all_slabs`): fixed by #571
+  (9f1c2056, 2026-11-10) after the review's commit (07a83e07, 2026-10-20);
+  the test it asks for added (`the_kube_slab_list_waits_on_the_manager_holding_no_registry`)
+- [x] d893aaefa0ff (a kube Volume PATCH seals/unseals with the node token):
+  every kube Volume PATCH destructive (`is_destructive_274`), as the REST
+  PATCH and `…/seal`; test `a_kube_volume_patch_is_the_admins_both_ways`
+- [ ] check.sh; release; close #709
+
 ## #708 — finding 07322d3af07a: parity writes after a failed dirty mark (2026-11-20, P1)
 - [x] `StripeLog`: a stripe is in the set only once the file naming it is
   synced (`write` under the set's lock: no in-memory mark that a retry could

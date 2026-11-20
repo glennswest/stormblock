@@ -2258,6 +2258,39 @@ async fn a_seed_keeps_its_directories_and_asked_to_its_labels_case() {
 /// and asked for the manager: an hour, every `/api/v1/volumes` behind it,
 /// no apiserver. Here each of the other locks is held while the list runs;
 /// the manager must stay free, and the list answers once the lock is let go.
+/// #709 (finding 2e2144771e67): the kube slab list never holds the registry
+/// while it waits for the manager. A delete takes the manager, then the
+/// registry's write lock; a list that took the registry first and then
+/// waited on the manager deadlocked both. Here the manager is held as a
+/// delete holds it while the list runs; the registry's write lock must still
+/// be had, and the list answers once the manager is let go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_kube_slab_list_waits_on_the_manager_holding_no_registry() {
+    use std::time::Duration;
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir).await;
+    let (url, server) = start(state.clone()).await;
+    let client = reqwest::Client::new();
+    for path in ["slabs", "slabs?watch=false"] {
+        let vm = state.volume_manager.lock().await;
+        let list = tokio::spawn({
+            let (client, url) = (client.clone(), url.clone());
+            async move { client.get(format!("{url}/apis/storage.storm.io/v1/{path}")).send().await.unwrap().json::<serde_json::Value>().await.unwrap() }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // What the delete does next, holding the manager: the registry's
+        // write lock. The list must not hold it.
+        let reg = tokio::time::timeout(Duration::from_secs(5), state.slab_registry.write())
+            .await
+            .unwrap_or_else(|_| panic!("the slab list holds the registry while it waits for the manager (#709)"));
+        drop(reg);
+        drop(vm);
+        let slabs = tokio::time::timeout(Duration::from_secs(10), list).await.expect("the list answers once let go").unwrap();
+        assert!(slabs["items"].as_array().is_some_and(|a| !a.is_empty()), "{path}: {slabs}");
+    }
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_kube_volume_list_holds_the_manager_while_waiting_for_nothing() {
     use std::time::Duration;

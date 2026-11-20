@@ -372,6 +372,15 @@ fn is_destructive_274(method: &Method, path: &str) -> bool {
     if *method != Method::GET && *method != Method::HEAD && (p == "/apis/storage.storm.io/v1/replications" || p.starts_with("/apis/storage.storm.io/v1/replications/")) {
         return true;
     }
+    // A Volume patched on the kube surface (#709, finding d893aaefa0ff): its
+    // spec seals, unseals (a golden opened again) or makes a volume
+    // writable, as the REST `…/seal` and `PATCH /api/v1/volumes/{id}` do,
+    // and those are the admin's. Every patch of a Volume here, then, as the
+    // REST PATCH is. (A spec changed on the cluster's apiserver reaches the
+    // engine through `kube_publish`, behind the apiserver's own RBAC.)
+    if *method == Method::PATCH && seg.len() >= 6 && seg[1] == "apis" && seg[2] == "storage.storm.io" && seg[4] == "volumes" {
+        return true;
+    }
     // Minting a backup credential (#693): a bearer that writes this store.
     // (Revoking is a DELETE, the admin's already.)
     if *method == Method::POST && p == "/api/v1/backup-credentials" {
@@ -1817,6 +1826,10 @@ mod tests {
 
     #[test]
     fn destructive_verbs_are_classified() {
+        // #709: a Volume patched on the kube surface; its reads are not.
+        assert_eq!(classify(&Method::PATCH, "/apis/storage.storm.io/v1/volumes/abc", None), Class::Destructive);
+        assert_eq!(classify(&Method::GET, "/apis/storage.storm.io/v1/volumes/abc", None), Class::Ordinary);
+        assert_eq!(classify(&Method::GET, "/apis/storage.storm.io/v1/volumes", None), Class::Ordinary);
         assert!(is_destructive(&Method::DELETE, "/mk/v1/exports/abc", None));
         assert!(is_destructive(&Method::POST, "/api/v1/fstemplates/abc/seal", None));
         assert!(is_destructive(&Method::POST, "/mk/v1/volumes/abc/trim", Some("apply=true")));

@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** #709 (finding d893aaefa0ff, major): a `PATCH` of a Volume on the engine's kube surface (`/apis/storage.storm.io/v1/volumes/{name}`) is destructive: the admin token, or a `destroy` review. It seals, unseals (a golden opened again) or changes access, as the REST `…/seal` and `PATCH /api/v1/volumes/{id}` do, and those were the admin's while this was the node token's. A spec changed on the cluster's apiserver reaches the engine through `kube_publish`, behind the apiserver's own RBAC, as before.
+- **test:** #709 (finding 2e2144771e67, major, fixed by #571's 9f1c2056 after the review's commit): the kube slab list, run while the manager is held as a delete holds it, holds no registry lock, and answers once let go.
+
 ## [v24.44.2] — 2026-11-20
 
 ### Fixed

@@ -1155,3 +1155,42 @@ async fn a_release_erase_is_planned_recorded_for_the_next_boot_and_refused_where
     assert!(get("/health").await.get("release").is_none());
     assert_eq!(call(&n, M::DELETE, "/release", Some(ADMIN), None).await, 404);
 }
+
+/// #709 (finding d893aaefa0ff): a Volume patched on the engine's kube
+/// surface is the admin's, as the REST `…/seal` and PATCH are. The node token
+/// can neither open a golden again (`sealed: false`), nor seal a live volume,
+/// nor make one writable; the admin can, both ways. Reads stay the node
+/// token's.
+#[tokio::test]
+async fn a_kube_volume_patch_is_the_admins_both_ways() {
+    let n = node(false, None).await;
+    let golden = volume(&n, "golden-709", true).await;
+    let plain = volume(&n, "plain-709", false).await;
+    let root = n.base.trim_end_matches("/api/v1").to_string();
+    let c = reqwest::Client::new();
+    let patch = |id: &str, tok: &str, spec: Value| {
+        c.patch(format!("{root}/apis/storage.storm.io/v1/volumes/{id}")).bearer_auth(tok.to_string()).json(&json!({ "spec": spec })).send()
+    };
+    let sealed = |id: &str| {
+        let state = n.state.clone();
+        let id = stormblock::volume::VolumeId(uuid::Uuid::parse_str(id).unwrap());
+        async move { state.volume_manager.lock().await.get_volume_handle(&id).unwrap().is_sealed() }
+    };
+
+    let r = c.get(format!("{root}/apis/storage.storm.io/v1/volumes/{golden}")).bearer_auth(NODE).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 200, "a read is the node token's");
+
+    assert_eq!(patch(&golden, NODE, json!({ "sealed": false })).await.unwrap().status().as_u16(), 401, "a golden is not opened again by the node token");
+    assert!(sealed(&golden).await, "still sealed");
+    assert_eq!(patch(&plain, NODE, json!({ "sealed": true })).await.unwrap().status().as_u16(), 401, "nor a live volume sealed");
+    assert!(!sealed(&plain).await);
+    assert_eq!(patch(&plain, NODE, json!({ "access": "ro" })).await.unwrap().status().as_u16(), 401, "nor its access changed");
+
+    let r = patch(&golden, ADMIN, json!({ "sealed": false })).await.unwrap();
+    assert_eq!(r.status().as_u16(), 200, "{}", r.text().await.unwrap_or_default());
+    assert!(!sealed(&golden).await, "the admin opens it");
+    let r = patch(&plain, ADMIN, json!({ "sealed": true })).await.unwrap();
+    assert_eq!(r.status().as_u16(), 200, "{}", r.text().await.unwrap_or_default());
+    assert!(sealed(&plain).await, "the admin seals it");
+    assert!(audit(&n).iter().any(|a| a["path"].as_str().is_some_and(|p| p.contains("/apis/storage.storm.io/v1/volumes/"))), "audited as destructive");
+}
