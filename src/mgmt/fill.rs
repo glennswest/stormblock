@@ -447,7 +447,8 @@ mod tests {
         assert_eq!(p.next(4 * G, G + G / 2), Some(5 * G), "the room, in whole GiB");
         assert_eq!(p.next(4 * G, G / 2), None, "no GiB of room");
         let small = GrowPolicy { max: 64 << 20, step: G };
-        assert_eq!(small.next(32 << 20, 10 * G), None, "a max under a step: parse refuses it, next grows nothing past it");
+        assert_eq!(small.next(32 << 20, 10 * G), Some(64 << 20), "a step past max stops at max");
+        assert_eq!(small.next(64 << 20, 10 * G), None);
     }
 
     #[test]
