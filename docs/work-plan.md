@@ -4,7 +4,17 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
-## #690 — Volume fill conditions and a `spec.grow` policy (2026-11-19, P1)
+## #691 — `grow = {max, step}` on an image spec's golden (2026-11-19, P1)
+stormcos#1049 wants `grow = { max = "1T", step = "8G" }` on a
+`[[data_slab.golden]]`; `GoldenSpec` denied the key.
+- [x] `GoldenSpec.grow: Option<GrowSpec>` (`max` bytes or `1T`, `step`
+  optional), checked at `ImageSpec::from_toml` with the golden's name
+- [x] `image build` sets it on the golden before its clones (they inherit
+  it, #690); the build report and `slabs_in` show `grow`
+- [x] test `a_goldens_grow_policy_is_on_the_golden_and_every_clone`; docs/images.md, CHANGELOG
+- [ ] check.sh on the pushed commit, release, close
+
+ conditions and a `spec.grow` policy (2026-11-19, P1)
 Owner (forge1's registry-data filled twice): "We need the ability to enlarge space."
 Design:
 - Fill: every 30 s the engine `statfs`es each volume's filesystem where it is

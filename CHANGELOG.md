@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-19
+- **feat:** #691: `grow = { max, step }` on an image spec's `[[slab.golden]]` / `[[data_slab.golden]]` (the spelling of `spec.grow`, #690). `image build` sets it on the golden before taking its clones, so every clone inherits it; the build report and the slab listing show each volume's `grow`. A policy that cannot apply refuses the spec at load, naming the golden. Before, `GoldenSpec` refused the key, and so the whole spec (stormcos#1049).
+
 ## [v24.35.0] — 2026-11-19
 
 ### Added

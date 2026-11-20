@@ -90,6 +90,9 @@ pub struct VolumeReport {
     /// The filesystem UUID the volume carries, when the build could read one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fs_uuid: Option<Uuid>,
+    /// Its grow policy, when it has one (#691).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grow: Option<crate::volume::metadata::GrowPolicy>,
 }
 
 /// Whether the path names a block device, as opposed to a file to create.
@@ -698,6 +701,15 @@ impl ImageBuilder {
                 mgr.mark_template(golden_id);
             }
 
+            // A grow policy goes on the golden, before any clone is taken:
+            // every clone inherits it, the image's own and each node's
+            // (#691, #690).
+            if let Some(grow) = &g.grow {
+                let policy = grow.policy().map_err(|e| ImageError::Spec(format!("golden '{}': grow: {e}", g.name)))?;
+                mgr.set_grow_policy(golden_id, Some(policy))
+                    .map_err(|e| ImageError::Other(format!("grow policy on '{golden_name}': {e}")))?;
+            }
+
             // A stamped clone copies on write what its stamp touches: the
             // superblock's slot for ext4, both GPT copies' for a disk.
             if let Some(f) = &fs {
@@ -780,6 +792,7 @@ impl ImageBuilder {
                     clone_of: clone_of.get(&id).map(|g| g.0),
                     sealed: mgr.is_sealed(&id),
                     fs_uuid: mgr.fs_info(&id).and_then(|f| f.uuid),
+                    grow: mgr.grow_policy(&id),
                 });
             }
         }
@@ -1403,6 +1416,7 @@ pub async fn slabs_in(image: &Path) -> Result<Vec<SlabContents>> {
                     clone_of: v.parent.map(|p| p.0),
                     sealed: v.sealed,
                     fs_uuid: v.fs.as_ref().and_then(|f| f.uuid),
+                    grow: v.grow,
                 });
             }
             volumes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1634,5 +1648,79 @@ clones = ["pvc-a"]
         let slab = report.partitions.iter().find(|p| !p.volumes.is_empty()).expect("the slab");
         assert!(slab.size_bytes >= 250 << 20, "the rest of a 256M image: {}", slab.size_bytes);
         assert_eq!(slab.volumes.len(), 3);
+    }
+
+    /// #691: `grow = { max, step }` on a golden is set on the golden the
+    /// build lays, every clone inherits it, and it is in the slab's record
+    /// (what a node attaching the slab reads); a golden without one has
+    /// none, and a policy that cannot apply is refused at load.
+    #[tokio::test]
+    async fn a_goldens_grow_policy_is_on_the_golden_and_every_clone() {
+        use crate::volume::metadata::GrowPolicy;
+        const G: u64 = GrowPolicy::GIB;
+        let dir = tempfile::TempDir::new().unwrap();
+        let blank = dir.path().join("blank.img").display().to_string();
+        {
+            let dev: std::sync::Arc<dyn crate::drive::BlockDevice> = std::sync::Arc::new(
+                crate::drive::filedev::FileDevice::open_with_capacity(&blank, 32 << 20).await.unwrap(),
+            );
+            crate::fs::ext4::format(&dev, &crate::fs::ext4::Ext4Params::default()).await.unwrap();
+        }
+        let spec = |grow: &str| {
+            crate::image::ImageSpec::from_toml(&format!(
+                r#"
+size = "512M"
+[slab]
+size = "128M"
+[[slab.golden]]
+name = "plain"
+file = "{blank}"
+[data_slab]
+size = "256M"
+[[data_slab.golden]]
+name = "registry-data"
+file = "{blank}"
+clones = ["registry-data-b"]
+{grow}
+"#
+            ))
+        };
+        let out = dir.path().join("image.img");
+        let report = crate::image::ImageBuilder::new(spec(r#"grow = { max = "1T", step = "8G" }"#).unwrap())
+            .build(&out)
+            .await
+            .unwrap();
+        let want = GrowPolicy { max: 1024 * G, step: 8 * G };
+        let vols: Vec<&super::VolumeReport> = report.partitions.iter().flat_map(|p| p.volumes.iter()).collect();
+        for name in ["registry-data.golden", "registry-data", "registry-data-b"] {
+            let v = vols.iter().find(|v| v.name == name).unwrap_or_else(|| panic!("{name} in {vols:?}"));
+            assert_eq!(v.grow, Some(want), "{name}: the golden's policy");
+        }
+        for name in ["plain.golden", "plain"] {
+            let v = vols.iter().find(|v| v.name == name).unwrap();
+            assert_eq!(v.grow, None, "{name}: no grow said, none set");
+        }
+        // Written: the slab's own record says it, as a node attaching it reads.
+        let slabs = super::slabs_in(&out).await.unwrap();
+        let data = slabs.iter().find(|s| s.role == "data").expect("the data slab");
+        assert_eq!(data.volumes.len(), 3, "{:?}", data.volumes);
+        for v in &data.volumes {
+            assert_eq!(v.grow, Some(want), "{} in the slab's record", v.name);
+        }
+        let sys = slabs.iter().find(|s| s.role == "system").expect("the system slab");
+        assert!(sys.volumes.iter().all(|v| v.grow.is_none()), "{:?}", sys.volumes);
+
+        // Bytes, and a step unsaid: 1 GiB.
+        let s = spec(&format!("grow = {{ max = {} }}", 32 * G)).unwrap();
+        let g = s.data_slab.as_ref().unwrap().goldens[0].grow.as_ref().unwrap().policy().unwrap();
+        assert_eq!(g, GrowPolicy { max: 32 * G, step: G });
+        // Refused at load, naming the golden.
+        let e = spec(r#"grow = { max = "512M" }"#).unwrap_err().to_string();
+        assert!(e.contains("registry-data") && e.contains("less than one step"), "{e}");
+        let e = spec(r#"grow = { max = "1T", step = 0 }"#).unwrap_err().to_string();
+        assert!(e.contains("registry-data") && e.contains("grows nothing"), "{e}");
+        let e = spec(r#"grow = { max = "1T", every = "8G" }"#).unwrap_err().to_string();
+        assert!(e.contains("every"), "an unknown key in grow is refused: {e}");
+        assert!(spec(r#"grow = { step = "8G" }"#).is_err(), "max is required");
     }
 }

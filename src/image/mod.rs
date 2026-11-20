@@ -299,6 +299,47 @@ pub struct GoldenSpec {
     /// Volume size. Defaults to the content, rounded up to a slot.
     #[serde(default)]
     pub size: Option<String>,
+    /// The golden's grow policy (#691, #690's `spec.grow`): `grow = { max =
+    /// "1T", step = "8G" }`. Set on the golden the build lays, so every
+    /// clone of it — the image's own and each node's — grows by `step`, up
+    /// to `max`, once its filesystem is past 80% used. `step` defaults to
+    /// 1 GiB and is rounded up to whole GiB; `max` is at least one step.
+    #[serde(default)]
+    pub grow: Option<GrowSpec>,
+}
+
+/// A size in an image spec: bytes, or `64G` / `64Gi` (base 1024).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SpecSize {
+    Bytes(u64),
+    Text(String),
+}
+
+impl SpecSize {
+    fn json(&self) -> serde_json::Value {
+        match self {
+            SpecSize::Bytes(n) => serde_json::Value::from(*n),
+            SpecSize::Text(s) => serde_json::Value::from(s.as_str()),
+        }
+    }
+}
+
+/// `grow = { max, step }` on a golden (#691): the spelling of a Volume's
+/// `spec.grow` (#690).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrowSpec {
+    pub max: SpecSize,
+    #[serde(default)]
+    pub step: Option<SpecSize>,
+}
+
+impl GrowSpec {
+    /// The policy it says, or why it says none.
+    pub fn policy(&self) -> std::result::Result<crate::volume::metadata::GrowPolicy, String> {
+        crate::volume::metadata::GrowPolicy::parse(&self.max.json(), self.step.as_ref().map(SpecSize::json).as_ref())
+    }
 }
 
 impl ImageSpec {
@@ -319,6 +360,15 @@ impl ImageSpec {
                     p.name.as_deref().unwrap_or("(from_image)")
                 ))
             })?;
+        }
+        // A grow policy that cannot be applied is refused before anything
+        // is laid down, not when the golden is (#691).
+        for slab in self.slab.iter().chain(self.data_slab.iter()) {
+            for g in &slab.goldens {
+                if let Some(grow) = &g.grow {
+                    grow.policy().map_err(|e| ImageError::Spec(format!("golden '{}': grow: {e}", g.name)))?;
+                }
+            }
         }
         Ok(())
     }
