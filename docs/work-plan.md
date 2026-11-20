@@ -537,6 +537,10 @@ f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
 - [ ] **reopened 2026-11-18**: the proof's `api:` path 404s on the apiserver
   (no replications CRD; no object made on pvetest2). Behind #655's owner
   decision (A CRDs / B APIService / C :9090).
+- [x] 2026-11-20: back in line with both holds still open (registry#186
+  reopened on its 502, v0.74.1 e9badfd shipped; stormcos#1050 open); nothing
+  left on the engine side; re-proposed `--after stormblock-registry#186
+  --after stormcos#1050`
 
 - [ ] **2026-11-19, the master's re-scope (issue retitled; comments of
   2026-11-18 "registry to registry", "thin all the way through")**: the
