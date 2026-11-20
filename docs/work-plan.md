@@ -157,6 +157,16 @@ ISO. stormblock's side, in steps (each its own commit):
   LBA missing from the manifest: glennswest/stormdist#17
 - (2026-11-18) `propose --after stormdist#10` was refused as circular: #10's
   firmware boot waits for this initramfs half, so it is ours to do next
+- (2026-11-19) **waits on the owner** (needs-owner, comment 7028681467): a
+  forge install boots a clone of the release's composed disk
+  (`stormcos-sno-<ver>`: ESP, pallets kernel1/system1/kube1/data1, the
+  system and data slabs; one per flavour). The 12.78 full ISO carries only
+  the 101 component goldens: no disk, pallets or image spec, so goldens
+  alone cannot boot a node. Asked: (1, recommended) the ISO carries each
+  flavour's disk as a member and `/init` hands `boot-local` an ISO-backed
+  read-only source (`Media::read_at`), the forge flow-over unchanged; or
+  (2) the node composes the disk from the goldens (image spec + pallets on
+  the ISO). Nothing built for the ISO boot until answered.
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it
