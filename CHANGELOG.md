@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.41.0] — 2026-11-20
+
+### Added
+- #695: `DELETE /api/v1/releases/{v}/stage` stops a running stage (it was a 409 until the stage ended, so a cancelled update waited out the whole copy, stormupdate#36). It answers 202 with the job `cancelled`; the stage stops before its next volume or between two extents, deletes what it laid, and the job is then gone (`GET` a 404). A new stage is a 409 while a cancelled one is being discarded.
+
 ### 2026-11-20
 - **feat:** #695: `DELETE /api/v1/releases/{v}/stage` stops a running stage (it was a 409 until the stage ended, so a cancelled update waited out the whole copy, stormupdate#36). It answers 202 with the job `cancelled`; the stage stops before its next volume or between two extents, deletes what it laid, and the job is then gone (`GET` a 404). A new stage is a 409 while a cancelled one is being discarded.
 
