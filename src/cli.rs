@@ -3791,7 +3791,41 @@ pub async fn run() -> anyhow::Result<()> {
 /// smallest, and every drive laid at once; then the kernel told of the new
 /// tables, so stormraid finds the data regions.
 async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) -> anyhow::Result<()> {
-    use crate::image::{local, storage::sh_quote};
+    use crate::image::storage::sh_quote;
+    let o = storage_lay(system_bytes, legs, drives).await?;
+    println!("STORAGE_LAID={}", sh_quote(&o.laid.join(" ")));
+    println!(
+        "STORAGE_LAY_FAILED={}",
+        sh_quote(&o.failed.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>().join(" "))
+    );
+    println!(
+        "STORAGE_LAY_WHY={}",
+        sh_quote(&o.failed.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join("; "))
+    );
+    println!("STORAGE_MEMBERS={}", sh_quote(&o.members.join(" ")));
+    println!("STORAGE_REGION={}", o.regions.member_bytes);
+    println!("STORAGE_SYSTEM_REGION={}", o.regions.system_bytes);
+    println!("STORAGE_BOOT_AREA={}", o.regions.boot_bytes);
+    Ok(())
+}
+
+/// What [`storage_lay`] laid (#573; #623: the running node lays as /init does).
+#[derive(Debug, Clone)]
+pub struct LayOutcome {
+    /// The drives laid, in the order given.
+    pub laid: Vec<String>,
+    /// The drives that could not be laid, each with why (#625).
+    pub failed: Vec<(String, String)>,
+    /// Each laid drive's data-region partition: the set's members.
+    pub members: Vec<String>,
+    pub regions: crate::image::local::StorageRegions,
+}
+
+/// Lay every drive at once (#573): regions sized by the smallest, a system
+/// leg on each of `legs`; the kernel told of each new table. An error only
+/// when no drive could be laid; a drive that fails is in `failed`.
+pub async fn storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) -> anyhow::Result<LayOutcome> {
+    use crate::image::local;
     if let Some(l) = legs.iter().find(|l| !drives.contains(l)) {
         anyhow::bail!("{l} is a leg but not one of the drives laid");
     }
@@ -3872,20 +3906,7 @@ async fn run_storage_lay(system_bytes: u64, legs: &[String], drives: &[String]) 
             failed.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join("; ")
         );
     }
-    println!("STORAGE_LAID={}", sh_quote(&done.join(" ")));
-    println!(
-        "STORAGE_LAY_FAILED={}",
-        sh_quote(&failed.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>().join(" "))
-    );
-    println!(
-        "STORAGE_LAY_WHY={}",
-        sh_quote(&failed.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join("; "))
-    );
-    println!("STORAGE_MEMBERS={}", sh_quote(&members.join(" ")));
-    println!("STORAGE_REGION={}", regions.member_bytes);
-    println!("STORAGE_SYSTEM_REGION={}", regions.system_bytes);
-    println!("STORAGE_BOOT_AREA={}", regions.boot_bytes);
-    Ok(())
+    Ok(LayOutcome { laid: done, failed, members, regions })
 }
 
 /// A drive whose lay failed, explained (#625): the drive's own answers

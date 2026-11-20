@@ -5,6 +5,10 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-20
+- **refactor:** #623: `cli::storage_lay` returns what it laid (`LayOutcome`); `image storage-lay` prints it exactly as before.
+- **feat:** #623 step 3 (not started by anything yet): `mgmt::node_install::run`, a fresh install's order as the running node runs it. It formats, lays, makes the set and takes the system half, its legs and the flow-over, each step in the install record, with a drive that will not lay stopping it or left out per `storage.on_drive_failure`.
+
+### 2026-11-20
 - **fix:** #709 (finding d893aaefa0ff, major): a `PATCH` of a Volume on the engine's kube surface (`/apis/storage.storm.io/v1/volumes/{name}`) is destructive: the admin token, or a `destroy` review. It seals, unseals (a golden opened again) or changes access, as the REST `…/seal` and `PATCH /api/v1/volumes/{id}` do, and those were the admin's while this was the node token's. A spec changed on the cluster's apiserver reaches the engine through `kube_publish`, behind the apiserver's own RBAC, as before.
 - **test:** #709 (finding 2e2144771e67, major, fixed by #571's 9f1c2056 after the review's commit): the kube slab list, run while the manager is held as a delete holds it, holds no registry lock, and answers once let go.
 

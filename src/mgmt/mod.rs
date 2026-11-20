@@ -39,6 +39,7 @@ pub mod forge_trust;
 pub mod finder;
 pub mod install_config;
 pub mod install_plan;
+pub mod node_install;
 pub mod kernelopt;
 pub mod peers;
 pub mod live_mirror;

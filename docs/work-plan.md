@@ -154,6 +154,25 @@ Steps, each its own commit and check:
   6. reboot to local once the flow-over is proved (stormpump's boot intent),
      done when Ready from its own disk; NodeInstall status follows each step.
   Proposed `--after stormraid#96`.
+- (2026-11-20, P0 again after 76 h) **not blocked after all**: `/init` makes
+  the set with `stormraid create --role node-data` (the role is in the
+  superblock) and serves it with its own `stormraid serve --id 65535` until
+  the node's daemon takes it over. The running node does the same, so the
+  next boot finds the set as it finds `/init`'s; stormraid#96 (a RaidSet
+  `role`) is wanted for kube-made sets, not needed here. Step 3 now:
+  - [x] `cli::storage_lay` returns a `LayOutcome` (`run_storage_lay` prints
+    it as before)
+  - [x] `mgmt::node_install::run` over an `Install` trait: format, lay
+    (`on_drive_failure`), set, system half + legs + flow-over, each in the
+    install record; fake-tested (order, a lay failure stop/continue, no set,
+    a failed format)
+  - [ ] the live `Install`: format (`format_job` on the plan's SAS drives
+    not at its format, polled), lay (`storage_lay`), set (`stormraid create`
+    + `serve --id`, the binary from config), take (`take_local_disks` on
+    the live manager, the legs registered, `spawn_flow_over`)
+  - [ ] the trigger: `storage.runtime: true` in the words; /init boots the
+    claim with drives untouched; the engine starts `run` once; then the
+    reboot to local after the flow-over is proved
 - (2026-11-20) held behind #700 (the master: forge first). Next is step 2:
   /init keeps the install-config's non-secret `mode` and `storage:` for the
   node (it deletes the whole file before switch_root, #685). The engine
