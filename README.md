@@ -980,7 +980,7 @@ deleting an unsealed volume. Each destructive call is in `<data_dir>/audit.log`.
 | `/v1` | the CSI / orchestrator contract (`contract/`): volumes, snapshots, `group-snapshots`, attach/detach, `nodes/capacity`, `placement` (create takes `placement.array_id`, `slab_id` or `drive`, exactly one, on this node: a slab or drive that cannot hold it is `409`, one this node lacks `507`, #426), `prestage`, `fence`, `promote`, `dual-attach`; the backup primitives (stormstorage#46, stormvm#31): `GET /v1/snapshots/{id}/changes[?base=]` (#399) and `POST /v1/snapshots/{id}/ship` → `/v1/ship-jobs/{id}` (#400), below |
 | `/serve/v1` (and `/mk/v1`) | the serving layer: `health`, `ready`, `status`, `volumes` (list, create, delete), exports, tar, raw, trim |
 | `/apis`, `/apis/storage.storm.io`, `/apis/storage.storm.io/v1` | API discovery, then Kubernetes-shaped `volumes`, `slabs`, `drives`, `nodes`, with `?watch=1` and `labelSelector` (`k=v`, `k!=v`, `k`, `!k`). A Volume's `status` carries `owner`, `consumer`, `inUse`, `attachments[]` (`transport`, `device`, `mountedAt`, `target`, `port`, `lun`, `nsid`, `state`, `remote`) and `kind` as the REST listing does (#649), and `attach`, the same list with `deviceHint` on a ublk entry (#658; it was one object or null, from the engine's own exports only), and its labels `storm.io/kind` and `storm.io/owner-kind`: `kubectl get volumes -l storm.io/owner-kind=Pod`, `-l '!storm.io/owner-kind,storm.io/kind=volume'` for orphan clones, or `?unowned=true` |
-| `PATCH /apis/storage.storm.io/v1/volumes/{id}` | `spec`: `redundancy`, `sealed`, `access`, `retention`, `resync`, and `sizeBytes` (#655), which grows the volume: thin, never smaller (`422`), never a sealed, exported or mirrored one (`409`). Its ublk device is told the new size. An ext4 the engine sees mounted on it is grown online (`EXT4_IOC_RESIZE_FS`); otherwise (an XFS, a mount in a service's own namespace) the service that mounts it grows it. `status.capacityBytes` follows, and the PATCH's answer carries `status.lastResize` (`from`, `to`, `device`, `filesystem`) |
+| `PATCH /apis/storage.storm.io/v1/volumes/{id}` | `spec`: `redundancy`, `sealed`, `access`, `retention`, `resync`, and `sizeBytes` (#655), which grows the volume: thin, never smaller (`422`), never a sealed, exported or mirrored one (`409`). Its ublk device is told the new size. An ext4 mounted on it, in any mount namespace (reached through `/proc/<pid>/root`, #690), is grown online (`EXT4_IOC_RESIZE_FS`); anything else (an XFS) is left to the service that mounts it. `grow` (#690) sets or clears the volume's grow policy (below). `status.capacityBytes` follows, and the PATCH's answer carries `status.lastResize` (`from`, `to`, `device`, `filesystem`) |
 | `/apis/storage.storm.io/v1/replications` | `Replication` (#656): sync this engine's store from a peer engine, once or following it; create, replace, patch, delete are the admin's. See "Replication" below |
 | the cluster's apiserver | The engine writes its `Volume` and `Replication` objects there as CRDs (#655, `deploy/crds.yaml`), and takes back a spec changed there. See "On the cluster's apiserver" below |
 | `/ui`, `/` | the old web UI, only with `--features ui`: behind the token like the API, and its forms (create, delete) behind the admin gate (#166) |
@@ -1228,13 +1228,38 @@ Every 15 s (`mgmt::kube_publish`):
 - **A spec changed on the apiserver**: `sc patch volume <id> -p
   '{"spec":{"sizeBytes":1099511627776}}'`. The annotation
   `storm.io/engine-spec` holds the writable fields (`sizeBytes`, `sealed`,
-  `access`, `retention`, `redundancy`) as the engine last wrote them. A field
+  `access`, `retention`, `redundancy`, `grow`) as the engine last wrote them. A field
   that differs from it was asked there and goes through the same code as the
   engine's own PATCH. So a grow is thin, its ublk device is told, and an ext4
   the engine sees mounted is grown online; `status.lastResize` says what
   happened. `resync: true` runs a resync. A refusal (smaller, sealed,
   exported, mirrored) is put in `status.specError` (`asked`, `code`,
   `message`, `at`), and the spec is put back to what the volume is.
+- **How full, and grown as it fills** (#690, `mgmt::fill`). Every 30 s each
+  volume served here as a ublk device and mounted on the node (in any mount
+  namespace, reached through `/proc/<pid>/root`) is `statfs`ed. Its object
+  carries `status.filesystem` (`mountedAt`, `sizeBytes`, `usedBytes`,
+  `availBytes`, `usedPercent` as `df` counts it, `readAt`),
+  `status.usedBytes`, and two conditions: `VolumeFilling` from 80 % used and
+  `VolumeFull` from 95 %, each `True`/`False` with a reason, a message (used
+  of size, where) and `lastTransitionTime`. A crossing is logged. Metrics:
+  `storm_volume_fs_size_bytes`, `storm_volume_fs_used_bytes`,
+  `storm_volume_fs_used_ratio`, `storm_volume_grows_total`, by `volume` and
+  `name`. A volume not mounted where the engine sees it (an iSCSI or NVMe/TCP
+  export, a raw device) has none of these.
+  **`spec.grow: {max, step}`** (bytes, or `64G`/`64Gi`, base 1024; `step`
+  whole GiB, 1 GiB when not said; `null` clears it) has the engine grow the
+  volume, once its filesystem is 80 % used, by a step up to `max`, at most
+  once in 5 minutes, through the same grow as `spec.sizeBytes`. The step is
+  cut to the room in the volume's pool: its free bytes less 1 GiB or 5 % of
+  what the pool promises, in whole GiB. Each grow is in `status.grown` (the
+  last 10: `from`, `to`, `device`, `filesystem`, `at`). One that was not made
+  says why in `status.growBlocked` (`AtMax`, `NoRoom`, `Refused`, or
+  `NotTheEngines` for a `/v1` attach's device, which its claim grows). The
+  policy is kept with the volume (a format-2 header block, `G`; a volume with
+  none writes the header it did) and a clone inherits it, so a policy on a
+  release's blank reaches every node's copy. A sealed volume takes one for
+  its clones and is never grown. No policy, no grow: the conditions alone.
 - **Replication.** This node's are written the same way, labelled with the
   node. One made on the apiserver with this node's `storm.io/node` label runs
   here; a spec changed there is a new generation here. One the engine had

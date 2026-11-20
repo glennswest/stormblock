@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-19
+- **feat:** #690: every volume served here as a ublk device and mounted on the node is `statfs`ed every 30 s (any mount namespace, through `/proc/<pid>/root`). Its Volume object carries `status.filesystem`, `status.usedBytes`, and the conditions `VolumeFilling` (80 %) and `VolumeFull` (95 %) with reason, message and `lastTransitionTime`. Metrics: `storm_volume_fs_{size,used}_bytes`, `storm_volume_fs_used_ratio`, `storm_volume_grows_total`.
+- **feat:** #690: `spec.grow: {max, step}` on a Volume. Once the volume's filesystem is 80 % used, the engine grows it by a step up to `max`, at most every 5 minutes, within its pool's room less a margin; `status.grown` and `status.growBlocked` say what happened. The policy is kept with the volume (header block `G`; a volume without one writes the header it did) and inherited by a clone. `deploy/crds.yaml` carries the schema and a `Used%` column.
+- **fix:** #690: a grow through `spec.sizeBytes` (#655) reaches the ext4 mounted on the volume through its own mount namespace and tells it by its statfs magic. Before, the mount point was opened from the engine's namespace, where a service's mount is not, or is another path.
+
 ## [v24.34.3] — 2026-11-19
 
 ### Fixed
