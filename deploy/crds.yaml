@@ -13,6 +13,12 @@
 #   in status.specError, a grow in status.lastResize. The annotation
 #   storm.io/engine-spec is what the engine last wrote. Deleting the object
 #   deletes no volume: the engine writes it again.
+#   spec.grow {max, step} (#690; bytes or 64G, step whole GiB, default 1G;
+#   null clears) has the engine grow the volume by a step, up to max, once
+#   its filesystem is 80 % used; a clone inherits its blank's. Every volume
+#   mounted on the node carries status.filesystem, status.usedBytes and the
+#   conditions VolumeFilling (80 %) and VolumeFull (95 %); status.grown the
+#   last grows, status.growBlocked why one was not made.
 # - Replication: a sync from a peer engine (#656). It runs on the node its
 #   storm.io/node label names (no label: nowhere). Made, changed or deleted
 #   here, the node's engine follows; one made on the engine's own port is
@@ -51,6 +57,7 @@ spec:
         - { name: Sealed, type: boolean, jsonPath: .spec.sealed }
         - { name: Kind, type: string, jsonPath: .status.kind }
         - { name: InUse, type: boolean, jsonPath: .status.inUse }
+        - { name: Used%, type: integer, jsonPath: .status.filesystem.usedPercent }
         - { name: Namespace, type: string, jsonPath: .spec.namespace, priority: 1 }
         - { name: Role, type: string, jsonPath: .spec.role, priority: 1 }
         - { name: Error, type: string, jsonPath: .status.specError.message, priority: 1 }
@@ -72,6 +79,13 @@ spec:
                 fs: { type: object, nullable: true, x-kubernetes-preserve-unknown-fields: true }
                 namespace: { type: string }
                 resync: { type: boolean }
+                grow:
+                  type: object
+                  nullable: true
+                  required: [max]
+                  properties:
+                    max: { x-kubernetes-int-or-string: true }
+                    step: { x-kubernetes-int-or-string: true }
             status:
               type: object
               x-kubernetes-preserve-unknown-fields: true

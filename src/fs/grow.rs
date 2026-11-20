@@ -2,8 +2,8 @@
 //!
 //! A volume grown through its object (`spec.sizeBytes`) is a bigger device;
 //! the filesystem on it is grown by whoever mounts it. When the engine can
-//! see the mount (the device's mount point in the host's mount table), it
-//! grows an ext4 itself, as `resize2fs` does on a mounted one: the kernel's
+//! see the mount (in any mount namespace, reached through `/proc/<pid>/root`,
+//! #690), it grows an ext4 itself, as `resize2fs` does on a mounted one: the kernel's
 //! `EXT4_IOC_RESIZE_FS` with the new block count. Anything else is said, and
 //! left to the service that mounts it (an XFS: `xfs_growfs`).
 
@@ -16,30 +16,34 @@ pub fn blocks_for(bytes: u64, block: u64) -> u64 {
     bytes.checked_div(block).unwrap_or(0)
 }
 
-/// What the filesystem at `mountpoint` is (`ext4`, `xfs`, …), from the
-/// mount table.
-pub fn kind_at(mountinfo: &str, mountpoint: &str) -> Option<String> {
-    mountinfo.lines().find_map(|l| {
-        let f: Vec<&str> = l.split(' ').collect();
-        let sep = f.iter().position(|x| *x == "-")?;
-        if f.get(4) == Some(&mountpoint) {
-            f.get(sep + 1).map(|s| s.to_string())
-        } else {
-            None
-        }
-    })
+/// What a filesystem's `f_type` says it is (`statfs(2)`'s magic numbers).
+pub fn kind_of_magic(magic: u64) -> &'static str {
+    match magic {
+        0xEF53 => "ext4",
+        0x5846_5342 => "xfs",
+        0x9123_683E => "btrfs",
+        0x0102_1994 => "tmpfs",
+        _ => "another filesystem",
+    }
 }
 
-/// Grow the ext4 mounted at `mountpoint` to `device_bytes`. Said in words.
+/// Grow the ext4 mounted at `mountpoint` (as its namespace shows it) to
+/// `device_bytes`, opened through `reach` (#690: `/proc/<pid>/root` and the
+/// mount point, so a mount in a service's own namespace is the one grown,
+/// never a path that means something else here). Said in words.
 #[cfg(target_os = "linux")]
-pub fn grow_mounted(mountpoint: &str, device_bytes: u64) -> Result<String, String> {
+pub fn grow_mounted(reach: &str, mountpoint: &str, device_bytes: u64) -> Result<String, String> {
     use std::os::fd::AsRawFd;
-    let info = ["/proc/1/mountinfo", "/proc/self/mountinfo"].iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
-    let kind = kind_at(&info, mountpoint).unwrap_or_else(|| "?".into());
+    let dir = std::fs::File::open(reach).map_err(|e| format!("{mountpoint}: {e}"))?;
+    // SAFETY: statfs fills the struct it is given.
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(dir.as_raw_fd(), &mut fs) } != 0 {
+        return Err(format!("{mountpoint}: statfs: {}", std::io::Error::last_os_error()));
+    }
+    let kind = kind_of_magic(fs.f_type as u64);
     if kind != "ext4" {
         return Err(format!("{kind} at {mountpoint}: grown by the service that mounts it (an XFS: xfs_growfs {mountpoint})"));
     }
-    let dir = std::fs::File::open(mountpoint).map_err(|e| format!("{mountpoint}: {e}"))?;
     // SAFETY: statvfs fills the struct it is given.
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatvfs(dir.as_raw_fd(), &mut st) } != 0 {
@@ -60,7 +64,7 @@ pub fn grow_mounted(mountpoint: &str, device_bytes: u64) -> Result<String, Strin
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn grow_mounted(mountpoint: &str, _device_bytes: u64) -> Result<String, String> {
+pub fn grow_mounted(_reach: &str, mountpoint: &str, _device_bytes: u64) -> Result<String, String> {
     Err(format!("{mountpoint}: grown by the service that mounts it"))
 }
 
@@ -69,11 +73,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_mount_table_read() {
-        let t = "36 25 259:3 / /var/lib/registry rw,relatime shared:12 - ext4 /dev/ublkb7 rw\n37 25 259:4 / /data rw - xfs /dev/ublkb8 rw\n";
-        assert_eq!(kind_at(t, "/var/lib/registry").as_deref(), Some("ext4"));
-        assert_eq!(kind_at(t, "/data").as_deref(), Some("xfs"));
-        assert_eq!(kind_at(t, "/nope"), None);
+    fn the_filesystem_told_by_its_magic() {
+        assert_eq!(kind_of_magic(0xEF53), "ext4");
+        assert_eq!(kind_of_magic(0x5846_5342), "xfs");
+        assert_eq!(kind_of_magic(7), "another filesystem");
         assert_eq!(blocks_for(4 << 30, 4096), 1 << 20);
         assert_eq!(blocks_for(1, 0), 0);
     }

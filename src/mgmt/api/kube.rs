@@ -471,9 +471,11 @@ pub(crate) async fn grow_volume(state: &AppState, id: VolumeId, to: u64) -> Resu
             format!("its ublk device did not follow: {e}")
         }
     };
-    let fs = match dev_path.as_deref().and_then(crate::mgmt::ublk_export::mounted_at) {
-        Some(mp) => {
-            let r = tokio::task::spawn_blocking(move || crate::fs::grow::grow_mounted(&mp, to)).await.unwrap_or_else(|e| Err(e.to_string()));
+    // The mount reached through its own namespace (#690): a service's
+    // mount is not a path in the engine's.
+    let fs = match dev_path.as_deref().and_then(crate::mgmt::ublk_export::reach_of) {
+        Some((mp, reach)) => {
+            let r = tokio::task::spawn_blocking(move || crate::fs::grow::grow_mounted(&reach, &mp, to)).await.unwrap_or_else(|e| Err(e.to_string()));
             match r {
                 Ok(s) => s,
                 Err(e) => e,
