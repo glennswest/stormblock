@@ -13086,6 +13086,11 @@ file = "{state}"
         let claim = dir.path().join("claim-11.91.raw").display().to_string();
         std::fs::copy(&image_n1, &claim).unwrap();
         let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
+        // #690: the release declares `state` grows; the node's kept volume,
+        // made before, takes it.
+        let policy = crate::volume::metadata::GrowPolicy { max: grown * 2, step: 1 << 30 };
+        let rel_state = mgr.find_volume("state").await.unwrap();
+        mgr.set_grow_policy(rel_state, Some(policy)).unwrap();
         let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump")).await.unwrap();
         let flow = flow.expect("the system half laid again");
         let report = report.expect("the data half kept");
@@ -13098,6 +13103,7 @@ file = "{state}"
         struct Expect {
             state_id: crate::volume::VolumeId,
             state_grown: u64,
+            policy: crate::volume::metadata::GrowPolicy,
             logs_id: crate::volume::VolumeId,
             pvc: crate::volume::VolumeId,
             state_before: Vec<u8>,
@@ -13110,6 +13116,7 @@ file = "{state}"
             assert_eq!(m.find_volume("state").await, Some(e.state_id), "{when}: the node's state, by its id");
             let grown = m.get_volume(&e.state_id).unwrap().capacity_bytes();
             assert_eq!(grown, e.state_grown, "{when}: the grown state keeps its size (#689)");
+            assert_eq!(m.grow_policy(&e.state_id), Some(e.policy), "{when}: the release's grow policy on the kept state (#690)");
             assert_eq!(volume_bytes(m, "state").await.unwrap(), e.state_before, "{when}: state");
             assert_eq!(m.find_volume("logs@11.90").await, Some(e.logs_id), "{when}: the node's logs, aside");
             // A rollback copy, marked so (#565), and the mark kept on disk.
@@ -13129,7 +13136,7 @@ file = "{state}"
             names.dedup();
             assert_eq!(names.len(), all, "{when}: a name answered by two volumes: {names:?}");
         }
-        let e = Expect { state_id, state_grown: grown, logs_id, pvc, state_before, logs_before, pvc_bytes, n1_svc, n1_logs };
+        let e = Expect { state_id, state_grown: grown, policy, logs_id, pvc, state_before, logs_before, pvc_bytes, n1_svc, n1_logs };
         check(&mgr, "after the install", &e).await;
         super::quarantine_flow_sources(&mgr, &flow).await;
         drop(mgr);

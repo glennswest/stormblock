@@ -572,8 +572,17 @@ pub async fn adopt(
         }
         match policy.get(name).cloned().unwrap_or(Policy::Keep) {
             Policy::Keep => {
-                // The node's stays. The release's was this boot's fresh
-                // clone of its blank, and nothing has used it.
+                // The node's stays, at its own size (#689), and takes the
+                // grow policy the release's copy of it carries (#690: one
+                // the release declares reaches a volume made before it).
+                if let Some(g) = mgr.grow_policy(&rel_id) {
+                    if mgr.grow_policy(node_id) != Some(g) {
+                        let _ = mgr.set_grow_policy(*node_id, Some(g));
+                        tracing::info!("install: {name} kept, and grows as the release says: up to {} bytes, {} a step (#690)", g.max, g.step);
+                    }
+                }
+                // The release's was this boot's fresh clone of its blank,
+                // and nothing has used it.
                 if let Err(e) = mgr.delete_volume(rel_id).await {
                     let to = generation_name(name, version);
                     tracing::warn!("install: the release's fresh {name} could not be deleted ({e}); renamed {to}");
