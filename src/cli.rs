@@ -1120,6 +1120,19 @@ enum ImageAction {
         #[arg(long)]
         force: bool,
     },
+    /// Keep the install-config's words the running node plans with (#623):
+    /// `mode`, `system_drive` and `storage` without its wipe word, written to
+    /// `--out` (0600); nothing else of the file, which holds secrets. /init
+    /// runs it before it deletes the install-configs. No such words: `--out`
+    /// is removed.
+    InstallIntent {
+        /// The install-config (YAML)
+        #[arg(long)]
+        config: String,
+        /// Where the words go
+        #[arg(long, default_value = "/run/stormblock/install-intent.yaml")]
+        out: String,
+    },
     /// Lay every drive of a planned `storage:` layout at once (#573): the
     /// same table on each — boot area, system region, data region — sized by
     /// the smallest. **Destroys what is on every drive named.** Prints
@@ -2931,6 +2944,10 @@ pub async fn run() -> anyhow::Result<()> {
                     Ok(Some(sh)) => print!("STORAGE_NONE=0\n{sh}"),
                     Err(e) => println!("STORAGE_NONE=0\nSTORAGE_STOP={}", crate::image::storage::sh_quote(&e)),
                 }
+            }
+            ImageAction::InstallIntent { config, out } => {
+                let doc = std::fs::read_to_string(config).map_err(|e| anyhow::anyhow!("cannot read {config}: {e}"))?;
+                write_install_intent(&doc, Path::new(out))?;
             }
             ImageAction::StorageLay { system_bytes, leg, drives } => {
                 run_storage_lay(*system_bytes, leg, drives).await?;
@@ -11317,6 +11334,27 @@ async fn system_legs_checked(
     out
 }
 
+/// [`crate::image::storage::install_intent`] of `doc` written to `out`, 0600,
+/// by a rename (#623); `out` removed when there is nothing to keep.
+fn write_install_intent(doc: &str, out: &std::path::Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let kept = crate::image::storage::install_intent(doc);
+    if kept.is_empty() {
+        let _ = std::fs::remove_file(out);
+        return Ok(());
+    }
+    if let Some(d) = out.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = out.with_extension("tmp");
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+    f.write_all(kept.as_bytes())?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, out)?;
+    Ok(())
+}
+
 /// Whether this boot-local is an install (#700): it boots the claimed image
 /// (every slab a fabric URI) and has a local drive to lay a system half on.
 fn install_boot(slab_paths: &[String], lays_local: bool, check: bool) -> bool {
@@ -11994,6 +12032,19 @@ async fn handle_migrate_boot(
 #[cfg(test)]
 mod tests {
     use super::note_no_intent;
+
+    /// #623: the kept words are written 0600; nothing kept, nothing left.
+    #[test]
+    fn the_install_intent_is_written_private_and_gone_when_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let w = tempfile::tempdir().unwrap();
+        let out = w.path().join("run/install-intent.yaml");
+        super::write_install_intent("apiToken: x\nmode: diagnostic\n", &out).unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "mode: diagnostic\n");
+        assert_eq!(std::fs::metadata(&out).unwrap().permissions().mode() & 0o777, 0o600);
+        super::write_install_intent("apiToken: x\n", &out).unwrap();
+        assert!(!out.exists());
+    }
 
     /// #700: an install boot is the claim alone with a drive to lay; a
     /// node booting its own disk, or a check, is none.

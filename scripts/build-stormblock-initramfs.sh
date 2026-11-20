@@ -7783,6 +7783,15 @@ if [ -n "$_icfile" ]; then
 fi
 mkdir -p "${STORM_RUN:-/run/stormblock}" 2>/dev/null
 printf '%s\n' "${_icsrc%%,*}" > "${STORM_RUN:-/run/stormblock}/install-config.source" 2>/dev/null || true
+# The words the running node plans an install with (#623): mode,
+# system_drive and storage: without its wipe word, nothing else (the engine's
+# NodeInstall shows its plan). Written from this boot's copy before it goes.
+if [ -n "$_icfile" ] && [ -f "$_icfile" ]; then
+    if ! _icw=$("${STORM_STORMBLOCK:-/usr/sbin/stormblock}" image install-intent --config "$_icfile" \
+            --out "${STORM_RUN:-/run/stormblock}/install-intent.yaml" 2>&1); then
+        echo "install-config: its install words are not kept for the node (#623): $(printf '%s' "$_icw" | head -c 200)"
+    fi
+fi
 rm -f "${INSTALL_CONFIG_STAGED:-}" "$INSTALL_CONFIG_FORGE" 2>/dev/null
 # --- END install config write
 

@@ -61,12 +61,28 @@ lay() { # [header] -> the variables for $CONF, chunked at 768
     var StormBootInstallConfig "$WORK/hdr"
 }
 
+# stormblock, as far as this block uses it (#623): `image install-intent`
+# records what it was handed and keeps the first `mode:` line, as the real
+# one keeps only the install's words.
+cat > "$WORK/fake-sb" <<'SB'
+#!/bin/sh
+[ "$1 $2" = "image install-intent" ] || exit 2
+shift 2
+while [ $# -gt 0 ]; do
+    case "$1" in --config) cfg=$2; shift 2 ;; --out) out=$2; shift 2 ;; *) exit 2 ;; esac
+done
+echo "$cfg -> $out" > "${SB_LOG:?}"
+grep '^mode:' "$cfg" > "$out" || rm -f "$out"
+SB
+chmod +x "$WORK/fake-sb"
+
 boot() { # mounted(yes|no) -> runs read then write; console in $WORK/console
     rm -rf "$WORK/run"
     : > "$WORK/mounts"
     [ "$1" = yes ] && echo "/dev/ublkb9 $WORK/sysroot/state ext4 rw 0 0" > "$WORK/mounts"
     STORM_EFIVARS="$EV" STORM_RUN="$WORK/run" STORM_SYSROOT="$WORK/sysroot" \
     STORM_MOUNTS_FILE="$WORK/mounts" STORM_INSTALL_TICKET="$WORK/run/install.json" \
+    STORM_STORMBLOCK="$WORK/fake-sb" SB_LOG="$WORK/sb-log" \
     FORGE="${FORGE:-}" TICKET="${TICKET:-}" INSTALL_OVER="${INSTALL_OVER:-}" sh -c '
         mkdir -p "$STORM_RUN"
         # What boot-claim leaves (#459): forge'"'"'s copy, and the ticket.
@@ -161,5 +177,18 @@ rm -rf "$WORK/sysroot"; mkdir -p "$WORK/sysroot/state"; FORGE="$FCONF" TICKET=1 
 check "forge's, /state not mounted: nothing written" no "$([ -e "$WORK/sysroot/state/config/install-config.yaml" ] && echo yes || echo no)"
 check "  and its staged copy is gone" no "$(forge_gone)"
 check "no forge run printed a secret" 0 "$(grep -c 'SECRET-' "$WORK/console" || true)"
+
+echo "the install's words for the node (#623):"
+printf 'mode: install\nstormupdate:\n  updateToken: SECRET-UPDATE-3\n' > "$FCONF"
+rm -rf "$EV" "$WORK/sysroot" "$WORK/sb-log"; mkdir -p "$EV" "$WORK/sysroot/state"
+FORGE="$FCONF" TICKET=1 boot yes
+check "forge's copy handed to install-intent before it goes" \
+    "$WORK/run/install-config.forge.yaml -> $WORK/run/install-intent.yaml" "$(cat "$WORK/sb-log" 2>/dev/null)"
+check "  the node keeps its mode" "mode: install" "$(cat "$WORK/run/install-intent.yaml" 2>/dev/null)"
+check "  and no secret" 0 "$(grep -c 'SECRET-' "$WORK/run/install-intent.yaml" 2>/dev/null || true)"
+check "  the staged copy is gone" no "$(forge_gone)"
+rm -rf "$EV" "$WORK/sb-log"; mkdir -p "$EV"; boot yes
+check "no install-config: install-intent is not run" no "$([ -e "$WORK/sb-log" ] && echo yes || echo no)"
+check "no run printed a secret" 0 "$(grep -c 'SECRET-' "$WORK/console" || true)"
 
 [ "$fail" = 0 ] && echo "PASS" || { echo "FAIL"; exit 1; }

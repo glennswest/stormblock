@@ -1034,9 +1034,257 @@ pub fn plan_from_config(doc: &str, seen: &[SeenDrive], force: bool) -> Result<Op
     plan(&spec, seen, force).map(|p| Some(p.to_shell()))
 }
 
+/// The install-config's words the running node keeps (#623): `mode`,
+/// `system_drive` and `storage` without its `wipe` (the wipe word is for one
+/// install, and it never leaves the initramfs). Nothing else: the rest of
+/// the file holds secrets (#275), and `/init` deletes it before
+/// `switch_root` (#685). Comments are dropped. Empty when it has none of
+/// them.
+pub fn install_intent(doc: &str) -> String {
+    const KEEP: [&str; 3] = ["mode", "storage", "system_drive"];
+    let mut out = String::new();
+    // The top-level key being copied, and in `storage` the indent of its
+    // children and whether a `wipe` child is being skipped.
+    let mut keeping = false;
+    let mut in_storage = false;
+    let mut child_indent: Option<usize> = None;
+    let mut skipping_wipe = false;
+    for raw in doc.lines() {
+        let l = strip_comment(raw).trim_end();
+        let t = l.trim_start();
+        if t.is_empty() || t == "---" {
+            continue;
+        }
+        let indent = l.len() - t.len();
+        if indent == 0 {
+            let key = split_key(t).map(|(k, _)| k);
+            keeping = key.as_deref().is_some_and(|k| KEEP.contains(&k));
+            in_storage = key.as_deref() == Some("storage");
+            child_indent = None;
+            skipping_wipe = false;
+            if keeping {
+                let _ = writeln!(out, "{l}");
+            }
+            continue;
+        }
+        if !keeping {
+            continue;
+        }
+        if in_storage {
+            let ci = *child_indent.get_or_insert(indent);
+            if indent <= ci {
+                skipping_wipe = indent == ci && split_key(t).is_some_and(|(k, _)| k == "wipe");
+            }
+            if skipping_wipe {
+                continue;
+            }
+        }
+        let _ = writeln!(out, "{l}");
+    }
+    out
+}
+
+/// `/sys/block/<name>`'s shelf, as `/init`'s `shelf_of` reads it (#573):
+/// (shelf id, position, bay).
+fn shelf_in(block: &std::path::Path) -> (String, String, String) {
+    let real = std::fs::canonicalize(block).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let expander = real.contains("/expander-");
+    let comp = std::fs::read_dir(block.join("device")).ok().and_then(|rd| {
+        rd.flatten().filter_map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.strip_prefix("enclosure_device:").map(|b| (b.to_string(), e.path()))
+        }).last()
+    });
+    let Some((bay, link)) = comp else {
+        return ("-".into(), if expander { "external" } else { "internal" }.into(), String::new());
+    };
+    let clean = |s: String| -> String {
+        s.chars().filter(|c| *c != '"' && *c != '\\').map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
+    };
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).map(clean).unwrap_or_default();
+    let edir = std::fs::canonicalize(&link).ok().and_then(|p| p.parent().map(|p| p.to_path_buf()));
+    let (id, ident) = match &edir {
+        Some(e) => {
+            let id = read(e.join("id"));
+            let id = if id.is_empty() { e.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { id };
+            let ident = clean(format!("{} {}", read(e.join("device/vendor")), read(e.join("device/model"))));
+            (id, ident)
+        }
+        None => (String::new(), String::new()),
+    };
+    let both = format!("{bay} {ident}");
+    let lower = both.to_ascii_lowercase();
+    let position = if expander && !(ident.starts_with("DP BP") || ident.starts_with("DELL BP")) {
+        "external"
+    } else if lower.contains("rear") {
+        "rear"
+    } else if lower.contains("internal") || both.contains("M.2") || both.contains("BOSS") {
+        "internal"
+    } else {
+        "front"
+    };
+    (id, position.into(), bay)
+}
+
+/// Every whole disk with media under `sys` (`/sys` on a node), as `/init`'s
+/// `storage_disks` lists them and `storage_plan` describes them (#623: the
+/// running node plans as `/init` does). `carries` says what a disk holds
+/// that is not this node's own (empty for blank or this node's); nothing on
+/// a running node is `running` (the node runs from its volumes, not a
+/// drive), and a drive with no readable format is not listed (#595: the
+/// card's rows say those).
+pub fn seen_in(sys: &std::path::Path, carries: impl Fn(&str) -> String) -> Vec<SeenDrive> {
+    let mut names: Vec<String> = std::fs::read_dir(sys.join("block"))
+        .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    names.sort();
+    let mut out = Vec::new();
+    for n in names {
+        const NOT: [&str; 11] = ["loop", "ram", "zram", "ublkb", "ublkc", "nbd", "dm-", "md", "sr", "fd", "zd"];
+        if NOT.iter().any(|p| n.starts_with(p)) {
+            continue;
+        }
+        let b = sys.join("block").join(&n);
+        if !b.join("device").exists() {
+            continue;
+        }
+        let sectors: u64 = std::fs::read_to_string(b.join("size")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+        if sectors == 0 {
+            continue;
+        }
+        let real = std::fs::canonicalize(&b).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let id = crate::drive::identity::of_in(sys, &n).unwrap_or_default();
+        let (shelf, position, bay) = shelf_in(&b);
+        let dev = format!("/dev/{n}");
+        out.push(SeenDrive {
+            carries: carries(&dev),
+            dev,
+            serial: id.serial,
+            wwn: id.wwn,
+            model: id.model,
+            shelf,
+            position,
+            bay,
+            bytes: sectors * 512,
+            removable: std::fs::read_to_string(b.join("removable")).map(|s| s.trim() == "1").unwrap_or(false),
+            usb: real.contains("/usb"),
+            running: false,
+            unready: false,
+        });
+    }
+    out
+}
+
+impl StoragePlan {
+    /// The plan as the node's NodeInstall status shows it (#623): the
+    /// drives taken, their legs, the format and the set, and what the plan
+    /// says. Whether a wipe was asked, never the word.
+    pub fn to_json(&self) -> serde_json::Value {
+        let drives: Vec<serde_json::Value> = self
+            .drives
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "dev": d.dev, "serial": d.serial, "wwn": d.wwn, "model": d.model,
+                    "shelf": d.shelf, "position": d.position, "bay": d.bay, "bytes": d.bytes,
+                    "notReady": d.unready, "systemLeg": self.system.contains(&d.dev),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "drives": drives,
+            "systemLegs": self.system,
+            "blockSize": self.spec.block_size,
+            "protection": self.spec.protection.as_str(),
+            "method": self.spec.method,
+            "set": self.raid.map(|r| serde_json::json!({"parity": r.parity, "spares": r.spares})),
+            "onDriveFailure": self.spec.on_drive_failure.as_str(),
+            "wipeAsked": self.spec.wipe.is_some(),
+            "said": self.said,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #623: what the running node keeps of an install-config: mode,
+    /// system_drive and storage, never the wipe word or anything else.
+    #[test]
+    fn the_install_intent_keeps_no_secret_and_no_wipe_word() {
+        let doc = "pullSecret: '{\"auths\": {}}'\nmode: install   # the default\nstorage:\n  drives: all\n  wipe:\n    by: owner\n    why: forge1 again\n  format:\n    block_size: 4096\n  data_raid:\n    parity: 1\napiToken: secret\nsystem_drive: sda\n";
+        let kept = install_intent(doc);
+        assert_eq!(kept, "mode: install\nstorage:\n  drives: all\n  format:\n    block_size: 4096\n  data_raid:\n    parity: 1\nsystem_drive: sda\n");
+        assert!(!kept.contains("secret") && !kept.contains("auths") && !kept.contains("owner") && !kept.contains('#'));
+        // Still the same storage section, less the word.
+        let spec = StorageSpec::from_yaml(&top_level(&kept, "storage").unwrap().unwrap()).unwrap();
+        assert!(spec.wipe.is_none());
+        assert_eq!(spec.data_raid, Some(DataRaid { parity: 1, spares: 0 }));
+        let inline = install_intent("storage:\n  wipe: all\n  drives: all\n");
+        assert_eq!(inline, "storage:\n  drives: all\n");
+        assert_eq!(install_intent("apiToken: x\n"), "");
+    }
+
+    /// #623: the drives as /init describes them, read from sysfs by the
+    /// running node: disks with media only, their identity, shelf and bay.
+    #[test]
+    fn the_running_node_sees_its_drives_as_init_does() {
+        let w = tempfile::tempdir().unwrap();
+        let sys = w.path();
+        let mk = |name: &str, sectors: u64, model: &str, serial: &str| {
+            let b = sys.join("block").join(name);
+            std::fs::create_dir_all(b.join("device")).unwrap();
+            std::fs::write(b.join("size"), format!("{sectors}\n")).unwrap();
+            std::fs::write(b.join("removable"), "0\n").unwrap();
+            std::fs::write(b.join("device/model"), format!("{model}\n")).unwrap();
+            std::fs::write(b.join("device/serial"), format!("{serial}\n")).unwrap();
+            std::fs::create_dir_all(sys.join("class/block")).unwrap();
+            std::os::unix::fs::symlink(&b, sys.join("class/block").join(name)).unwrap();
+            b
+        };
+        mk("sda", 19_532_873_728, "HUH721010AL4200", "7JG1");
+        let sdb = mk("sdb", 19_532_873_728, "HUH721010AL4200", "7JG2");
+        mk("sdc", 0, "EMPTY", "0");
+        mk("loop0", 2048, "loop", "-");
+        mk("ublkb65535", 2048, "set", "-");
+        // An enclosure slot for sdb.
+        let enc = sys.join("class/enclosure/0:0:8:0");
+        std::fs::create_dir_all(enc.join("Slot 03")).unwrap();
+        std::fs::create_dir_all(enc.join("device")).unwrap();
+        std::fs::write(enc.join("id"), "0x500056b3\n").unwrap();
+        std::fs::write(enc.join("device/vendor"), "DP\n").unwrap();
+        std::fs::write(enc.join("device/model"), "BP14G+\n").unwrap();
+        std::os::unix::fs::symlink(enc.join("Slot 03"), sdb.join("device/enclosure_device:Slot 03")).unwrap();
+        let seen = seen_in(sys, |d| if d == "/dev/sdb" { "a partition table".into() } else { String::new() });
+        let devs: Vec<&str> = seen.iter().map(|d| d.dev.as_str()).collect();
+        assert_eq!(devs, ["/dev/sda", "/dev/sdb"], "media only; never loop, ublk or the set");
+        assert_eq!(seen[0].bytes, 19_532_873_728 * 512);
+        assert_eq!((seen[0].serial.as_str(), seen[0].model.as_str()), ("7JG1", "HUH721010AL4200"));
+        assert_eq!((seen[0].shelf.as_str(), seen[0].position.as_str(), seen[0].bay.as_str()), ("-", "internal", ""));
+        assert_eq!(seen[1].bay, "Slot 03");
+        assert_eq!(seen[1].shelf, "0x500056b3");
+        assert_eq!(seen[1].position, "front");
+        assert_eq!(seen[1].carries, "a partition table");
+        assert!(seen.iter().all(|d| !d.running && !d.usb && !d.removable));
+    }
+
+    /// #623: the plan as the NodeInstall shows it: whether a wipe was asked,
+    /// never the word.
+    #[test]
+    fn the_plan_as_json_says_a_wipe_was_asked_not_its_word() {
+        let doc = "storage:\n  drives: all\n  wipe: {by: owner, why: test}\n";
+        let spec = StorageSpec::from_yaml(&top_level(doc, "storage").unwrap().unwrap()).unwrap();
+        let seen: Vec<SeenDrive> = (0..4)
+            .map(|i| SeenDrive::parse(&format!("dev=/dev/sd{};serial=S{i};bay={i};position=front;bytes=10000000000000", ['a', 'b', 'c', 'd'][i])).unwrap())
+            .collect();
+        let p = plan(&spec, &seen, false).unwrap();
+        let j = p.to_json();
+        assert_eq!(j["drives"].as_array().unwrap().len(), 4);
+        assert_eq!(j["wipeAsked"], serde_json::json!(true));
+        assert!(!j.to_string().contains("owner"), "{j}");
+        assert_eq!(j["blockSize"], serde_json::json!(4096));
+    }
 
     fn s(v: &str) -> Yaml {
         Yaml::Str(v.into())

@@ -26,8 +26,10 @@
 # - NodeInstall: one per node, named after it (#623), written by that node's
 #   engine. Its status is the node's install record (GET
 #   /api/v1/install/progress, #616): state, stage, the layout's steps, each
-#   drive's state and format progress, the set and the system legs. It is
-#   written only when the node has an install record. Its spec names the
+#   drive's state and format progress, the set and the system legs, and
+#   status.install: this boot's install words (mode, storage:) and the plan
+#   they make over the drives now. It is written only when the node has an
+#   install record or install words. Its spec names the
 #   node and nothing else yet: nothing is asked through it.
 #
 # The engine writes them with its own token (kube-system/stormblock, the one

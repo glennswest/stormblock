@@ -1290,8 +1290,18 @@ Every 15 s (`mgmt::kube_publish`):
   `state`, `stage`, `steps`, each drive's state, format percent, ETA and last
   format line, `drivesTotal`, `drivesFormatting`, `etaSeconds`, the set and
   the system legs. `kubectl get nodeinstalls` (`ni`) lists them. A node with
-  no install record has none. Its spec names the node and nothing else yet:
-  the install is not driven through it. Its errors (the CRD not on the
+  no install record has none. `status.install` is this boot's install words
+  and the plan they make (#623, `mgmt::install_plan`). `/init` keeps the
+  install-config's `mode`, `system_drive` and `storage:` in
+  `/run/stormblock/install-intent.yaml`, without the wipe word and nothing
+  else (`stormblock image install-intent`). The engine then runs the plan
+  `/init` lays drives by over the drives sysfs lists now: this node's own
+  carry nothing, and any other carries what is on it (our slabs, else the
+  signatures in its first and last MiB; one being formatted is not read).
+  The status shows `plan` (the drives taken, their system legs, the format,
+  the set, what it says) or `planError`. Nothing is laid by it. Its spec
+  names the node and nothing else yet: the install is not driven through
+  it. Its errors (the CRD not on the
   cluster yet) are said once and never stop the other objects.
 - **Volume.** One object a volume, named by its uuid and labelled
   `storm.io/node` with this node, as the engine's own port renders it. A

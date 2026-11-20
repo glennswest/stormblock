@@ -44,8 +44,11 @@ Steps, each its own commit and check:
   `install_progress::record` (stage, steps, drives, layout): the one source
   for the screen, the page and stormcentral. CRD and ClusterRole go in
   `deploy/crds.yaml`; stormcos carries them (an issue there).
-- [ ] 2. `spec`, seeded from the install-config on the node (`mode`,
-  `storage:`); `status.plan` is `image storage-plan` over the live drives.
+- [x] 2. (status only: a spec field nothing acts on would be a stub)
+  `status.install`: the words /init keeps (`image install-intent` →
+  `/run/stormblock/install-intent.yaml`, no wipe word) and the plan over the
+  drives now (`mgmt::install_plan`, `image::storage::seen_in`). The spec comes
+  with step 3, which acts on it.
 - [ ] 3. The runtime lay. When `spec.mode: install` and the drives are at
   their format, the engine lays the ESP and pallets, the system legs and the
   data regions, on drives with no slab open. It then makes the RaidSet and

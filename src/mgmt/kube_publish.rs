@@ -86,6 +86,8 @@ pub struct Publisher {
     said: BTreeSet<String>,
     /// The NodeInstall's last error, said when it changes (#623).
     install_error: Option<String>,
+    /// The last install plan and what it was made from (#623).
+    install_plan: crate::mgmt::install_plan::Cache,
     /// The last error, said when it changes.
     last_error: Option<String>,
 }
@@ -315,7 +317,7 @@ pub async fn pass(state: &Arc<AppState>, p: &mut Publisher) -> Result<Summary, S
     let mut s = Summary::default();
     volumes(state, p, &mut s).await?;
     replications(state, p, &mut s).await?;
-    match node_install(state, &mut s).await {
+    match node_install(state, &mut p.install_plan, &mut s).await {
         Ok(()) => {
             if p.install_error.take().is_some() {
                 tracing::info!("kubernetes: the NodeInstall object is published again (#623)");
@@ -341,11 +343,11 @@ const INSTALL_DRIVE_FIELDS: [&str; 11] =
 /// node with no install record has no object, rather than one that says
 /// `starting` for ever. The record's own clock fields (`at`, `eta`) are left
 /// out, so an unchanged install writes nothing.
-pub fn node_install_object(node: &str, record: &Value) -> Option<Value> {
+pub fn node_install_object(node: &str, record: &Value, install: Option<&Value>) -> Option<Value> {
     let stages = record["stages"].as_array().map_or(0, Vec::len);
     let drives = record["drives"].as_array().cloned().unwrap_or_default();
     let reported = record["layout"].as_array().into_iter().flatten().any(|s| s["state"] != json!("pending"));
-    if stages == 0 && drives.is_empty() && !reported {
+    if stages == 0 && drives.is_empty() && !reported && install.is_none() {
         return None;
     }
     let drives: Vec<Value> = drives
@@ -380,18 +382,22 @@ pub fn node_install_object(node: &str, record: &Value) -> Option<Value> {
             "drives": drives,
             "set": record["set"],
             "systemLegs": record["system_legs"],
+            // This boot's install words and the plan they make over the
+            // drives now (`mgmt::install_plan`).
+            "install": install,
         },
     }))
 }
 
 /// This node's NodeInstall written, when it has an install record (#623).
-async fn node_install(state: &Arc<AppState>, s: &mut Summary) -> Result<(), String> {
+async fn node_install(state: &Arc<AppState>, cache: &mut crate::mgmt::install_plan::Cache, s: &mut Summary) -> Result<(), String> {
     let node = state.local_node_name();
+    let install = crate::mgmt::install_plan::status(state, cache).await;
     let run = std::path::PathBuf::from(crate::install_progress::RUN);
     let record = tokio::task::spawn_blocking(move || crate::install_progress::record(&run, crate::install_progress::now()))
         .await
         .map_err(|e| e.to_string())?;
-    let Some(want) = node_install_object(&node, &record) else {
+    let Some(want) = node_install_object(&node, &record, install.as_ref()) else {
         return Ok(());
     };
     let have = match call(state, "GET", &format!("{GROUP_PATH}/nodeinstalls/{node}"), None).await {
@@ -626,13 +632,16 @@ mod tests {
     #[test]
     fn a_node_install_is_the_install_record() {
         let empty = crate::install_progress::record(std::path::Path::new("/nonexistent/stormblock-623"), 100);
-        assert!(node_install_object("n1", &empty).is_none(), "no record, no object");
+        assert!(node_install_object("n1", &empty, None).is_none(), "no record, no object");
+        let words = json!({"mode": "install", "storage": false});
+        let o = node_install_object("n1", &empty, Some(&words)).expect("install words make an object");
+        assert_eq!(o["status"]["install"]["mode"], json!("install"));
 
         let w = tempfile::tempdir().unwrap();
         crate::install_progress::append(w.path(), "stage", "formatting", "running", "2 drives", 10).unwrap();
         crate::install_progress::append(w.path(), "step", "format", "running", "", 11).unwrap();
         let rec = crate::install_progress::record(w.path(), 200);
-        let o = node_install_object("n1", &rec).expect("a record makes an object");
+        let o = node_install_object("n1", &rec, None).expect("a record makes an object");
         assert_eq!(o["metadata"]["name"], json!("n1"));
         assert_eq!(o["metadata"]["labels"][NODE_LABEL], json!("n1"));
         let st = &o["status"];
@@ -640,7 +649,7 @@ mod tests {
         assert!(st["steps"].as_array().unwrap().iter().any(|s| s["step"] == json!("format") && s["state"] == json!("running")));
         assert!(st.get("at").is_none() && st.get("console").is_none(), "{st}");
         // Read again later: the same object, so nothing is written.
-        let again = node_install_object("n1", &crate::install_progress::record(w.path(), 900)).unwrap();
+        let again = node_install_object("n1", &crate::install_progress::record(w.path(), 900), None).unwrap();
         assert!(same(&o, &again), "the clock alone changes nothing");
 
         let rec = json!({
@@ -650,7 +659,7 @@ mod tests {
                         "eta_s": 600, "card": {"phys": 8}, "lines": ["a", "b", "FORMAT: 40%"]},
                        {"sas": null, "dev": "sdb", "state": "laid"}],
         });
-        let st = node_install_object("n2", &rec).unwrap()["status"].clone();
+        let st = node_install_object("n2", &rec, None).unwrap()["status"].clone();
         assert_eq!(st["drivesTotal"], json!(2));
         assert_eq!(st["drivesFormatting"], json!(1));
         assert_eq!(st["etaSeconds"], json!(600));
