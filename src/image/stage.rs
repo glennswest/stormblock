@@ -190,13 +190,47 @@ impl Generations {
     }
 }
 
-/// How far a stage has got, for its job's status.
+/// How far a stage has got, for its job's status, and whether it is asked to
+/// stop (#695).
 #[derive(Debug, Default)]
 pub struct Progress {
     pub volumes_done: AtomicU64,
     pub volumes_total: AtomicU64,
     pub bytes_copied: AtomicU64,
+    pub cancel: std::sync::atomic::AtomicBool,
 }
+
+impl Progress {
+    /// Ask the stage to stop: it does before its next volume, or between two
+    /// extents of the one it is copying, with [`Cancelled`].
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    fn check(&self) -> anyhow::Result<()> {
+        if self.cancelled() {
+            return Err(Cancelled.into());
+        }
+        Ok(())
+    }
+}
+
+/// A stage stopped because it was asked to (#695). What it laid is in the
+/// generation its `on_volume` was last given, for the caller to delete.
+#[derive(Debug)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the stage was cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
 
 /// What one image volume becomes on the node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -362,6 +396,7 @@ async fn copy_extents(
 ) -> anyhow::Result<()> {
     let mut buf = vec![0u8; extent_size as usize];
     for e in extents {
+        progress.check()?;
         let off = e * extent_size;
         if off >= size {
             continue;
@@ -401,6 +436,7 @@ pub async fn stage(
     progress: &Progress,
     mut on_volume: impl FnMut(&Generation),
 ) -> anyhow::Result<(Generation, Vec<PlanItem>)> {
+    progress.check()?;
     let (image_vm, vols) = read_image(&image).await?;
     let policy = read_policy(&image_vm, &opts.root).await?;
     let mut gen = Generation {
@@ -424,6 +460,7 @@ pub async fn stage(
     let mut local_of: HashMap<VolumeId, VolumeId> = HashMap::new();
     let mut plan = Vec::new();
     for v in &vols {
+        progress.check()?;
         let pol = policy.get(&v.name).cloned();
         let mut item = PlanItem {
             name: v.name.clone(),

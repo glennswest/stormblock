@@ -14227,6 +14227,37 @@ file = "{state}"
         let url = range_server(image_n1.clone()).await;
         let image = Arc::new(crate::drive::httpdev::HttpDevice::open(&url).await.unwrap()) as Arc<dyn BlockDevice>;
         let opts = stage::StageOptions { version: "11.91".into(), root: "stormpump".into(), source: url.clone() };
+
+        // #695: a stage cancelled once its first volume is laid stops there,
+        // and deleting what it recorded leaves the node as it was.
+        {
+            let names = || async {
+                let mut n: Vec<String> = node.lock().await.list_volumes().await.into_iter().map(|v| v.1).collect();
+                n.sort();
+                n
+            };
+            let before = names().await;
+            let image = Arc::new(crate::drive::httpdev::HttpDevice::open(&url).await.unwrap()) as Arc<dyn BlockDevice>;
+            let progress = stage::Progress::default();
+            let mut laid = None;
+            let err = stage::stage(&node, image, &opts, &progress, |g| {
+                laid = Some(g.clone());
+                progress.cancel();
+            })
+            .await
+            .expect_err("a cancelled stage stops");
+            assert!(err.is::<stage::Cancelled>(), "{err}");
+            let laid = laid.expect("a volume was laid before the cancel");
+            assert_eq!(laid.volumes.len(), 1, "it stops before its next volume: {:?}", laid.volumes);
+            assert!(!laid.complete);
+            use std::sync::atomic::Ordering::Relaxed;
+            assert!(progress.volumes_done.load(Relaxed) < progress.volumes_total.load(Relaxed));
+            assert_eq!(progress.bytes_copied.load(Relaxed), 0, "the copy stops at its first extent");
+            assert_ne!(names().await, before, "the volume it laid is there until discarded");
+            assert_eq!(stage::delete_generation(&node, &laid).await.unwrap(), 1);
+            assert_eq!(names().await, before, "discarded: the node as it was");
+        }
+
         let progress = stage::Progress::default();
         let (gen, plan) = stage::stage(&node, image, &opts, &progress, |_| {}).await.expect("staged");
         assert!(gen.complete);
@@ -14437,6 +14468,39 @@ file = "{state}"
         let r = c.delete(format!("{base}/11.91/stage")).send().await.unwrap();
         assert_eq!(r.status(), 200);
         assert!(!names().await.iter().any(|n| n.ends_with("@11.91")), "{:?}", names().await);
+
+        // #695: a running stage is cancelled at once. It is held behind the
+        // volume manager's lock (it lists the node's volumes before its
+        // first), so the DELETE finds it running.
+        {
+            let vm_held = state.volume_manager.lock().await;
+            let body = serde_json::json!({"source": url.clone(), "current": "11.90"});
+            let r = c.post(format!("{base}/11.91/stage")).json(&body).send().await.unwrap();
+            assert_eq!(r.status(), 202, "{}", r.text().await.unwrap());
+            let r = c.delete(format!("{base}/11.91/stage")).send().await.unwrap();
+            assert_eq!(r.status(), 202, "a running stage cancelled");
+            let v: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(v["state"], "cancelled", "{v}");
+            let v: serde_json::Value = c.get(format!("{base}/11.91/stage")).send().await.unwrap().json().await.unwrap();
+            assert_eq!(v["state"], "cancelled", "{v}");
+            assert_eq!(c.delete(format!("{base}/11.91/stage")).send().await.unwrap().status(), 202, "asked again: the same");
+            assert_eq!(c.post(format!("{base}/11.91/stage")).json(&body).send().await.unwrap().status(), 409, "no stage while one is discarded");
+            drop(vm_held);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let r = c.get(format!("{base}/11.91/stage")).send().await.unwrap();
+            if r.status() == 404 {
+                break;
+            }
+            let v: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(v["state"], "cancelled", "{v}");
+            assert!(std::time::Instant::now() < deadline, "the cancelled stage never went: {v}");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(!names().await.iter().any(|n| n.ends_with("@11.91")), "{:?}", names().await);
+        let g: serde_json::Value = c.get(format!("{base}/generations")).send().await.unwrap().json().await.unwrap();
+        assert!(g["staged"].is_null(), "{g}");
 
         // Staged and activated again; then the next stage removes 11.90's
         // volumes, keeping only what something else is cloned from.

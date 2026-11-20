@@ -2786,6 +2786,10 @@ stormupdate:
    (`POST /api/v1/releases/rollback`) keeps it the same way, because N's
    goldens are still there.
 
+`DELETE /api/v1/releases/{v}/stage` discards a stage. A running one is
+stopped before its next volume or extent (202, the job `cancelled`), what it
+laid is deleted, and then `GET {v}/stage` is a 404 (#695).
+
 `GET /api/v1/releases/generations` lists `current`, `staged` and `previous`.
 One previous generation is kept. All the verbs but the GETs are destructive.
 Details: [docs/staging.md](docs/staging.md).

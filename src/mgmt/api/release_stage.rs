@@ -2,8 +2,9 @@
 //!
 //! ```text
 //! POST   /api/v1/releases/{v}/stage     {source, current?, root?, disk?}  202: a job
-//! GET    /api/v1/releases/{v}/stage     the job: running|complete|failed, progress, plan
-//! DELETE /api/v1/releases/{v}/stage     discard what is staged
+//! GET    /api/v1/releases/{v}/stage     the job: running|cancelled|complete|failed, progress, plan
+//! DELETE /api/v1/releases/{v}/stage     discard what is staged; a running stage is
+//!                                       stopped and discarded (202, `cancelled`, #695)
 //! POST   /api/v1/releases/{v}/activate  {current?}: N aside, N+1 onto the plain names
 //! POST   /api/v1/releases/rollback      back to the previous generation
 //! GET    /api/v1/releases/generations   current, staged, previous
@@ -133,6 +134,9 @@ pub async fn post_stage(
         if let Some(j) = job.as_ref().filter(|j| j.state == "running") {
             return conflict(format!("release {} is being staged", j.version));
         }
+        if let Some(j) = job.as_ref().filter(|j| j.state == "cancelled") {
+            return conflict(format!("release {}'s cancelled stage is being discarded", j.version));
+        }
     }
     let mut gens = Generations::load(&dir);
     if gens.current.as_ref().map(|c| c.version.as_str()) == Some(version.as_str()) {
@@ -177,6 +181,38 @@ pub async fn post_stage(
     let st = state.clone();
     tokio::spawn(async move {
         let result = run_stage(&st, &dir, gens, &version, req, image, &progress).await;
+        // A cancel is decided under the job's lock (#695): a DELETE either
+        // finds the job running and cancels it, or finds it ended and
+        // discards what it staged the plain way.
+        let cancelled = {
+            let job = st.stage_job.lock().await;
+            job.as_ref().is_some_and(|j| j.version == version && j.state == "cancelled")
+        };
+        if cancelled {
+            if let Err(e) = &result {
+                if !e.is::<stage::Cancelled>() {
+                    tracing::warn!(version = %version, "the cancelled stage failed on its own: {e}");
+                }
+            }
+            let outcome = discard_staged(&st, &dir, &version).await;
+            let mut job = st.stage_job.lock().await;
+            if job.as_ref().is_some_and(|j| j.version == version && j.state == "cancelled") {
+                match outcome {
+                    Ok(n) => {
+                        tracing::info!(version = %version, "release stage cancelled: {} staged volume(s) deleted", n.unwrap_or(0));
+                        *job = None;
+                    }
+                    Err(e) => {
+                        tracing::error!(version = %version, "discarding the cancelled stage: {e}");
+                        if let Some(j) = job.as_mut() {
+                            j.state = "failed".into();
+                            j.error = Some(format!("cancelled, and discarding what it staged failed: {e}"));
+                        }
+                    }
+                }
+            }
+            return;
+        }
         let mut job = st.stage_job.lock().await;
         if let Some(j) = job.as_mut() {
             match result {
@@ -235,6 +271,9 @@ async fn run_stage(
         }
     })
     .await?;
+    if progress.cancelled() {
+        return Err(stage::Cancelled.into());
+    }
     // The staged goldens carry the release's digests, unchecked: read once
     // against them in the background (#384), before `slab holds` is asked.
     state.check_goldens();
@@ -284,25 +323,40 @@ pub async fn get_stage(State(state): State<Arc<AppState>>, Path(version): Path<S
     }
 }
 
+/// Delete the staged generation of `version`, if the record has one: what a
+/// whole stage laid, or what a cancelled one had laid when it stopped (each
+/// volume is recorded as it is made). Returns how many volumes went.
+async fn discard_staged(state: &AppState, dir: &std::path::Path, version: &str) -> anyhow::Result<Option<usize>> {
+    let mut gens = Generations::load(dir);
+    let Some(g) = gens.staged.take().filter(|g| g.version == version) else {
+        return Ok(None);
+    };
+    let n = stage::delete_generation(&state.volume_manager, &g).await?;
+    gens.save(dir)?;
+    Ok(Some(n))
+}
+
 pub async fn delete_stage(State(state): State<Arc<AppState>>, Path(version): Path<String>) -> Response {
     let dir = match data_dir(&state) {
         Ok(d) => d,
         Err(r) => return r,
     };
-    if state.stage_job.lock().await.as_ref().is_some_and(|j| j.state == "running" && j.version == version) {
-        return conflict(format!("release {version} is being staged"));
-    }
-    let mut gens = Generations::load(&dir);
-    let Some(g) = gens.staged.take().filter(|g| g.version == version) else {
-        return ApiError::not_found(format!("release {version} is not staged here"));
-    };
-    match stage::delete_generation(&state.volume_manager, &g).await {
-        Ok(n) => {
-            if let Err(e) = gens.save(&dir) {
-                return ApiError::internal(e.to_string());
+    // A running stage is stopped (#695): it stops before its next volume or
+    // extent, deletes what it laid, and its job is gone (a 404) once it has.
+    {
+        let mut job = state.stage_job.lock().await;
+        if let Some(j) = job.as_mut().filter(|j| j.version == version && (j.state == "running" || j.state == "cancelled")) {
+            j.progress.cancel();
+            if j.state == "running" {
+                tracing::warn!(version = %version, "release stage cancelled; it stops and discards what it staged");
             }
-            Json(json!({"version": version, "deleted": n})).into_response()
+            j.state = "cancelled".into();
+            return (StatusCode::ACCEPTED, Json(job_json(j))).into_response();
         }
+    }
+    match discard_staged(&state, &dir, &version).await {
+        Ok(Some(n)) => Json(json!({"version": version, "deleted": n})).into_response(),
+        Ok(None) => ApiError::not_found(format!("release {version} is not staged here")),
         Err(e) => conflict(e),
     }
 }

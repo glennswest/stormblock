@@ -28,6 +28,14 @@ Then re-point `boothost/<tag>` back to N and reboot.
 
 Every verb but the GETs is destructive (#274). It needs the admin token, or a Kubernetes bearer whose SubjectAccessReview allows `update` (or `delete`, for a DELETE) on `storage.storm.io` `releases`.
 
+**Discard** (an update cancelled before activate):
+
+```text
+DELETE /api/v1/releases/{N+1}/stage
+```
+
+A stage that is complete is deleted at once (200, `deleted`). A stage still running is stopped (#695): the DELETE answers 202 and the job is `cancelled`. The stage stops before its next volume, or between two extents of the one it is copying, then deletes every volume it had laid (each is recorded as it is made). Once that is done the job is gone and `GET {N+1}/stage` is a 404. A new stage is refused (409) while a cancelled one is still being discarded. What the node runs is never touched.
+
 `GET /api/v1/releases/generations` shows `current`, `staged` and `previous`. They are kept in `<data_dir>/release-generations.json`.
 
 ## What stage does
