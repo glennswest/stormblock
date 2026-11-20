@@ -59,6 +59,15 @@ the release is written, explicitly, and travels with the clone:
 - Owner's stormd#75 answer (A/B/C) still open; A and B need this, C is not harmed.
 - No uid: stage knows no Service object, and Owner's rule is absent, not guessed.
 
+## #691 — `grow` on an image spec's golden (2026-11-20: reopened by its proof)
+- [x] v24.36.0 (063b8434, check.sh ALL PASS); shipped with
+  `api:/apis/storage.storm.io/v1/volumes ~ "grow":{"max":1099511627776,"step":8589934592}`
+- [x] reopened 2026-11-20 by 12.97's pvetest2: no Volume carries a grow,
+  because no release declares one yet. stormcos#1049 has the image.toml lines
+  on `wip/1049-grow`, unmerged on purpose: its compose refuses a grow while
+  forge's engine (24.2.2) is older than 24.37.0. Nothing for stormblock to
+  change; held `--after stormcos#1049` (registered 2026-11-20).
+
 ## #692 — compose/slab carries a golden's grow policy (2026-11-19, P1)
 stormcentral#1510: a release's data slab is `POST /api/v1/volumes/compose/slab`;
 its golden entries had no `grow`, dropped unknown fields, and the slab's
