@@ -4215,7 +4215,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
 
     /// Per volume, how many of its extents have a leg on one of `slabs`
     /// (#700): what a missing slab costs, said by name.
-    fn extents_on(
+    fn volumes_with_extents_on(
         docs: &[Option<crate::volume::metadata::VolumeMetadata>],
         slabs: &std::collections::HashSet<crate::drive::slab::SlabId>,
     ) -> Vec<(String, usize)> {
@@ -4590,7 +4590,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                                 missing.iter().map(|m| m.0.to_string()).collect::<Vec<_>>().join(", ")
                             );
                             // Who has extents there, and how many (#700).
-                            let on = extents_on(&embedded, &missing);
+                            let on = volumes_with_extents_on(&embedded, &missing);
                             let total: usize = on.iter().map(|(_, n)| n).sum();
                             println!(
                                 "  {total} extent(s) of {} volume(s) have a leg there: {}{}",
@@ -12081,9 +12081,9 @@ mod tests {
             crate::volume::metav2::read_slab(s).await.unwrap()
         };
         let missing: std::collections::HashSet<_> = [sid].into_iter().collect();
-        assert_eq!(super::extents_on(&[doc.clone()], &missing), vec![("pod-logs".to_string(), 2)]);
+        assert_eq!(super::volumes_with_extents_on(&[doc.clone()], &missing), vec![("pod-logs".to_string(), 2)]);
         let other: std::collections::HashSet<_> = [crate::drive::slab::SlabId(uuid::Uuid::new_v4())].into_iter().collect();
-        assert!(super::extents_on(&[doc], &other).is_empty());
+        assert!(super::volumes_with_extents_on(&[doc], &other).is_empty());
     }
 
     /// #625: a drive the kernel removed after its write (it left the SAS

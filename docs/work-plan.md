@@ -16,9 +16,9 @@ under them.
   laid, each leg's system slab is laid again (`relay_system_legs`), and with
   none laid the legs are left alone
 - [x] the "not in this machine's image either" warning names each volume and
-  its extent count (`extents_on`)
+  its extent count (`volumes_with_extents_on`)
 - [x] tests: `install_boot`, a leg laid again with its old volume gone,
-  `extents_on`
+  `volumes_with_extents_on`
 - [ ] check.sh; tag; stage build; say so on #700; shipped with the proof
   `System leg .*: laid again with the system half` on forge1's next install
 
