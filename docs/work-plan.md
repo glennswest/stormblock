@@ -19,7 +19,7 @@ the apiserver (no new engine REST write endpoint). Who does what:
   one per node, named after it).
 
 Steps, each its own commit and check:
-- [ ] 1. `NodeInstall` published by the engine (kube_publish). Its status is
+- [x] 1. (7e54c610; check.sh run started 2026-11-20, result to be read; stormcos#1050 told) `NodeInstall` published by the engine (kube_publish). Its status is
   `install_progress::record` (stage, steps, drives, layout): the one source
   for the screen, the page and stormcentral. CRD and ClusterRole go in
   `deploy/crds.yaml`; stormcos carries them (an issue there).
@@ -38,6 +38,11 @@ Steps, each its own commit and check:
   untouched, as diagnostic does. The initramfs path stays until forge1
   proves 1–5, and is then removed. stormcentral's stages follow (an issue
   there).
+- (2026-11-20) held behind #700 (the master: forge first). Next is step 2:
+  /init keeps the install-config's non-secret `mode` and `storage:` for the
+  node (it deletes the whole file before switch_root, #685). The engine
+  then builds `SeenDrive`s from its own inventory and calls
+  `image::storage::plan` in-process.
 
 ## #695 — a running stage discarded at once (2026-11-20, stormupdate#36)
 
