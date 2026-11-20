@@ -15,19 +15,24 @@ from the store: `POST /v1/snapshots/{id}/ship`, `GET|DELETE /v1/ship-jobs/{id}`.
 Its names carry no node (`<ns>.<vm>.<disk>.backup`, `<ns>.<vm>.backup.<name>`),
 so the scope is **by creator, not name prefix**: what a credential makes is
 recorded (#422's creators) as `backup:<node>`, and it reaches only that.
-- [ ] `mgmt::backup_creds`: `<data_dir>/backup-credentials.json` (sha256 only,
+- [x] `mgmt::backup_creds`: `<data_dir>/backup-credentials.json` (sha256 only,
   0600); `POST /api/v1/backup-credentials {node}` (admin; the bearer once;
   again = rotate), `GET` (who holds one, created, last used, uses),
   `DELETE …/{node}` (admin)
-- [ ] the middleware: a bearer that is a backup credential reaches the verb
+- [x] the middleware: a bearer that is a backup credential reaches the verb
   list above and nothing else (403 naming why); each object checked to be
   `backup:<node>`'s; a create has no source, is not secret, names the owner
   kind `VirtualMachineBackup`, takes no name another holds; an attach is
   nvme_tcp; the list of points filtered to its own; what it makes recorded
-- [ ] every use in the audit log and a log line with its node; `/metrics`
+- [x] every use in the audit log and a log line with its node; `/metrics`
   `storm_backup_credential_requests_total{node,result}`
-- [ ] tests (mint/revoke/rotate; each verb allowed on its own, refused on
+- [x] tests (mint/revoke/rotate; each verb allowed on its own, refused on
   another node's and on everything else; admin verbs refused), README, CHANGELOG
+- check.sh ALL PASS on 543aa4dd; v24.40.0 (0e119f98), build cd2acccc876f.
+  Found on the way: `/v1` GET takes no name, so stormvm's target lookup always
+  misses and every backup is a full copy: #699 (P1).
+- Left to others: stormcentral and storminstall mint at each install and write
+  `backupStores` (stormcos#1027).
 
 ## #670 — every service clone born with its owner (2026-11-19)
 Premise check: stage (`src/image/stage.rs`) copies the owner an image volume
