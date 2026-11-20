@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.38.0] — 2026-11-19
+
+### Added
+- #656: a pull verified by sha: `seal` (the seal digest) in a volume's answer; the pull job's `sha256`, `peer_sha256`, `verified`; a copy whose sha differs is deleted and the job fails naming both.
+
 ### 2026-11-19
 - **feat:** #656: a pull is verified by sha: a volume's answer (`GET /api/v1/volumes[/{id}]`) carries `seal`, its seal digest (`sb-seal-1` sha256, verdict, `checked_at`); `POST /api/v1/volumes/pull` reads the copy back before the seal and compares: `sha256`, `peer_sha256`, `verified` on the job; a different sha deletes the copy and fails the job naming both. The copy keeps the digest, `intact`. A volume here whose digest differs from the peer's is not "the same here", for a pull or a Replication.
 
