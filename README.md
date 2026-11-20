@@ -1031,6 +1031,56 @@ zero_bytes, ranges, message, next_offset, …}`.
 The engine's own NVMe/TCP target does WRITE ZEROES now (ONCS bit 3). With
 DEAC the range is deallocated first, then zeroed.
 
+### A store's per-node backup credentials (#693)
+
+A node's VM backups go to a store: another node's engine, forge1's by
+default (stormcos#1027, the owner's B). The store's admin token never leaves
+the store. The store's engine mints a bearer for **one node's backups
+alone** instead, and keeps only its sha256 (`<data_dir>/backup-credentials.json`,
+0600).
+
+- `POST /api/v1/backup-credentials {"node": "server8"}` (admin token):
+  `201 {node, principal: "backup:server8", token, replaced}`. The token
+  (`sbbk-…`) is answered this once. Minting again for the node replaces it,
+  and the old one stops working. A name that is not a DNS name is `400`; an
+  engine with no data directory refuses (`409`).
+- `GET /api/v1/backup-credentials` (node token): who holds one, with
+  `created_at`, `created_by`, `last_used_at`, `uses` and `objects` (the
+  volumes and points it made that are still here). Never a token.
+- `DELETE /api/v1/backup-credentials/{node}` (admin token): revoked at once.
+  The node's backups stay, and a credential minted for the node again
+  reaches them.
+
+The bearer is the principal `backup:<node>`. It reaches the calls a backup
+and a restore make on a store (stormvm's `backup::Transfer`) and nothing
+else; anything else is `403` naming this list:
+
+| verb | for |
+|---|---|
+| `GET /v1/volumes/{id or name}` | a backup's target volume |
+| `POST /v1/volumes` | a blank target: no `source`, not `secret`, `owner.kind` `VirtualMachineBackup` |
+| `DELETE /v1/volumes/{id}`, `DELETE /api/v1/volumes/{id}` | a target too small for a grown disk |
+| `POST /v1/volumes/{id}/attach` (`transport: nvme_tcp`), `…/detach` | the target served for the node's ship |
+| `GET`, `POST /v1/group-snapshots` | its points (the list has only its own), and a point of its own volumes |
+| `GET`, `DELETE /v1/group-snapshots/{id}` | read or prune a point |
+| `POST /v1/snapshots/{id}/ship`, `GET`, `DELETE /v1/ship-jobs/{id}` | a restore: a point's member shipped to the node |
+
+**Whose, by creator.** stormvm's names carry no node
+(`<ns>.<vm>.<disk>.backup`, `<ns>.<vm>.backup.<name>`), so the scope is not a
+name prefix. What a backup bearer makes is recorded as `backup:<node>`'s
+(the creator record, #422), and every call that names an object reaches only
+one recorded so: another node's volume, point, snapshot or ship job, or a
+volume the store made for itself, is `403`. A volume or point name another
+holds is `409`, never handed back.
+
+**Seen.** Every call is in the audit log as `backup:<node>`, allowed or
+refused, and logged with its node. `/metrics` counts them:
+`storm_backup_credential_requests_total{node, result="allowed|refused"}`.
+
+stormcentral (test machines) and storminstall (sites) put the minted bearer
+into install-config `backupStores`, and the kubelet presents it to the store
+(stormcos INSTALL-CONFIG.md).
+
 ## stormdist: goldens out on an ISO, and back in (#442)
 
 [stormdist](https://github.com/glennswest/stormdist) (format 2) carries a

@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **feat:** #693: per-node backup credentials on a store (stormcos#1027, the owner's B): `POST /api/v1/backup-credentials {node}` (admin; the bearer once, only its sha256 kept), `GET` (holders, last used, uses), `DELETE …/{node}` (admin). The bearer (`backup:<node>`) reaches only the calls a backup and a restore make (the `/v1` volume, attach, group-snapshot, ship and ship-job verbs), and only on what it made itself (creator records, #422); a point list has only its own; everything else is 403. Every use audited and logged with its node; `storm_backup_credential_requests_total{node,result}`.
+
 ## [v24.39.0] — 2026-11-20
 
 ### Added
