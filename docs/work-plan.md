@@ -4,6 +4,16 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #481 — declare a licence (2026-11-20)
+Six manifests say `license = "TBD"`: the root, tests-runtime, benches,
+crates/pallet-format (stormuefi links it, MIT), crates/screen-spec (stormbootx,
+MIT) and crates/nvmeof-target (storminstall, Apache-2.0, public binaries).
+- [ ] **waits on the owner** (needs-owner on #481, narrowing #578): A
+  Apache-2.0, B MIT OR Apache-2.0, C proprietary, D split (MIT OR Apache-2.0
+  for the three linked crates, proprietary for the engine; recommended).
+  Then: the SPDX id in all six (a `LICENSE` file for a proprietary one, a
+  `LICENSE-MIT`/`LICENSE-APACHE` pair for B/D), check.sh, close #481 and #578.
+
 ## #701 — finding 661ff070abe6: a runtime format could take a live array member (2026-11-20, P0)
 The in-use check compared slab paths with `/dev/sdX`. A slab on an engine
 array is `raid:<id>`, so no member matched, and the node-data set
