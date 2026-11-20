@@ -269,6 +269,45 @@ ISO. stormblock's side, in steps (each its own commit):
   read-only source (`Media::read_at`), the forge flow-over unchanged; or
   (2) the node composes the disk from the goldens (image spec + pallets on
   the ISO). Nothing built for the ISO boot until answered.
+- (2026-11-20) **answered: option 1** (owner, item 12 "A"): the ISO carries
+  each flavour's composed, tested disk as a member; flowed over exactly as
+  from forge. Design read from the code (nothing written yet; paused for the
+  P0 #621, back in line):
+  - [ ] `src/drive/isodev.rs`: a `stormdist://<iso path>?member=<golden or
+    component>&key=<pubkey file>` drive URI, parsed in
+    `drive::open_one_drive_with_secret` (beside `emulated://`, nvme-tcp,
+    iscsi; add it to `supported_uri_schemes`). It opens with
+    `Media::open_for_install` and uses `select(member)` for the golden's extents. Reads
+    go through `read_chunk` (verified by hash), with a small LRU of verified
+    4 MiB chunks: `Media::read_at` re-reads and re-hashes a whole chunk on
+    every call. It reads zeros in holes, runs on a blocking thread, and
+    keeps writes in memory, as `httpdev.rs` does (the node runs from the
+    source while the flow-over copies, so a write must read back). That
+    makes it the "claimed" source: `slab holds`, STORMBLOCK_RESUME_SOURCE,
+    the install guards and boot-local's `--slab` all take a drive URI
+    unchanged (`cli.rs` `is_fabric_uri`/`open_storage`).
+  - [ ] `/init` (scripts/build-stormblock-initramfs.sh): `rd.stormblock.iso`
+    (a device, or `auto`: scan /dev/sr* and block devices for RELEASE.toml)
+    skips appliance discovery. `boothost_claim` then answers
+    `CLAIMED=stormdist://…?member=stormcos-<flavour>` with no network, and
+    the three claim gates (`[ -n "$BOOTHOST" ]` at the local-slab probe, the
+    diskless branch, `root_fallback`) also accept an ISO source. The flavour
+    comes from the install-config (`flavour:`). An ISO boot is an install, as
+    the ticket is (`HELD_RC=1` unless `slab holds` says the same release).
+    The release key is baked in at build time:
+    `build-stormblock-initramfs.sh --release-key <hex>` writes it to
+    `/etc/stormblock/release-key.pub`. The ISO stays attached until the
+    flow-over ends, because the device stays open until then.
+  - [ ] contract for stormcentral (file it there): the disk member's
+    component is `stormcos-<flavour>` (name `stormcos-<flavour>-<ver>`), so
+    `Media::select` finds it by component. It is a member of its flavour,
+    and its ranges come from `GET /api/v1/stormdist/goldens/{volume}`. No
+    stormcentral issue for "release.disk in the recipe" was found
+    (searched 2026-11-20).
+  - [ ] tests: an in-process test (tests/it) makes a data ISO with
+    stormdist `make` from a composed test disk, opens it as `stormdist://`,
+    runs a slab open and a boot-local flow-over from it, and checks a
+    corrupt chunk fails the read. Add an initramfs test for the ISO branch.
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it
