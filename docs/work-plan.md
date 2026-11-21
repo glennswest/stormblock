@@ -167,10 +167,14 @@ Steps, each its own commit and check:
     (`on_drive_failure`), set, system half + legs + flow-over, each in the
     install record; fake-tested (order, a lay failure stop/continue, no set,
     a failed format)
-  - [ ] the live `Install`: format (`format_job` on the plan's SAS drives
-    not at its format, polled), lay (`storage_lay`), set (`stormraid create`
-    + `serve --id`, the binary from config), take (`take_local_disks` on
-    the live manager, the legs registered, `spawn_flow_over`)
+  - [x] the live `Install` (`node_install::Live`): format (`format_job` on
+    the plan's SAS drives, polled; a drive on no card taken at its format or
+    refused), lay (`storage_lay`), set (`stormraid create --role node-data`
+    + `serve --id 65535`; `$STORMBLOCK_STORMRAID`, /usr/sbin, the pallet),
+    take (`cli::runtime_take`: `take_local_disks` on the live manager, the
+    legs' slabs registered, sources quarantined, the handover record
+    written, `spawn_flow_over`); tests: the set with a fake stormraid, a
+    drive on no card
   - [ ] the trigger: `storage.runtime: true` in the words; /init boots the
     claim with drives untouched; the engine starts `run` once; then the
     reboot to local after the flow-over is proved

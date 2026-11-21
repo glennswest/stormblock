@@ -8805,6 +8805,65 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
     /// that race (#239, see [`flow_system_half`]); the data half still moves only
     /// before anything is exported.
     ///
+    /// The system half, its legs and the flow-over, from the running node
+    /// (#623 step 3): what boot-local does with `--system-disk`,
+    /// `--local-disk` and `--system-leg` before it hands over, done in the
+    /// live engine. The system half is laid on `system_disk`, the data half on
+    /// `data_disk` (the node-data set), each other leg's system slab given to
+    /// the engine, the claim's slabs quarantined as the flow-over's sources,
+    /// the handover record written (a restart of the engine finishes the
+    /// flow-over), and the flow-over started.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn runtime_take(
+        state: &Arc<AppState>,
+        data_disk: &str,
+        system_disk: &str,
+        legs: &[String],
+    ) -> anyhow::Result<String> {
+        use crate::drive::handover::{InstallTicket, Record, DEFAULT_PATH, INSTALL_TICKET_PATH};
+        let path = std::path::Path::new(DEFAULT_PATH);
+        let mut record = Record::read(path);
+        let root = record.as_ref().and_then(|r| r.devices.iter().find(|d| d.dev_id == 0).map(|d| d.volume.clone()));
+        let sources: Vec<String> = record.as_ref().map(|r| r.slabs.clone()).unwrap_or_default();
+        let (flow, _) = {
+            let mut vm = state.volume_manager.lock().await;
+            take_local_disks(&mut vm, data_disk, Some(system_disk), None, "hot", false, root.as_deref()).await?
+        };
+        let Some(mut flow) = flow else {
+            anyhow::bail!("{system_disk} and {data_disk} hold this release already: nothing to flow over");
+        };
+        let mut ids = Vec::new();
+        for leg in legs {
+            let dev = open_storage(leg).await?;
+            let found = crate::drive::discover::slabs_in_partitions(&dev).await;
+            let registry = state.volume_manager.lock().await.registry().clone();
+            for f in found.into_iter().filter(|f| f.slab.role() == crate::drive::slab::SlabRole::System) {
+                ids.push(f.slab.slab_id().0.to_string());
+                registry.write().await.add(f.slab);
+            }
+        }
+        flow.legs = ids;
+        flow.leg_disks = legs.to_vec();
+        quarantine_flow_sources(&*state.volume_manager.lock().await, &flow).await;
+        if let Some(r) = record.as_mut() {
+            for p in [flow.disk.clone(), data_disk.to_string()].into_iter().chain(legs.iter().cloned()) {
+                if !r.slabs.contains(&p) {
+                    r.slabs.push(p);
+                }
+            }
+            r.flow_over = Some(flow.clone());
+            r.local_boot = Some(flow.disk.clone());
+            r.system_legs = legs.to_vec();
+            if let Err(e) = r.write(path) {
+                tracing::warn!("install: the handover record not written ({e}): an engine restart would not finish this flow-over (#623)");
+            }
+        }
+        let install = InstallTicket::read(std::path::Path::new(INSTALL_TICKET_PATH));
+        let said = format!("onto {} (system) and {data_disk} (data), legs {}", flow.disk, legs.join(" "));
+        spawn_flow_over(state, flow.clone(), Some((flow.disk.clone(), sources)), install);
+        Ok(said)
+    }
+
     /// One extent per lock cycle, so root I/O interleaves with the copy instead of
     /// stalling behind the whole migration.
     #[cfg(target_os = "linux")]

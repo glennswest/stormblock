@@ -21,9 +21,11 @@
 //! holds (#625), as in `/init`. Each step's effect is behind [`Install`]: the
 //! running engine's, or a test's.
 //!
-//! Not yet started by anything: the switch that sends a fresh install this
-//! way (`storage.runtime`) comes with the last step, so no install takes a
-//! path that is not all there.
+//! [`Live`] is the running engine's: #621's format jobs, `cli::storage_lay`,
+//! the stormraid binary, `cli::runtime_take`. Nothing starts it yet: the
+//! switch that sends a fresh install this way (`storage.runtime`) comes with
+//! the trigger and the reboot to local, so no install takes a path that is
+//! not all there.
 
 use async_trait::async_trait;
 
@@ -137,6 +139,158 @@ pub async fn run(i: &dyn Install, plan: &StoragePlan, system_bytes: u64) -> Resu
     Ok(Outcome { laid: laid.laid, left_out: laid.failed, data_disk, system_disk, legs })
 }
 
+/// The running engine's steps (#623).
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub struct Live {
+    pub state: std::sync::Arc<crate::mgmt::AppState>,
+    /// `/sys`, `/dev` (a test points them elsewhere).
+    pub sys: std::path::PathBuf,
+    pub dev: std::path::PathBuf,
+    /// The stormraid binary (`stormraid create`, `serve`).
+    pub stormraid: std::path::PathBuf,
+    /// The ublk id the set is served at, as /init serves it (#605).
+    pub set_id: u32,
+    /// How often a format is looked at.
+    pub poll: std::time::Duration,
+}
+
+/// The stormraid binary: `$STORMBLOCK_STORMRAID`, else the initramfs's, else
+/// the node's pallet.
+pub fn stormraid_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("STORMBLOCK_STORMRAID") {
+        return p.into();
+    }
+    ["/usr/sbin/stormraid", "/pallets/stormraid/bin/stormraid"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+        .unwrap_or_else(|| "/usr/sbin/stormraid".into())
+}
+
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+static SET_SERVER: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[async_trait]
+impl Install for Live {
+    async fn format(&self, plan: &StoragePlan) -> Result<Vec<String>, String> {
+        use crate::image::storage::Protection;
+        use crate::mgmt::format_job::{self, Opts, Want};
+        let want = Want {
+            block_size: plan.spec.block_size,
+            pi_type: if plan.spec.protection == Protection::Type1 { 1 } else { 0 },
+        };
+        let mut sas = Vec::new();
+        let mut said = Vec::new();
+        for d in &plan.drives {
+            let name = d.dev.trim_start_matches("/dev/");
+            let dev = self.sys.join("block").join(name);
+            let addr = std::fs::read_to_string(dev.join("device/sas_address"))
+                .ok()
+                .and_then(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok());
+            match addr {
+                Some(a) => sas.push((a, None, None)),
+                None => {
+                    // Not on a SAS card: taken at the format it has, which
+                    // must be the plan's block size.
+                    let lbs: u32 = std::fs::read_to_string(dev.join("queue/logical_block_size"))
+                        .ok()
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                    if lbs != 0 && lbs != want.block_size {
+                        return Err(format!("{} is at {lbs}-byte blocks, not {}, and is on no SAS card to be formatted", d.dev, want.block_size));
+                    }
+                    said.push(format!("{}: at its format, no SAS card", d.dev));
+                }
+            }
+        }
+        if sas.is_empty() {
+            return Ok(said);
+        }
+        let fallback = if want.pi_type == 1 { vec![Want { block_size: want.block_size, pi_type: 0 }] } else { vec![] };
+        let keys = format_job::start(&format_job::Card, sas, Opts { want, fallback, test: true, canary: false })?;
+        // Every job to its end (a skipped drive ends at once).
+        loop {
+            let states: Vec<(String, String)> = keys
+                .iter()
+                .map(|k| (k.clone(), format_job::get(k).and_then(|j| j["state"].as_str().map(str::to_string)).unwrap_or_default()))
+                .collect();
+            if let Some((k, _)) = states.iter().find(|(_, s)| s == "failed") {
+                return Err(format!("drive {k}: its format failed (GET /api/v1/storage/formats)"));
+            }
+            if states.iter().all(|(_, s)| s == "ready") {
+                said.extend(states.iter().map(|(k, _)| format!("{k}: ready at {}", want.said())));
+                return Ok(said);
+            }
+            tokio::time::sleep(self.poll).await;
+        }
+    }
+
+    async fn lay(&self, system_bytes: u64, legs: &[String], drives: &[String]) -> Result<LayOutcome, String> {
+        crate::cli::storage_lay(system_bytes, legs, drives).await.map_err(|e| e.to_string())
+    }
+
+    async fn make_set(&self, members: &[String], parity: u32, spares: u32) -> Result<String, String> {
+        let keep = members.len().saturating_sub(spares as usize);
+        let mut args: Vec<String> = ["create", "--role", "node-data", "--name", "node-data", "--parity"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        args.push(parity.to_string());
+        args.extend(["--pi", "auto", "--force"].iter().map(|s| s.to_string()));
+        for (i, m) in members.iter().enumerate() {
+            if i >= keep {
+                args.push("--spare".into());
+            }
+            args.push(m.clone());
+        }
+        let out = tokio::process::Command::new(&self.stormraid)
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| format!("{}: {e}", self.stormraid.display()))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr);
+            return Err(format!("stormraid create: {}", err.lines().last().unwrap_or("failed")));
+        }
+        // Served as /init serves it, until the node's stormraid takes it over
+        // at the next boot.
+        let child = std::process::Command::new(&self.stormraid)
+            .arg("serve")
+            .arg("--id")
+            .arg(self.set_id.to_string())
+            .args(&members[..keep])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("stormraid serve: {e}"))?;
+        *SET_SERVER.lock().unwrap() = Some(child);
+        let dev = self.dev.join(format!("ublkb{}", self.set_id));
+        for _ in 0..60 {
+            if dev.exists() {
+                return Ok(dev.display().to_string());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Err(format!("the node-data set did not come up as {}", dev.display()))
+    }
+
+    async fn take(&self, data_disk: &str, system_disk: &str, legs: &[String]) -> Result<String, String> {
+        crate::cli::runtime_take(&self.state, data_disk, system_disk, legs).await.map_err(|e| e.to_string())
+    }
+
+    fn event(&self, kind: &str, name: &str, state: &str, detail: &str) {
+        let _ = crate::install_progress::append(
+            std::path::Path::new(crate::install_progress::RUN),
+            kind,
+            name,
+            state,
+            detail,
+            crate::install_progress::now(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +388,75 @@ mod tests {
         assert_eq!(o.left_out.len(), 1);
         assert!(f.calls.lock().unwrap().contains(&"set /dev/sda4,/dev/sdb4,/dev/sdd4 p1 s0".to_string()));
         assert!(f.events.lock().unwrap().contains(&"drive /dev/sdc failed".to_string()));
+    }
+
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    async fn live(dir: &std::path::Path) -> Live {
+        let vm = crate::volume::VolumeManager::new(crate::volume::DEFAULT_EXTENT_SIZE);
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        let state = std::sync::Arc::new(crate::mgmt::AppState::new(crate::mgmt::config::StormBlockConfig::default(), vm, reg, gem));
+        Live {
+            state,
+            sys: dir.join("sys"),
+            dev: dir.join("dev"),
+            stormraid: dir.join("stormraid"),
+            set_id: 65535,
+            poll: std::time::Duration::from_millis(10),
+        }
+    }
+
+    /// #623: the live set is made as /init makes it (`create --role
+    /// node-data`, the last members spares) and served at the set's id, and
+    /// its device is waited for.
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    #[tokio::test]
+    async fn the_live_set_is_made_and_served_as_init_does() {
+        use std::os::unix::fs::PermissionsExt;
+        let w = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(w.path().join("dev")).unwrap();
+        let log = w.path().join("calls");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> {log}\n[ \"$1\" = serve ] && : > {dev}/ublkb$3 && exec sleep 5\nexit 0\n",
+            log = log.display(),
+            dev = w.path().join("dev").display()
+        );
+        std::fs::write(w.path().join("stormraid"), script).unwrap();
+        std::fs::set_permissions(w.path().join("stormraid"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let l = live(w.path()).await;
+        let members: Vec<String> = ["/dev/sda4", "/dev/sdb4", "/dev/sdc4", "/dev/sdd4"].iter().map(|s| s.to_string()).collect();
+        let dev = l.make_set(&members, 1, 1).await.unwrap();
+        assert_eq!(dev, w.path().join("dev/ublkb65535").display().to_string());
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = calls.lines().collect();
+        assert_eq!(lines[0], "create --role node-data --name node-data --parity 1 --pi auto --force /dev/sda4 /dev/sdb4 /dev/sdc4 --spare /dev/sdd4");
+        assert_eq!(lines[1], "serve --id 65535 /dev/sda4 /dev/sdb4 /dev/sdc4");
+        if let Some(mut c) = SET_SERVER.lock().unwrap().take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
+    /// #623: a drive on no SAS card is taken at its own format when it is the
+    /// plan's block size, and refused when it is not.
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    #[tokio::test]
+    async fn a_drive_on_no_card_is_taken_at_its_format_or_refused() {
+        let w = tempfile::tempdir().unwrap();
+        let l = live(w.path()).await;
+        let lbs = |name: &str, n: u32| {
+            let q = w.path().join("sys/block").join(name).join("queue");
+            std::fs::create_dir_all(&q).unwrap();
+            std::fs::write(q.join("logical_block_size"), format!("{n}\n")).unwrap();
+        };
+        for d in ["sda", "sdb", "sdc", "sdd"] {
+            lbs(d, 4096);
+        }
+        let p = the_plan("storage:\n  drives: all\n");
+        let said = l.format(&p).await.unwrap();
+        assert_eq!(said.len(), 4, "{said:?}");
+        lbs("sdc", 512);
+        let e = l.format(&p).await.unwrap_err();
+        assert!(e.contains("/dev/sdc") && e.contains("512"), "{e}");
     }
 
     /// No data_raid: the data half on the first drive's region, no set; a
