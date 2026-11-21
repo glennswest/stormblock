@@ -17,6 +17,13 @@
 //! - `degraded`: any counter moving;
 //! - `failing`: loss of sync or phy resets moving in two samples running.
 //!
+//! A sample a side of which cannot be read (the drive's log page fails, or
+//! the host phy that faced it is gone) is **stale** (#721): it changes
+//! nothing measured. The last valid counters, rates, level and streak are
+//! kept and the error is said; the next valid sample is measured against
+//! the last valid one. An unread link is never `ok`: a SCSI error on the
+//! very link being watched must not clear its alarm.
+//!
 //! A change of level is logged at WARN (the alarm before a write fails). The
 //! sample is in `GET /api/v1/storage/hba` (each row's `link`) and on
 //! `/metrics` (`storm_drive_link_*`). stormdrive carries it in the Drive
@@ -108,7 +115,18 @@ pub struct Link {
     /// What did not answer.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+    /// The last sample could not be read (#721): `at`, the counters, the
+    /// rates and the level are the last valid sample's.
+    pub stale: bool,
+    /// When the link was last tried, read or not.
+    pub checked_at: u64,
+    /// A valid sample has been taken: the counters are a baseline.
+    #[serde(skip)]
+    pub measured: bool,
 }
+
+/// One side of a new sample: its phys, or why it could not be read.
+pub type Read = Result<Vec<PhyLink>, String>;
 
 fn rate(before: u32, after: u32, minutes: f64) -> Option<f64> {
     // Saturated, or reset (a re-plug): no rate from this pair.
@@ -142,22 +160,53 @@ fn moving(r: &[Rates], critical: bool) -> bool {
     })
 }
 
-/// The next state of a drive's link from its last and a new sample.
-pub fn next(prev: Option<&Link>, sas: &str, drive: Vec<PhyLink>, host: Vec<PhyLink>, at: u64) -> Link {
-    let Some(p) = prev else {
+/// The next state of a drive's link from its last and a new sample. A side
+/// that could not be read (`Err`) makes the sample stale (#721): nothing
+/// measured changes, the errors are said.
+pub fn next(prev: Option<&Link>, sas: &str, drive: Read, host: Read, at: u64) -> Link {
+    let errors: Vec<String> = [("drive side", &drive), ("host side", &host)]
+        .iter()
+        .filter_map(|(n, r)| r.as_ref().err().map(|e| format!("{n}: {e}")))
+        .collect();
+    let (Ok(drive), Ok(host)) = (drive, host) else {
+        return match prev {
+            Some(p) => Link { stale: true, checked_at: at, errors, ..p.clone() },
+            None => Link {
+                sas_address: sas.to_string(),
+                at,
+                drive: Side::default(),
+                host: Side::default(),
+                host_phy: None,
+                host_maximum: None,
+                drive_programmed_max: None,
+                drive_hardware_max: None,
+                level: Level::Settling,
+                since: at,
+                streak: 0,
+                errors,
+                stale: true,
+                checked_at: at,
+                measured: false,
+            },
+        };
+    };
+    let Some(p) = prev.filter(|p| p.measured) else {
         return Link {
             sas_address: sas.to_string(),
             at,
             drive: Side { phys: drive, rates: vec![] },
             host: Side { phys: host, rates: vec![] },
-            host_phy: None,
-            host_maximum: None,
-            drive_programmed_max: None,
-            drive_hardware_max: None,
+            host_phy: prev.and_then(|p| p.host_phy.clone()),
+            host_maximum: prev.and_then(|p| p.host_maximum.clone()),
+            drive_programmed_max: prev.and_then(|p| p.drive_programmed_max),
+            drive_hardware_max: prev.and_then(|p| p.drive_hardware_max),
             level: Level::Settling,
-            since: at,
+            since: prev.map_or(at, |p| p.since),
             streak: 0,
             errors: vec![],
+            stale: false,
+            checked_at: at,
+            measured: true,
         };
     };
     let minutes = at.saturating_sub(p.at) as f64 / 60.0;
@@ -186,6 +235,9 @@ pub fn next(prev: Option<&Link>, sas: &str, drive: Vec<PhyLink>, host: Vec<PhyLi
         since: if level == p.level { p.since } else { at },
         streak,
         errors: vec![],
+        stale: false,
+        checked_at: at,
+        measured: true,
     }
 }
 
@@ -240,19 +292,21 @@ pub fn record(
     rates: Option<Vec<crate::drive::scsi::PhyRates>>,
     at: u64,
 ) {
-    let (dphys, derr) = match drive {
-        Ok(v) => (v, None),
-        Err(e) => (vec![], Some(format!("drive side: {e}"))),
-    };
-    let (hname, hphys, hmax) = match host {
-        Some((n, p, m)) => (Some(n), vec![p], Some(m)),
-        None => (None, vec![], None),
-    };
     let l = with(|m| {
-        let mut l = next(m.get(sas), sas, dphys, hphys, at);
-        l.host_phy = hname;
-        l.host_maximum = hmax;
-        if let Some(r) = &rates {
+        let prev = m.get(sas);
+        // A host phy that faced the drive and is gone is a side not read
+        // (#721); a drive no HBA phy ever faced has an empty host side.
+        let (hname, hread, hmax) = match host {
+            Some((n, p, mx)) => (Some(n), Ok(vec![p]), Some(mx)),
+            None if prev.is_some_and(|p| p.host_phy.is_some()) => (None, Err("the HBA phy facing it is not listed".to_string()), None),
+            None => (None, Ok(vec![]), None),
+        };
+        let mut l = next(prev, sas, drive, hread, at);
+        if !l.stale {
+            l.host_phy = hname;
+            l.host_maximum = hmax;
+        }
+        if let Some(r) = rates.as_ref().filter(|_| !l.stale) {
             (l.drive_programmed_max, l.drive_hardware_max) = maxima(r);
             let was = m.get(sas).and_then(|p| p.drive_programmed_max);
             if let (Some(p), Some(h)) = (l.drive_programmed_max, l.drive_hardware_max) {
@@ -261,7 +315,12 @@ pub fn record(
                 }
             }
         }
-        l.errors = derr.into_iter().collect();
+        let fresh = !m.get(sas).is_some_and(|p| p.stale);
+        if l.stale && fresh {
+            tracing::warn!("storage: drive {sas} (bay {}): link not measured, {} kept: {} (#721)", labels.bay, l.level.as_str(), l.errors.join("; "));
+        } else if !l.stale && !fresh {
+            tracing::info!("storage: drive {sas} (bay {}): link measured again (#721)", labels.bay);
+        }
         if let Some(p) = m.get(sas) {
             if p.level != l.level && l.level != Level::Settling {
                 let line = format!("storage: drive {sas} (bay {}): link {} -> {} (#642)", labels.bay, p.level.as_str(), said(&l));
@@ -319,6 +378,14 @@ fn publish(l: &Link, lb: &Labels) {
         "shelf" => lb.shelf.clone()
     )
     .set(l.level.gauge());
+    metrics::gauge!(
+        "storm_drive_link_stale",
+        "node" => lb.node.clone(),
+        "drive" => lb.drive.clone(),
+        "bay" => lb.bay.clone(),
+        "shelf" => lb.shelf.clone()
+    )
+    .set(if l.stale { 1.0 } else { 0.0 });
 }
 
 /// A drive's SAS address from sysfs: `/dev/sdb` (its block device) or
@@ -397,7 +464,7 @@ pub fn summary() -> Vec<Value> {
             .map(|l| {
                 let sync: Option<f64> = l.drive.rates.iter().filter_map(|r| r.loss_of_sync).reduce(|a, b| a + b);
                 serde_json::json!({
-                    "sas_address": l.sas_address, "level": l.level.as_str(), "since": l.since,
+                    "sas_address": l.sas_address, "level": l.level.as_str(), "since": l.since, "stale": l.stale,
                     "loss_of_sync_per_min": sync,
                     "rate_mbps": l.drive.phys.iter().map(|p| p.rate_mbps).max(),
                     "drive_programmed_max": l.drive_programmed_max,
@@ -450,25 +517,25 @@ mod tests {
     fn bay_3s_link_by_its_levels() {
         let sas = "0x5000cca26a819e69";
         let host = |n: u32| vec![PhyLink { phy: 2, rate_mbps: 12000, attached_sas: None, invalid_dwords: n, disparity_errors: 0, loss_of_sync: 0, phy_resets: 0 }];
-        let l0 = next(None, sas, vec![phy(73_506_628, 0, u32::MAX)], host(0), 1000);
+        let l0 = next(None, sas, Ok(vec![phy(73_506_628, 0, u32::MAX)]), Ok(host(0)), 1000);
         assert_eq!(l0.level, Level::Settling);
-        let l1 = next(Some(&l0), sas, vec![phy(73_507_128, 0, u32::MAX)], host(0), 1060);
+        let l1 = next(Some(&l0), sas, Ok(vec![phy(73_507_128, 0, u32::MAX)]), Ok(host(0)), 1060);
         assert_eq!(l1.level, Level::Degraded, "loss of sync moving once");
         assert_eq!(l1.drive.rates[0].loss_of_sync, Some(500.0));
         assert_eq!(l1.drive.rates[0].invalid_dwords, None, "a saturated counter has no rate");
-        let l2 = next(Some(&l1), sas, vec![phy(73_507_628, 0, u32::MAX)], host(0), 1120);
+        let l2 = next(Some(&l1), sas, Ok(vec![phy(73_507_628, 0, u32::MAX)]), Ok(host(0)), 1120);
         assert_eq!(l2.level, Level::Failing, "moving two samples running");
         assert_eq!(l2.since, 1120);
         assert!(said(&l2).starts_with("failing at 12 Gbit: drive phy 0 loss of sync 500/min"), "{}", said(&l2));
         // Pinned to 6 Gbit: the counter froze.
-        let l3 = next(Some(&l2), sas, vec![phy(73_507_628, 0, u32::MAX)], host(0), 1180);
+        let l3 = next(Some(&l2), sas, Ok(vec![phy(73_507_628, 0, u32::MAX)]), Ok(host(0)), 1180);
         assert_eq!(l3.level, Level::Ok);
         // Only the host's invalid DWORDs moving: degraded, never failing.
-        let l4 = next(Some(&l3), sas, vec![phy(73_507_628, 0, u32::MAX)], host(5), 1240);
-        let l5 = next(Some(&l4), sas, vec![phy(73_507_628, 0, u32::MAX)], host(9), 1300);
+        let l4 = next(Some(&l3), sas, Ok(vec![phy(73_507_628, 0, u32::MAX)]), Ok(host(5)), 1240);
+        let l5 = next(Some(&l4), sas, Ok(vec![phy(73_507_628, 0, u32::MAX)]), Ok(host(9)), 1300);
         assert_eq!((l4.level, l5.level), (Level::Degraded, Level::Degraded));
         // A re-plug resets the drive's counters: no rate from that pair.
-        let l6 = next(Some(&l5), sas, vec![phy(46_622, 0, 10)], host(9), 1360);
+        let l6 = next(Some(&l5), sas, Ok(vec![phy(46_622, 0, 10)]), Ok(host(9)), 1360);
         // #646: the drive's own maxima carried from sample to sample, said.
         let mut l7 = l6.clone();
         (l7.drive_programmed_max, l7.drive_hardware_max) = maxima(&[
@@ -476,10 +543,65 @@ mod tests {
             crate::drive::scsi::PhyRates { phy: 1, ..Default::default() },
         ]);
         assert_eq!((l7.drive_programmed_max, l7.drive_hardware_max), (Some(6000), Some(12000)));
-        let l8 = next(Some(&l7), sas, vec![phy(46_622, 0, 10)], host(9), 1420);
+        let l8 = next(Some(&l7), sas, Ok(vec![phy(46_622, 0, 10)]), Ok(host(9)), 1420);
         assert_eq!(l8.drive_programmed_max, Some(6000));
         assert!(said(&l8).starts_with("ok at 12 Gbit (the drive programs 6 Gbit (hardware 12)): nothing moving"), "{}", said(&l8));
         assert_eq!(l6.drive.rates[0].loss_of_sync, None);
         assert_eq!(l6.level, Level::Ok);
+    }
+
+    /// #721 (finding 93dc7ea1ce1c): bay 3 failing, then its log page 0x18
+    /// fails to read, then its host phy is not listed: still failing, no
+    /// recovery, the baseline kept; the next valid sample measured against
+    /// the last valid one, over the whole gap.
+    #[test]
+    fn an_unread_sample_keeps_a_failing_link_failing() {
+        let sas = "0x5000cca26a819e69";
+        let host = || Ok(vec![PhyLink { phy: 2, rate_mbps: 12000, attached_sas: None, invalid_dwords: 0, disparity_errors: 0, loss_of_sync: 0, phy_resets: 0 }]);
+        let l0 = next(None, sas, Ok(vec![phy(1000, 0, 0)]), host(), 1000);
+        let l1 = next(Some(&l0), sas, Ok(vec![phy(1500, 0, 0)]), host(), 1060);
+        let l2 = next(Some(&l1), sas, Ok(vec![phy(2000, 0, 0)]), host(), 1120);
+        assert_eq!(l2.level, Level::Failing);
+        let l3 = next(Some(&l2), sas, Err("LOG SENSE: check condition".into()), host(), 1180);
+        assert_eq!((l3.level, l3.since, l3.streak, l3.at), (Level::Failing, 1120, 2, 1120), "an unread drive side changes nothing measured");
+        assert!(l3.stale && l3.checked_at == 1180);
+        assert_eq!(l3.drive.phys, l2.drive.phys, "the baseline kept");
+        assert_eq!(l3.errors, vec!["drive side: LOG SENSE: check condition".to_string()]);
+        let l4 = next(Some(&l3), sas, Ok(vec![phy(2600, 0, 0)]), Err("the HBA phy facing it is not listed".into()), 1240);
+        assert_eq!((l4.level, l4.at), (Level::Failing, 1120), "a host side gone is not read either");
+        assert_eq!(l4.drive.phys, l2.drive.phys, "a half-read sample does not move the baseline");
+        // Read again: 1000 more over the two minutes since the last valid
+        // sample, 500 a minute, still moving: failing, the streak on.
+        let l5 = next(Some(&l4), sas, Ok(vec![phy(3000, 0, 0)]), host(), 1240);
+        assert!(!l5.stale && l5.errors.is_empty());
+        assert_eq!(l5.drive.rates[0].loss_of_sync, Some(500.0));
+        assert_eq!((l5.level, l5.since, l5.streak), (Level::Failing, 1120, 3));
+        // Never read: settling, and settling on its first valid sample.
+        let u0 = next(None, sas, Err("no sg node".into()), host(), 1000);
+        assert!(u0.stale && !u0.measured && u0.level == Level::Settling);
+        let u1 = next(Some(&u0), sas, Ok(vec![phy(1000, 0, 0)]), host(), 1060);
+        assert_eq!((u1.level, u1.stale, u1.measured), (Level::Settling, false, true), "no rate against no baseline");
+        let u2 = next(Some(&u1), sas, Ok(vec![phy(1000, 0, 0)]), host(), 1120);
+        assert_eq!(u2.level, Level::Ok);
+    }
+
+    /// The host phy that faced a drive gone from the card's list makes the
+    /// sample stale through `record`; a drive never faced by one is read.
+    #[test]
+    fn a_host_phy_gone_is_a_side_not_read() {
+        let lb = Labels::default();
+        let host = |n: u32| Some(("phy-0:2".to_string(), PhyLink { phy: 2, rate_mbps: 12000, attached_sas: None, invalid_dwords: 0, disparity_errors: 0, loss_of_sync: n, phy_resets: 0 }, "12.0 Gbit".to_string()));
+        let a = "0x5000cca200000721";
+        record(a, &lb, Ok(vec![phy(0, 0, 0)]), host(0), None, 1000);
+        record(a, &lb, Ok(vec![phy(0, 0, 0)]), host(500), None, 1060);
+        record(a, &lb, Ok(vec![phy(0, 0, 0)]), host(1000), None, 1120);
+        record(a, &lb, Ok(vec![phy(0, 0, 0)]), None, None, 1180);
+        let v = get(a).unwrap();
+        assert_eq!((v["level"].as_str(), v["stale"].as_bool(), v["host_phy"].as_str()), (Some("failing"), Some(true), Some("phy-0:2")), "{v}");
+        let b = "0x5000cca200000722";
+        record(b, &lb, Ok(vec![phy(0, 0, 0)]), None, None, 1000);
+        record(b, &lb, Ok(vec![phy(0, 0, 0)]), None, None, 1060);
+        let v = get(b).unwrap();
+        assert_eq!((v["level"].as_str(), v["stale"].as_bool()), (Some("ok"), Some(false)), "{v}");
     }
 }

@@ -595,14 +595,23 @@ protected write and read was good. Nobody read the counter.
   moving in two samples running). A change is logged at WARN:
   `storage: drive 0x5000cca26a819e69 (bay 3): link ok -> failing at 12
   Gbit: drive phy 0 loss of sync 500/min (#642)`.
+- **A sample not read is stale** (#721): the drive's log page fails, or the
+  HBA phy that faced the drive is no longer listed. Nothing measured
+  changes: the last valid counters, rates and level are kept (`stale: true`,
+  `checked_at`, `errors`), said once at WARN (`link not measured, failing
+  kept: …`), and the next valid sample is measured against the last valid
+  one. A link never read stays `settling`. A drive no HBA phy ever faced
+  has an empty host side, read.
 - **Where:** each row of `GET /api/v1/storage/hba` carries `link` (both
   sides' phys, their rates, the host phy and its maximum, the level and
   since when). `/metrics` has `storm_drive_link_invalid_dwords_total`,
   `storm_drive_link_disparity_errors_total`, `storm_drive_link_loss_of_sync_total`,
   `storm_drive_link_phy_resets_total` (counters) and `storm_drive_link_rate_mbps`
   (gauge), labelled `node, drive, bay, shelf, side=drive|host, phy`, and
-  `storm_drive_link_level` (-1 settling, 0 ok, 1 degraded, 2 failing).
+  `storm_drive_link_level` (-1 settling, 0 ok, 1 degraded, 2 failing),
+  `storm_drive_link_stale` (1 while the last sample was not read).
   Health (open, no token) has `drive_links`: each drive's level, since when,
+  `stale`,
   the drive side's loss-of-sync rate and its rate in Mbit/s. The
   trend and the alert rules are ironprom's (ironprom#49), the Drive object's
   `status.link` and its condition stormdrive's, the console's view
