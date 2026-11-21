@@ -100,9 +100,10 @@ MIT) and crates/nvmeof-target (storminstall, Apache-2.0, public binaries).
   Decisions box (needs-owner taken off by the owner's account): "every
   project is MIT; a licence is never an owner question. Declare MIT ...,
   LICENSE as MIT, and ship."
-- [ ] `license = "MIT"` in all six manifests, a root `LICENSE` (MIT,
+- [x] `license = "MIT"` in all six manifests, a root `LICENSE` (MIT,
   Glenn West), README's License section; the Antonio font stays OFL 1.1
-  (`crates/screen-spec/fonts/OFL.txt`). check.sh; release; close #481, #578
+  (`crates/screen-spec/fonts/OFL.txt`). 3dca4c8e: cargo metadata MIT for all
+  six packages, check.sh ALL PASS (1596/1596); v24.45.6; DONE, closed
 
 ## #701 — finding 661ff070abe6: a runtime format could take a live array member (2026-11-20, P0)
 The in-use check compared slab paths with `/dev/sdX`. A slab on an engine
