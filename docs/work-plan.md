@@ -95,11 +95,14 @@ master runs the boot.)
 Six manifests say `license = "TBD"`: the root, tests-runtime, benches,
 crates/pallet-format (stormuefi links it, MIT), crates/screen-spec (stormbootx,
 MIT) and crates/nvmeof-target (storminstall, Apache-2.0, public binaries).
-- [ ] **waits on the owner** (needs-owner on #481, narrowing #578): A
-  Apache-2.0, B MIT OR Apache-2.0, C proprietary, D split (MIT OR Apache-2.0
-  for the three linked crates, proprietary for the engine; recommended).
-  Then: the SPDX id in all six (a `LICENSE` file for a proprietary one, a
-  `LICENSE-MIT`/`LICENSE-APACHE` pair for B/D), check.sh, close #481 and #578.
+- [x] asked (needs-owner on #481, narrowing #578: A Apache-2.0, B MIT OR
+  Apache-2.0, C proprietary, D split). Answered 2026-11-20 21:21 through the
+  Decisions box (needs-owner taken off by the owner's account): "every
+  project is MIT; a licence is never an owner question. Declare MIT ...,
+  LICENSE as MIT, and ship."
+- [ ] `license = "MIT"` in all six manifests, a root `LICENSE` (MIT,
+  Glenn West), README's License section; the Antonio font stays OFL 1.1
+  (`crates/screen-spec/fonts/OFL.txt`). check.sh; release; close #481, #578
 
 ## #701 — finding 661ff070abe6: a runtime format could take a live array member (2026-11-20, P0)
 The in-use check compared slab paths with `/dev/sdX`. A slab on an engine
