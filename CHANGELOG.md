@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-21
+- **fix:** #716 (finding e535779343ee, major): a release erase saves the plan of what it lays again (each volume's name and its golden, the state volume's too) in the ticket, with the declaration, before its first delete. A run cut after its deletes lays the recorded plan back, a volume already gone included, and writes the declaration into the fresh `stormcos-state`; before, a cut there left `stormcos-state` and `fastetcd-data` deleted, the next run planned from what was left, and consumed the ticket without them.
+- **fix:** #716 (finding bf72463adfbf, major): a release step that fails (a delete, a volume laid again, the declaration's write, a persist, now checked) is an error before `stormblock-state` is touched: the ticket stays pending, the boot stops naming the steps, and the next boot runs it again. Before, the failures were listed in the report and the old state volume, with the ticket, was replaced all the same. The swap itself: a fresh state volume whose old one cannot be deleted is deleted again and the run is an error.
+
 ## [v24.45.7] — 2026-11-21
 
 ### Fixed

@@ -18006,6 +18006,7 @@ mod release_erase_tests {
                 force: false,
                 state: "pending".into(),
                 declaration: None,
+                relay: None,
             };
             store.put(TICKET, serde_json::to_vec(&t).unwrap()).await.unwrap();
             mgr.persist().await;
@@ -18068,6 +18069,116 @@ mod release_erase_tests {
         let again = run_release_ticket(again).await.unwrap();
         assert_eq!(names(&again).await, want);
         assert!(file(&again, "stormcos-state", "/config/install-config.yaml").await.is_some());
+    }
+
+    /// The ticket in `stormblock-state`, as the disk has it now.
+    async fn ticket_on(mgr: &VolumeManager) -> Option<Ticket> {
+        let id = mgr.find_volume("stormblock-state").await?;
+        let st = crate::state::StateStore::open_volume(mgr.get_volume(&id)?).await;
+        serde_json::from_slice(&st.get(TICKET).await?).ok()
+    }
+
+    /// #716, findings bf72463adfbf and e535779343ee: a step that fails stops
+    /// the run before the state volume is touched, and the ticket keeps the
+    /// plan of what is laid again (saved before the first delete), so a run
+    /// cut after its deletes lays those volumes back, the declaration in
+    /// `stormcos-state`, though nothing of them is left to plan from.
+    #[tokio::test]
+    async fn a_release_that_fails_or_is_cut_keeps_its_ticket_and_lays_its_plan_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.slab").display().to_string();
+        let declared = "[node]\nhostname = \"stormblock1\"\n\n[cluster]\nrole = \"master\"\n";
+        let (old_engine, pvc);
+        {
+            let dev = Arc::new(FileDevice::open_with_capacity(&path, 512 * 1024 * 1024).await.unwrap()) as Arc<dyn BlockDevice>;
+            let slab = Slab::format_with(
+                dev,
+                SlabFormat::new(SLOT, StorageTier::Hot).with_role(SlabRole::Data).with_metadata(8 * 1024 * 1024),
+            )
+            .await
+            .unwrap();
+            let sid = slab.slab_id();
+            let mut mgr = VolumeManager::new(SLOT);
+            mgr.add_slab(slab).await;
+            mgr.keep_metadata_in_first(&[sid]);
+            let g_state = golden(&mut mgr, "stormcos-state.golden", &[("/config/stormcos.toml", "[node]\n")], Origin::Release).await;
+            let g_engine = golden(&mut mgr, "stormblock-state.golden", &[("/engine/.keep", "")], Origin::Release).await;
+            let g_etcd = golden(&mut mgr, "fastetcd-data.golden", &[("/README", "empty")], Origin::Release).await;
+            clone_of(&mut mgr, g_state, "stormcos-state", Origin::Release, &[("/config/stormcos.toml", declared)]).await;
+            old_engine = clone_of(&mut mgr, g_engine, "stormblock-state", Origin::Release, &[]).await;
+            clone_of(&mut mgr, g_etcd, "fastetcd-data", Origin::Release, &[("/member/db", "the cluster's etcd")]).await;
+            pvc = ext4(&mut mgr, "pvc-0001", &[("/data", "a workload's")]).await;
+            mgr.set_origin(pvc, Origin::Node);
+            let store = crate::state::StateStore::open_volume(mgr.get_volume(&old_engine).unwrap()).await;
+            let t = Ticket {
+                id: "t-716".into(),
+                erase: crate::drive::erase::EraseLevel::Once,
+                asked_at: 1,
+                asked_by: "admin".into(),
+                force: false,
+                state: "pending".into(),
+                declaration: None,
+                relay: None,
+            };
+            store.put(TICKET, serde_json::to_vec(&t).unwrap()).await.unwrap();
+            mgr.persist().await;
+        }
+        let paths = vec![path.clone()];
+
+        // A delete that fails (the PVC held, as something serving it would):
+        // the run is an error, the boot stops, the old state volume and its
+        // ticket stay, now with the plan and the declaration in it.
+        let (mgr, _) = open_slabs_resuming(&paths, None, true).await.unwrap();
+        mgr.holds().hold(pvc.0, "a test's hold");
+        let err = run_release_ticket(mgr).await.err().expect("a delete that failed is no release done");
+        assert!(err.to_string().contains("pvc-0001: not deleted"), "{err}");
+        assert!(err.to_string().contains("the ticket stays"), "{err}");
+        let (mut mgr, _) = open_slabs_resuming(&paths, None, true).await.unwrap();
+        assert_eq!(mgr.find_volume("stormblock-state").await, Some(old_engine), "the old state volume is still the one read");
+        assert!(mgr.find_volume("stormblock-state.release-new").await.is_none());
+        assert!(mgr.find_volume("pvc-0001").await.is_some(), "the held volume was not deleted");
+        let t = ticket_on(&mgr).await.expect("the ticket is still there");
+        assert!(t.pending());
+        let mut planned: Vec<String> = t.relay.clone().unwrap().into_iter().map(|r| r.name).collect();
+        planned.sort();
+        assert_eq!(planned, ["fastetcd-data", "stormblock-state", "stormcos-state"], "the plan saved before the first delete");
+        assert!(t.declaration.as_ref().unwrap().files.contains_key("/config/stormcos.toml"));
+
+        // A cut after the deletes: stormcos-state and fastetcd-data gone,
+        // nothing laid yet. Nothing of them is left to plan from; the
+        // ticket's plan lays them back, the declaration written again.
+        for gone in ["stormcos-state", "fastetcd-data"] {
+            let id = mgr.find_volume(gone).await.unwrap();
+            mgr.delete_volume(id).await.unwrap();
+        }
+        mgr.persist().await;
+        drop(mgr);
+        let (mgr, _) = open_slabs_resuming(&paths, None, true).await.unwrap();
+        let mgr = run_release_ticket(mgr).await.unwrap();
+        assert_eq!(
+            names(&mgr).await,
+            [
+                "fastetcd-data",
+                "fastetcd-data.golden",
+                "stormblock-state",
+                "stormblock-state.golden",
+                "stormcos-state",
+                "stormcos-state.golden",
+            ]
+        );
+        assert_eq!(file(&mgr, "fastetcd-data", "/README").await.as_deref(), Some("empty"));
+        assert_eq!(file(&mgr, "fastetcd-data", "/member/db").await, None);
+        let toml = file(&mgr, "stormcos-state", "/config/stormcos.toml").await.unwrap();
+        assert!(toml.contains("stormblock1") && !toml.contains("master"), "{toml}");
+        assert_ne!(mgr.find_volume("stormblock-state").await, Some(old_engine));
+        assert!(ticket_on(&mgr).await.is_none(), "the ticket went with the old state volume, once all of it was done");
+        let st = crate::state::StateStore::open_volume(mgr.get_volume(&mgr.find_volume("stormblock-state").await.unwrap()).unwrap()).await;
+        let r: crate::release_erase::Report = serde_json::from_slice(&st.get(REPORT).await.unwrap()).unwrap();
+        assert!(r.failed.is_empty(), "{r:?}");
+        assert!(r.erased.iter().any(|n| n == "pvc-0001"), "{r:?}");
+        for n in ["fastetcd-data", "stormcos-state", "stormblock-state"] {
+            assert!(r.relaid.iter().any(|x| x == n), "{n} laid again: {r:?}");
+        }
     }
 }
 

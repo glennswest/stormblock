@@ -31,10 +31,17 @@
 //! (`/api/v1/erasures`). Slots a kept golden still shares are not freed, so
 //! not erased (#286's rule).
 //!
-//! **A cut part-way repeats the run.** The ticket, with the declaration in
-//! it, is in `stormblock-state`, and that volume is laid again last, through
-//! a temporary name: until the end the old one (and its ticket) is there.
-//! What was already laid again is laid again (still fresh, still erased).
+//! **A cut part-way repeats the run.** The ticket, with the declaration and
+//! the plan of what is laid again from which golden in it (both saved before
+//! the first delete, #716), is in `stormblock-state`, and that volume is laid
+//! again last, through a temporary name: until the end the old one (and its
+//! ticket) is there. What was already laid again is laid again (still fresh,
+//! still erased); what was deleted and not yet laid is laid from the plan.
+//!
+//! **A step that fails stops the boot.** A delete, a volume laid again, the
+//! declaration's write or a persist that does not go as planned is an error
+//! before the state volume is touched: the ticket stays pending and the
+//! next boot runs it again (#716).
 
 use std::sync::Arc;
 
@@ -75,6 +82,19 @@ pub struct Ticket {
     /// The node's declaration, saved before anything is deleted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declaration: Option<Declaration>,
+    /// What is laid again, and from which golden, saved with the declaration
+    /// before anything is deleted (#716): a run cut after a delete lays it
+    /// all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<Vec<Relay>>,
+}
+
+/// A volume of the release's laid again: deleted, then cloned afresh from
+/// the golden `from` (its id) under the same `name`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Relay {
+    pub name: String,
+    pub from: String,
 }
 
 impl Ticket {
@@ -250,31 +270,61 @@ pub async fn finish_interrupted(m: &mut VolumeManager) -> bool {
 
 /// Run a ticket on a node whose volumes nothing serves yet: `boot-local`,
 /// before the root is resolved.
+///
+/// An error leaves the ticket pending in the old `stormblock-state` (#716,
+/// finding bf72463adfbf): anything required that did not go as planned (a
+/// delete, a volume laid again, the declaration's write, a persist) is
+/// refused before the state volume is touched, the boot stops, and the next
+/// one runs the ticket again from the plan it carries.
 pub async fn run(vm: &Arc<crate::fs::template::VmLock>, store: &crate::state::StateStore, mut t: Ticket) -> anyhow::Result<Report> {
     println!("RELEASE: ticket {} ({} erase, asked by {}): erasing what this node holds for its cluster", t.id, t.erase, t.asked_by);
-    // The declaration first, kept in the ticket: a cut after stormcos-state
-    // is gone still has it.
-    if t.declaration.is_none() {
-        let dev = {
-            let m = vm.lock().await;
-            match m.find_volume(NODE_STATE_VOLUME).await {
-                Some(id) => m.get_volume(&id),
-                None => None,
-            }
-        };
-        let d = match dev {
-            Some(dev) => read_declaration(&dev).await,
-            None => Declaration::default(),
-        };
-        t.declaration = Some(d);
+    let items = plan(&*vm.lock().await).await;
+    // The declaration and the plan of what is laid again, kept in the ticket
+    // before anything is deleted (#716, finding e535779343ee): a cut after a
+    // delete still knows what to lay and what to write into it, though the
+    // volume it was read from is gone.
+    if t.declaration.is_none() || t.relay.is_none() {
+        if t.declaration.is_none() {
+            let dev = {
+                let m = vm.lock().await;
+                match m.find_volume(NODE_STATE_VOLUME).await {
+                    Some(id) => m.get_volume(&id),
+                    None => None,
+                }
+            };
+            t.declaration = Some(match dev {
+                Some(dev) => read_declaration(&dev).await,
+                None => Declaration::default(),
+            });
+        }
+        if t.relay.is_none() {
+            t.relay = Some(
+                items
+                    .iter()
+                    .filter_map(|i| match &i.action {
+                        Action::Relay { from } => Some(Relay { name: i.name.clone(), from: from.clone() }),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+        }
         store
             .put(TICKET, serde_json::to_vec_pretty(&t)?)
             .await
-            .map_err(|e| anyhow::anyhow!("saving the declaration in the ticket: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("saving the declaration and the plan in the ticket: {e}"))?;
     }
     let decl = t.declaration.clone().unwrap_or_default();
+    // The recorded plan, and anything the release's that is to be laid again
+    // and is not in it (a volume laid since an older engine wrote the ticket).
+    let mut relay = t.relay.clone().unwrap_or_default();
+    for i in &items {
+        if let Action::Relay { from } = &i.action {
+            if !relay.iter().any(|r| r.name == i.name) {
+                relay.push(Relay { name: i.name.clone(), from: from.clone() });
+            }
+        }
+    }
 
-    let items = plan(&*vm.lock().await).await;
     let mut r = Report { ticket: t.id.clone(), erase: t.erase, ran_at: now(), ..Default::default() };
     let level = Some(t.erase.max(EraseLevel::Once));
     // Deepest first, so a clone goes before what it was cloned from; the
@@ -289,17 +339,13 @@ pub async fn run(vm: &Arc<crate::fs::template::VmLock>, store: &crate::state::St
             r.kept.push(format!("{} ({why})", i.name));
         }
     }
-    let mut relay = Vec::new();
-    let mut state_from = None;
     for i in order.iter().filter(|i| i.name != STATE_VOLUME) {
         let mut m = vm.lock().await;
         match m.delete_volume_erasing(i.vid(), level).await {
             Ok(s) => {
                 r.slots += s.slots;
                 r.bytes += s.bytes;
-                if let Action::Relay { from } = &i.action {
-                    relay.push((i.name.clone(), from.clone()));
-                } else {
+                if !matches!(i.action, Action::Relay { .. }) {
                     r.erased.push(i.name.clone());
                 }
             }
@@ -310,79 +356,97 @@ pub async fn run(vm: &Arc<crate::fs::template::VmLock>, store: &crate::state::St
             }
         }
     }
-    for i in order.iter().filter(|i| i.name == STATE_VOLUME) {
-        if let Action::Relay { from } = &i.action {
-            state_from = Some(from.clone());
-        }
+    if let Err(e) = vm.lock().await.persist_checked().await {
+        r.failed.push(format!("the deletes not recorded: {e}"));
     }
-    vm.lock().await.persist().await;
 
-    for (name, from) in &relay {
-        match lay(vm, name, from).await {
-            Ok(id) => {
-                r.relaid.push(name.clone());
-                if name == NODE_STATE_VOLUME && !decl.files.is_empty() {
-                    let dev = vm.lock().await.get_volume(&id);
-                    if let Some(dev) = dev {
-                        let files: Vec<_> =
-                            decl.files.iter().map(|(p, c)| crate::fs::files::SeedFile::new(p.clone(), c.clone().into_bytes())).collect();
-                        match crate::fs::files::write_files(&dev, &files).await {
-                            Ok(()) => r.carried = decl.files.keys().cloned().collect(),
-                            Err(e) => r.failed.push(format!("{NODE_STATE_VOLUME}: the declaration not written: {e}")),
-                        }
-                    }
-                }
-            }
+    for Relay { name, from } in relay.iter().filter(|x| x.name != STATE_VOLUME) {
+        // Laid only where the old one is gone: one whose delete failed is
+        // said above, and laid by the run that deletes it.
+        if vm.lock().await.find_volume(name).await.is_some() {
+            continue;
+        }
+        let id = match lay(vm, name, from).await {
+            Ok(id) => id,
             Err(e) => {
                 let why = format!("{name}: not laid again: {e}");
                 eprintln!("WARNING: release: {why}");
                 r.failed.push(why);
+                continue;
+            }
+        };
+        r.relaid.push(name.clone());
+        if name == NODE_STATE_VOLUME && !decl.files.is_empty() {
+            let dev = vm.lock().await.get_volume(&id);
+            let written = match dev {
+                Some(dev) => {
+                    let files: Vec<_> =
+                        decl.files.iter().map(|(p, c)| crate::fs::files::SeedFile::new(p.clone(), c.clone().into_bytes())).collect();
+                    crate::fs::files::write_files(&dev, &files).await
+                }
+                None => Err(anyhow::anyhow!("the volume laid is not open")),
+            };
+            match written {
+                Ok(()) => r.carried = decl.files.keys().cloned().collect(),
+                Err(e) => {
+                    let why = format!("{NODE_STATE_VOLUME}: the declaration not written: {e}");
+                    eprintln!("WARNING: release: {why}");
+                    r.failed.push(why);
+                }
             }
         }
     }
-    vm.lock().await.persist().await;
+    if let Err(e) = vm.lock().await.persist_checked().await {
+        r.failed.push(format!("the volumes laid again not recorded: {e}"));
+    }
+    // Everything above is required: short of it, the old state volume and
+    // its ticket stay, and the next boot runs the ticket again.
+    if !r.failed.is_empty() {
+        anyhow::bail!("{} step(s) not as planned: {}", r.failed.len(), r.failed.join("; "));
+    }
 
-    // The state volume last, through a temporary name: until the rename the
-    // old one, with its ticket, is the one the next boot reads.
+    // The state volume last, through a temporary name: until the old one is
+    // deleted, it and its ticket are what the next boot reads.
     let old_state = items.iter().find(|i| i.name == STATE_VOLUME).map(|i| i.vid());
+    let state_from = relay.iter().find(|x| x.name == STATE_VOLUME).map(|x| x.from.clone());
     if let (Some(old), Some(from)) = (old_state, state_from) {
-        match lay(vm, STATE_NEW, &from).await {
-            Ok(new) => {
-                r.relaid.push(STATE_VOLUME.to_string());
-                let mut m = vm.lock().await;
-                match m.delete_volume_erasing(old, level).await {
-                    Ok(s) => {
-                        r.slots += s.slots;
-                        r.bytes += s.bytes;
-                    }
-                    Err(e) => r.failed.push(format!("{STATE_VOLUME}: not deleted: {e}")),
-                }
-                // The report once everything is counted, then the name: a cut
-                // before the rename is finished by the next boot
-                // ([`finish_interrupted`]).
-                r.ran_at = now();
-                if let Some(dev) = m.get_volume(&new) {
-                    let fresh = crate::state::StateStore::open_volume(dev).await;
-                    if let Err(e) = fresh.put(REPORT, serde_json::to_vec_pretty(&r)?).await {
-                        r.failed.push(format!("the report not written: {e}"));
-                    }
-                }
-                if let Err(e) = m.rename_volume(new, STATE_VOLUME).await {
-                    r.failed.push(format!("{STATE_NEW}: not renamed: {e}"));
-                }
-                m.persist().await;
+        let new = lay(vm, STATE_NEW, &from).await.map_err(|e| anyhow::anyhow!("{STATE_VOLUME}: not laid again: {e}"))?;
+        let mut m = vm.lock().await;
+        match m.delete_volume_erasing(old, level).await {
+            Ok(s) => {
+                r.slots += s.slots;
+                r.bytes += s.bytes;
             }
-            Err(e) => r.failed.push(format!("{STATE_VOLUME}: not laid again: {e}")),
+            Err(e) => {
+                // The old one, its ticket with it, stays the one read; the
+                // fresh one goes (`plan` erases it next time anyway).
+                let _ = m.delete_volume_erasing(new, level).await;
+                m.persist().await;
+                anyhow::bail!("{STATE_VOLUME}: not deleted: {e}");
+            }
         }
+        r.relaid.push(STATE_VOLUME.to_string());
+        // Past here the release is done: a cut before the rename is finished
+        // by the next boot ([`finish_interrupted`]).
+        m.persist_checked().await.map_err(|e| anyhow::anyhow!("the state volume's swap not recorded: {e}"))?;
+        r.ran_at = now();
+        if let Some(dev) = m.get_volume(&new) {
+            let fresh = crate::state::StateStore::open_volume(dev).await;
+            if let Err(e) = fresh.put(REPORT, serde_json::to_vec_pretty(&r)?).await {
+                eprintln!("WARNING: release: the report not written: {e}");
+                r.failed.push(format!("the report not written: {e}"));
+            }
+        }
+        m.rename_volume(new, STATE_VOLUME).await.map_err(|e| anyhow::anyhow!("{STATE_NEW}: not renamed: {e}"))?;
+        m.persist_checked().await.map_err(|e| anyhow::anyhow!("{STATE_NEW}'s rename not recorded: {e}"))?;
     } else if let Some(old) = old_state {
         // No golden to lay it from: erased, and the ticket with it.
         let mut m = vm.lock().await;
-        if let Ok(s) = m.delete_volume_erasing(old, level).await {
-            r.slots += s.slots;
-            r.bytes += s.bytes;
-            r.erased.push(STATE_VOLUME.to_string());
-        }
-        m.persist().await;
+        let s = m.delete_volume_erasing(old, level).await.map_err(|e| anyhow::anyhow!("{STATE_VOLUME}: not deleted: {e}"))?;
+        r.slots += s.slots;
+        r.bytes += s.bytes;
+        r.erased.push(STATE_VOLUME.to_string());
+        m.persist_checked().await.map_err(|e| anyhow::anyhow!("the state volume's delete not recorded: {e}"))?;
     }
     println!(
         "RELEASE: done: {} kept, {} laid again, {} erased, {} slot(s) to overwrite ({}){}",

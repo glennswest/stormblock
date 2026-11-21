@@ -143,6 +143,7 @@ async fn ask(
         force: req.force,
         state: "pending".into(),
         declaration: None,
+        relay: None,
     };
     if let Err(e) = write_ticket(&state, &t).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": "ticket", "message": e}))).into_response();

@@ -162,7 +162,13 @@ and the node reboots (decided on #291, 1B):
      `/config/stormcos.toml` with only its `[node]` and `[network]` tables
      (the role, `[cluster]`, is not carried), `install-node.toml`,
      `install-config.yaml` and `ssh/authorized_keys`. It is saved in the
-     ticket before anything is deleted.
+     ticket before anything is deleted, with the plan of what is laid again
+     from which golden (#716);
+   - **a step that fails stops the boot** (#716): a delete, a volume laid
+     again, the declaration's write or a persist that does not go as planned
+     is an error before `stormblock-state` is touched. The ticket stays
+     pending, the boot stops with the steps named, and the next boot runs
+     the ticket again.
 3. **Overwritten.** Every slot a deleted volume frees is `Erasing` at least
    at the ticket's level (`once` by default, never less), and the
    successor's eraser overwrites it when it opens the slab; progress is
@@ -170,12 +176,14 @@ and the node reboots (decided on #291, 1B):
    Slots a kept golden still shares are not freed, so not erased.
 4. **Reported.** `release-report.json` in the fresh `stormblock-state`: what
    was kept, laid again and erased, slots and bytes queued, the files
-   carried, and anything that did not go as planned (each also a console
-   WARNING).
+   carried, and the report's own write if that failed (the one step after
+   the release is done that may).
 
 A cut part-way runs the ticket again at the next boot: `stormblock-state` is
 laid again last, under a temporary name, and the old one, with the ticket,
-is there until the end. A cut between its delete and the rename is finished
+is there until the end. What the cut left deleted and not yet laid again is
+laid from the plan in the ticket (#716); what was laid already is laid
+again, still fresh. A cut between its delete and the rename is finished
 by the next boot. A volume of origin `release` that has no golden to lay it
 from is erased and named in the report.
 
