@@ -4,6 +4,12 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.45.11] — 2026-11-21
+
+### Fixed
+- #723 (stormcos#942): a keep-data install carries the node's volumes out of the system half in slot order as long runs and says how far it is every 10 s. A moved slot's share count is published with its entry, never as a table write for each share (the flow-over's too).
+- #720 (finding 6f750e62ad35): only rollback copies an install marked are pruned unasked. Name-recognised ones are `inferred` and pruned only with `include_inferred`.
+
 ### 2026-11-21
 - **fix:** #723 (stormcos#942, an X9's drive-managed SMR disk): a keep-data install carries the node's volumes out of the system half the way the flow-over moves a window. Each slot is read once, in disk order, written in the data half's slot order as 64 MiB runs (32 MiB on an SSD), read back, and the maps are swept once a window. An all-zero slot is unmapped, and a domain collision is refused before anything moves. The carry is said on the console: a start line, one every 10 s (slots, MiB, MB/s), and a summary with its time split into opening, copying and recording. Before, it moved one extent at a time and said nothing until it ended (a minute for an X9's `ctr-ct-*` clones).
 - **fix:** #723: a moved slot's share count (`Slab::carry_shares`) goes onto the table with its entry at the destination's next sync, after its data (#171). This applies to `move_slot`, `migrate_leg_unlocked` and the flow-over's window. Before, each share beyond the first was its own synchronous table write in the middle of the runs: for a golden's clones, several scattered writes for every moved slot, which is what slows a drive-managed SMR disk. `inc_ref_batch` reads table pages only for the slots memory does not already hold.

@@ -24,7 +24,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   pass with clippy on afbdbfdd (the carry's console lines seen); negative
   control (a table write a share again, `wip/723-negative`, deleted) fails
   the window test with 10 writes against <= 3
-- [ ] check.sh on main; release
+- [x] check.sh ALL PASS on 4b2f35aa (1606/1606, 1958 s); v24.45.11
 - [ ] measured on an X9 (`replacing the system half` → `laid out and handed`,
   the flow-over's MB/s): needs a keep-data install on the test machine
 
