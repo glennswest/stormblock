@@ -10,7 +10,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 - [x] 78ed70cc2493: `volume_delete_is_destructive` resolves the key with
   `volumes::volume_key_in` (the handler's rules, `?namespace=`); test
   `a_sealed_or_template_volume_is_the_admins_by_id_name_or_synonym`
-- [ ] check.sh, patch release, close
+- [x] check.sh ALL PASS on 4f4a22dc (1594/1594, 1885 s); v24.45.2; DONE, closed
 
 ## #710 — finding 3b2c8a529282 in mgmt/namespaces.rs (2026-11-20, P1)
 - [x] `for_review`: the path's volume (UUID, a name within `?namespace=`,
