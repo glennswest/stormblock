@@ -2,7 +2,7 @@
 name = "stormblock-runtime-tests"
 version = "0.1.0"
 edition = "2021"
-license = "TBD"
+license = "MIT"
 description = "stormblock's runtime tests: they drive the built binary (STORMBLOCK_BIN), kernel devices or privileges, so they run against a built engine, not in the routine cargo test (#209)."
 publish = false
 

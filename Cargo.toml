@@ -11,7 +11,7 @@ edition = "2021"
 authors = ["Glenn West"]
 description = "Pure Rust enterprise block storage engine — NVMe-oF/TCP + iSCSI targets with software RAID"
 repository = "https://github.com/glennswest/stormblock"
-license = "TBD"
+license = "MIT"
 rust-version = "1.82"
 # One in-process integration-test binary (tests/it), not one per file (#209).
 autotests = false

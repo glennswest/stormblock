@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Glenn West"]
 description = "NVMe/TCP wire code shared by the stormblock engine, and a portable read-only boot target (macOS, Windows, Linux)"
 repository = "https://github.com/glennswest/stormblock"
-license = "TBD"
+license = "MIT"
 publish = false
 
 [features]

@@ -3605,4 +3605,8 @@ benches/               stormblock-benches: criterion benchmarks, `cargo bench -p
 
 ## License
 
-TBD
+MIT: [LICENSE](LICENSE), for the engine and every crate in the workspace
+(`crates/nvmeof-target`, `crates/pallet-format` and `crates/screen-spec`,
+which other components link, each carry a copy). The boot screen's typeface,
+Antonio Bold, is the SIL Open Font License 1.1
+([crates/screen-spec/fonts/OFL.txt](crates/screen-spec/fonts/OFL.txt)).

@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Glenn West"]
 description = "The boot and install screen's look as one no_std spec: palette, typeface, grid, frame and shapes (stormblock#637, for stormblock's screen and stormbootx's panel)"
 repository = "https://github.com/glennswest/stormblock"
-license = "TBD"
+license = "MIT"
 rust-version = "1.75"
 
 [dependencies]

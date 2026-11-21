@@ -2,7 +2,7 @@
 name = "stormblock-benches"
 version = "0.1.0"
 edition = "2021"
-license = "TBD"
+license = "MIT"
 description = "stormblock's criterion benchmarks: parity, extent allocation, PDU parsing (#211)."
 publish = false
 

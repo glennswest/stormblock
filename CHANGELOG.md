@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-21
+- **chore:** #481/#578: the licence is MIT (the owner's answer on #481: every project is MIT). `license = "MIT"` in all six manifests (the root, `tests-runtime`, `benches`, `crates/nvmeof-target`, `crates/pallet-format`, `crates/screen-spec`), which said `"TBD"`, not an SPDX id; a root `LICENSE`, with a copy in each crate other components link (stormuefi, stormbootx, storminstall). The Antonio font stays OFL 1.1.
+
 ## [v24.45.5] — 2026-11-21
 
 ### Fixed
