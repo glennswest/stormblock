@@ -11,7 +11,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   `?namespace=` is a 404. Test: `a_familys_bearer_keeps_to_its_namespace_and_its_quota`
   (GET, `/digest`, `POST /clone` with a misleading query: 403 for nana, 404
   for the node token)
-- [ ] check.sh, patch release, close
+- [x] check.sh ALL PASS on dd6f3846 (1592/1592, 1909 s); v24.45.1; DONE, closed
 
 ## #709 — findings 2e2144771e67, d893aaefa0ff in mgmt/api/kube.rs (2026-11-20, P1)
 - [x] 2e2144771e67 (registry before manager in `all_slabs`): fixed by #571
