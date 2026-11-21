@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.45.12] — 2026-11-21
+
+### Fixed
+- #721 (finding 93dc7ea1ce1c): a drive's link sample that cannot be read (log page 0x18 failing, its host phy gone) is `stale` and keeps the last valid counters and level; a failing link is never cleared by an unread sample.
+
 ### 2026-11-21
 - **fix:** #721 (finding 93dc7ea1ce1c, major): a drive's link sample a side of which cannot be read (its log page 0x18 fails, or the HBA phy that faced it is no longer listed) is `stale`: the last valid counters, rates, level, since and streak are kept, the error is in `errors`, `checked_at` says when it was tried, and the next valid sample is measured against the last valid one. It is said once at WARN (`link not measured, failing kept: …`) and at INFO when read again; `stale` is in each row's `link` and health's `drive_links`, and `/metrics` has `storm_drive_link_stale`. A link never read is `settling` until two valid samples. Before, the unread side went in as no phys, nothing moving: a failing link turned `ok`, was logged as recovered, and lost its baseline.
 

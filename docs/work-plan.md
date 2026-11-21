@@ -21,7 +21,7 @@ failing link went `ok`, said recovered, and lost its baseline.
   `a_host_phy_gone_is_a_side_not_read`: pass with clippy on 569fbacf;
   negative control (an unread side as no phys, `wip/721-negative`, deleted)
   fails both: `(Ok, 1180, 0, 1180)` against `(Failing, 1120, 2, 1120)`
-- [ ] check.sh, release
+- [x] check.sh ALL PASS on c361dcaa (2083 s); v24.45.12
 
 ## #723 — keep-data install on drive-managed SMR: the carry written sequentially, said (2026-11-21, stormcos#942)
 - [x] `carry_split`: each system-half slot once (shared slots deduped), in
