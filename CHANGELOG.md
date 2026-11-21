@@ -9,6 +9,9 @@
 ### Added
 - #623 step 3: `storage.runtime: true` in the install-config. A fresh install over blank drives, from an appliance's or the media's image, is done by the running node. `/init` boots the image with every drive left alone. The engine formats (#621's jobs), lays, makes the node-data set and flows over, each step in the install record. Off by default. A keep-data reinstall and the wipe word stay with `/init`.
 
+### Fixed
+- #709 (finding d893aaefa0ff): a `PATCH` of a Volume on the engine's kube surface is destructive (the admin token, or a `destroy` review), as the REST seal/unseal and `PATCH /api/v1/volumes/{id}` are. Finding 2e2144771e67 (the kube slab list's lock order, fixed by #571) has its test.
+
 ### 2026-11-20
 - **fix:** #722: the runtime install's run directory shadowed `node_install::run` (7deb7485 did not compile); renamed.
 - **feat:** #623 step 3, the trigger: `storage.runtime: true` in the install-config. On a fresh install from an appliance's or the media's image over drives that hold nothing (no node data served, no wipe word), `/init` lays nothing, leaves `/run/stormblock/runtime-install` and boots the image with every drive left alone. The node's engine then runs `node_install::run` once a boot, from the words `/init` kept and the drives it sees, refusing any drive that holds something, planning again by serial after the format. Off by default; otherwise `/init` goes on as before and says why.

@@ -15,8 +15,8 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   (`integration_locks::listings_keep_their_time_while_builds_and_creates_flush_a_slow_disk`,
   1.54 s) failed on the first run; the second run passed (1584/1584,
   1994 s; sc-build: a flake, not filed). Paused for the P0 #623
-  (2026-11-20). Next: release (patch) d051aee9 or later, stage, close #709
-  naming both findings.
+  (2026-11-20). Released in v24.45.0 (f7a1ef77, stage f56b2ee3da96);
+  both tests passed again in check.sh on 60fddd9a (1592/1592). DONE, closed.
 
 ## #708 — finding 07322d3af07a: parity writes after a failed dirty mark (2026-11-20, P1)
 - [x] `StripeLog`: a stripe is in the set only once the file naming it is
