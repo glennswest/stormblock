@@ -667,6 +667,17 @@ ISO. stormblock's side, in steps (each its own commit):
   proof is a boot from a release ISO carrying the disk (stormcentral#1556,
   the key and `rd.stormblock.iso=auto` from #1476). Held `--after`
   mkfs.iso.rs#35 and stormcentral#1556.
+- (2026-11-21) mkfs.iso.rs#35 closed (mkfs-iso v0.1.1, 0ac298a);
+  stormcentral#1556 closed (the disk on the ISO as `stormcos-sno[-<f>]`, the
+  release key in the initramfs). stormdist still pins mkfs-iso v0.1.0 (main
+  and v0.7.0) and `Media` opens the path itself, so this repo cannot supply
+  a sized medium: filed glennswest/stormdist#25 (take v0.1.1, tag). Then:
+  - [ ] this repo's stormdist rev to that tag (`cargo update -p stormdist`
+    on a build VM; v0.6.0 → v0.7.x: check the API, tests), check.sh
+  - [ ] proof: an ISO on a block device (a QEMU CD) read by `stormdist://`;
+    the firmware boot of a release ISO waits on stormcentral#1476
+    (ESP/BIOS loader: stormuefi#83, stormdist#18)
+  - still open elsewhere: stormblock-test#6 (component Jobs), stormdist#17
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it
