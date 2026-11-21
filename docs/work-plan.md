@@ -5,11 +5,13 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 ## #713 — finding 95472f7cca9a in nvmeof-target/src/overlay.rs (2026-11-20, P1)
-- [ ] `Overlay::create`: the scratch file an opaque random name (lowercase
+- [x] `Overlay::create`: the scratch file an opaque random name (lowercase
   hex), opened `create_new`, retried on AlreadyExists; never the host's
   spelling, never truncating. Tests: punctuation/case-only host names get
   distinct files and independent data; a taken name is skipped, not truncated
-- [ ] check.sh, release, close
+- [x] crate tests (3/3 overlay) and check.sh ALL PASS on 991b7478 (1595/1595,
+  1917 s); v24.45.4; DONE, closed. check.sh's nextest is the root package
+  only: the workspace crates' tests are not in it (filed)
 
 ## #712 — finding c113e8f8eb01 in target/iscsi/scsi.rs (2026-11-20, P1)
 - [x] `byte_range`: lba + count against capacity in blocks, checked_add /
