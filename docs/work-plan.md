@@ -4,6 +4,13 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #713 — finding 95472f7cca9a in nvmeof-target/src/overlay.rs (2026-11-20, P1)
+- [ ] `Overlay::create`: the scratch file an opaque random name (lowercase
+  hex), opened `create_new`, retried on AlreadyExists; never the host's
+  spelling, never truncating. Tests: punctuation/case-only host names get
+  distinct files and independent data; a taken name is skipped, not truncated
+- [ ] check.sh, release, close
+
 ## #712 — finding c113e8f8eb01 in target/iscsi/scsi.rs (2026-11-20, P1)
 - [x] `byte_range`: lba + count against capacity in blocks, checked_add /
   checked_mul, for read, write, write same, every UNMAP descriptor (all
