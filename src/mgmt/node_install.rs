@@ -235,8 +235,8 @@ pub fn replan_over(old: &StoragePlan, seen: &[crate::image::storage::SeenDrive])
 /// (#623): once a boot, in the background, each step in the install record.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 pub fn start(state: &std::sync::Arc<crate::mgmt::AppState>) {
-    let run = std::path::PathBuf::from(crate::install_progress::RUN);
-    if !run.join(ASKED).exists() {
+    let rundir = std::path::PathBuf::from(crate::install_progress::RUN);
+    if !rundir.join(ASKED).exists() {
         return;
     }
     let live = Live {
@@ -248,7 +248,7 @@ pub fn start(state: &std::sync::Arc<crate::mgmt::AppState>) {
         poll: std::time::Duration::from_secs(10),
     };
     tokio::spawn(async move {
-        if run.join(STARTED).exists() {
+        if rundir.join(STARTED).exists() {
             tracing::warn!(
                 "install: this boot's runtime install was started by an earlier run of the engine; not again \
                  (a flow-over it began resumes from the handover record) (#623)"
@@ -259,9 +259,9 @@ pub fn start(state: &std::sync::Arc<crate::mgmt::AppState>) {
             live.event("stage", "install", "failed", &why);
             return;
         }
-        let _ = std::fs::write(run.join(STARTED), format!("{}\n", crate::install_progress::now()));
-        let doc = std::fs::read_to_string(run.join(crate::mgmt::install_plan::INTENT)).unwrap_or_default();
-        let seen = crate::mgmt::install_plan::seen_now(&live.state, &run, &live.sys).await;
+        let _ = std::fs::write(rundir.join(STARTED), format!("{}\n", crate::install_progress::now()));
+        let doc = std::fs::read_to_string(rundir.join(crate::mgmt::install_plan::INTENT)).unwrap_or_default();
+        let seen = crate::mgmt::install_plan::seen_now(&live.state, &rundir, &live.sys).await;
         let (plan, bytes) = match decide(&doc, &seen) {
             Ok(d) => d,
             Err(e) => {
