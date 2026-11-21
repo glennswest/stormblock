@@ -27,6 +27,9 @@ pinning or kernel module, so it builds for macOS, Windows and Linux
   makes lands in a scratch file of its own, holding only the blocks written
   (append-only, so it is small on any filesystem, NTFS included). Write Zeroes
   and Deallocate take no room. The file goes when the overlay is dropped.
+  Its name is opaque (`<16 hex digits>.overlay`), created with `create_new`,
+  never the host's spelling: two hosts can never share or truncate one
+  (#713).
   The boot path writes to the disk it was handed: stormuefi counts boot
   attempts in the GPT, a diskless node keeps its data there, and an install
   discards what it moved. A read-only namespace would fail all of these.

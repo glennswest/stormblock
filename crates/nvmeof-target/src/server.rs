@@ -114,7 +114,7 @@ impl BootTarget {
             next_nsid: 1,
         });
         let nsid = sub.next_nsid;
-        let overlay = Overlay::create(self.image.clone(), &self.scratch, &format!("{host}-{nsid}"))?;
+        let overlay = Overlay::create(self.image.clone(), &self.scratch)?;
         sub.namespaces.insert(nsid, Arc::new(overlay));
         sub.next_nsid += 1;
         while sub.namespaces.len() > CLAIMS_KEPT {

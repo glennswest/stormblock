@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** #713 (finding 95472f7cca9a, major): `stormboot-serve`'s per-claim overlay is a scratch file with an opaque random name (`<16 hex>.overlay`), created with `create_new` and retried if taken, never the host's spelling. Hosts `node_a` and `node+a` (accepted with `--any-host`) both became `node_a-1.overlay`: the second claim truncated the first host's file, each then read the other's writes, and either release removed both. Case-only differences collided the same way on a case-insensitive filesystem.
+
 ## [v24.45.3] — 2026-11-20
 
 ### Fixed

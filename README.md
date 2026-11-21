@@ -2957,7 +2957,8 @@ stormboot-serve --image release.img --host server8 [--host server7=<mac>] [--any
 ```
 
 - **The image is never written.** Each claim gets its own copy-on-write
-  overlay: a scratch file holding only the blocks that node wrote. Write
+  overlay: a scratch file holding only the blocks that node wrote, under an
+  opaque name of its own, never the host's (#713). Write
   Zeroes and Deallocate take no room, and a stop removes the overlays. The
   boot path does write to the disk it is handed: stormuefi's boot count, a
   diskless node's data, and an install's discards of what it moved.

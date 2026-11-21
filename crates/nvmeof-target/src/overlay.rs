@@ -43,15 +43,42 @@ struct State {
 }
 
 impl Overlay {
-    /// A fresh overlay over `image`, its scratch file created in `dir` as
-    /// `<name>.overlay` (any old one there is replaced).
-    pub fn create(image: Arc<Image>, dir: &Path, name: &str) -> io::Result<Overlay> {
+    /// A fresh overlay over `image`, its scratch file created in `dir`.
+    ///
+    /// The file's name is opaque (`<16 hex digits>.overlay`, random) and never
+    /// the host's spelling, and it is created with `create_new`: two hosts
+    /// whose names differ only in punctuation or case (`node_a`, `node+a`,
+    /// `Node-A` on a case-insensitive filesystem) can never share, or
+    /// truncate, each other's file (finding 95472f7cca9a). The path kept is
+    /// the one created, and only it is removed on drop.
+    pub fn create(image: Arc<Image>, dir: &Path) -> io::Result<Overlay> {
+        Self::create_named(image, dir, rand::random::<u64>)
+    }
+
+    /// [`Overlay::create`] with the candidate names drawn from `pick`; a name
+    /// already taken is skipped, never opened.
+    fn create_named(image: Arc<Image>, dir: &Path, mut pick: impl FnMut() -> u64) -> io::Result<Overlay> {
         std::fs::create_dir_all(dir)?;
-        let safe: String =
-            name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' }).collect();
-        let path = dir.join(format!("{safe}.overlay"));
-        let scratch = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path)?;
-        Ok(Overlay { image, scratch, path, state: Mutex::new(State { blocks: HashMap::new(), next: 0 }) })
+        const TRIES: usize = 64;
+        for _ in 0..TRIES {
+            let path = dir.join(format!("{:016x}.overlay", pick()));
+            match OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
+                Ok(scratch) => {
+                    return Ok(Overlay {
+                        image,
+                        scratch,
+                        path,
+                        state: Mutex::new(State { blocks: HashMap::new(), next: 0 }),
+                    })
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("no free overlay name in {} after {TRIES} tries", dir.display()),
+        ))
     }
 
     pub fn image(&self) -> &Arc<Image> {
@@ -201,8 +228,8 @@ mod tests {
         let img = image(&dir, 64 * 1024 + 100, 4096);
         assert_eq!(img.blocks(), 17, "an image's tail rounds up");
         let before = std::fs::read(img.path()).unwrap();
-        let a = Overlay::create(img.clone(), &dir.join("s"), "host-a").unwrap();
-        let b = Overlay::create(img.clone(), &dir.join("s"), "host-b").unwrap();
+        let a = Overlay::create(img.clone(), &dir.join("s")).unwrap();
+        let b = Overlay::create(img.clone(), &dir.join("s")).unwrap();
 
         // A partial write in the middle of a block keeps the rest of it.
         a.write(&[0xEE; 10], 4096 + 5).unwrap();
@@ -245,6 +272,95 @@ mod tests {
         assert!(p.exists());
         drop(a);
         assert!(!p.exists(), "the scratch file goes with the overlay");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finding 95472f7cca9a: hosts whose names fold to the same spelling
+    /// (punctuation, or case on a case-insensitive filesystem) each get a
+    /// file of their own, and neither sees nor removes the other's writes.
+    #[test]
+    fn colliding_host_spellings_never_share_an_overlay() {
+        let dir = scratch();
+        let img = image(&dir, 16 * 4096, 4096);
+        let s = dir.join("s");
+        let hosts = ["node_a", "node+a", "node a", "Node_A", "NODE_A"];
+        let overlays: Vec<Overlay> = hosts.iter().map(|_| Overlay::create(img.clone(), &s).unwrap()).collect();
+
+        let mut paths: Vec<String> = Vec::new();
+        for o in &overlays {
+            let name = o.path().file_name().unwrap().to_str().unwrap().to_string();
+            assert!(name.ends_with(".overlay"));
+            let stem = name.trim_end_matches(".overlay");
+            assert_eq!(stem.len(), 16);
+            assert!(
+                stem.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "lowercase hex only, so case folding cannot make two names one: {name}"
+            );
+            for h in hosts {
+                assert!(!name.to_ascii_lowercase().contains(&h.to_ascii_lowercase()), "no host spelling in {name}");
+            }
+            // Distinct even case-folded.
+            assert!(!paths.contains(&name.to_ascii_lowercase()), "{name} shared");
+            paths.push(name.to_ascii_lowercase());
+        }
+
+        // Each host writes its own byte to the same block.
+        for (i, o) in overlays.iter().enumerate() {
+            o.write(&[i as u8 + 1; 4096], 3 * 4096).unwrap();
+        }
+        for (i, o) in overlays.iter().enumerate() {
+            let mut got = vec![0u8; 4096];
+            o.read(&mut got, 3 * 4096).unwrap();
+            assert!(got.iter().all(|&x| x == i as u8 + 1), "host {} reads its own block", hosts[i]);
+        }
+
+        // Releasing one leaves the others' files and data.
+        let mut overlays = overlays;
+        let gone = overlays.remove(1);
+        let gone_path = gone.path().to_path_buf();
+        drop(gone);
+        assert!(!gone_path.exists());
+        for (i, o) in overlays.iter().enumerate() {
+            let n = if i == 0 { 1u8 } else { i as u8 + 2 };
+            assert!(o.path().exists());
+            let mut got = vec![0u8; 4096];
+            o.read(&mut got, 3 * 4096).unwrap();
+            assert!(got.iter().all(|&x| x == n));
+        }
+        drop(overlays);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name already on disk (a live overlay's, or anything else) is never
+    /// opened or truncated: the next one is taken.
+    #[test]
+    fn a_taken_name_is_skipped_never_truncated() {
+        let dir = scratch();
+        let img = image(&dir, 4 * 4096, 4096);
+        let s = dir.join("s");
+        let first = Overlay::create_named(img.clone(), &s, || 7).unwrap();
+        first.write(&[0xAB; 4096], 0).unwrap();
+        first.flush().unwrap();
+        let len = std::fs::metadata(first.path()).unwrap().len();
+        assert_eq!(len, 4096);
+
+        let mut picks = [7u64, 7, 8].into_iter();
+        let second = Overlay::create_named(img.clone(), &s, || picks.next().unwrap()).unwrap();
+        assert_ne!(first.path(), second.path());
+        assert!(second.path().ends_with("0000000000000008.overlay"));
+        assert_eq!(std::fs::metadata(first.path()).unwrap().len(), len, "the first file is not truncated");
+        let mut got = vec![0u8; 4096];
+        first.read(&mut got, 0).unwrap();
+        assert!(got.iter().all(|&x| x == 0xAB));
+
+        // Every candidate taken: an error, nothing opened.
+        assert_eq!(
+            Overlay::create_named(img.clone(), &s, || 7).err().map(|e| e.kind()),
+            Some(io::ErrorKind::AlreadyExists)
+        );
+        drop(second);
+        assert!(first.path().exists(), "dropping one overlay removes only its own file");
+        drop(first);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
