@@ -4,6 +4,13 @@
 
 <!-- New unreleased changes go here -->
 
+### Fixed
+- #442: a release ISO on a CD or a USB stick is read by `stormdist://` and `rd.stormblock.iso`: mkfs-iso v0.1.1 under stormdist sizes a block device (mkfs.iso.rs#35), taken here by a `[patch]` until stormdist's pin carries it (stormdist#25).
+
+### 2026-11-21
+- **fix:** #442: mkfs-iso v0.1.1 by a `[patch."https://github.com/glennswest/mkfs.iso.rs"]` (rev 0ac298a, spelt `www.github.com` since cargo refuses a patch on the patched URL itself). v0.1.0 sized a block device by `metadata().len()`, 0, so `stormdist:///dev/sr0` failed with `[image] 0 bytes: too small for a volume descriptor set`. The patch goes when stormdist's own pin carries v0.1.1 (stormdist#25).
+- **test:** #442: `ci-isodev-blockdev-verify.sh`: a release ISO made by stormdist's `make` (the ignored it test `integration_isodev::writes_the_guests_release_iso`) attached to a QEMU guest as a CD (`/dev/sr0`) and a raw disk (`/dev/vda`); `slab volumes stormdist:///dev/…` finds the flavour's slab and `pod-logs` on each. Before the patch both fail to open (the control).
+
 ## [v24.45.12] — 2026-11-21
 
 ### Fixed
