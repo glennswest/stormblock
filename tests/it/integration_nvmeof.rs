@@ -409,7 +409,7 @@ async fn an_oversized_log_page_on_a_discovery_connection_is_refused() {
     let refused = |status: u16| ((status >> 1) & 0xFF, status & (1 << 15) != 0);
     let past = (max / 4) as u32; // 0's based: max + 4 bytes
     for lid in [0x70u32, 0x04] {
-        for (cdw10, cdw11) in [((0xFFFF << 16) | lid, 0x7FFF), ((u32::MAX & !0xFF) | lid, u32::MAX), (((past & 0xFFFF) << 16) | lid, past >> 16)] {
+        for (cdw10, cdw11) in [((0xFFFF << 16) | lid, 0x7FFF), (!0xFF | lid, u32::MAX), (((past & 0xFFFF) << 16) | lid, past >> 16)] {
             let status = init.get_log_page_refused(cdw10, cdw11).await.unwrap();
             assert_eq!(refused(status), (0x02, true), "lid {lid:#x} cdw10 {cdw10:#x} cdw11 {cdw11:#x}");
         }
