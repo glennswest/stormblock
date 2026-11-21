@@ -564,6 +564,19 @@ on it is not garbage. Three cases, and they get three answers:
 | a lone data slab | refused. That is an install abandoned part-way, and it is indistinguishable from a live node's identity. `/init` never forces it (#311); `--local-disk-force` by hand is the deliberate act for a drive whose identity is spent. |
 | a lone system slab | **taken** under `any` and `force` (no identity lives on it; fresh slabs are laid over it), left alone under `blank`. |
 
+Before a kept disk's system half is laid again, whatever the node made there
+(a VM disk, a registry golden and its `ctr-ct-*` clones) is **carried into
+the data half** (#349). The carry reads the system half's slots in disk order,
+each shared slot once. It writes them in the data half's slot order as runs of
+64 MiB (32 MiB on an SSD), reads each run back, and rewrites the maps once a
+window. A slot that is all zeros is unmapped rather than copied. A moved slot's
+share count goes onto the table with its entry at the next sync, so no table
+write happens for each share (#723: on a drive-managed SMR disk the carry of
+one extent at a time, with those writes, took a silent minute). The console
+shows the carry's start (`Install: carrying N volume(s) …: S slot(s), M MiB`),
+a line every 10 s with slots, MiB and MB/s, and a summary
+(`Install: carried …; T s in all (opening, copying, recording)`).
+
 The data half holds this node's CA key and its ServiceAccount signing key, and
 nothing can mint those again — which is why it is opened rather than assumed:
 a data partition that will not open as a data slab stops the flow-over instead
