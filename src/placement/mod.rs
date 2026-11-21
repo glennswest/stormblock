@@ -2476,4 +2476,103 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Counts the writes that reach a device (#723).
+    struct CountWrites(Arc<dyn BlockDevice>, std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl BlockDevice for CountWrites {
+        fn id(&self) -> &crate::drive::DeviceId { self.0.id() }
+        fn capacity_bytes(&self) -> u64 { self.0.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.0.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.0.optimal_io_size() }
+        fn device_type(&self) -> crate::drive::DriveType { self.0.device_type() }
+        async fn read(&self, o: u64, b: &mut [u8]) -> crate::drive::DriveResult<usize> { self.0.read(o, b).await }
+        async fn write(&self, o: u64, b: &[u8]) -> crate::drive::DriveResult<usize> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.write(o, b).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> { self.0.flush().await }
+        async fn discard(&self, o: u64, l: u64) -> crate::drive::DriveResult<()> { self.0.discard(o, l).await }
+    }
+
+    /// #723 (an X9's drive-managed SMR disk): four neighbouring slots, each
+    /// shared by three maps (a golden and two clones), moved as a window
+    /// reach the destination as their runs' writes and nothing else; their share counts
+    /// change in memory and reach the table with their entries at the next
+    /// sync (#171), where they read back as 3. Each share used to be a table
+    /// write of its own, synchronously, between the runs: here eight more.
+    #[tokio::test]
+    async fn a_window_of_shared_slots_is_one_write_and_its_shares_come_with_the_sync() {
+        let dir = std::env::temp_dir().join("stormblock-placement-slab-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut src, p1) = make_slab(32 * 1024 * 1024, StorageTier::Hot).await;
+        let p2 = dir.join(format!("pl-{}.bin", uuid::Uuid::new_v4().simple())).display().to_string();
+        let inner: Arc<dyn BlockDevice> = Arc::new(FileDevice::open_with_capacity(&p2, 32 * 1024 * 1024).await.unwrap());
+        let counted = Arc::new(CountWrites(inner.clone(), Default::default()));
+        let dest_dev: Arc<dyn BlockDevice> = counted.clone();
+        let dest = Slab::format(dest_dev.clone(), DEFAULT_SLOT_SIZE, StorageTier::Hot).await.unwrap();
+        let (src_id, dest_id) = (src.slab_id(), dest.slab_id());
+        let slot = DEFAULT_SLOT_SIZE;
+        let maps = [VolumeId::new(), VolumeId::new(), VolumeId::new()];
+        let mut gem = GlobalExtentMap::new();
+        let mut legs = Vec::new();
+        for v in 0..4u64 {
+            let idx = src.allocate(maps[0], v).await.unwrap();
+            src.inc_ref(idx).await.unwrap();
+            src.inc_ref(idx).await.unwrap();
+            src.write_slot(idx, 0, &vec![0x30 + v as u8; slot as usize]).await.unwrap();
+            for m in &maps {
+                let mut loc = ExtentLocation::new(src_id, idx);
+                loc.ref_count = 3;
+                gem.insert(*m, v, loc);
+            }
+            legs.push((v, Leg::new(src_id, idx)));
+        }
+        src.sync().await.unwrap();
+        let mut registry = SlabRegistry::new();
+        registry.add(src);
+        registry.add(dest);
+        let gem = crate::lockwatch::TrackedRwLock::new(gem);
+        let registry = crate::lockwatch::TrackedRwLock::new(registry);
+        let engine = PlacementEngine::new();
+        let fences: Vec<_> = legs.iter().map(|(_, l)| crate::volume::fence::try_exclusive(*l).unwrap()).collect();
+        let items: Vec<_> = legs.iter().zip(&fences).map(|((v, l), f)| (maps[1], *v, *l, f)).collect();
+        let before = counted.1.load(std::sync::atomic::Ordering::SeqCst);
+        let (outs, _) = engine.migrate_window_unlocked(&gem, &registry, &items, dest_id, 64 << 20, 4, true).await;
+        let writes = counted.1.load(std::sync::atomic::Ordering::SeqCst) - before;
+        drop(items);
+        drop(fences);
+        let mut dest_slots = Vec::new();
+        for o in &outs {
+            match o {
+                Ok(WindowMove::Moved { dest_slot }) => dest_slots.push(*dest_slot),
+                other => panic!("not moved: {other:?}"),
+            }
+        }
+        // A run is at most half the window (so one half is read while the
+        // other is written): two runs, three if the reads arrive unevenly.
+        // Never a table write for a share: that was eight more.
+        assert!((1..=3).contains(&writes), "{writes} writes: the window's runs only, no table write for a share (#723)");
+        // Every map follows, every byte as it was.
+        {
+            let g = gem.read().await;
+            for (v, _) in &legs {
+                for m in &maps {
+                    assert_eq!(g.lookup(*m, *v).unwrap().slab_id, dest_id);
+                }
+            }
+        }
+        registry.read().await.get(&dest_id).unwrap().sync().await.unwrap();
+        // The table on the device, read afresh: three shares each.
+        let reopened = Slab::open(inner.clone()).await.unwrap();
+        for (i, d) in dest_slots.iter().enumerate() {
+            assert_eq!(reopened.shares(*d).await, 3, "slot {d}: its shares on the device");
+            let mut buf = vec![0u8; slot as usize];
+            reopened.read_slot(*d, 0, &mut buf).await.unwrap();
+            assert!(buf.iter().all(|b| *b == 0x30 + i as u8), "slot {d}: its bytes");
+        }
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
 }
