@@ -363,8 +363,31 @@ pub struct RaidArray {
     /// Handed to another engine (#296): nothing is written to a member from
     /// here, and I/O is refused.
     released: AtomicBool,
-    /// One grow at a time (#318).
+    /// One grow at a time (#318), and never a grow and a release at once
+    /// (#718): a grow writes the members directly through the handles it
+    /// took, which the `released` checks on array I/O do not stop. A release
+    /// holds it from its first check to `released` ([`ReleaseHold`]).
     grow_lock: tokio::sync::Mutex<()>,
+}
+
+/// A release under way (#718, finding 0f237e79c424): no grow runs while it
+/// is held, and one asked meanwhile waits and then finds the set released.
+pub struct ReleaseHold<'a> {
+    array: &'a RaidArray,
+    _grow: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl ReleaseHold<'_> {
+    /// Let go of the set (see [`RaidArray::release`]). A rebuild or a scrub
+    /// that began since the hold was taken still refuses.
+    pub fn release(self) -> Result<(), String> {
+        if let Some(why) = self.array.release_blocker() {
+            return Err(why);
+        }
+        self.array.released.store(true, Ordering::SeqCst);
+        self.array.stop();
+        Ok(())
+    }
 }
 
 /// What a grow found and did (#318).
@@ -2391,15 +2414,22 @@ impl RaidArray {
 
     /// Let go of the set for another engine to assemble (#296): stopped, and
     /// from here nothing is written to any member (superblocks, bitmap, data)
-    /// and every I/O is refused. Refused while a rebuild or a scrub runs:
-    /// their workers write members directly.
+    /// and every I/O is refused. Refused while a rebuild, a scrub or a grow
+    /// runs: their workers write members directly (#718).
     pub fn release(&self) -> Result<(), String> {
+        self.hold_for_release()?.release()
+    }
+
+    /// The first half of [`release`](Self::release), for a caller with work
+    /// to do between the check and the release (the API lets go of the
+    /// set's volumes): refused while a grow, a rebuild or a scrub runs, and
+    /// while it is held no grow starts (#718).
+    pub fn hold_for_release(&self) -> Result<ReleaseHold<'_>, String> {
+        let grow = self.grow_lock.try_lock().map_err(|_| "a grow is running: wait for it".to_string())?;
         if let Some(why) = self.release_blocker() {
             return Err(why);
         }
-        self.released.store(true, Ordering::SeqCst);
-        self.stop();
-        Ok(())
+        Ok(ReleaseHold { array: self, _grow: grow })
     }
 
     /// Whether the set was handed to another engine (#296).

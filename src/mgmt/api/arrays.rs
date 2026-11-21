@@ -523,7 +523,7 @@ pub struct ReleaseQuery {
 /// Then `POST /api/v1/arrays/assemble` on the other engine brings it up as if
 /// this one had died. 404 when the array is not held here (so a repeat is a
 /// 404); 409 while a consumer is served one of its volumes (unless `force`,
-/// which withdraws them), while it rebuilds or scrubs, or for a volume with
+/// which withdraws them), while it rebuilds, scrubs or grows (#718), or for a volume with
 /// extents off the array.
 async fn release_array(
     State(state): State<Arc<AppState>>,
@@ -534,9 +534,11 @@ async fn release_array(
         Ok(x) => x,
         Err(r) => return r,
     };
-    if let Some(why) = info.array.release_blocker() {
-        return ApiError::conflict(format!("cannot release array {array_id}: {why}"));
-    }
+    // Held to the release: no grow writes the members from here (#718).
+    let hold = match info.array.hold_for_release() {
+        Ok(h) => h,
+        Err(why) => return ApiError::conflict(format!("cannot release array {array_id}: {why}")),
+    };
     let vols = state.volume_manager.lock().await.volumes_of_array(&array_id).await;
     let mut serving = Vec::new();
     for (v, name) in &vols {
@@ -603,7 +605,7 @@ async fn release_array(
         Ok(r) => r,
         Err(e) => return ApiError::conflict(format!("cannot release array {array_id}: {e}")),
     };
-    if let Err(why) = info.array.release() {
+    if let Err(why) = hold.release() {
         // A rebuild began in between: the volumes are already let go of in
         // memory, written nowhere; the set stays here, stopped.
         info.array.stop();

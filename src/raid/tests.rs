@@ -18,6 +18,11 @@ struct MemDev {
     fail_reads: AtomicBool,
     fail_writes: AtomicBool,
     reads: AtomicU64,
+    /// A write_zeroes says it began, then waits for a permit (#718).
+    hold_zeroes: AtomicBool,
+    zeroes_began: tokio::sync::Notify,
+    zeroes_through: tokio::sync::Semaphore,
+    zeroes: AtomicU64,
 }
 
 impl MemDev {
@@ -35,6 +40,10 @@ impl MemDev {
             fail_reads: AtomicBool::new(false),
             fail_writes: AtomicBool::new(false),
             reads: AtomicU64::new(0),
+            hold_zeroes: AtomicBool::new(false),
+            zeroes_began: tokio::sync::Notify::new(),
+            zeroes_through: tokio::sync::Semaphore::new(0),
+            zeroes: AtomicU64::new(0),
         })
     }
 
@@ -49,6 +58,11 @@ impl MemDev {
 
     fn poke(&self, at: u64, bytes: &[u8]) {
         self.data.lock().unwrap()[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
+    }
+
+    /// The drive made larger, as a leg resized on its own engine.
+    fn extend(&self, size: u64) {
+        self.data.lock().unwrap().resize(size as usize, 0xEE);
     }
 
     fn peek(&self, at: u64, len: usize) -> Vec<u8> {
@@ -106,6 +120,14 @@ impl BlockDevice for MemDev {
     }
     async fn discard(&self, _offset: u64, _len: u64) -> DriveResult<()> {
         Ok(())
+    }
+    async fn write_zeroes(&self, offset: u64, len: u64) -> DriveResult<()> {
+        if self.hold_zeroes.load(Ordering::SeqCst) {
+            self.zeroes_began.notify_one();
+            self.zeroes_through.acquire().await.expect("open").forget();
+        }
+        self.zeroes.fetch_add(1, Ordering::SeqCst);
+        crate::drive::write_zeroes_by_writing(self, offset, len).await
     }
 }
 
@@ -763,4 +785,57 @@ async fn a_returned_member_is_re_added_from_the_bitmap() {
         c.set_member_state(partner, RaidMemberState::Failed);
         assert_eq!(read_all(&c).await, model, "{level}: drive 0 serves what it missed");
     }
+}
+
+/// #718, finding 0f237e79c424: a release and a grow never run at once. A
+/// grow held in a member's write_zeroes refuses the release (nothing is
+/// released, the members stay this engine's); let through, the grow ends
+/// and the release goes. A grow asked while a release is held waits, then
+/// finds the set released and writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_release_and_a_grow_never_run_at_once() {
+    const MIB: u64 = 1 << 20;
+    let (a, mems) = make_sized(RaidLevel::Raid1, 2, DATA_OFFSET + 4 * MIB).await;
+    for m in &mems {
+        m.extend(DATA_OFFSET + 8 * MIB);
+    }
+    mems[0].hold_zeroes.store(true, Ordering::SeqCst);
+    let grow = tokio::spawn({
+        let a = a.clone();
+        async move { a.grow().await }
+    });
+    tokio::time::timeout(Duration::from_secs(10), mems[0].zeroes_began.notified()).await.expect("the grow zeroes a leg");
+
+    let why = a.release().expect_err("a release with a grow writing the members");
+    assert!(why.contains("grow"), "{why}");
+    assert!(a.hold_for_release().is_err());
+    assert!(!a.is_released(), "nothing was released");
+
+    mems[0].zeroes_through.add_permits(8);
+    let rep = tokio::time::timeout(Duration::from_secs(10), grow).await.expect("the grow ends").unwrap().unwrap();
+    assert!(rep.grown && rep.data_size == 8 * MIB, "{rep:?}");
+    mems[0].hold_zeroes.store(false, Ordering::SeqCst);
+
+    // Held for a release (the API lets go of the volumes meanwhile): a grow
+    // asked now waits, and once the set is released it is refused, with no
+    // write to a member.
+    for m in &mems {
+        m.extend(DATA_OFFSET + 12 * MIB);
+    }
+    let zeroes = (mems[0].zeroes.load(Ordering::SeqCst), mems[1].zeroes.load(Ordering::SeqCst));
+    let before = (mems[0].peek(0, (DATA_OFFSET + 12 * MIB) as usize), mems[1].peek(0, (DATA_OFFSET + 12 * MIB) as usize));
+    let hold = a.hold_for_release().expect("nothing runs now");
+    let grow = tokio::spawn({
+        let a = a.clone();
+        async move { a.grow().await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!grow.is_finished(), "a grow started under a release");
+    hold.release().unwrap();
+    assert!(a.is_released());
+    let err = tokio::time::timeout(Duration::from_secs(10), grow).await.expect("the grow answers").unwrap().unwrap_err();
+    assert!(err.to_string().contains("released"), "{err}");
+    assert_eq!((mems[0].zeroes.load(Ordering::SeqCst), mems[1].zeroes.load(Ordering::SeqCst)), zeroes);
+    let after = (mems[0].peek(0, (DATA_OFFSET + 12 * MIB) as usize), mems[1].peek(0, (DATA_OFFSET + 12 * MIB) as usize));
+    assert!(after == before, "a member byte changed after the release");
 }

@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-21
+- **fix:** #718 (finding 0f237e79c424, major): a RAID set's release and grow never run at once. `POST /api/v1/arrays/{id}/release` takes the set's grow lock (`RaidArray::hold_for_release`) before it lets go of the volumes and holds it to the release: 409 while a grow runs, and a grow asked meanwhile waits, then is refused as released. A release used to check only rebuilds and scrubs, so it could answer and hand the members to another engine while a grow went on zeroing and flushing them through the handles it took.
+
 ## [v24.45.8] — 2026-11-21
 
 ### Fixed
