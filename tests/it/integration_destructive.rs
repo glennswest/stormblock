@@ -962,6 +962,21 @@ async fn a_familys_bearer_keeps_to_its_namespace_and_its_quota() {
     assert_eq!(call(&n, M::GET, &format!("/volumes/{nana_img}"), Some(NANA), None).await, 200);
     assert_eq!(call(&n, M::GET, "/volumes/img?namespace=nana", Some(NANA), None).await, 200);
     assert_eq!(call(&n, M::GET, &format!("/volumes/{stormcos_img}"), Some(NANA), None).await, 403);
+    // Finding 3b2c8a529282: a stormcos volume's UUID with `?namespace=nana`
+    // is reviewed in stormcos, never in the namespace the query names, for
+    // a read, a subresource and a mutation; and a caller every namespace
+    // allows is told there is no such volume in nana, never served it.
+    for (m, path, body) in [
+        (M::GET, format!("/volumes/{stormcos_img}?namespace=nana"), None),
+        (M::GET, format!("/volumes/{stormcos_img}/digest?namespace=nana"), None),
+        (M::POST, format!("/volumes/{stormcos_img}/clone?namespace=nana"), Some(json!({"name": "stolen", "namespace": "nana"}))),
+    ] {
+        assert_eq!(call(&n, m.clone(), &path, Some(NANA), body.clone()).await, 403, "{m} {path} by nana's bearer");
+    }
+    assert_eq!(call(&n, M::GET, &format!("/volumes/{stormcos_img}?namespace=nana"), Some(NODE), None).await, 404, "not nana's");
+    assert_eq!(call(&n, M::GET, &format!("/volumes/{stormcos_img}/digest?namespace=nana"), Some(NODE), None).await, 404);
+    assert_eq!(call(&n, M::GET, &format!("/volumes/{stormcos_img}?namespace=stormcos"), Some(NODE), None).await, 200, "its own namespace");
+    assert_eq!(call(&n, M::GET, &format!("/volumes/{nana_img}?namespace=nana"), Some(NANA), None).await, 200, "nana's, as asked");
 
     // A clone is in its source's namespace (a sealed source, as every clone's).
     {

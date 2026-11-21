@@ -4,6 +4,15 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #710 — finding 3b2c8a529282 in mgmt/namespaces.rs (2026-11-20, P1)
+- [x] `for_review`: the path's volume (UUID, a name within `?namespace=`,
+  a synonym) reviewed in its own namespace before `?namespace=`;
+  `volume_key`: a UUID or synonym whose volume is in another namespace than
+  `?namespace=` is a 404. Test: `a_familys_bearer_keeps_to_its_namespace_and_its_quota`
+  (GET, `/digest`, `POST /clone` with a misleading query: 403 for nana, 404
+  for the node token)
+- [ ] check.sh, patch release, close
+
 ## #709 — findings 2e2144771e67, d893aaefa0ff in mgmt/api/kube.rs (2026-11-20, P1)
 - [x] 2e2144771e67 (registry before manager in `all_slabs`): fixed by #571
   (9f1c2056, 2026-11-10) after the review's commit (07a83e07, 2026-10-20);

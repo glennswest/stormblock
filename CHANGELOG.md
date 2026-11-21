@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** #710 (finding 3b2c8a529282, major): a volume named by its UUID (or a synonym) is reviewed in its own namespace, never in the one `?namespace=` names, and a `?namespace=` that is not the volume's is a 404 (`no volume … in namespace …`), so nana's bearer could not read, clone or change a stormcos volume by its UUID with `?namespace=nana`. A name is still found within `?namespace=`.
+
 ## [v24.45.0] — 2026-11-20
 
 ### Added

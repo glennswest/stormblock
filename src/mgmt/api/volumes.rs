@@ -2727,12 +2727,12 @@ async fn volumes_named(vm: &impl VolumeView, name: &str, namespace: Option<&str>
 /// (never a 400: "not there" is an ordinary answer), and a name two volumes
 /// share is a 409 naming them, never one picked at random.
 pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<VolumeId, Response> {
+    let ns = request_namespace();
     if let Ok(u) = key.parse::<Uuid>() {
-        return Ok(VolumeId(u));
+        return in_namespace(state, VolumeId(u), key, ns.as_deref()).await;
     }
     // The published catalog when it is current (#364), else the manager;
     // within `?namespace=` when the request names one (#408).
-    let ns = request_namespace();
     let named = match state.volume_catalog.latest() {
         Some(c) if crate::volume::catalog::is_current(&c, &state.volume_presence) => volumes_named(&c, key, ns.as_deref()).await,
         _ => volumes_named(&*state.volume_manager.lock().await, key, ns.as_deref()).await,
@@ -2740,7 +2740,7 @@ pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<Volum
     match named.as_slice() {
         [one] => Ok(*one),
         [] => match super::synonyms::volume_for(state, key).await {
-            Some(id) => Ok(id),
+            Some(id) => in_namespace(state, id, key, ns.as_deref()).await,
             None => Err(ApiError::not_found(format!("no volume {key}"))),
         },
         many => Err(ApiError::conflict(format!(
@@ -2749,6 +2749,19 @@ pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<Volum
             many.iter().map(|v| v.0.to_string()).collect::<Vec<_>>().join(", ")
         ))),
     }
+}
+
+/// `id`, unless `?namespace=` names another namespace than the volume's
+/// (finding 3b2c8a529282): then there is no such volume in the namespace
+/// asked, a 404, and the request is never served on the volume it was not
+/// reviewed for. A volume that is not there is left to the caller.
+async fn in_namespace(state: &Arc<AppState>, id: VolumeId, key: &str, ns: Option<&str>) -> Result<VolumeId, Response> {
+    let Some(ns) = ns else { return Ok(id) };
+    let Some(view) = crate::mgmt::namespaces::current_view(state).await else { return Ok(id) };
+    if view.get_volume_handle(&id).is_some() && view.namespace(&id) != ns {
+        return Err(ApiError::not_found(format!("no volume {key} in namespace {ns}")));
+    }
+    Ok(id)
 }
 
 /// [`volume_key`], and a 404 for a UUID no volume has.

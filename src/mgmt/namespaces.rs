@@ -257,42 +257,60 @@ pub fn asked(ns: Option<&str>) -> Result<Option<&str>, Response> {
 }
 
 /// The namespace a Kubernetes bearer's request on `/api/v1/volumes` is
-/// reviewed in (#408): `?namespace=`; else the volume the path names (by id,
-/// or by a name one volume has); else a create's or import's JSON body's
+/// reviewed in (#408): the volume the path names, in its own namespace (by
+/// id, by a name one volume has within `?namespace=` or anywhere, or a
+/// synonym); else `?namespace=`; else a create's or import's JSON body's
 /// `namespace`; else the default. `None` for anything that is not a volume
 /// (slabs, drives, …: node-wide, reviewed cluster-wide) and for the list,
 /// which the auth layer reviews per namespace.
 pub async fn for_review(state: &AppState, path: &str, query: Option<&str>, body: Option<&[u8]>) -> Option<String> {
     let rest = path.trim_end_matches('/').strip_prefix("/api/v1/volumes")?;
-    if let Some(n) = query.and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("namespace="))).filter(|n| !n.is_empty()) {
-        return Some(n.to_string());
-    }
+    let asked = query
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("namespace=")))
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
     let key = rest.trim_start_matches('/').split('/').next().unwrap_or("");
     let collection = matches!(key, "" | "import" | "snapshots" | "compose");
+    // The volume the path names is reviewed in its own namespace, whatever
+    // `?namespace=` says (finding 3b2c8a529282): a UUID as it is, a name
+    // within `?namespace=` when given (as `volume_key` finds it), else a
+    // synonym. A selector that disagrees with a UUID's volume is refused by
+    // the handler (`volume_key`), never reviewed in its place.
     if !collection {
         if let Some(view) = current_view(state).await {
             let id = match key.parse::<uuid::Uuid>() {
                 Ok(u) => Some(VolumeId(u)),
                 Err(_) => {
                     let mut hit = None;
+                    let mut many = false;
                     for id in view.volume_ids() {
+                        if asked.as_deref().is_some_and(|n| n != view.namespace(&id)) {
+                            continue;
+                        }
                         if let Some(h) = view.get_volume_handle(&id) {
                             if h.name().await == key {
-                                if hit.is_some() {
-                                    hit = None;
+                                many = hit.is_some();
+                                hit = Some(id);
+                                if many {
                                     break;
                                 }
-                                hit = Some(id);
                             }
                         }
                     }
-                    hit
+                    match (hit, many) {
+                        (Some(id), false) => Some(id),
+                        (Some(_), true) => None,
+                        (None, _) => crate::mgmt::api::synonyms::volume_for(state, key).await,
+                    }
                 }
             };
             if let Some(id) = id.filter(|id| view.get_volume_handle(id).is_some()) {
                 return Some(view.namespace(&id).to_string());
             }
         }
+    }
+    if let Some(n) = asked {
+        return Some(n);
     }
     if let Some(n) = body
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
