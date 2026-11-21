@@ -1209,3 +1209,71 @@ async fn a_kube_volume_patch_is_the_admins_both_ways() {
     assert!(sealed(&plain).await, "the admin seals it");
     assert!(audit(&n).iter().any(|a| a["path"].as_str().is_some_and(|p| p.contains("/apis/storage.storm.io/v1/volumes/"))), "audited as destructive");
 }
+
+/// Finding 78ed70cc2493: a sealed golden, or a template, is the admin's to
+/// delete whatever names it: its id, its name, or a synonym (with `force`
+/// too). The node token is refused all three and the volume stays; the
+/// admin deletes it by name.
+#[tokio::test]
+async fn a_sealed_or_template_volume_is_the_admins_by_id_name_or_synonym() {
+    use reqwest::Method as M;
+    let n = node(false, None).await;
+    let golden = volume(&n, "golden-by-name", true).await;
+    let tmpl = volume(&n, "tmpl-by-name", false).await;
+    n.state.volume_manager.lock().await.mark_template(stormblock::volume::VolumeId(tmpl.parse().unwrap()));
+    assert_eq!(
+        call(&n, M::POST, "/synonyms", Some(ADMIN), Some(json!({"name": "syn-golden", "volume": golden}))).await,
+        201,
+        "a synonym for the golden"
+    );
+    for key in [golden.as_str(), "golden-by-name", "syn-golden"] {
+        for q in ["", "?force=true"] {
+            assert_eq!(call(&n, M::DELETE, &format!("/volumes/{key}{q}"), Some(NODE), None).await, 401, "the golden by {key}{q}");
+        }
+    }
+    for key in [tmpl.as_str(), "tmpl-by-name"] {
+        assert_eq!(call(&n, M::DELETE, &format!("/volumes/{key}"), Some(NODE), None).await, 401, "the template by {key}");
+    }
+    let vm = n.state.volume_manager.lock().await;
+    assert!(vm.get_volume_handle(&stormblock::volume::VolumeId(golden.parse().unwrap())).is_some(), "the golden stays");
+    assert!(vm.get_volume_handle(&stormblock::volume::VolumeId(tmpl.parse().unwrap())).is_some(), "the template stays");
+    drop(vm);
+    let plain = volume(&n, "plain-by-name", false).await;
+    assert_eq!(call(&n, M::DELETE, "/volumes/plain-by-name", Some(NODE), None).await, 204, "an unsealed volume by name is the node token's");
+    assert!(n.state.volume_manager.lock().await.get_volume_handle(&stormblock::volume::VolumeId(plain.parse().unwrap())).is_none());
+    assert_eq!(call(&n, M::DELETE, "/volumes/tmpl-by-name", Some(ADMIN), None).await, 204, "the admin's");
+}
+
+/// Finding 4dbf706d9a2b: a bearer that may list volumes in one namespace
+/// only is narrowed to it on the REST collection listing alone. The
+/// Kubernetes surface's list and items, which do not filter by namespace,
+/// stay refused, as does a REST item it is denied.
+#[tokio::test]
+async fn the_namespace_list_fallback_is_the_rest_listing_only() {
+    use reqwest::Method as M;
+    const NANA: &str = "nana-k8s";
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let api = apiserver(asked.clone()).await;
+    let n = node(false, Some(api)).await;
+    let c = reqwest::Client::new();
+    let theirs = volume(&n, "stormcos-vol", false).await;
+    let r = c.post(format!("{}/volumes", n.base)).bearer_auth(NANA)
+        .json(&json!({"name": "mine", "size": "4M", "namespace": "nana"})).send().await.unwrap();
+    assert_eq!(r.status().as_u16(), 201, "{}", r.text().await.unwrap());
+
+    // The REST listing: nana's alone.
+    let list: Value = c.get(format!("{}/volumes", n.base)).bearer_auth(NANA).send().await.unwrap().json().await.unwrap();
+    let names: Vec<&str> = list["items"].as_array().unwrap().iter().filter_map(|v| v["name"].as_str()).collect();
+    assert_eq!(names, vec!["mine"], "{list}");
+
+    // The Kubernetes surface: never the fallback.
+    let root = n.base.trim_end_matches("/api/v1").to_string();
+    for path in ["/apis/storage.storm.io/v1/volumes".to_string(), format!("/apis/storage.storm.io/v1/volumes/{theirs}"), "/apis/storage.storm.io/v1/volumes/stormcos-vol".into()] {
+        let r = c.get(format!("{root}{path}")).bearer_auth(NANA).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 403, "GET {path} by nana's bearer: {}", r.text().await.unwrap());
+    }
+    // A REST item of another namespace: refused.
+    assert_eq!(call(&n, M::GET, &format!("/volumes/{theirs}"), Some(NANA), None).await, 403);
+    // The node token still lists the Kubernetes surface.
+    assert_eq!(c.get(format!("{root}/apis/storage.storm.io/v1/volumes")).bearer_auth(NODE).send().await.unwrap().status().as_u16(), 200);
+}

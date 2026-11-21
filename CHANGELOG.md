@@ -4,6 +4,10 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-20
+- **fix:** #711 (finding 4dbf706d9a2b, major): a bearer that may list volumes in some namespaces only is narrowed to them on `GET /api/v1/volumes` alone, the one listing that filters by namespace. A denied review of the Kubernetes surface (`/apis/storage.storm.io/v1/volumes`, its list and items) or of any other volumes request now stays denied; it had been allowed after one namespace's review, and the Kubernetes list answered every namespace's volumes.
+- **fix:** #711 (finding 78ed70cc2493, major): deleting a volume by its name or a synonym is classified on the volume the delete handler resolves (`volume_key_in`, within `?namespace=`), so a sealed golden or a template is the admin's by name and by synonym, `force` or not, as it was by id.
+
 ## [v24.45.1] — 2026-11-20
 
 ### Fixed

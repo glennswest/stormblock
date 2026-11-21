@@ -4,6 +4,14 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #711 — findings 4dbf706d9a2b, 78ed70cc2493 in mgmt/auth.rs (2026-11-20, P1)
+- [x] 4dbf706d9a2b: the ListNamespaces fallback only on `GET /api/v1/volumes`
+  (verb list); test `the_namespace_list_fallback_is_the_rest_listing_only`
+- [x] 78ed70cc2493: `volume_delete_is_destructive` resolves the key with
+  `volumes::volume_key_in` (the handler's rules, `?namespace=`); test
+  `a_sealed_or_template_volume_is_the_admins_by_id_name_or_synonym`
+- [ ] check.sh, patch release, close
+
 ## #710 — finding 3b2c8a529282 in mgmt/namespaces.rs (2026-11-20, P1)
 - [x] `for_review`: the path's volume (UUID, a name within `?namespace=`,
   a synonym) reviewed in its own namespace before `?namespace=`;

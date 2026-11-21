@@ -560,7 +560,7 @@ pub async fn require_token(
         }
         Class::Ordinary => false,
         Class::Destructive => true,
-        Class::VolumeDelete(id) => volume_delete_is_destructive(&state, &id).await,
+        Class::VolumeDelete(id) => volume_delete_is_destructive(&state, &id, req.uri().query()).await,
         Class::Attestation(host) => {
             if is_admin || is_node {
                 return next.run(req).await;
@@ -588,7 +588,11 @@ pub async fn require_token(
             // A list of every namespace a bearer may not list cluster-wide:
             // the namespaces it may list, each asked (#408).
             let mut only = None;
-            if let (Review::Denied(..), true) = (&review, resource == "volumes" && ns.is_none() && verb != "watch") {
+            // Only the REST collection listing, which filters by
+            // ListNamespaces (finding 4dbf706d9a2b): an item, a mutation or
+            // the Kubernetes surface's list, denied, stays denied.
+            let listing = method == axum::http::Method::GET && path.trim_end_matches('/') == "/api/v1/volumes";
+            if let (Review::Denied(..), true) = (&review, resource == "volumes" && ns.is_none() && verb == "list" && listing) {
                 let names: Vec<String> = match super::namespaces::current_view(&state).await {
                     Some(v) => super::namespaces::usage(&*v).await.into_keys().collect(),
                     None => Vec::new(),
@@ -855,10 +859,17 @@ async fn attestation_reader(
 /// Whether deleting this volume is destructive (#274, owner's B): a sealed
 /// volume (a golden, a blank, a snapshot), or a template's. An unsealed
 /// volume that is no template is the node token's to delete; an unknown id is
-/// too (the delete answers 404).
-async fn volume_delete_is_destructive(state: &AppState, id: &str) -> bool {
-    let Ok(uuid) = uuid::Uuid::parse_str(id) else { return false };
-    let vid = crate::volume::VolumeId(uuid);
+/// too (the delete answers 404). The path's key is resolved as the delete
+/// handler resolves it (a UUID, a name within `?namespace=`, a synonym), so a
+/// sealed golden named by its name or a synonym is the admin's as by its id
+/// (finding 78ed70cc2493). A key that names no one volume is answered 404 or
+/// 409 by the handler, which deletes nothing.
+async fn volume_delete_is_destructive(state: &Arc<AppState>, id: &str, query: Option<&str>) -> bool {
+    let ns = query
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("namespace=")))
+        .filter(|n| !n.is_empty())
+        .map(str::to_string);
+    let Ok(vid) = crate::mgmt::api::volumes::volume_key_in(state, id, ns).await else { return false };
     let vm = state.volume_manager.lock().await;
     vm.is_sealed(&vid) || vm.is_template(&vid)
 }

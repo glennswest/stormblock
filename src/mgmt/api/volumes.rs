@@ -2727,7 +2727,13 @@ async fn volumes_named(vm: &impl VolumeView, name: &str, namespace: Option<&str>
 /// (never a 400: "not there" is an ordinary answer), and a name two volumes
 /// share is a 409 naming them, never one picked at random.
 pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<VolumeId, Response> {
-    let ns = request_namespace();
+    volume_key_in(state, key, request_namespace()).await
+}
+
+/// [`volume_key`] with the namespace given, for a caller outside the
+/// volumes router (the auth layer, finding 78ed70cc2493): the same volume
+/// the handler will act on.
+pub(crate) async fn volume_key_in(state: &Arc<AppState>, key: &str, ns: Option<String>) -> Result<VolumeId, Response> {
     if let Ok(u) = key.parse::<Uuid>() {
         return in_namespace(state, VolumeId(u), key, ns.as_deref()).await;
     }
