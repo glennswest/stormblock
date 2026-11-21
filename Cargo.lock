@@ -1670,7 +1670,7 @@ dependencies = [
 [[package]]
 name = "mkfs-iso"
 version = "0.1.1"
-source = "git+https://github.com/glennswest/mkfs.iso.rs?rev=0ac298a53cd0e31eef88f733d97f869b0ef73416#0ac298a53cd0e31eef88f733d97f869b0ef73416"
+source = "git+https://www.github.com/glennswest/mkfs.iso.rs?rev=0ac298a53cd0e31eef88f733d97f869b0ef73416#0ac298a53cd0e31eef88f733d97f869b0ef73416"
 
 [[package]]
 name = "mkfs-xfs"

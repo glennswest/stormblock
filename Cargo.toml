@@ -260,5 +260,8 @@ codegen-units = 1
 # (`metadata().len()`), so a release ISO on /dev/sr0 or a USB stick could not
 # be read (mkfs.iso.rs#35). stormdist still pins v0.1.0 (stormdist#25); this
 # goes when its pin carries v0.1.1. By rev (#480): 0ac298a is tag v0.1.1.
+# Spelt www.github.com (GitHub redirects it to the same repository) because
+# cargo refuses a patch whose source is the patched URL at another rev ("patch
+# for `mkfs-iso` points to the same source").
 [patch."https://github.com/glennswest/mkfs.iso.rs"]
-mkfs-iso = { git = "https://github.com/glennswest/mkfs.iso.rs", rev = "0ac298a53cd0e31eef88f733d97f869b0ef73416" }
+mkfs-iso = { git = "https://www.github.com/glennswest/mkfs.iso.rs", rev = "0ac298a53cd0e31eef88f733d97f869b0ef73416" }
