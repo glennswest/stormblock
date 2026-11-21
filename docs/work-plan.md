@@ -5,13 +5,15 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 ## #715 — finding 6aebc6f1b8c8 in volume/mirror.rs (2026-11-21, P1)
-- [ ] `LiveMirror`: a copy gate (RwLock) held by every copy step (lock,
+- [x] `LiveMirror`: a copy gate (RwLock) held by every copy step (lock,
   read, write) and the copy's final flush, `is_live` checked again under
   it; `stop` sets stopping, then takes the gate's write half (drains the
   step in flight), then flushes. Reads never take `mirror_gate`, so stop
   (holding it) waiting on a copy step cannot deadlock. Test: a target whose
   write blocks; stop must not return while the copy's write is held
-- [ ] check.sh on the fix commit; release; close
+- [x] mirror tests 2/2 + clippy on 315952e7; negative control (the drain
+  removed) fails the stop test as expected; check.sh ALL PASS on 315952e7
+  (1598/1598, 1750 s); v24.45.7; DONE, closed
 
 ## #714 — finding c001083c059d in nvmeof-target/src/server.rs (2026-11-20, P1)
 - [x] `identify::log_page_len`: NUMD decoded in u64, the length refused
