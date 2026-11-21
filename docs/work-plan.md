@@ -4,6 +4,19 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #720 — finding 6f750e62ad35 in volume/rollback.rs (2026-11-21, P1)
+- [ ] a copy is the install's only by the mark it wrote (`set_aside_at` > 0);
+  one recognised by its name (no mark, or the 0 mark start wrote) is
+  *inferred*: listed, said `inferred`, never pruned on boot-ok or by a
+  plain `POST /rollback/prune`, only with `include_inferred: true` (admin,
+  after the list)
+- [ ] the name rule narrowed to the labels installs wrote: `previous` or a
+  release number (digits and dots), `.N` after; `data@east` is not a copy,
+  and an inferred mark start wrote on one is cleared
+- [ ] tests: `data@east`/`data@west` beside `data` never marked or pruned;
+  forge1's pile skipped by the prune, gone with `include_inferred`. check.sh;
+  release; close
+
 ## #719 — finding 021e897d6367 in mgmt/volume_move.rs (2026-11-21, P1)
 - [x] `Moves::reserve`: the volume's slot taken under the jobs mutex before
   the target is resolved or kept (409 while a worker is live, a flag the
