@@ -4,6 +4,24 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #721 — finding 93dc7ea1ce1c in mgmt/link.rs (2026-11-21, P1)
+A failed link-counter sample (the drive's log page 0x18 unreadable, or the
+host phy gone) went to `next` as an empty phy list: nothing moving, so a
+failing link went `ok`, said recovered, and lost its baseline.
+- [ ] `next` takes each side as read or not: a side unreadable (the drive's
+  error; a host phy that was there and is not) makes the sample `stale`:
+  counters, rates, level, since and streak kept from the last valid sample,
+  `checked_at` and `errors` said; the next valid sample's rates are against
+  the last valid one (two valid samples, never a stale one). No valid sample
+  yet: `settling`, still settling after
+- [ ] stale said once at WARN (level kept), measured again at INFO;
+  `stale` in rows' `link` and health's `drive_links`, `/metrics`
+  `storm_drive_link_stale`
+- [ ] tests: a failing link through a drive-side error and a host loss stays
+  failing, no recovery; rates resume against the kept baseline; negative
+  control
+- [ ] check.sh, release
+
 ## #723 — keep-data install on drive-managed SMR: the carry written sequentially, said (2026-11-21, stormcos#942)
 - [x] `carry_split`: each system-half slot once (shared slots deduped), in
   source slot order, through `migrate_window_unlocked` (the flow-over's
