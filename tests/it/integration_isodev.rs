@@ -196,3 +196,29 @@ fn a_stormdist_path_names_its_iso_key_and_disk() {
     assert_eq!(disk_name("cilium"), "stormcos-sno");
     assert_eq!(disk_name("flowsdn"), "stormcos-sno-flowsdn");
 }
+
+/// The ISO `ci-isodev-blockdev-verify.sh` attaches to a QEMU guest as a CD
+/// and as a raw disk: the flavour's disk (a laid system drive with
+/// `pod-logs`) and its key, written to `$STORMBLOCK_ISO_OUT`. Run only by
+/// that script: `cargo test --test it -- --ignored --exact
+/// integration_isodev::writes_the_guests_release_iso`.
+#[tokio::test]
+#[ignore = "makes the ISO for ci-isodev-blockdev-verify.sh (STORMBLOCK_ISO_OUT)"]
+async fn writes_the_guests_release_iso() {
+    let out = std::path::PathBuf::from(std::env::var("STORMBLOCK_ISO_OUT").expect("STORMBLOCK_ISO_OUT"));
+    let dir = TempDir::new().unwrap();
+    let disk = dir.path().join("stormcos-sno.img");
+    composed_disk(&disk).await;
+    let k = key(9);
+    let recipe = Recipe {
+        version: "12.99".into(),
+        flavour: vec![Flavour { name: "cilium".into(), members: vec!["stormcos-sno".into()] }],
+        kind: Kind::Full,
+        volumes: vec![input("stormcos-sno", "stormcos-sno", &disk)],
+        forge: None,
+        boot: None,
+    };
+    stormdist::media::make(&recipe, &out.join("12.99.iso"), &k).unwrap();
+    key_file(&out, &k, "release-key.pub");
+    std::fs::write(out.join("disk.sha256"), sha_of(&disk)).unwrap();
+}

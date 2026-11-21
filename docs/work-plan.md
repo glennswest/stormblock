@@ -697,6 +697,20 @@ ISO. stormblock's side, in steps (each its own commit):
     the firmware boot of a release ISO waits on stormcentral#1476
     (ESP/BIOS loader: stormuefi#83, stormdist#18)
   - still open elsewhere: stormblock-test#6 (component Jobs), stormdist#17
+- (2026-11-21, later) stormdist#25 untouched (no tag past v0.7.0, which
+  still pins v0.1.0). Not waited on: this repo takes mkfs-iso v0.1.1 itself
+  with a `[patch."https://github.com/glennswest/mkfs.iso.rs"]` (a patch
+  release, no new dependencies; stormdist's `Media` then sizes a block
+  device). The patch goes when stormdist's tag carries v0.1.1. The stormdist
+  rev stays at 8e645d1: nothing here needs v0.7.0.
+  - [ ] `ci-isodev-blockdev-verify.sh`: a QEMU guest with the ISO as a CD
+    (`/dev/sr0`) and as a raw disk (`/dev/vda`, a USB stick's stand-in);
+    `stormblock slab volumes stormdist:///dev/…` finds the slab and its
+    volume. The ISO is made by an `#[ignore]`d it test
+    (`STORMBLOCK_ISO_OUT`). Negative control: the script on the commit
+    before the patch fails on both devices.
+  - [ ] the patch, Cargo.lock by hand (mkfs-iso 0.1.1 @ 0ac298a), the script
+    passes, check.sh, README/CHANGELOG, a tag
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it
