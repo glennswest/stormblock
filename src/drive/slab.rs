@@ -1768,6 +1768,21 @@ impl Slab {
         self.persist_slot(slot_idx).await
     }
 
+    /// A moved slot's share count, `shares` in all (#723): raised in memory
+    /// and written with the slot's entry by the next [`sync`](Self::sync),
+    /// after the data it names (#171), as [`inc_ref_batch`](Self::inc_ref_batch)
+    /// does. [`inc_ref`](Self::inc_ref) once a share wrote a table sector for
+    /// each, synchronously: scattered writes in the middle of a carry's or a
+    /// flow-over's runs, slow on a drive-managed SMR disk. A count of 1 or
+    /// less changes nothing.
+    pub async fn carry_shares(&mut self, slot_idx: u64, shares: u32) -> DriveResult<()> {
+        if shares <= 1 {
+            return Ok(());
+        }
+        let extra = vec![slot_idx; (shares - 1) as usize];
+        self.inc_ref_batch(&extra).await
+    }
+
     /// Increment reference counts on many slots at once.
     ///
     /// Cloning a volume bumps every extent it shares with its source. The
@@ -1792,7 +1807,15 @@ impl Slab {
         // Validate everything before mutating, so a bad index cannot leave the
         // batch half-applied.
         if !self.preread_valid(pre) {
-            self.table.prefetch(slot_indices.iter().copied()).await;
+            // Only what memory does not hold: a slot just taken is there,
+            // and reading its table page would be a read for nothing (#723).
+            let read: Vec<u64> = {
+                let p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+                slot_indices.iter().copied().filter(|i| !p.entries.contains_key(i)).collect()
+            };
+            if !read.is_empty() {
+                self.table.prefetch(read).await;
+            }
         }
         let mut now: Vec<(u64, Slot)> = Vec::with_capacity(slot_indices.len());
         for &slot_idx in slot_indices {

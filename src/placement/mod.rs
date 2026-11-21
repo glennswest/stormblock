@@ -718,16 +718,15 @@ impl PlacementEngine {
         }
 
         // A shared slot stays shared: the new slot carries the same count.
+        // Published with the slot's entry at the next sync, not a table
+        // write for each share (#723).
         if ref_count > 1 {
             if let Some(slab) = registry.get_mut(&dest_id) {
-                for _ in 1..ref_count {
-                    if let Err(e) = slab.inc_ref(dest_slot).await {
-                        tracing::warn!(
-                            volume = %volume_id, slab = %dest_id, slot = dest_slot,
-                            "could not carry the share count to the moved slot: {e}"
-                        );
-                        break;
-                    }
+                if let Err(e) = slab.carry_shares(dest_slot, ref_count).await {
+                    tracing::warn!(
+                        volume = %volume_id, slab = %dest_id, slot = dest_slot,
+                        "could not carry the share count to the moved slot: {e}"
+                    );
                 }
             }
         }
@@ -925,14 +924,12 @@ impl PlacementEngine {
         // Its entry is published at the destination's next flush, after the
         // data it names (#171).
         slab.confirm(dest_slot);
-        for _ in 1..shares.max(1) {
-            if let Err(e) = slab.inc_ref(dest_slot).await {
-                tracing::warn!(
-                    volume = %volume_id, slab = %dest_id, slot = dest_slot,
-                    "could not carry the share count to the moved slot: {e}"
-                );
-                break;
-            }
+        // The share count with it, not a table write for each share (#723).
+        if let Err(e) = slab.carry_shares(dest_slot, shares).await {
+            tracing::warn!(
+                volume = %volume_id, slab = %dest_id, slot = dest_slot,
+                "could not carry the share count to the moved slot: {e}"
+            );
         }
         let new = Leg::new(dest_id, dest_slot);
         let mut moves = HashMap::new();
@@ -1146,11 +1143,11 @@ impl PlacementEngine {
             // Its entry is published at the destination's next flush, after
             // the data it names (#171).
             slab.confirm(slot);
-            for _ in 1..shares.max(1) {
-                if let Err(e) = slab.inc_ref(slot).await {
-                    tracing::warn!(volume = %vol, slab = %dest_id, slot, "could not carry the share count to the moved slot: {e}");
-                    break;
-                }
+            // The share count with it, not a table write for each share:
+            // on a drive-managed SMR disk those scattered writes are what a
+            // stream of runs is slowed by (#723).
+            if let Err(e) = slab.carry_shares(slot, shares).await {
+                tracing::warn!(volume = %vol, slab = %dest_id, slot, "could not carry the share count to the moved slot: {e}");
             }
             moves.insert(old, Leg::new(dest_id, slot));
             out[i] = Some(Ok(WindowMove::Moved { dest_slot: slot }));

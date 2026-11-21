@@ -14023,6 +14023,124 @@ file = "{state}"
         assert_eq!(alone.origin(&made[1].3), Origin::Node, "the origin travels with the volume");
     }
 
+    /// #723 (stormcos#942, an X9's drive-managed SMR disk): a keep-data
+    /// install carried the node's container clones out of the system half an
+    /// extent at a time, a table write for every share of every slot, a
+    /// minute with nothing said. The carry is a window of sources written in
+    /// slot order as long runs: the node's golden and its clones, sharing
+    /// slots, land as one run in the data half, every byte as it was, each
+    /// moved slot's share count on the disk's own table (published with its
+    /// entry, not written once a share), an all-zero slot unmapped rather
+    /// than copied; then from the disk alone after the flow-over.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_install_carries_a_golden_and_its_clones_as_one_run_with_their_shares() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
+        use crate::drive::slab::SlabRole;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, _image_n, image_n1, ..) = release_fixture(mkfs, &dir).await;
+        let (mut node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
+        let slot = node.slot_size();
+        let extents = 8u64;
+        let golden = node
+            .create_volume_with("ctr-golden", extents * slot, crate::volume::CreateOptions::default().in_role(SlabRole::System))
+            .await
+            .unwrap();
+        {
+            let v = node.get_volume(&golden).unwrap();
+            for e in 0..extents {
+                // Extent 3 written all zeros: unmapped by the carry.
+                let mark = if e == 3 { 0 } else { 0xC0 + e as u8 };
+                v.write(e * slot, &vec![mark; slot as usize]).await.unwrap();
+            }
+            v.flush().await.unwrap();
+        }
+        node.seal_volume(golden, None).await.unwrap();
+        let mut clones = Vec::new();
+        for i in 0..3u8 {
+            let name = format!("ctr-ct-{i}");
+            let id = node.create_snapshot(golden, &name).await.unwrap();
+            // Each clone writes one extent of its own; the rest it shares.
+            let v = node.get_volume(&id).unwrap();
+            v.write(i as u64 * slot, &vec![0xE0 + i; slot as usize]).await.unwrap();
+            v.flush().await.unwrap();
+            clones.push((name, id, i));
+        }
+        node.persist().await;
+        let want = all_bytes(&node).await;
+        drop(node);
+
+        let claim = dir.path().join("claim-n1.raw").display().to_string();
+        std::fs::copy(&image_n1, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
+        let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump"))
+            .await
+            .expect("the install carries the node's golden and clones");
+        let flow = flow.expect("laid");
+        let report = report.expect("an install report");
+        let mut carried = report.carried.clone();
+        carried.sort();
+        assert_eq!(carried, vec!["ctr-ct-0", "ctr-ct-1", "ctr-ct-2", "ctr-golden"], "{report:?}");
+        let data_slab = crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap());
+        let ids: Vec<_> = std::iter::once(golden).chain(clones.iter().map(|(_, id, _)| *id)).collect();
+        // Every slot the carried maps name, and how many maps name it.
+        let mut named: std::collections::BTreeMap<u64, u32> = std::collections::BTreeMap::new();
+        {
+            let g = mgr.gem().read().await;
+            for id in &ids {
+                let m = g.get_volume_map(id).expect("mapped");
+                assert!(m.all_legs().all(|l| l.slab_id == data_slab), "{id:?}: in the data half");
+                for l in m.all_legs() {
+                    *named.entry(l.slot_idx).or_default() += 1;
+                }
+            }
+            for id in &ids {
+                assert!(g.lookup(*id, 3).is_none(), "{id:?}: the golden's all-zero extent is unmapped, not copied");
+            }
+        }
+        for (name, bytes) in &want {
+            if name.starts_with("ctr-") {
+                assert_eq!(volume_bytes(&mgr, name).await.as_ref(), Some(bytes), "{name}: every byte");
+            }
+        }
+        // The golden's own seven slots and the clones' three: the golden's
+        // were copied as one run (they were in slot order in the system half).
+        let golden_slots: Vec<u64> = {
+            let g = mgr.gem().read().await;
+            let m = g.get_volume_map(&golden).unwrap();
+            let mut v: Vec<u64> = m.all_legs().map(|l| l.slot_idx).collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(golden_slots.len(), (extents - 1) as usize);
+        assert_eq!(
+            golden_slots.last().unwrap() - golden_slots[0] + 1,
+            golden_slots.len() as u64,
+            "the golden's slots land as one run: {golden_slots:?}"
+        );
+        drop(mgr);
+        // The share counts as the disk's own table has them, read afresh.
+        {
+            let dev = Arc::new(crate::drive::filedev::FileDevice::open(&disk).await.unwrap()) as Arc<dyn BlockDevice>;
+            let (data, ..) = crate::image::install::halves_split(&dev, None).await.unwrap();
+            assert_eq!(data.slab_id(), data_slab);
+            for (idx, maps) in &named {
+                assert_eq!(data.shares(*idx).await, *maps, "slot {idx}: its share count on the disk");
+            }
+        }
+
+        flow_into(&claim, &flow).await;
+        let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
+        for (name, bytes) in &want {
+            if name.starts_with("ctr-") {
+                assert_eq!(volume_bytes(&alone, name).await.as_ref(), Some(bytes), "{name}: from the disk alone");
+            }
+        }
+    }
+
     /// One install of `image` over `disk`, as a boot and its successor do it:
     /// claim, take the disk (the plan and the adopt), flow both halves over,
     /// persist. The install's report.

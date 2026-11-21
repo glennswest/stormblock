@@ -44,6 +44,7 @@ use crate::drive::slab::{Slab, SlabId, SlabRole};
 use crate::drive::BlockDevice;
 use crate::image::stage::{generation_name, Migration, Policy};
 use crate::pallet::gpt::Gpt;
+use crate::volume::gem::Leg;
 use crate::volume::{VolumeId, VolumeManager};
 
 /// What the node's data half holds, read before the install writes anything.
@@ -703,6 +704,7 @@ pub async fn carry_split(
     if plan.carry.is_empty() {
         return Ok(Vec::new());
     }
+    let started = std::time::Instant::now();
     let (data, bulk, system) = halves_split(device, system).await?;
     let Some(system) = system else {
         anyhow::bail!("the system half does not open: its volumes cannot be carried");
@@ -721,22 +723,38 @@ pub async fn carry_split(
     let registry = mgr.registry().clone();
     let _pin = crate::volume::gem::pin_resident(&gem).await.map_err(|e| anyhow::anyhow!("loading extent maps: {e}"))?;
     let ids: Vec<VolumeId> = plan.carry.iter().map(|(id, _)| *id).collect();
-    // What moves, and whether it fits.
-    let mut todo: Vec<(VolumeId, u64)> = Vec::new();
+    // What moves, and whether it fits: each system-half slot once (a slot a
+    // golden shares with its clones is named by every map, and one move
+    // rewrites all of them), in the order it lies on the disk.
+    let mut todo: Vec<(VolumeId, u64, Leg)> = Vec::new();
     {
         let g = gem.read().await;
+        let reg = registry.read().await;
+        let mut seen: HashSet<Leg> = HashSet::new();
         for id in &ids {
             let Some(m) = g.get_volume_map(id) else { continue };
             if m.parity.values().any(|grp| grp.legs.iter().any(|l| l.slab_id == system_id)) {
                 anyhow::bail!("{} keeps parity in the system half: not carried automatically, move it by hand", id.0);
             }
             for (v, loc) in m.extents.iter() {
-                if loc.leg_on(system_id).is_some() {
-                    todo.push((*id, v));
+                let Some(leg) = loc.leg_on(system_id) else { continue };
+                // Never two legs of one extent on one domain: refused here,
+                // before anything moves, not half-way through.
+                let others: Vec<_> = loc.legs().filter(|l| *l != leg).map(|l| reg.domain_of(&l.slab_id)).collect();
+                if reg.collides(&data_id, &others, crate::placement::domain::DEFAULT_RUNG) {
+                    anyhow::bail!(
+                        "{} extent {v}: the data half shares a failure domain with its other leg; not carried \
+                         automatically (nothing moved), move it by hand",
+                        id.0
+                    );
+                }
+                if seen.insert(leg) {
+                    todo.push((*id, v, leg));
                 }
             }
         }
     }
+    todo.sort_by_key(|(_, _, l)| l.slot_idx);
     let free = registry.read().await.get(&data_id).map(|s| s.free_slots()).unwrap_or(0);
     if todo.len() as u64 > free {
         anyhow::bail!(
@@ -745,24 +763,90 @@ pub async fn carry_split(
             todo.len()
         );
     }
+    let slot_size = registry.read().await.get(&system_id).map(|s| s.slot_size()).unwrap_or(1).max(1);
+    let total = todo.len() as u64;
+    let opened = started.elapsed();
+    println!(
+        "Install: carrying {} volume(s) of the node's out of the system half: {total} slot(s), {} MiB, \
+         written in slot order (#723)",
+        ids.len(),
+        (total * slot_size) >> 20
+    );
+    // A window of sources read together, written as long runs in the data
+    // half's slot order and read back, the maps rewritten once a window
+    // (#723: on a drive-managed SMR disk an extent at a time, with a table
+    // write for each of its shares, took a minute for a node's clones).
     let engine = crate::placement::PlacementEngine::new();
-    for (id, v) in todo {
-        let mut g = gem.write().await;
-        let mut reg = registry.write().await;
-        // A slot another carried map shares has moved already.
-        if g.lookup(id, v).is_none_or(|l| l.leg_on(system_id).is_none()) {
-            continue;
+    let rotational = registry.read().await.get(&data_id).is_some_and(|s| s.device().rotational());
+    let run_bytes: u64 = if rotational { CARRY_RUN_BYTES_ROTATIONAL } else { CARRY_RUN_BYTES };
+    let per_window = ((2 * run_bytes) / slot_size).max(1) as usize;
+    let copy_started = std::time::Instant::now();
+    let mut said = std::time::Instant::now();
+    let (mut done, mut moved, mut zeroed) = (0u64, 0u64, 0u64);
+    for window in todo.chunks(per_window) {
+        let mut held = Vec::with_capacity(window.len());
+        for (id, v, leg) in window {
+            let Some(f) = crate::volume::fence::try_exclusive(*leg) else {
+                anyhow::bail!("carrying {} extent {v}: its slot is in use by an I/O", id.0);
+            };
+            held.push((*id, *v, *leg, f));
         }
-        engine
-            .migrate_leg(&mut g, &mut reg, id, v, system_id, Some(data_id))
-            .await
-            .map_err(|e| anyhow::anyhow!("carrying {} extent {v}: {e}", id.0))?;
+        let items: Vec<_> = held.iter().map(|(id, v, l, f)| (*id, *v, *l, f)).collect();
+        let (outs, _) = engine
+            .migrate_window_unlocked(&gem, &registry, &items, data_id, run_bytes, CARRY_READS_AT_ONCE, true)
+            .await;
+        for ((id, v, _, _), res) in items.iter().zip(outs) {
+            match res {
+                Ok(crate::placement::WindowMove::Moved { .. }) => moved += 1,
+                Ok(crate::placement::WindowMove::Zeroed) => zeroed += 1,
+                // Another carried map shares the slot and it moved already.
+                Err(crate::placement::PlacementError::ExtentNotFound { .. }) => {}
+                Err(e) => anyhow::bail!("carrying {} extent {v}: {e}", id.0),
+            }
+        }
+        drop(held);
+        done += window.len() as u64;
+        if said.elapsed() >= CARRY_SAY_EVERY && done < total {
+            said = std::time::Instant::now();
+            let secs = copy_started.elapsed().as_secs_f64().max(0.001);
+            println!(
+                "Install: carrying: {done} of {total} slot(s), {} of {} MiB, {:.1} MB/s",
+                (moved * slot_size) >> 20,
+                (total * slot_size) >> 20,
+                (moved * slot_size) as f64 / secs / 1e6
+            );
+        }
     }
+    let copied = copy_started.elapsed();
     drop(_pin);
     mgr.keep_metadata_in_first(&[data_id]);
+    let record_started = std::time::Instant::now();
     mgr.persist_checked().await.map_err(|e| anyhow::anyhow!("recording the carried volumes: {e}"))?;
+    let secs = copied.as_secs_f64().max(0.001);
+    println!(
+        "Install: carried {} volume(s) into the data half: {moved} slot(s) copied ({} MiB, {:.1} MB/s), \
+         {zeroed} all-zero slot(s) unmapped; {:.1}s in all (opening {:.1}s, copying {:.1}s, recording {:.1}s) (#723)",
+        ids.len(),
+        (moved * slot_size) >> 20,
+        (moved * slot_size) as f64 / secs / 1e6,
+        started.elapsed().as_secs_f64(),
+        opened.as_secs_f64(),
+        copied.as_secs_f64(),
+        record_started.elapsed().as_secs_f64(),
+    );
     Ok(plan.carry.iter().map(|(_, n)| n.clone()).collect())
 }
+
+/// A carry's write run on a rotating data half (#723), as the flow-over's
+/// (`flow_run_bytes`): long enough that a drive-managed SMR disk sees a
+/// stream, not scattered writes.
+const CARRY_RUN_BYTES_ROTATIONAL: u64 = 64 << 20;
+/// … and on an SSD.
+const CARRY_RUN_BYTES: u64 = 32 << 20;
+/// Sources read at once: the system half is on the same disk, in slot order.
+const CARRY_READS_AT_ONCE: usize = 8;
+/// How often a carry says how far it is.
+const CARRY_SAY_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 mod tests {
