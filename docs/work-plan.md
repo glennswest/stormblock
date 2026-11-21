@@ -174,7 +174,9 @@ Steps, each its own commit and check:
     take (`cli::runtime_take`: `take_local_disks` on the live manager, the
     legs' slabs registered, sources quarantined, the handover record
     written, `spawn_flow_over`); tests: the set with a fake stormraid, a
-    drive on no card
+    drive on no card. Pushed 4b47ea27; its check.sh was stopped on this host
+    (low memory, the local sc-build client killed), not a build result:
+    run `sc-build 'sh check.sh'` on 4b47ea27 again
   - [ ] the trigger: `storage.runtime: true` in the words; /init boots the
     claim with drives untouched; the engine starts `run` once; then the
     reboot to local after the flow-over is proved
