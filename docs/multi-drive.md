@@ -274,6 +274,9 @@ the map that stopped naming it is durable; live I/O first between moves.
 `state` ends `done` (nothing outside), `failed` (`reason`, and `errors` per
 leg; a leg on a slab the volume has stopped trusting is not copied: resync
 it), or `cancelled`. `GET /api/v1/volumes/{id}` carries `target` and `move`.
+One move a volume: a request while one is under way is 409, refused before
+it resolves or sets anything, so of requests sent at once exactly one is the
+move (#719).
 
 The target **stays** after the move, so the guest's later writes and
 copy-on-writes keep to it and the move does not undo itself (an affine

@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-21
+- **fix:** #719 (finding 021e897d6367, major): requests to move one volume at once start one move. `POST /api/v1/volumes/{id}/move` takes the volume's move slot under the jobs lock before it resolves or keeps the target; every other request is 409 until that worker ends (its task frees the slot, a panic included). A request refused after it reserved (a target that does not resolve, a failed persist) gives the slot back and the previous move's status stays. Before, two requests could both pass the running check, each keep a different target and spawn a worker, the second replacing the first in the job list, so its cancel and progress were lost while both moved legs.
+
 ## [v24.45.9] — 2026-11-21
 
 ### Fixed

@@ -276,3 +276,52 @@ async fn a_volume_moves_onto_a_named_drive_while_written_and_stays_there() {
         assert!(state.volume_manager.lock().await.find_volume(&name).await.is_none(), "{name} left behind");
     }
 }
+
+/// #719, finding 021e897d6367: requests to move one volume at once, each
+/// to a different drive. One is the move (202), every other is refused
+/// (409) before it resolves or keeps a target, so the volume's target is
+/// the accepted one's, one worker moves it, and the volume ends there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_to_move_one_volume_at_once_start_one_move() {
+    let dir = TempDir::new().unwrap();
+    let (state, api, c) = start(&dir).await;
+    let (d0, _) = add_drive(&c, &api, &dir, "d0.img", "A").await;
+    let (d1, s1) = add_drive(&c, &api, &dir, "d1.img", "B").await;
+    let (d2, s2) = add_drive(&c, &api, &dir, "d2.img", "C").await;
+    let (s, v) = call(&c, reqwest::Method::POST, format!("{api}/volumes"), Some(json!({ "name": "vm-disk", "size": "32M" }))).await;
+    assert!(s == 200 || s == 201, "{v}");
+    let disk = vid(&v);
+    write(&state, disk, 0..16, 3).await;
+    let slab_of = |d: &str| if d == d1 { s1.clone() } else { s2.clone() };
+
+    for round in 0..8 {
+        // Onto two drives at once.
+        let asks = [d1.clone(), d2.clone()];
+        let reqs = asks.iter().map(|d| {
+            let (c, url) = (c.clone(), format!("{api}/volumes/{}/move", disk.0));
+            let body = json!({ "to": { "drive": d } });
+            async move { (d.clone(), call(&c, reqwest::Method::POST, url, Some(body)).await) }
+        });
+        let answers = futures::future::join_all(reqs).await;
+        let accepted: Vec<&String> = answers.iter().filter(|(_, (s, _))| *s == 202).map(|(d, _)| d).collect();
+        let refused = answers.iter().filter(|(_, (s, _))| *s == 409).count();
+        assert_eq!(accepted.len(), 1, "round {round}: one move: {answers:?}");
+        assert_eq!(refused, asks.len() - 1, "round {round}: {answers:?}");
+        let to = accepted[0].clone();
+        let (_, got) = call(&c, reqwest::Method::GET, format!("{api}/volumes/{}", disk.0), None).await;
+        assert_eq!(got["target"]["to"]["drive"], to, "round {round}: the target is the accepted move's: {got:#}");
+        let done = wait_done(&c, &api, disk).await;
+        assert_eq!(done["state"], "done", "round {round}: {done:#}");
+        assert!(done["target"].as_str().unwrap().contains(&to), "{done:#}");
+        assert_eq!(slabs_of(&c, &api, disk).await, [slab_of(&to)].into(), "round {round}: on the accepted drive");
+        check(&state, disk, 0..16, 3).await;
+        // Back off it for the next round, so every round moves something.
+        let (s, e) = call(&c, reqwest::Method::DELETE, format!("{api}/volumes/{}/move?release=true", disk.0), None).await;
+        assert_eq!(s, 200, "{e}");
+        let (s, m) = call(&c, reqwest::Method::POST, format!("{api}/volumes/{}/move", disk.0), Some(json!({ "to": { "drive": d0 } }))).await;
+        assert_eq!(s, 202, "{m}");
+        assert_eq!(wait_done(&c, &api, disk).await["state"], "done");
+        let (s, _) = call(&c, reqwest::Method::DELETE, format!("{api}/volumes/{}/move?release=true", disk.0), None).await;
+        assert_eq!(s, 200);
+    }
+}

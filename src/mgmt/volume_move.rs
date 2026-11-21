@@ -74,6 +74,57 @@ pub struct MoveStatus {
 struct Job {
     status: Arc<RwLock<MoveStatus>>,
     cancel: tokio::sync::watch::Sender<bool>,
+    /// From the reservation until the worker's task ends (#719): the slot
+    /// the next request for the volume is refused by.
+    live: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A volume's move slot, taken before its target is resolved or kept
+/// (#719, finding 021e897d6367). Dropped without [`commit`](Self::commit)
+/// (a refusal, a failed persist), the move it replaced is put back.
+pub struct Reservation<'a> {
+    moves: &'a Moves,
+    id: VolumeId,
+    live: Arc<std::sync::atomic::AtomicBool>,
+    replaced: Option<Job>,
+    committed: bool,
+}
+
+impl Reservation<'_> {
+    /// This request moves the volume: held by its worker's task, the slot
+    /// is free again when the task ends, a panic included.
+    pub fn commit(mut self) -> LiveSlot {
+        self.committed = true;
+        LiveSlot(self.live.clone())
+    }
+}
+
+/// Clears a move's slot when dropped (#719).
+pub struct LiveSlot(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for LiveSlot {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut jobs = self.moves.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        if jobs.get(&self.id).is_some_and(|j| Arc::ptr_eq(&j.live, &self.live)) {
+            match self.replaced.take() {
+                Some(old) => {
+                    jobs.insert(self.id, old);
+                }
+                None => {
+                    jobs.remove(&self.id);
+                }
+            }
+        }
+    }
 }
 
 /// The moves this engine has run, by volume: the latest one each.
@@ -93,6 +144,23 @@ impl Moves {
 
     pub async fn is_running(&self, id: &VolumeId) -> bool {
         matches!(self.status(id).await, Some(s) if s.state == MoveState::Running)
+    }
+
+    /// Take the volume's move slot, with the status and cancel its move will
+    /// have; refused while a move of it is reserved or its worker runs.
+    fn reserve(
+        &self,
+        id: VolumeId,
+        status: Arc<RwLock<MoveStatus>>,
+        cancel: tokio::sync::watch::Sender<bool>,
+    ) -> Option<Reservation<'_>> {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        if jobs.get(&id).is_some_and(|j| j.live.load(std::sync::atomic::Ordering::SeqCst)) {
+            return None;
+        }
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let replaced = jobs.insert(id, Job { status, cancel, live: live.clone() });
+        Some(Reservation { moves: self, id, live, replaced, committed: false })
     }
 
     fn cancel(&self, id: &VolumeId) -> bool {
@@ -333,21 +401,9 @@ pub async fn start(State(state): State<Arc<AppState>>, Path(id): Path<String>, J
             pin.0
         ));
     }
-    if state.volume_moves.is_running(&vid).await {
-        return ApiError::conflict(format!("volume {uuid} is already moving; cancel it first"));
-    }
-    let shape = shape_of(&handle);
-    let target = match build_target(&state, &req, &shape).await {
-        Ok(t) => t,
-        Err(r) => return r,
-    };
-    // Before anything moves: what the guest allocates meanwhile lands inside.
-    if let Err(r) = keep_target(&state, vid, Some(target.clone())) {
-        return r;
-    }
     let status = Arc::new(RwLock::new(MoveStatus {
         volume: uuid,
-        target: target.describe(),
+        target: String::new(),
         state: MoveState::Running,
         to_move: 0,
         moved: 0,
@@ -359,14 +415,28 @@ pub async fn start(State(state): State<Arc<AppState>>, Path(id): Path<String>, J
         errors: Vec::new(),
     }));
     let (cancel, cancel_rx) = tokio::sync::watch::channel(false);
-    {
-        let mut jobs = state.volume_moves.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        jobs.insert(vid, Job { status: status.clone(), cancel });
+    // The volume's slot first (#719): a second request is refused here, not
+    // after both resolved and kept a target. Every return before `commit`
+    // gives the slot back.
+    let Some(reservation) = state.volume_moves.reserve(vid, status.clone(), cancel) else {
+        return ApiError::conflict(format!("volume {uuid} is already moving; cancel it first"));
+    };
+    let shape = shape_of(&handle);
+    let target = match build_target(&state, &req, &shape).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    status.write().await.target = target.describe();
+    // Before anything moves: what the guest allocates meanwhile lands inside.
+    if let Err(r) = keep_target(&state, vid, Some(target.clone())) {
+        return r;
     }
+    let live = reservation.commit();
     let (gem, reg, vm) = (state.gem.clone(), state.slab_registry.clone(), state.volume_manager.clone());
     let st = status.clone();
     tracing::info!(volume = %vid, "move: started, {}", target.describe());
     tokio::spawn(crate::lockwatch::named(format!("the move of volume {vid}"), async move {
+        let _live = live;
         run(vid, shape, gem, reg, vm, st, cancel_rx).await;
     }));
     // Counted before answering, so the first GET already says how much.
@@ -707,5 +777,65 @@ async fn run(
             since_persist = 0;
         }
         tokio::task::yield_now().await;
+    }
+}
+
+#[cfg(test)]
+mod reserve_tests {
+    use super::*;
+
+    fn job(volume: uuid::Uuid, target: &str) -> (Arc<RwLock<MoveStatus>>, tokio::sync::watch::Sender<bool>) {
+        let st = MoveStatus {
+            volume,
+            target: target.into(),
+            state: MoveState::Running,
+            to_move: 0,
+            moved: 0,
+            failed: 0,
+            remaining: 0,
+            started_at: 0,
+            finished_at: None,
+            reason: None,
+            errors: Vec::new(),
+        };
+        (Arc::new(RwLock::new(st)), tokio::sync::watch::channel(false).0)
+    }
+
+    /// #719, finding 021e897d6367: one move slot a volume. A second request
+    /// is refused from the moment the first reserves, through its worker;
+    /// a reservation given back (a refusal, a failed persist) puts back the
+    /// move it replaced, and a slot is free again once its worker ends.
+    #[tokio::test]
+    async fn a_volume_has_one_move_slot_and_a_refusal_gives_it_back() {
+        let moves = Moves::default();
+        let id = VolumeId(uuid::Uuid::new_v4());
+
+        // A move that ran and ended: its status is what GET says.
+        let (st, c) = job(id.0, "first");
+        let slot = moves.reserve(id, st.clone(), c).expect("free").commit();
+        assert!(moves.reserve(id, job(id.0, "x").0, job(id.0, "x").1).is_none(), "refused while the worker runs");
+        st.write().await.state = MoveState::Done;
+        drop(slot);
+
+        // A request reserves; a second is refused before either resolves.
+        let (st2, c2) = job(id.0, "second");
+        let r = moves.reserve(id, st2, c2).expect("the worker ended: free");
+        let (st3, c3) = job(id.0, "third");
+        assert!(moves.reserve(id, st3, c3).is_none(), "refused while reserved");
+        // Given back (its target did not resolve): the ended move is back.
+        drop(r);
+        let s = moves.status(&id).await.expect("the earlier move");
+        assert_eq!((s.target.as_str(), s.state), ("first", MoveState::Done));
+
+        // Committed and its worker panicking: the slot is free all the same.
+        let (st4, c4) = job(id.0, "fourth");
+        let slot = moves.reserve(id, st4, c4).unwrap().commit();
+        let worker = tokio::spawn(async move {
+            let _slot = slot;
+            panic!("a worker that dies");
+        });
+        assert!(worker.await.is_err());
+        let (st5, c5) = job(id.0, "fifth");
+        assert!(moves.reserve(id, st5, c5).is_some(), "a dead worker holds no slot");
     }
 }
