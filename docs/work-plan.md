@@ -186,9 +186,11 @@ Steps, each its own commit and check:
     something, `replan` by serial after the format. Tests: storage.rs
     `the_runtime_switch`, node_install `decide_…`, `the_plan_after_…`,
     tests/initramfs-storage.sh's four storage.runtime cases.
-  - [ ] step 5, the reboot to local once the flow-over is proved, is its own
-    step (the /init path does not reboot either; the node runs on from the
-    local disk)
+  - check.sh ALL PASS on 60fddd9a (1592/1592; 7deb7485 did not compile,
+    #722, fixed there); v24.45.0 (f7a1ef77), stage f56b2ee3da96
+  - [ ] step 5, the reboot to local once the flow-over is proved:
+    stormpump's (stormpump#299: reboot once the record says `stage laid
+    done` on a runtime-install boot); the /init path does not reboot either
   - [ ] proved on forge1 / a pvetest with `storage.runtime: true` (hardware)
 - (2026-11-20) held behind #700 (the master: forge first). Next is step 2:
   /init keeps the install-config's non-secret `mode` and `storage:` for the
