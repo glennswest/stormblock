@@ -4,6 +4,21 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #716 — findings bf72463adfbf, e535779343ee in release_erase.rs (2026-11-21, P1)
+- [ ] e535779343ee: the relay plan (name → golden, the state volume's too)
+  saved in the ticket with the declaration, checked, before the first
+  delete; a rerun lays the recorded plan, an entry whose volume is gone
+  laid all the same
+- [ ] bf72463adfbf: a delete, a lay or the declaration's write that fails
+  (or a checked persist) is an error before the state volume is touched:
+  the ticket stays pending, the boot stops (`run_release_ticket`), the next
+  boot runs it again. The swap: lay `.release-new`, delete the old (fail:
+  the new one deleted, error), persist checked, rename, persist checked
+- [ ] tests (cli.rs release tests): a held volume fails the run, the ticket
+  stays with its plan, nothing of the state volume swapped; a cut after the
+  deletes (stormcos-state, fastetcd-data gone) laid back from the plan with
+  the declaration. check.sh; release; close
+
 ## #715 — finding 6aebc6f1b8c8 in volume/mirror.rs (2026-11-21, P1)
 - [x] `LiveMirror`: a copy gate (RwLock) held by every copy step (lock,
   read, write) and the copy's final flush, `is_live` checked again under
