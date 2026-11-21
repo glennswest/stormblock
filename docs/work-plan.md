@@ -16,6 +16,12 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 - [ ] tests: `data@east`/`data@west` beside `data` never marked or pruned;
   forge1's pile skipped by the prune, gone with `include_inferred`. check.sh;
   release; close
+- status 2026-11-21 06:30: fix dfdae2e8 pushed, its targeted build passed
+  (5/5 rollback unit, 2/2 integration_rollback, clippy). Still to do: the
+  negative control (fb21e34f, the `wip/720-negative` branch, deleted again; push
+  it back to rerun), `check.sh` on main, v24.45.11, image, shipped. Blocked on
+  stormcentral#1638: sc-build cannot submit (empty job id, 404), and the first
+  negative run's VM 3901 never answered ssh
 
 ## #719 — finding 021e897d6367 in mgmt/volume_move.rs (2026-11-21, P1)
 - [x] `Moves::reserve`: the volume's slot taken under the jobs mutex before
