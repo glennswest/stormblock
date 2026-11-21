@@ -4,6 +4,17 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #718 — finding 0f237e79c424 in raid/mod.rs (2026-11-21, P1)
+- [ ] `RaidArray::hold_for_release`: the grow lock taken (refused, 409,
+  while a grow holds it) with the rebuild/scrub check; the API's release
+  holds it from its first check through `ReleaseHold::release`, so a grow
+  cannot start in between and one asked meanwhile waits, then finds the set
+  released. `release()` is the hold and the release at once
+- [ ] test (raid/tests.rs): a grow held in a member's write_zeroes; release
+  refused, nothing released; let through, then released; a grow asked
+  under a hold refuses once released and writes nothing. check.sh;
+  release; close
+
 ## #716 — findings bf72463adfbf, e535779343ee in release_erase.rs (2026-11-21, P1)
 - [x] e535779343ee: the relay plan (name → golden, the state volume's too)
   saved in the ticket with the declaration, checked, before the first
