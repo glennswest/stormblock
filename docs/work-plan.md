@@ -46,6 +46,14 @@ failing link went `ok`, said recovered, and lost its baseline.
 - [x] check.sh ALL PASS on 4b2f35aa (1606/1606, 1958 s); v24.45.11
 - [ ] measured on an X9 (`replacing the system half` → `laid out and handed`,
   the flow-over's MB/s): needs a keep-data install on the test machine
+- (2026-11-21) no stormblock image carries the fix: the newest,
+  golden-stormblock-ec2745dcaebb, is a7bbab6 (v24.45.10). Image requested of
+  main's head (v24.45.13); `shipped` with the proof `console:Install: carried
+  … into the data half` on the X9 blades (server1-8), whose summary line
+  carries the times the issue asks (`… s in all (opening, copying,
+  recording)`). The line is said only when there is something to carry: the
+  X9 measured had the node's `ctr-ct` clones in its system half. The
+  measurement itself is the master's install (stormcos#942).
 
 ## #720 — finding 6f750e62ad35 in volume/rollback.rs (2026-11-21, P1)
 - [x] a copy is the install's only by the mark it wrote (`set_aside_at` > 0);
