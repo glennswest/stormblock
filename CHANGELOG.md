@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-21
+- **fix:** #715 (finding 6aebc6f1b8c8, major): `DELETE /api/v1/volumes/{id}/mirror` waits for the live mirror's background copy. Every copy step (an extent's read and write to the target, the final flush) holds a gate and checks the mirror is live under it; the stop sets `stopping`, then drains the gate, then flushes. A stop that arrived while the copy slept, waited for an extent lock or read the source used to answer `stopped`/`flushed` with the copy still to write that extent to the target, which may already have been reused.
+
 ## [v24.45.6] — 2026-11-21
 
 ### Changed

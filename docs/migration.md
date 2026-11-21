@@ -158,7 +158,8 @@ hypervisor. Only S's engine sees every write to it, so it copies it:
    error on T never reaches the guest: the mirror goes `failed` and says why,
    and the volume carries on as before. A resize is refused while mirrored.
 5. `DELETE /api/v1/volumes/{id}/mirror`: every write in flight lands on both,
-   T is flushed, the mirror is dropped (`{stopped, flushed, state}`). Called
+   the background copy's extent in flight finishes and no other is copied
+   (it answers only after, #715), T is flushed, the mirror is dropped (`{stopped, flushed, state}`). Called
    with the guest paused on S, T is then exact: the switch-over. The same
    call is the abort. S's volume is never changed by any of it.
 6. `<data_dir>/mirrors.json` names each mirror started and not stopped. One

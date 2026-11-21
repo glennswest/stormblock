@@ -19,8 +19,9 @@
 //! - an error on T never reaches the guest: the mirror goes `failed`, says
 //!   why, and the volume carries on as before.
 //!
-//! The switch-over (and the abort) is `stop`: in-flight writes finish, T is
-//! flushed, the mirror is dropped. S's volume is never changed by any of it.
+//! The switch-over (and the abort) is `stop`: in-flight writes finish, the
+//! copy's step in flight finishes and no other starts (#715), T is flushed,
+//! the mirror is dropped. S's volume is never changed by any of it.
 //!
 //! A mirror lives in this process. It is recorded on disk by the API
 //! (`mirrors.json`) so that after a restart it reports `failed` rather than
@@ -59,6 +60,10 @@ pub struct LiveMirror {
     failed: AtomicBool,
     synced: AtomicBool,
     stopping: AtomicBool,
+    /// Held (read) by each step of the copy: an extent's read and write, its
+    /// final flush. `stop` takes it (write) after setting `stopping`, so no
+    /// copy write reaches T once the stop has answered (#715).
+    copy_gate: tokio::sync::RwLock<()>,
     bytes_total: AtomicU64,
     bytes_remaining: AtomicU64,
     message: std::sync::Mutex<Option<String>>,
@@ -77,6 +82,7 @@ impl LiveMirror {
             failed: AtomicBool::new(false),
             synced: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
+            copy_gate: tokio::sync::RwLock::new(()),
             bytes_total: AtomicU64::new(0),
             bytes_remaining: AtomicU64::new(0),
             message: std::sync::Mutex::new(None),
@@ -197,7 +203,14 @@ impl LiveMirror {
             }
             let n = ext.min(capacity - at) as usize;
             {
+                // A stop that began while this step waited (a sleep, a
+                // shard) ends the copy here; one that begins now waits for
+                // the step (#715).
+                let _step = self.copy_gate.read().await;
                 let _g = self.lock_range(at, n as u64).await;
+                if !self.is_live() {
+                    return;
+                }
                 if let Err(e) = vol.read(at, &mut buf[..n]).await {
                     self.fail(format!("reading extent {x} here to copy it: {e}"));
                     return;
@@ -215,6 +228,7 @@ impl LiveMirror {
             last_took = t.elapsed();
             last_fg = super::thin::FOREGROUND_IO.load(Ordering::Relaxed);
         }
+        let _step = self.copy_gate.read().await;
         if !self.is_live() {
             return;
         }
@@ -231,11 +245,16 @@ impl LiveMirror {
     }
 
     /// Stop: no more writes go to T. The caller has made in-flight writes
-    /// finish first. T is flushed when the mirror is still good; the error,
-    /// if the flush fails, is returned (and the mirror says failed).
+    /// finish first; the copy's step in flight finishes here, and no other
+    /// starts (#715, finding 6aebc6f1b8c8). T is flushed when the mirror is
+    /// still good; the error, if the flush fails, is returned (and the
+    /// mirror says failed).
     pub async fn stop(&self) -> Result<(), DriveError> {
         let live = self.is_live();
         self.stopping.store(true, Ordering::SeqCst);
+        // Every copy step holds the gate and checks `stopping` under it: once
+        // this is held, none is in flight and none will write to T.
+        let _drained = self.copy_gate.write().await;
         if live {
             if let Err(e) = self.dev.flush().await {
                 self.fail(format!("flush at the stop: {e}"));
@@ -243,5 +262,128 @@ impl LiveMirror {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drive::filedev::FileDevice;
+    use crate::drive::{DeviceId, DriveResult, DriveType};
+    use async_trait::async_trait;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::{Notify, Semaphore};
+
+    /// T: a write says it began, then waits to be let through.
+    struct Gated {
+        inner: FileDevice,
+        began: Notify,
+        through: Semaphore,
+        writes_done: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl BlockDevice for Gated {
+        fn id(&self) -> &DeviceId {
+            self.inner.id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.inner.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.inner.optimal_io_size()
+        }
+        fn device_type(&self) -> DriveType {
+            self.inner.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            self.began.notify_one();
+            self.through.acquire().await.expect("open").forget();
+            let n = self.inner.write(offset, buf).await?;
+            self.writes_done.fetch_add(1, Ordering::SeqCst);
+            Ok(n)
+        }
+        async fn flush(&self) -> DriveResult<()> {
+            self.inner.flush().await
+        }
+        async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
+    }
+
+    async fn file(dir: &std::path::Path, name: &str, len: u64) -> FileDevice {
+        FileDevice::open_with_capacity(dir.join(name).to_str().unwrap(), len).await.unwrap()
+    }
+
+    /// #715, finding 6aebc6f1b8c8: a stop that arrives while the copy is
+    /// writing an extent to T does not answer until that write is done, and
+    /// the copy writes nothing to T after it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_waits_for_the_copy_write_in_flight_and_no_copy_write_follows() {
+        let dir = tempfile::tempdir().unwrap();
+        let ext = 64 * 1024u64;
+        let len = 8 * ext;
+        let src = file(dir.path(), "s", len).await;
+        for x in 0..8u64 {
+            src.write(x * ext, &vec![x as u8 + 1; ext as usize]).await.unwrap();
+        }
+        let src: Arc<dyn BlockDevice> = Arc::new(src);
+        let t = Arc::new(Gated {
+            inner: file(dir.path(), "t", len).await,
+            began: Notify::new(),
+            through: Semaphore::new(0),
+            writes_done: AtomicUsize::new(0),
+        });
+        let m = LiveMirror::new("t".into(), t.clone(), ext);
+        let copy = tokio::spawn(m.clone().copy(src, (0..8).collect(), len));
+
+        // The copy is in its first extent's write to T, held there.
+        tokio::time::timeout(Duration::from_secs(10), t.began.notified()).await.expect("the copy writes");
+        let stop = tokio::spawn({
+            let m = m.clone();
+            async move { m.stop().await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!stop.is_finished(), "the stop answered with a copy write to T in flight");
+        assert_eq!(t.writes_done.load(Ordering::SeqCst), 0);
+
+        // Let every write through: the one in flight lands, then the stop
+        // answers and the copy ends without another.
+        t.through.add_permits(64);
+        tokio::time::timeout(Duration::from_secs(10), stop).await.expect("the stop answers").unwrap().unwrap();
+        assert_eq!(t.writes_done.load(Ordering::SeqCst), 1, "the write in flight landed before the stop answered");
+        tokio::time::timeout(Duration::from_secs(10), copy).await.expect("the copy ends").unwrap();
+        assert_eq!(t.writes_done.load(Ordering::SeqCst), 1, "no copy write after the stop");
+        assert_eq!(m.status().state, "copying", "stopped mid-copy: never synced, not failed");
+        let mut got = vec![0u8; ext as usize];
+        t.inner.read(0, &mut got).await.unwrap();
+        assert_eq!(got, vec![1u8; ext as usize]);
+        t.inner.read(ext, &mut got).await.unwrap();
+        assert_eq!(got, vec![0u8; ext as usize], "the second extent was never copied");
+    }
+
+    /// A stop before the copy's first step: the copy writes nothing at all.
+    #[tokio::test]
+    async fn a_copy_that_starts_after_the_stop_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ext = 64 * 1024u64;
+        let src = file(dir.path(), "s", 2 * ext).await;
+        src.write(0, &vec![9u8; ext as usize]).await.unwrap();
+        let t = Arc::new(Gated {
+            inner: file(dir.path(), "t", 2 * ext).await,
+            began: Notify::new(),
+            through: Semaphore::new(64),
+            writes_done: AtomicUsize::new(0),
+        });
+        let m = LiveMirror::new("t".into(), t.clone(), ext);
+        m.stop().await.unwrap();
+        m.clone().copy(Arc::new(src), vec![0, 1], 2 * ext).await;
+        assert_eq!(t.writes_done.load(Ordering::SeqCst), 0);
     }
 }

@@ -2324,7 +2324,7 @@ every write of a volume in use (a VM's disk over ublk) to a fresh volume on
 another engine, attached for this node over NVMe/TCP, and copies the extents
 already mapped in the background; `GET /api/v1/volumes/{id}` says `mirror
 {state: copying | synced | failed, …}`; `DELETE …/mirror` lets in-flight
-writes land on both, flushes the target and lets go: the switch-over and the
+writes and the copy's extent in flight land (no copy write follows, #715), flushes the target and lets go: the switch-over and the
 abort. An error on the target never reaches the guest. docs/migration.md §3.
 
 ### A disk served from two nodes: ANA and the epoch (#83)
