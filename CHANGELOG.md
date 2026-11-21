@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.45.3] — 2026-11-20
+
+### Fixed
+- #712 (finding c113e8f8eb01): the iSCSI target checks a command's LBA range in blocks with checked arithmetic before any I/O; a WRITE(16) whose byte offset wrapped u64 overwrote block 0 and is LBA OUT OF RANGE now, as is any READ, WRITE SAME or UNMAP descriptor past the end.
+
 ### 2026-11-20
 - **fix:** #712 (finding c113e8f8eb01, major): the iSCSI target checks a command's LBA and block count against the device's capacity in blocks, with checked arithmetic, before anything is multiplied, allocated or sent to the device: READ, WRITE, WRITE SAME (with or without UNMAP) and every UNMAP descriptor (one out of range refuses the whole list). A WRITE(16) at LBA 2^52 on a 4096-byte device wrapped to byte 0 and overwrote the first block; it is LBA OUT OF RANGE now. A READ or WRITE of more than the advertised 65536 blocks is INVALID FIELD IN CDB, never a buffer that size.
 

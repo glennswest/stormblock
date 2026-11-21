@@ -9,7 +9,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   checked_mul, for read, write, write same, every UNMAP descriptor (all
   checked before any discard); MAX TRANSFER LENGTH enforced on read/write.
   Test `an_lba_that_would_wrap_is_out_of_range_and_touches_nothing`
-- [ ] check.sh, patch release, close
+- [x] check.sh ALL PASS on 00ce2533 (1595/1595, 2045 s); v24.45.3; DONE, closed
 
 ## #711 — findings 4dbf706d9a2b, 78ed70cc2493 in mgmt/auth.rs (2026-11-20, P1)
 - [x] 4dbf706d9a2b: the ListNamespaces fallback only on `GET /api/v1/volumes`
