@@ -5,7 +5,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 ## #714 — finding c001083c059d in nvmeof-target/src/server.rs (2026-11-20, P1)
-- [ ] `identify::log_page_len`: NUMD decoded in u64, the length refused
+- [x] `identify::log_page_len`: NUMD decoded in u64, the length refused
   (Invalid Field, DNR) past the target's max transfer before anything is
   allocated; used by stormboot-serve's Get Log Page and the engine's two
   (`target/nvmeof/mod.rs`: discovery/ANA/unknown, changed-NS list), which

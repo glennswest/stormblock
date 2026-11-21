@@ -389,6 +389,38 @@ async fn the_discovery_record_names_a_dialable_address_for_a_host_name() {
 }
 
 
+/// #714 (finding c001083c059d): a Get Log Page's length is the host's word,
+/// and the discovery controller takes a host no subsystem admits. 8 GiB
+/// (NUMDU 0x7fff, NUMDL 0xffff), every NUMD bit, and one dword past MDTS are
+/// refused (Invalid Field, DNR) before anything is allocated, for the
+/// discovery log and for the changed-namespace list; the connection still
+/// answers a page that fits.
+#[tokio::test]
+async fn an_oversized_log_page_on_a_discovery_connection_is_refused() {
+    let (_dir, vol, _vm) = common::setup_raid1_volume(64 * 1024 * 1024, 32 * 1024 * 1024).await;
+    let max = 128 << 10;
+    let config = NvmeofConfig { max_transfer: max, maxh2cdata: max as u32, ..default_nvmeof_config() };
+    let (addr, server) = common::start_nvmeof_target(vol, config).await;
+    let mut init = NvmeofInitiator::connect(addr).await.unwrap();
+    init.ic_handshake().await.unwrap();
+    init.fabric_connect("nqn.2014-08.org.nvmexpress.discovery", "nqn.2014-08.org.nvmexpress:uuid:nobody", 0)
+        .await
+        .unwrap();
+    let refused = |status: u16| ((status >> 1) & 0xFF, status & (1 << 15) != 0);
+    let past = (max / 4) as u32; // 0's based: max + 4 bytes
+    for lid in [0x70u32, 0x04] {
+        for (cdw10, cdw11) in [((0xFFFF << 16) | lid, 0x7FFF), ((u32::MAX & !0xFF) | lid, u32::MAX), (((past & 0xFFFF) << 16) | lid, past >> 16)] {
+            let status = init.get_log_page_refused(cdw10, cdw11).await.unwrap();
+            assert_eq!(refused(status), (0x02, true), "lid {lid:#x} cdw10 {cdw10:#x} cdw11 {cdw11:#x}");
+        }
+    }
+    let page = init.get_log_page(0x70, 4096).await.unwrap();
+    assert_eq!(page.len(), 4096, "a page that fits is still served");
+    let page = init.get_log_page(0x70, max).await.unwrap();
+    assert_eq!(page.len(), max, "exactly MDTS is served");
+    server.abort();
+}
+
 /// A TCP proxy to `to` on `on` that can be killed: its listener and every
 /// connection through it go at once, as a link that drops.
 async fn killable_proxy(on: &str, to: std::net::SocketAddr) -> (std::net::SocketAddr, impl FnOnce()) {

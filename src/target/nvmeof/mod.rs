@@ -1106,10 +1106,19 @@ impl NvmeofTarget {
                         admin::ADMIN_GET_LOG_PAGE
                             if (sqe.cdw10() & 0xFF) as u8 == LID_CHANGED_NS_LIST =>
                         {
-                            let numd = ((sqe.cdw10() >> 16) | ((sqe.cdw11() & 0xFFFF) << 16)) + 1;
+                            // The length is the host's word: bounded by
+                            // MDTS before anything is allocated (#714).
+                            let Some(len) = stormblock_nvmeof::identify::log_page_len(
+                                sqe.cdw10(),
+                                sqe.cdw11(),
+                                self.config.max_transfer.max(4096),
+                            ) else {
+                                pdu::write_capsule_resp(writer, &NvmeCqe::error_dnr(cid, 0, 0, 0, 0x02), hdgst).await?;
+                                continue;
+                            };
                             let list: Vec<u32> = changed.iter().copied().collect();
                             let mut page = admin::changed_ns_list(&list, overflow);
-                            page.resize(numd as usize * 4, 0);
+                            page.resize(len, 0);
                             // Reading the page clears it, per spec.
                             changed.clear();
                             overflow = false;
@@ -1544,8 +1553,15 @@ impl NvmeofTarget {
             }
             admin::ADMIN_GET_LOG_PAGE => {
                 let lid = (sqe.cdw10() & 0xFF) as u8;
-                let numd = ((sqe.cdw10() >> 16) | ((sqe.cdw11() & 0xFFFF) << 16)) + 1;
-                let log_bytes = numd as usize * 4;
+                // The length is the host's word, and a discovery connection
+                // needs no admitted host: bounded by MDTS before anything is
+                // allocated for it (#714, finding c001083c059d).
+                let Some(log_bytes) =
+                    stormblock_nvmeof::identify::log_page_len(sqe.cdw10(), sqe.cdw11(), self.config.max_transfer.max(4096))
+                else {
+                    pdu::write_capsule_resp(writer, &NvmeCqe::error_dnr(cid, 0, 0, 0, 0x02), hdgst).await?;
+                    return Ok(());
+                };
 
                 // LPO (log page offset) — the initiator reads the header
                 // first, then the entries at their offset.
@@ -1573,7 +1589,7 @@ impl NvmeofTarget {
                         })
                         .collect();
                     let log = discovery::build_discovery_log_page(&entries);
-                    let start = (lpo as usize).min(log.len());
+                    let start = usize::try_from(lpo).unwrap_or(usize::MAX).min(log.len());
                     let mut out = log[start..].to_vec();
                     out.resize(log_bytes, 0);
                     out

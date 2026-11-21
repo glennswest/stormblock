@@ -193,6 +193,21 @@ impl NvmeofInitiator {
         self.read_data_response().await
     }
 
+    /// A Get Log Page with CDW10/CDW11 as given (NUMDL, NUMDU), answered
+    /// with a completion and no data: its status field (#714).
+    pub async fn get_log_page_refused(&mut self, cdw10: u32, cdw11: u32) -> io::Result<u16> {
+        let cid = self.next_cid();
+        let mut sqe = [0u8; 64];
+        sqe[0] = ADMIN_GET_LOG_PAGE;
+        sqe[2..4].copy_from_slice(&cid.to_le_bytes());
+        sqe[40..44].copy_from_slice(&cdw10.to_le_bytes());
+        sqe[44..48].copy_from_slice(&cdw11.to_le_bytes());
+        self.send_capsule_cmd(&sqe, &[]).await?;
+        let (cqe, _) = self.read_capsule_resp().await?;
+        assert_eq!(u16::from_le_bytes([cqe.raw[12], cqe.raw[13]]), cid);
+        Ok(u16::from_le_bytes([cqe.raw[14], cqe.raw[15]]))
+    }
+
     /// Post an Asynchronous Event Request; it completes when the controller
     /// has something to say ([`Self::next_completion_dw0`]).
     pub async fn post_async_event(&mut self) -> io::Result<()> {

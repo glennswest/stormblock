@@ -40,7 +40,9 @@ pinning or kernel module, so it builds for macOS, Windows and Linux
   over a fresh overlay, and the newest two claims are kept (stormbootx's and
   the initramfs's, one boot). The target serves Identify, log pages,
   features, keep-alive, Read, Write (with R2T), Flush, Write Zeroes and
-  Dataset Management. Left out on purpose: DH-HMAC-CHAP (a boot host is
+  Dataset Management. A Get Log Page longer than the target's MDTS is
+  refused (Invalid Field, DNR) before anything is allocated for it (#714).
+  Left out on purpose: DH-HMAC-CHAP (a boot host is
   handed no secret), ANA, asynchronous events and the engine's reactor.
 - `command`: a host's command slot (#494): the verbs, the id rule, `done`.
 - `boothost::Boothost`: the HTTP surface stormbootx and the initramfs's

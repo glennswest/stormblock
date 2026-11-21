@@ -367,9 +367,12 @@ impl BootTarget {
             }
             ADMIN_GET_LOG_PAGE => {
                 let lid = (sqe.cdw10() & 0xFF) as u8;
-                let numd = ((sqe.cdw10() >> 16) | ((sqe.cdw11() & 0xFFFF) << 16)) + 1;
-                let len = numd as usize * 4;
-                let lpo = (sqe.cdw12() as u64 | ((sqe.cdw13() as u64) << 32)) as usize;
+                // The length is the host's word: bounded by MDTS before
+                // anything is allocated for it (#714).
+                let Some(len) = identify::log_page_len(sqe.cdw10(), sqe.cdw11(), self.max_transfer) else {
+                    return pdu::write_capsule_resp(w, &NvmeCqe::error_dnr(cid, 0, 0, 0, 0x02), hdgst).await;
+                };
+                let lpo = usize::try_from(sqe.cdw12() as u64 | ((sqe.cdw13() as u64) << 32)).unwrap_or(usize::MAX);
                 let mut out = if lid == 0x70 {
                     // The subsystems the asking host may connect to, at the
                     // address it reached this one on.
@@ -562,4 +565,105 @@ struct Session {
     hdgst: bool,
     ddgst: bool,
     props: ControllerProperties,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header(t: u8, hlen: u8, pdo: u8, plen: u32) -> [u8; 8] {
+        pdu::CommonHeader { pdu_type: t, flags: 0, hlen, pdo, plen }.to_bytes()
+    }
+
+    fn sqe(opcode: u8, cid: u16, cdw10: u32, cdw11: u32) -> [u8; 64] {
+        let mut s = [0u8; 64];
+        s[0] = opcode;
+        s[2..4].copy_from_slice(&cid.to_le_bytes());
+        s[40..44].copy_from_slice(&cdw10.to_le_bytes());
+        s[44..48].copy_from_slice(&cdw11.to_le_bytes());
+        s
+    }
+
+    /// A host on the discovery controller, no digests: ICReq, then a
+    /// Connect with no registered host behind it.
+    async fn discovery_connection(addr: SocketAddr) -> TcpStream {
+        let mut c = TcpStream::connect(addr).await.unwrap();
+        c.write_all(&header(0x00, 128, 0, 128)).await.unwrap();
+        c.write_all(&[0u8; 120]).await.unwrap();
+        let mut icresp = [0u8; 128];
+        c.read_exact(&mut icresp).await.unwrap();
+        assert_eq!(icresp[0], 0x01, "ICResp");
+
+        let mut connect = sqe(NVME_FABRIC_OPC, 1, 0, 0);
+        connect[4] = FCTYPE_CONNECT;
+        let mut data = vec![0u8; 1024];
+        data[16..18].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        let sub = discovery::DISCOVERY_NQN.as_bytes();
+        data[256..256 + sub.len()].copy_from_slice(sub);
+        let host = b"nqn.2014-08.org.nvmexpress:uuid:nobody";
+        data[512..512 + host.len()].copy_from_slice(host);
+        c.write_all(&header(0x04, 72, 72, 72 + 1024)).await.unwrap();
+        c.write_all(&connect).await.unwrap();
+        c.write_all(&data).await.unwrap();
+        let mut resp = [0u8; 24];
+        c.read_exact(&mut resp).await.unwrap();
+        assert_eq!(resp[0], 0x05, "CapsuleResp");
+        assert_eq!(u16::from_le_bytes([resp[22], resp[23]]) >> 1, 0, "Connect succeeded");
+        c
+    }
+
+    async fn get_log_page(c: &mut TcpStream, cid: u16, cdw10: u32, cdw11: u32) {
+        c.write_all(&header(0x04, 72, 0, 72)).await.unwrap();
+        c.write_all(&sqe(ADMIN_GET_LOG_PAGE, cid, cdw10, cdw11)).await.unwrap();
+    }
+
+    /// The status a CapsuleResp carries: (status code, DNR).
+    async fn refusal(c: &mut TcpStream, cid: u16) -> (u16, bool) {
+        let mut resp = [0u8; 24];
+        c.read_exact(&mut resp).await.unwrap();
+        assert_eq!(resp[0], 0x05, "a CapsuleResp, not data");
+        assert_eq!(u16::from_le_bytes([resp[20], resp[21]]), cid);
+        let status = u16::from_le_bytes([resp[22], resp[23]]);
+        ((status >> 1) & 0xFF, status & (1 << 15) != 0)
+    }
+
+    /// #714, finding c001083c059d: a Get Log Page's length is the host's
+    /// word, and the discovery controller takes any host. One asking for
+    /// 8 GiB (NUMDU 0x7fff, NUMDL 0xffff), or for one dword past MDTS, is
+    /// refused (Invalid Field, DNR) before anything is allocated, and the
+    /// connection goes on serving a page that fits.
+    #[tokio::test]
+    async fn an_oversized_log_page_on_an_unregistered_discovery_connection_is_refused() {
+        let dir = std::env::temp_dir().join(format!("stormboot-server-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("image.raw");
+        std::fs::write(&path, vec![7u8; 64 * 1024]).unwrap();
+        let image = Arc::new(Image::open(&path, 4096).unwrap());
+        let max = 1 << 20;
+        let target = BootTarget::new(image, dir.join("s"), "nqn.2026-11.lo.storm:t", max);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(target.run(listener));
+
+        let mut c = discovery_connection(addr).await;
+        get_log_page(&mut c, 7, (0xFFFF << 16) | 0x70, 0x7FFF).await;
+        assert_eq!(refusal(&mut c, 7).await, (0x02, true), "8 GiB is refused");
+        get_log_page(&mut c, 8, u32::MAX, u32::MAX).await;
+        assert_eq!(refusal(&mut c, 8).await, (0x02, true), "every NUMD bit set is refused, not wrapped");
+        let past = (max / 4) as u32; // NUMD is 0's based: max + 4 bytes
+        get_log_page(&mut c, 9, ((past & 0xFFFF) << 16) | 0x70, past >> 16).await;
+        assert_eq!(refusal(&mut c, 9).await, (0x02, true), "one dword past MDTS is refused");
+
+        // A page that fits: the discovery log, 4 KiB, on the same connection.
+        get_log_page(&mut c, 10, (0x3FF << 16) | 0x70, 0).await;
+        let mut ch = [0u8; 24];
+        c.read_exact(&mut ch).await.unwrap();
+        assert_eq!(ch[0], 0x07, "C2HData");
+        assert_eq!(u16::from_le_bytes([ch[8], ch[9]]), 10);
+        assert_eq!(u32::from_le_bytes(ch[16..20].try_into().unwrap()), 4096);
+        let mut page = vec![0u8; 4096];
+        c.read_exact(&mut page).await.unwrap();
+        assert_eq!(u64::from_le_bytes(page[8..16].try_into().unwrap()), 0, "no subsystem admits this host");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

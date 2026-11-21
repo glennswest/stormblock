@@ -39,6 +39,18 @@ pub fn mdts_for(bytes: usize) -> u8 {
     (bytes.max(4096) / 4096).trailing_zeros() as u8
 }
 
+/// The bytes a Get Log Page command asks for: NUMDL (CDW10 bits 31:16) and
+/// NUMDU (CDW11 bits 15:0), a 0's based dword count, decoded in u64. `None`
+/// when that is past `max` (the target's MDTS), so the caller refuses it
+/// before allocating anything: the fields are the host's word, and a
+/// discovery connection needs no registered host (#714, finding
+/// c001083c059d: NUMDU 0x7fff with NUMDL 0xffff asked for 8 GiB).
+pub fn log_page_len(cdw10: u32, cdw11: u32, max: usize) -> Option<usize> {
+    let numd = ((((cdw11 & 0xFFFF) as u64) << 16) | (cdw10 >> 16) as u64) + 1;
+    let len = numd * 4;
+    (len <= max as u64).then_some(len as usize)
+}
+
 /// Namespace Identification Descriptor list (CNS 0x03): one UUID descriptor
 /// then a zero terminator. The Linux initiator issues this during namespace
 /// scan and aborts the namespace when it errors.
@@ -228,5 +240,20 @@ mod tests {
         assert_eq!(mdts_for(8 << 20), 11);
         assert_eq!(mdts_for(128 << 10), 5);
         assert_eq!(mdts_for(0), 0);
+    }
+
+    #[test]
+    fn log_page_len_is_bounded_before_anything_is_allocated() {
+        // NUMDL 0x3ff: 1024 dwords, 4 KiB.
+        assert_eq!(log_page_len((0x3FF << 16) | 0x70, 0, 1 << 20), Some(4096));
+        // NUMDL 0: one dword.
+        assert_eq!(log_page_len(0x70, 0, 4096), Some(4));
+        // Exactly the limit, and one dword past it.
+        assert_eq!(log_page_len(0xFFFF << 16, 0, 1 << 18), Some(1 << 18));
+        assert_eq!(log_page_len(0, 1, 1 << 18), None);
+        // The finding's 8 GiB, and every field at its widest: no wrap in u32.
+        assert_eq!(log_page_len(0xFFFF << 16, 0x7FFF, 32 << 20), None);
+        assert_eq!(log_page_len(u32::MAX, u32::MAX, usize::MAX), Some(1 << 34));
+        assert_eq!(log_page_len(u32::MAX, u32::MAX, 32 << 20), None);
     }
 }
