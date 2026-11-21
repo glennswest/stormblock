@@ -902,6 +902,9 @@ pub async fn start_management_server(state: Arc<AppState>) -> anyhow::Result<()>
             // This node's Volume and Replication objects on the cluster's
             // apiserver, and the spec changes asked there (#655).
             crate::mgmt::kube_publish::start(&state);
+            // This boot's fresh install, when /init left it to the node (#623).
+            #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+            crate::mgmt::node_install::start(&state);
             // Each mounted volume's fill read, and grown by its policy (#690).
             crate::mgmt::fill::spawn(state.clone());
             // Every ship job a restart cut short resumes, or reads failed (#400).

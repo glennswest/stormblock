@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-20
+- **feat:** #623 step 3, the trigger: `storage.runtime: true` in the install-config. On a fresh install from an appliance's or the media's image over drives that hold nothing (no node data served, no wipe word), `/init` lays nothing, leaves `/run/stormblock/runtime-install` and boots the image with every drive left alone. The node's engine then runs `node_install::run` once a boot, from the words `/init` kept and the drives it sees, refusing any drive that holds something, planning again by serial after the format. Off by default; otherwise `/init` goes on as before and says why.
 - **refactor:** #623: `cli::storage_lay` returns what it laid (`LayOutcome`); `image storage-lay` prints it exactly as before.
 - **feat:** #623 step 3: `node_install::Live`, each step on the running engine. It formats with #621's jobs, lays with `storage_lay`, and makes the set with `stormraid create --role node-data` and `serve --id 65535`, as `/init` does. `cli::runtime_take` then lays the system half and the data half in the live engine, registers the legs, writes the handover record and starts the flow-over. Nothing starts it yet.
 - **feat:** #623 step 3 (not started by anything yet): `mgmt::node_install::run`, a fresh install's order as the running node runs it. It formats, lays, makes the set and takes the system half, its legs and the flow-over, each step in the install record, with a drive that will not lay stopping it or left out per `storage.on_drive_failure`.

@@ -50,6 +50,7 @@ from the file and prints shell `/init` evaluates:
 | `STORAGE_SAID` | the plan in words, for the console |
 | `STORAGE_WIPE` | the install-config's wipe word (`storage.wipe`, #614), said as where it came from; empty without it |
 | `STORAGE_ON_DRIVE_FAILURE` | `stop` (the default) or `continue`: `storage.on_drive_failure`, what a drive that cannot be laid does to the install (#625) |
+| `STORAGE_RUNTIME` | `1` with `storage.runtime: true`: a fresh install over blank drives is the running node's (#623, below); empty otherwise |
 | `STORAGE_STOP` | refused: no drive is taken, the install stops naming why |
 
 It refuses by name a drive that `carries` something (another node's
@@ -285,6 +286,51 @@ storage:
   `stop` does, saying which of these failed. The console says
   `WARNING: storage: /dev/sdb left out (storage.on_drive_failure: continue)`
   and the set it makes (`2 data + 1 parity`).
+
+## The install done by the running node (`storage.runtime`, #623)
+
+```yaml
+storage:
+  drives: all
+  runtime: true      # false (the default): /init formats and lays, as above
+```
+
+With `runtime: true`, `/init` lays nothing on a **fresh install** when it
+runs from an image an appliance or the media gave it (`SLAB` is a URL), the
+node's data half is not served from the drives, no wipe word is given, and
+every drive taken holds nothing (no stormblock slab, no signature). It says
+`RUNTIME INSTALL: storage.runtime …`, lets go of the set if it served one, leaves
+`/run/stormblock/runtime-install` (the drives, a line), and boots the claimed
+image with every local drive left alone (`ASSIMILATE=off`, said as
+`DISKLESS, as storage.runtime …`). When any of these does not hold, it says
+`storage.runtime: not this boot, <why>` and goes on exactly as without it.
+
+The node's engine (`adopt-ublk`) sees the file once it is up and runs the
+install once a boot (`mgmt::node_install`), with the console, the boot screen
+and the install page up the whole time:
+
+1. it reads the words `/init` kept (`install-intent.yaml`, no wipe word) and
+   plans over the drives it sees now, as `/init` plans; a drive taken that
+   holds anything stops it (`stage install failed`, nothing written);
+2. **format**: #621's format jobs on each SAS drive not at the format, waited
+   for; a drive on no card must already be at the block size;
+3. the plan again over the drives as they are after the format, the same
+   ones by serial;
+4. **lay**: what `image storage-lay` does, every drive at once;
+   `storage.on_drive_failure` as above;
+5. **set**: `stormraid create --role node-data` and `serve --id 65535`, as
+   `/init` makes it, so the next boot finds it;
+6. **system half and legs**: the system half on the first leg and the data
+   half on the set, in the live engine, the other legs' slabs opened, the
+   handover record written, then the flow-over. Once it is done the disk
+   boots on its own and the install is reported `laid`, as `/init`'s is.
+
+Each step is in the install record (`format`, `lay`, `set`, `system legs`,
+`flow-over`), which the NodeInstall object, the page and the screen show. An
+engine restart does not start it again: a flow-over it began resumes from the
+handover record. A keep-data reinstall, and an install with the wipe word,
+are `/init`'s, as above (option 1 on #623). The node keeps running from the
+local disk after the flow-over; it is not rebooted for you.
 
 ## Every boot: the set served
 

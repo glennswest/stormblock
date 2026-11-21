@@ -120,6 +120,33 @@ pub async fn status(state: &AppState, cache: &mut Cache) -> Option<Value> {
     status_in(state, &PathBuf::from(crate::install_progress::RUN), Path::new("/sys"), cache).await
 }
 
+/// The drives sysfs lists now, each with what it carries as `/init` says
+/// it (this node's own carry nothing, a drive being formatted is not read).
+/// The runtime install (#623) plans over these.
+pub async fn seen_now(state: &AppState, run: &Path, sys: &Path) -> Vec<SeenDrive> {
+    let own = own_disks(state, run).await;
+    let mut seen = {
+        let sys = sys.to_path_buf();
+        tokio::task::spawn_blocking(move || seen_in(&sys, |_| String::new())).await.unwrap_or_default()
+    };
+    fill_carries(&mut seen, &own, sys).await;
+    seen
+}
+
+async fn fill_carries(seen: &mut [SeenDrive], own: &HashSet<String>, sys: &Path) {
+    for d in seen.iter_mut() {
+        let name = d.dev.trim_start_matches("/dev/").to_string();
+        if own.contains(&name) {
+            continue;
+        }
+        if sas_of(sys, &name).is_some_and(crate::mgmt::format_job::running) {
+            d.carries = "a format running (#621)".into();
+            continue;
+        }
+        d.carries = carries_of(&d.dev).await;
+    }
+}
+
 async fn status_in(state: &AppState, run: &Path, sys: &Path, cache: &mut Cache) -> Option<Value> {
     let doc = std::fs::read_to_string(run.join(INTENT)).ok()?;
     let own = own_disks(state, run).await;
@@ -141,17 +168,7 @@ async fn status_in(state: &AppState, run: &Path, sys: &Path, cache: &mut Cache) 
     if cache.key.as_deref() == Some(key.as_str()) {
         return cache.value.clone();
     }
-    for d in seen.iter_mut() {
-        let name = d.dev.trim_start_matches("/dev/").to_string();
-        if own.contains(&name) {
-            continue;
-        }
-        if sas_of(sys, &name).is_some_and(crate::mgmt::format_job::running) {
-            d.carries = "a format running (#621)".into();
-            continue;
-        }
-        d.carries = carries_of(&d.dev).await;
-    }
+    fill_carries(&mut seen, &own, sys).await;
     let v = render(&doc, &seen);
     cache.key = Some(key);
     cache.value = Some(v.clone());

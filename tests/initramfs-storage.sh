@@ -285,6 +285,8 @@ echo "=LOCAL_DISK=$LOCAL_DISK"
 echo "=SYSTEM_DISK=${SYSTEM_DISK:-}"
 echo "=SYSTEM_DISK_ID=${SYSTEM_DISK_ID:-}"
 echo "=SERVED=${STORAGE_SERVED:-}"
+echo "=RUNTIME=${RUNTIME_INSTALL:-}"
+echo "=ASSIMILATE=${ASSIMILATE:-}"
 EOF
     } > "$WORK/run-format.sh"
     sh "$WORK/run-format.sh" > "$WORK/out" 2>&1 || echo "EXIT $?" >> "$WORK/out"
@@ -1198,6 +1200,46 @@ lay "STORAGE_DRIVES=''"
 check "nothing laid" "no" "$([ -e "$WORK/lay.args" ] && echo yes || echo no)"
 check "the local disk stands" "/dev/sda4" "$(val LOCAL_DISK)"
 check "the system disk stands" "/dev/sdb" "$(val SYSTEM_DISK)"
+
+echo "the format: storage.runtime leaves a fresh install to the running node (#623)"
+reset
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'STORAGE_RUNTIME=1' 'SLAB=nvme-tcp://forge/claim'
+check "nothing formatted" "" "$(val FORMATTED)"
+check "no format ran" "no" "$([ -e "$WORK/format.log" ] && echo yes || echo no)"
+check "a runtime install" "1" "$(val RUNTIME)"
+check "no local disk for boot-local" "" "$(val LOCAL_DISK)"
+check "no system disk" "" "$(val SYSTEM_DISK)"
+check "every drive left alone" "off" "$(val ASSIMILATE)"
+check "the node is told" "/dev/sda /dev/sdb" "$(cat "$WORK/run/runtime-install" 2>/dev/null)"
+has "said" "$WORK/out" "RUNTIME INSTALL: storage.runtime"
+has "recorded" "$WORK/run/install-progress.events" "from the running node"
+hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the format: storage.runtime over a drive that holds something is /init's, as without it (#623)"
+reset
+echo "superblock: data slab" > "$WORK/slabs.sdb"
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'STORAGE_RUNTIME=1' 'SLAB=nvme-tcp://forge/claim'
+check "not a runtime install" "" "$(val RUNTIME)"
+check "no note for the node" "no" "$([ -e "$WORK/run/runtime-install" ] && echo yes || echo no)"
+has "why" "$WORK/out" "storage.runtime: not this boot, the drives hold something: /dev/sdb(stormblock slabs)"
+# A fresh install takes them as it does without storage.runtime.
+check "laid by /init" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+
+echo "the format: storage.runtime with the wipe word, or no image to run from, is /init's (#623)"
+reset
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'STORAGE_RUNTIME=1' 'SLAB=nvme-tcp://forge/claim' "STORAGE_WIPE='all (by ops)'" 'STORAGE_FORCE=1'
+check "the wipe word: /init formats" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+has "the wipe word said" "$WORK/out" "storage.runtime: not this boot, the wipe word is given"
+reset
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'STORAGE_RUNTIME=1' 'SLAB=/dev/sda'
+check "a local slab: /init formats" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+has "no image said" "$WORK/out" "no image from an appliance or the media"
+
+echo "the format: without storage.runtime nothing changes"
+reset
+format "STORAGE_DRIVES='/dev/sda /dev/sdb'" 'SLAB=nvme-tcp://forge/claim'
+check "formatted here" "/dev/sda /dev/sdb" "$(val FORMATTED)"
+check "no runtime" "" "$(val RUNTIME)"
 
 if [ "$fail" = 0 ]; then
     echo "initramfs-storage: all ok"

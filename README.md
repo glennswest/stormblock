@@ -3242,7 +3242,11 @@ install's install-config (#614, written by stormcentral's `testhost install
 (#609). A drive that cannot be laid is explained on the console (its sense,
 PI, a write at LBA 0 without PI, the kernel's lines) and stops the install,
 or with `storage.on_drive_failure: continue` is left out while the plan still
-holds (#625, `docs/storage-layout.md`).
+holds (#625, `docs/storage-layout.md`). With `storage.runtime: true`, a fresh
+install over blank drives from an appliance's or the media's image is done by
+the running node (#623): `/init` boots the image with every drive left alone,
+and the engine formats, lays, makes the set and flows over, each step in the
+install record (`docs/storage-layout.md`).
 Every system leg (the first `system_mirror` drives) carries a full copy of
 the system volumes: `/init` names the other legs to `boot-local` as
 `--system-leg DEV`, the handover record keeps them, and after the flow-over

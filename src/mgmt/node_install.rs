@@ -22,10 +22,18 @@
 //! running engine's, or a test's.
 //!
 //! [`Live`] is the running engine's: #621's format jobs, `cli::storage_lay`,
-//! the stormraid binary, `cli::runtime_take`. Nothing starts it yet: the
-//! switch that sends a fresh install this way (`storage.runtime`) comes with
-//! the trigger and the reboot to local, so no install takes a path that is
-//! not all there.
+//! the stormraid binary, `cli::runtime_take`.
+//!
+//! **The trigger** (`storage.runtime: true` in the install-config): on a
+//! fresh install over drives that hold nothing, `/init` lays nothing. It
+//! boots the claimed image with every drive left alone and leaves
+//! `/run/stormblock/runtime-install`. [`start`] sees it once the engine is
+//! up and runs the install once a boot, from the words `/init` kept
+//! (`install-intent.yaml`) and the drives as the engine sees them,
+//! [`decide`]d again here: a drive that holds anything stops it (the wipe
+//! word, and a keep-data reinstall, are `/init`'s, option 1 on #623). Once
+//! the flow-over is done, the disk boots on its own and the install is
+//! reported laid, as with `/init`'s install.
 
 use async_trait::async_trait;
 
@@ -38,6 +46,9 @@ pub trait Install: Send + Sync {
     /// Format the plan's drives that are not at its format, and wait for
     /// them; what was done, a line each.
     async fn format(&self, plan: &StoragePlan) -> Result<Vec<String>, String>;
+    /// The plan over the drives as they are after the format: a drive a
+    /// card format took off the link comes back, maybe by another name.
+    async fn replan(&self, plan: &StoragePlan) -> Result<StoragePlan, String>;
     /// Lay `drives`, a system leg on each of `legs`.
     async fn lay(&self, system_bytes: u64, legs: &[String], drives: &[String]) -> Result<LayOutcome, String>;
     /// Make the node-data set over `members` (the last `spares` hot spares)
@@ -78,6 +89,13 @@ pub async fn run(i: &dyn Install, plan: &StoragePlan, system_bytes: u64) -> Resu
         Ok(lines) => i.event("step", "format", "done", &lines.join("; ")),
         Err(e) => return fail("format", e),
     }
+
+    // The same drives, by serial, under the names they have now.
+    let plan = match i.replan(plan).await {
+        Ok(p) => p,
+        Err(e) => return fail("format", e),
+    };
+    let plan = &plan;
 
     // 2. Lay.
     let drives: Vec<String> = plan.drives.iter().map(|d| d.dev.clone()).collect();
@@ -167,6 +185,99 @@ pub fn stormraid_path() -> std::path::PathBuf {
         .unwrap_or_else(|| "/usr/sbin/stormraid".into())
 }
 
+/// `/init` leaves this in the run directory when this boot's fresh install
+/// is the running node's (#623).
+pub const ASKED: &str = "runtime-install";
+/// Written when [`start`] begins: an install is run once a boot.
+pub const STARTED: &str = "runtime-install.started";
+
+/// The install the words ask of this node over the drives `seen`, checked
+/// as `/init` would before it lays anything: `storage.runtime: true`, a plan
+/// without the wipe word, and every drive it takes holding nothing. The
+/// plan and the system region's size (0: the release's).
+pub fn decide(doc: &str, seen: &[crate::image::storage::SeenDrive]) -> Result<(StoragePlan, u64), String> {
+    use crate::image::storage::{plan, top_level, StorageSpec};
+    let y = top_level(doc, "storage")
+        .map_err(|e| format!("storage in the install words cannot be read: {e}"))?
+        .ok_or("the install words have no storage: section")?;
+    let spec = StorageSpec::from_yaml(&y)?;
+    if !spec.runtime {
+        return Err("storage.runtime is not true in the install words".into());
+    }
+    let p = plan(&spec, seen, false)?;
+    let held: Vec<String> = p.drives.iter().filter(|d| !d.carries.is_empty()).map(|d| format!("{} carries {}", d.said(), d.carries)).collect();
+    if !held.is_empty() {
+        return Err(format!(
+            "a runtime install lays only drives that hold nothing, and {}: nothing was written \
+             (the wipe word installs from /init: storage.wipe: all, without storage.runtime)",
+            held.join("; ")
+        ));
+    }
+    let bytes = spec.system_size.unwrap_or(0);
+    Ok((p, bytes))
+}
+
+/// The plan again over `seen` after the format: the same drives, by serial.
+pub fn replan_over(old: &StoragePlan, seen: &[crate::image::storage::SeenDrive]) -> Result<StoragePlan, String> {
+    let p = crate::image::storage::plan(&old.spec, seen, false)?;
+    let key = |d: &crate::image::storage::SeenDrive| if d.serial.is_empty() { d.dev.clone() } else { d.serial.clone() };
+    let mut a: Vec<String> = old.drives.iter().map(key).collect();
+    let mut b: Vec<String> = p.drives.iter().map(key).collect();
+    a.sort();
+    b.sort();
+    if a != b {
+        return Err(format!("the drives after the format are not those formatted: {} then {}", a.join(" "), b.join(" ")));
+    }
+    Ok(p)
+}
+
+/// Run this boot's runtime install, when `/init` left it to the node
+/// (#623): once a boot, in the background, each step in the install record.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn start(state: &std::sync::Arc<crate::mgmt::AppState>) {
+    let run = std::path::PathBuf::from(crate::install_progress::RUN);
+    if !run.join(ASKED).exists() {
+        return;
+    }
+    let live = Live {
+        state: state.clone(),
+        sys: "/sys".into(),
+        dev: "/dev".into(),
+        stormraid: stormraid_path(),
+        set_id: 65535,
+        poll: std::time::Duration::from_secs(10),
+    };
+    tokio::spawn(async move {
+        if run.join(STARTED).exists() {
+            tracing::warn!(
+                "install: this boot's runtime install was started by an earlier run of the engine; not again \
+                 (a flow-over it began resumes from the handover record) (#623)"
+            );
+            return;
+        }
+        if let Some(why) = crate::boot_mode::refuses("the runtime install") {
+            live.event("stage", "install", "failed", &why);
+            return;
+        }
+        let _ = std::fs::write(run.join(STARTED), format!("{}\n", crate::install_progress::now()));
+        let doc = std::fs::read_to_string(run.join(crate::mgmt::install_plan::INTENT)).unwrap_or_default();
+        let seen = crate::mgmt::install_plan::seen_now(&live.state, &run, &live.sys).await;
+        let (plan, bytes) = match decide(&doc, &seen) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("Install: the runtime install does not start: {e}");
+                live.event("stage", "install", "failed", &e);
+                return;
+            }
+        };
+        println!("Install: from the running node (#623): {}", plan.said.first().cloned().unwrap_or_default());
+        match run(&live, &plan, bytes).await {
+            Ok(o) => println!("Install: {} laid, flowing over onto {} and {}", o.laid.join(" "), o.system_disk, o.data_disk),
+            Err(e) => println!("Install: the runtime install stopped: {e}"),
+        }
+    });
+}
+
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 static SET_SERVER: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
 
@@ -224,6 +335,18 @@ impl Install for Live {
             }
             tokio::time::sleep(self.poll).await;
         }
+    }
+
+    async fn replan(&self, plan: &StoragePlan) -> Result<StoragePlan, String> {
+        let run = std::path::Path::new(crate::install_progress::RUN);
+        let mut seen = crate::mgmt::install_plan::seen_now(&self.state, run, &self.sys).await;
+        // The plan's drives held nothing before the format ([`decide`]),
+        // which left them blank; what any other drive carries stands.
+        let ours: Vec<&str> = plan.drives.iter().map(|d| d.serial.as_str()).filter(|s| !s.is_empty()).collect();
+        for d in seen.iter_mut().filter(|d| ours.contains(&d.serial.as_str())) {
+            d.carries.clear();
+        }
+        replan_over(plan, &seen)
     }
 
     async fn lay(&self, system_bytes: u64, legs: &[String], drives: &[String]) -> Result<LayOutcome, String> {
@@ -313,6 +436,9 @@ mod tests {
                 return Err("sdb: FORMAT UNIT refused".into());
             }
             Ok(vec!["4 drives at 4096 + PI type1".into()])
+        }
+        async fn replan(&self, p: &StoragePlan) -> Result<StoragePlan, String> {
+            Ok(p.clone())
         }
         async fn lay(&self, sys: u64, legs: &[String], drives: &[String]) -> Result<LayOutcome, String> {
             self.calls.lock().unwrap().push(format!("lay {sys} legs={} drives={}", legs.join(","), drives.join(",")));
@@ -457,6 +583,48 @@ mod tests {
         lbs("sdc", 512);
         let e = l.format(&p).await.unwrap_err();
         assert!(e.contains("/dev/sdc") && e.contains("512"), "{e}");
+    }
+
+    /// #623: the engine starts only what the words ask with storage.runtime,
+    /// and never over a drive that holds something.
+    #[test]
+    fn decide_takes_runtime_words_over_blank_drives_only() {
+        let seen = |carries: &str| -> Vec<SeenDrive> {
+            ["a", "b"]
+                .iter()
+                .enumerate()
+                .map(|(i, l)| {
+                    let mut d = SeenDrive::parse(&format!("dev=/dev/sd{l};serial=S{i};bay={i};position=front;bytes=10000000000000")).unwrap();
+                    if i == 1 {
+                        d.carries = carries.into();
+                    }
+                    d
+                })
+                .collect()
+        };
+        let words = "mode: install\nstorage:\n  drives: all\n  runtime: true\n  system_size: 64G\n";
+        let (p, bytes) = decide(words, &seen("")).unwrap();
+        assert_eq!(p.drives.len(), 2);
+        assert_eq!(bytes, 64 << 30);
+        assert!(decide("storage:\n  drives: all\n", &seen("")).unwrap_err().contains("storage.runtime"));
+        assert!(decide("mode: install\n", &seen("")).unwrap_err().contains("no storage"));
+        // Named, a drive that holds data would be taken by /init's plan; the
+        // runtime install refuses it.
+        let listed = "storage:\n  runtime: true\n  drives:\n    - serial: S0\n    - serial: S1\n";
+        let e = decide(listed, &seen("an ext2/3/4 filesystem")).unwrap_err();
+        assert!(e.contains("ext2/3/4") && e.contains("nothing was written"), "{e}");
+    }
+
+    /// #623: after the format the same drives are laid, under their names now.
+    #[test]
+    fn the_plan_after_the_format_is_the_same_drives() {
+        let p = the_plan("storage:\n  drives: all\n");
+        let mut seen: Vec<SeenDrive> = p.drives.clone();
+        seen[0].dev = "/dev/sdq".into();
+        let again = replan_over(&p, &seen).unwrap();
+        assert!(again.drives.iter().any(|d| d.dev == "/dev/sdq"));
+        seen.pop();
+        assert!(replan_over(&p, &seen).unwrap_err().contains("not those formatted"));
     }
 
     /// No data_raid: the data half on the first drive's region, no set; a

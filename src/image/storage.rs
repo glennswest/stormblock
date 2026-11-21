@@ -383,6 +383,12 @@ pub struct StorageSpec {
     /// why; `continue` lays the others without it when the plan still holds
     /// (fewer system legs, a spare in its place, the set one drive narrower).
     pub on_drive_failure: OnDriveFailure,
+    /// `storage.runtime: true` (#623): a fresh install is done by the
+    /// running node. `/init` boots the claimed image with every drive left
+    /// alone and the engine formats, lays, makes the set and flows over
+    /// (`mgmt::node_install`). A keep-data reinstall, and an install with the
+    /// wipe word, are still laid by `/init` (option 1 on #623).
+    pub runtime: bool,
 }
 
 /// `storage.on_drive_failure` (#625).
@@ -442,6 +448,7 @@ impl Default for StorageSpec {
             wipe: None,
             on_drive_failure: OnDriveFailure::Stop,
             link_rates: Vec::new(),
+            runtime: false,
         }
     }
 }
@@ -482,7 +489,7 @@ impl StorageSpec {
             Yaml::Str(s) if s.is_empty() => return Ok(spec),
             other => return Err(format!("storage is {}, not a mapping", other.kind())),
         };
-        keys_known(m, "storage", &["drives", "format", "system_mirror", "system_size", "data_raid", "wipe", "on_drive_failure"])?;
+        keys_known(m, "storage", &["drives", "format", "system_mirror", "system_size", "data_raid", "wipe", "on_drive_failure", "runtime"])?;
         for (k, v) in m {
             match k.as_str() {
                 "drives" => {
@@ -604,6 +611,14 @@ impl StorageSpec {
                             Some(d)
                         }
                         other => return Err(format!("storage.data_raid is {}: a mapping or none", other.kind())),
+                    };
+                }
+                "runtime" => {
+                    let w = scalar(v, "storage.runtime")?;
+                    spec.runtime = match w.to_ascii_lowercase().as_str() {
+                        "true" | "yes" => true,
+                        "false" | "no" | "" => false,
+                        _ => return Err(format!("storage.runtime is '{w}': true or false")),
                     };
                 }
                 "on_drive_failure" => {
@@ -1009,6 +1024,8 @@ impl StoragePlan {
         // STORAGE_FORCE for this install and says where it came from.
         let _ = writeln!(o, "STORAGE_WIPE={}", sh_quote(&self.spec.wipe.as_ref().map(|w| w.said()).unwrap_or_default()));
         let _ = writeln!(o, "STORAGE_ON_DRIVE_FAILURE={}", self.spec.on_drive_failure.as_str());
+        // #623: the running node does a fresh install.
+        let _ = writeln!(o, "STORAGE_RUNTIME={}", if self.spec.runtime { "1" } else { "" });
         let lr: Vec<String> = self.link_rates.iter().map(|(d, g)| format!("{d}={g}")).collect();
         let _ = writeln!(o, "STORAGE_LINKRATE={}", sh_quote(&lr.join(" ")));
         let _ = writeln!(o, "STORAGE_STOP=");
@@ -1199,6 +1216,7 @@ impl StoragePlan {
             "method": self.spec.method,
             "set": self.raid.map(|r| serde_json::json!({"parity": r.parity, "spares": r.spares})),
             "onDriveFailure": self.spec.on_drive_failure.as_str(),
+            "runtime": self.spec.runtime,
             "wipeAsked": self.spec.wipe.is_some(),
             "said": self.said,
         })
@@ -1483,6 +1501,22 @@ mod tests {
         assert!(sh.contains("STORAGE_ON_DRIVE_FAILURE=continue\n"), "{sh}");
         let v = top_level("storage:\n  on_drive_failure: maybe\n", "storage").unwrap().unwrap();
         assert!(StorageSpec::from_yaml(&v).unwrap_err().contains("continue or stop"));
+    }
+
+    /// #623: `storage.runtime: true` reaches /init as STORAGE_RUNTIME=1 and
+    /// the NodeInstall's plan; it is off unless said.
+    #[test]
+    fn the_runtime_switch() {
+        let sh = plan_from_config("storage:\n  drives: all\n", &forge1(), false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_RUNTIME=\n"), "{sh}");
+        let sh = plan_from_config("storage:\n  drives: all\n  runtime: true\n", &forge1(), false).unwrap().unwrap();
+        assert!(sh.contains("STORAGE_RUNTIME=1\n"), "{sh}");
+        let v = top_level("storage:\n  runtime: true\n", "storage").unwrap().unwrap();
+        assert!(StorageSpec::from_yaml(&v).unwrap().runtime);
+        let v = top_level("storage:\n  runtime: maybe\n", "storage").unwrap().unwrap();
+        assert!(StorageSpec::from_yaml(&v).unwrap_err().contains("true or false"));
+        // The words the node keeps carry it.
+        assert!(install_intent("storage:\n  runtime: true\n  wipe: all\n").contains("runtime: true"));
     }
 
     /// #642: `linkRate` on an entry is that drive's link policy, not a key

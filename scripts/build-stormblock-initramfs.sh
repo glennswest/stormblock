@@ -6722,6 +6722,49 @@ $1|$_svp|$3"
     # set is let go, which forgets it.
     STORAGE_NODE_DATA="${STORAGE_SERVED:-}${STORAGE_PLAIN:+ $STORAGE_PLAIN}"
     STORAGE_NODE_DATA="${STORAGE_NODE_DATA# }"
+    # The install done by the running node (#623; owner, 2026-11-16: "That
+    # the way it should be"): `storage.runtime: true` on a fresh install over
+    # drives that hold nothing, from an image the appliance or the media gave
+    # this boot. Nothing is formatted or laid here: the claimed image boots
+    # with every local drive left alone, and its engine formats, lays, makes
+    # the set and flows over, with the console, the screen and the page up
+    # (mgmt::node_install). A keep-data reinstall, the node's own data half,
+    # and the wipe word stay with /init (option 1 on #623), as below.
+    RUNTIME_INSTALL=""
+    if [ -n "${STORAGE_RUNTIME:-}" ] && [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "$STORAGE_KEPT" ]; then
+        _rt_no=""
+        case "${SLAB:-}" in *://*) ;; *) _rt_no="this boot has no image from an appliance or the media to run from" ;; esac
+        [ -n "$STORAGE_NODE_DATA" ] && _rt_no="this node's data half is served from them ($STORAGE_NODE_DATA)"
+        { [ -n "$STORAGE_FORCE" ] || [ -n "${STORAGE_WIPE:-}" ]; } && _rt_no="the wipe word is given: what the drives hold is laid over here"
+        if [ -z "$_rt_no" ]; then
+            for _dev in $STORAGE_DRIVES; do
+                case " ${STORAGE_EARLY:-} " in *" $_dev "*) continue ;; esac
+                if "$SURVEY_SB" slab list "$_dev" 2>/dev/null | grep -q ': slab \|data slab'; then
+                    _rt_no="$_rt_no $_dev(stormblock slabs)"
+                else
+                    _st_sig=$(drive_signature "$_dev" "$SURVEY_SYS/${_dev##*/}")
+                    [ -n "$_st_sig" ] && _rt_no="$_rt_no $_dev($_st_sig)"
+                fi
+            done
+            [ -n "$_rt_no" ] && _rt_no="the drives hold something:$_rt_no"
+        fi
+        if [ -n "$_rt_no" ]; then
+            echo "  storage.runtime: not this boot, $_rt_no: /init goes on as without it (#623)"
+        else
+            RUNTIME_INSTALL=1
+            echo "  RUNTIME INSTALL: storage.runtime in ${STORAGE_FROM##*/}: the running node formats and lays"
+            echo "  $STORAGE_DRIVES, makes the set and flows over (#623); this boot runs from $SLAB"
+            echo "  and every local drive is left alone here"
+            command -v storage_unserve >/dev/null 2>&1 && storage_unserve "now: the running node lays the drives (#623)"
+            mkdir -p "${STORM_RUN:-/run/stormblock}"
+            printf '%s\n' "$STORAGE_DRIVES" > "${STORM_RUN:-/run/stormblock}/runtime-install"
+            progress stage install running "from the running node: $STORAGE_DRIVES (#623)" 2>/dev/null
+            STORAGE_DRIVES=""; STORAGE_SYSTEM=""; STORAGE_LAID_LEGS=""
+            LOCAL_DISK=""; LOCAL_DISK_ID=""; SYSTEM_DISK=""; SYSTEM_DISK_ID=""
+            PAIR_DISK=""; PAIR_DISK_ID=""; FORCE_LOCAL=""
+            ASSIMILATE=off; OFF_WHY="storage.runtime (the running node installs, #623)"
+        fi
+    fi
     if [ -n "$STORAGE_DRIVES" ] && [ -n "$LOCAL_DISK" ] && [ -z "$STORAGE_KEPT" ]; then
         # Every drive taken, whatever it is at (owner, #595: "It need to
         # format all the drives"), but those the layout formatted this boot.
@@ -7120,8 +7163,11 @@ $1|$_svp|$3"
     : > "$ENGINE_LOG"
     system_legs
     storage_report
-    progress step flow-over running "the system onto ${SYSTEM_DISK:-${LOCAL_DISK:-this disk}}" 2>/dev/null
-    progress stage flow-over running "" 2>/dev/null
+    # A runtime install's flow-over is the running node's (#623).
+    if [ -z "${RUNTIME_INSTALL:-}" ]; then
+        progress step flow-over running "the system onto ${SYSTEM_DISK:-${LOCAL_DISK:-this disk}}" 2>/dev/null
+        progress stage flow-over running "" 2>/dev/null
+    fi
     # shellcheck disable=SC2086
     /usr/sbin/stormblock boot-local \
         --slab "$SLAB" \

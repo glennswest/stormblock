@@ -177,9 +177,19 @@ Steps, each its own commit and check:
     drive on no card. Pushed 4b47ea27; its check.sh was stopped on this host
     (low memory, the local sc-build client killed), not a build result:
     run `sc-build 'sh check.sh'` on 4b47ea27 again
-  - [ ] the trigger: `storage.runtime: true` in the words; /init boots the
-    claim with drives untouched; the engine starts `run` once; then the
-    reboot to local after the flow-over is proved
+  - [x] the trigger: `storage.runtime: true` in the words (`StorageSpec`,
+    `STORAGE_RUNTIME`); /init (storage format block) on a fresh install from
+    a URL slab over blank drives, no node data, no wipe word: lays nothing,
+    `/run/stormblock/runtime-install`, ASSIMILATE=off; the engine
+    (`node_install::start`, from `start_management_server`) runs `run` once a
+    boot (`runtime-install.started`), `decide` refusing any drive that holds
+    something, `replan` by serial after the format. Tests: storage.rs
+    `the_runtime_switch`, node_install `decide_…`, `the_plan_after_…`,
+    tests/initramfs-storage.sh's four storage.runtime cases.
+  - [ ] step 5, the reboot to local once the flow-over is proved, is its own
+    step (the /init path does not reboot either; the node runs on from the
+    local disk)
+  - [ ] proved on forge1 / a pvetest with `storage.runtime: true` (hardware)
 - (2026-11-20) held behind #700 (the master: forge first). Next is step 2:
   /init keeps the install-config's non-secret `mode` and `storage:` for the
   node (it deletes the whole file before switch_root, #685). The engine
