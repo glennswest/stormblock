@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-21
+- **fix:** #720 (finding 6f750e62ad35, major): a volume is pruned as a rollback copy unasked only when the install that set it aside marked it. A copy recognised by its name (set aside before #565) is *inferred*: listed (`inferred: true`), marked for the volume API, and deleted only by `POST /api/v1/rollback/prune {"include_inferred": true}`. The name rule takes only the labels installs wrote (`previous` or a release number, `.N` after), so a person's `data@east`/`data@west` beside `data` is never a copy, and a mark an earlier start wrote on one is cleared. Before, every `<base>@<label>` beside `<base>` was marked at start and the older ones deleted at the next boot-ok.
+
 ## [v24.45.10] — 2026-11-21
 
 ### Fixed

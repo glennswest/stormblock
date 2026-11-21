@@ -2724,12 +2724,18 @@ was, from which release, its generation, when), which every older reader
 stops before. The volume API says `kind: rollback` and `rollback {of, from,
 generation, set_aside_at}`, so the console's Volumes view (`kind=volume`)
 no longer lists them. Copies set aside before #565 are recognised by their
-name (`<x>@<label>[.N]` beside a live `<x>` in the same namespace) and marked
-at start. Once a boot pallet is marked successful (boot-ok: the release that
-set them aside booted and was confirmed), the node keeps the newest
-`[rollback] keep` (default 1: enough to roll back once) of each name and
-deletes the rest; `[rollback] prune = "off"` leaves it to
-`POST /api/v1/rollback/prune {keep?, dry_run?}` (admin). Never pruned: a copy
+name (`<x>@<label>[.N]` beside a live `<x>` in the same namespace, the label
+one an install wrote: `previous` or a release number) and marked at start,
+as **inferred** (`set_aside_at` 0, `inferred: true` in `GET
+/api/v1/rollback`): a name is anyone's to choose, so `data@east` beside
+`data` is never a copy (a mark an older start wrote on one is cleared), and
+an inferred copy is deleted only when asked (#720). Once a boot pallet is
+marked successful (boot-ok: the release that set them aside booted and was
+confirmed), the node keeps the newest `[rollback] keep` (default 1: enough to
+roll back once) of each name's install-marked copies and deletes the rest;
+`[rollback] prune = "off"` leaves it to `POST /api/v1/rollback/prune {keep?,
+dry_run?, include_inferred?}` (admin; `include_inferred: true` puts the
+copies known by name only in the plan too, else each is in `skipped`). Never pruned: a copy
 anything serves, a migration's source, the volumes of a #122 stage
 (`release-generations.json`), and nothing at all while a stage waits to be
 activated (409). `GET /api/v1/rollback` lists the copies.

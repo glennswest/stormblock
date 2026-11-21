@@ -3,6 +3,10 @@
 //! aside has booted and been confirmed (a boot pallet marked successful).
 //! The recognition and the order are [`crate::volume::rollback`]'s.
 //!
+//! Only a copy its install marked is pruned unasked: one recognised by its
+//! name alone (set aside before #565) is *inferred*, and goes only when a
+//! person asks for inferred copies (`include_inferred`, #720).
+//!
 //! Never pruned: a volume of a #122 stage (staged, current or previous
 //! generation, all in `release-generations.json`), a migration's source (the
 //! node's data a release's hook has still to read), and a copy anything
@@ -33,6 +37,9 @@ pub struct CopyView {
     pub generation: u32,
     /// Unix seconds; 0 for a copy set aside before #565, recognised by its name.
     pub set_aside_at: u64,
+    /// Recognised by its name, not marked by its install: pruned only when
+    /// asked with `include_inferred` (#720).
+    pub inferred: bool,
 }
 
 impl From<&Copy> for CopyView {
@@ -45,6 +52,7 @@ impl From<&Copy> for CopyView {
             from: c.mark.from.clone(),
             generation: c.mark.generation,
             set_aside_at: c.mark.set_aside_at,
+            inferred: c.by_name,
         }
     }
 }
@@ -54,6 +62,8 @@ impl From<&Copy> for CopyView {
 pub struct Report {
     pub keep: usize,
     pub dry_run: bool,
+    /// Copies recognised by name only were in the plan (#720).
+    pub include_inferred: bool,
     pub kept: Vec<CopyView>,
     pub pruned: Vec<CopyView>,
     /// Copies the prune would have deleted and did not, with why.
@@ -92,34 +102,55 @@ fn staging(state: &AppState) -> (HashSet<VolumeId>, HashSet<String>, Option<Stri
 
 /// The rollback copies on the node, with what a stage keeps left out.
 async fn copies(state: &AppState) -> (Vec<Copy>, HashSet<String>, Option<String>) {
+    let (found, _, migration_sources, wait) = copies_seen(state).await;
+    (found, migration_sources, wait)
+}
+
+async fn copies_seen(state: &AppState) -> (Vec<Copy>, Vec<rollback::Seen>, HashSet<String>, Option<String>) {
     let (exclude, migration_sources, wait) = staging(state);
     let vm = state.volume_manager.lock().await;
     let seen = rollback::seen(&vm).await;
     drop(vm);
-    (rollback::recognise(&seen, &exclude), migration_sources, wait)
+    (rollback::recognise(&seen, &exclude), seen, migration_sources, wait)
 }
 
 /// Mark the copies set aside before #565 (recognised by name), so the
-/// volume API says what they are. Persists when it marked any.
+/// volume API says what they are, and clear such a mark from a volume the
+/// name rule no longer takes for a copy (#720). Persists when it changed
+/// any; answers how many it marked.
 pub async fn mark_by_name(state: &AppState) -> usize {
-    let (found, _, _) = copies(state).await;
-    let n = {
+    let (found, seen, _, _) = copies_seen(state).await;
+    let (n, cleared) = {
         let mut vm = state.volume_manager.lock().await;
-        rollback::mark_by_name(&mut vm, &found)
+        rollback::mark_by_name(&mut vm, &seen, &found)
     };
     if n > 0 {
-        tracing::info!("rollback: {n} copy(ies) set aside before #565 recognised by name and marked");
+        tracing::info!("rollback: {n} copy(ies) set aside before #565 recognised by name and marked (inferred: pruned only when asked)");
+    }
+    if cleared > 0 {
+        tracing::info!("rollback: {cleared} volume(s) marked by name before #720 are not rollback copies: marks cleared");
+    }
+    if n + cleared > 0 {
         crate::volume::VolumeManager::persist_detached(&state.volume_manager).await;
     }
     n
 }
 
 /// Keep the newest `keep` copies of each name; delete the rest unless
-/// `dry_run`.
-pub async fn prune(state: &AppState, keep: usize, dry_run: bool) -> Report {
+/// `dry_run`. Copies recognised by name only are left alone, said in
+/// `skipped`, unless `include_inferred` (#720, finding 6f750e62ad35).
+pub async fn prune(state: &AppState, keep: usize, dry_run: bool, include_inferred: bool) -> Report {
     let (found, migration_sources, wait) = copies(state).await;
-    let (kept, gone) = rollback::plan(&found, keep);
-    let mut report = Report { keep, dry_run, kept: kept.iter().map(CopyView::from).collect(), ..Default::default() };
+    let (planned, inferred): (Vec<Copy>, Vec<Copy>) = found.into_iter().partition(|c| include_inferred || !c.by_name);
+    let (kept, gone) = rollback::plan(&planned, keep);
+    let mut report =
+        Report { keep, dry_run, include_inferred, kept: kept.iter().map(CopyView::from).collect(), ..Default::default() };
+    for c in &inferred {
+        report.skipped.push(Skipped {
+            name: c.name.clone(),
+            why: "recognised by its name only, not marked by an install: pruned only when asked with include_inferred".into(),
+        });
+    }
     if let Some(why) = wait {
         report.refused = Some(why);
         report.kept.extend(gone.iter().map(CopyView::from));
@@ -155,8 +186,15 @@ pub async fn prune(state: &AppState, keep: usize, dry_run: bool) -> Report {
             if report.skipped.is_empty() { String::new() } else { format!(", {} skipped", report.skipped.len()) },
         );
     }
-    for s in &report.skipped {
+    // The inferred ones in one line: forge1 has a hundred of them.
+    for s in report.skipped.iter().skip(inferred.len()) {
         tracing::warn!("rollback: {} not pruned: {}", s.name, s.why);
+    }
+    if !inferred.is_empty() {
+        tracing::info!(
+            "rollback: {} copy(ies) recognised by name only left alone; `POST /api/v1/rollback/prune {{\"include_inferred\": true}}` prunes them",
+            inferred.len()
+        );
     }
     report
 }
@@ -171,7 +209,8 @@ pub fn after_boot_ok(state: &Arc<AppState>) {
     let state = state.clone();
     tokio::spawn(async move {
         mark_by_name(&state).await;
-        let r = prune(&state, cfg.keep, false).await;
+        // What an install marked, only: a name is no proof (#720).
+        let r = prune(&state, cfg.keep, false, false).await;
         if let Some(why) = r.refused {
             tracing::info!("rollback: boot-ok, nothing pruned: {why}");
         }
@@ -193,6 +232,10 @@ pub struct PruneRequest {
     pub keep: Option<usize>,
     #[serde(default)]
     pub dry_run: bool,
+    /// Copies recognised by their name only (set aside before #565) are in
+    /// the plan too (#720): the person asking has seen them listed.
+    #[serde(default)]
+    pub include_inferred: bool,
 }
 
 async fn list(State(state): State<Arc<AppState>>) -> Response {
@@ -211,7 +254,7 @@ async fn prune_now(State(state): State<Arc<AppState>>, body: Option<Json<PruneRe
     let req = body.map(|Json(r)| r).unwrap_or_default();
     let keep = req.keep.unwrap_or(state.config.rollback.keep);
     mark_by_name(&state).await;
-    let r = prune(&state, keep, req.dry_run).await;
+    let r = prune(&state, keep, req.dry_run, req.include_inferred).await;
     let status = if r.refused.is_some() { axum::http::StatusCode::CONFLICT } else { axum::http::StatusCode::OK };
     (status, Json(r)).into_response()
 }

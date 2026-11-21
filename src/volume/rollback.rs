@@ -8,9 +8,15 @@
 //! name (forge1: 27 data templates × 5 generations).
 //!
 //! Since #565 each copy carries a [`RollbackMark`] (what it was, from which
-//! release, its generation), written in the record. A copy set aside before
-//! that is recognised by its name: `<of>@<label>[.N]` beside a live `<of>` in
-//! the same namespace. Volumes of a #122 stage (`<name>@<version>` while
+//! release, its generation, when), written in the record by the install that
+//! set it aside. A copy set aside before that is recognised by its name:
+//! `<of>@<label>[.N]` beside a live `<of>` in the same namespace, where the
+//! label is one an install wrote (`previous`, or a release number: digits
+//! and dots). Such a copy is **inferred** (#720, finding 6f750e62ad35): a
+//! name is anyone's to choose, so it is listed and marked for the volume
+//! API (its mark's `set_aside_at` is 0), and deleted only when a person asks
+//! for inferred copies by name; the automatic prune takes only copies an
+//! install marked. Volumes of a #122 stage (`<name>@<version>` while
 //! staged, the generation kept for a rollback) have their own bookkeeping
 //! and are never counted here: the caller passes their ids.
 //!
@@ -32,7 +38,8 @@ pub struct Copy {
     pub name: String,
     pub namespace: String,
     pub mark: RollbackMark,
-    /// Recognised by its name, with no mark written yet (#565).
+    /// Recognised by its name, not marked by the install that set it aside
+    /// (#565): never pruned unless asked (#720).
     pub by_name: bool,
 }
 
@@ -40,6 +47,14 @@ pub struct Copy {
 pub fn split(name: &str) -> Option<(&str, &str)> {
     let (of, label) = name.rsplit_once('@')?;
     (!of.is_empty() && !label.is_empty()).then_some((of, label))
+}
+
+/// A label an install wrote when it set a volume aside: `previous` (the
+/// release was not read) or the release's number, either with an install's
+/// `.N`. Anything else (`data@east`) is a name someone chose (#720).
+pub fn install_label(label: &str) -> bool {
+    let release = label_release(label);
+    release == "previous" || (!release.is_empty() && release.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())))
 }
 
 /// The release a copy's label names: `previous.3` → `previous`, `12.60` stays.
@@ -104,12 +119,14 @@ pub fn recognise(volumes: &[Seen], exclude: &HashSet<VolumeId>) -> Vec<Copy> {
     let mut out = Vec::new();
     let mut by_name: HashMap<(String, String), Vec<&Seen>> = HashMap::new();
     for v in volumes.iter().filter(|v| !exclude.contains(&v.id)) {
-        if let Some(m) = &v.mark {
+        // The install's own mark. One with no time is what a start wrote for
+        // a copy it recognised by name: recognised again, by the same rule.
+        if let Some(m) = v.mark.as_ref().filter(|m| m.set_aside_at > 0) {
             out.push(Copy { id: v.id, name: v.name.clone(), namespace: v.namespace.clone(), mark: m.clone(), by_name: false });
             continue;
         }
-        let Some((of, _)) = split(&v.name) else { continue };
-        if live.contains(&(v.namespace.as_str(), of)) {
+        let Some((of, label)) = split(&v.name) else { continue };
+        if install_label(label) && live.contains(&(v.namespace.as_str(), of)) {
             by_name.entry((v.namespace.clone(), of.to_string())).or_default().push(v);
         }
     }
@@ -192,16 +209,25 @@ pub async fn next_generation(mgr: &VolumeManager, namespace: &str, of: &str) -> 
 }
 
 /// Write the marks of copies recognised only by their name (#565), so the
-/// API calls them rollback copies. Returns how many were marked; the caller
-/// persists.
-pub fn mark_by_name(mgr: &mut VolumeManager, copies: &[Copy]) -> usize {
+/// API calls them rollback copies, and clear a by-name mark (`set_aside_at`
+/// 0) from a volume the rule no longer takes for one (#720: `data@east`,
+/// marked before the labels were narrowed). Returns `(marked, cleared)`;
+/// the caller persists.
+pub fn mark_by_name(mgr: &mut VolumeManager, seen: &[Seen], copies: &[Copy]) -> (usize, usize) {
     let mut n = 0;
     for c in copies.iter().filter(|c| c.by_name) {
-        if mgr.set_rollback(c.id, Some(c.mark.clone())).is_ok() {
+        if mgr.rollback(&c.id) != Some(&c.mark) && mgr.set_rollback(c.id, Some(c.mark.clone())).is_ok() {
             n += 1;
         }
     }
-    n
+    let copy: HashSet<VolumeId> = copies.iter().map(|c| c.id).collect();
+    let mut cleared = 0;
+    for v in seen {
+        if v.mark.as_ref().is_some_and(|m| m.set_aside_at == 0) && !copy.contains(&v.id) && mgr.set_rollback(v.id, None).is_ok() {
+            cleared += 1;
+        }
+    }
+    (n, cleared)
 }
 
 /// Unix seconds now.
@@ -212,6 +238,33 @@ pub fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_installs_labels_are_copies() {
+        for l in ["previous", "previous.2", "previous.10", "12.60", "12.60.2", "24.45.0", "7"] {
+            assert!(install_label(l), "{l}");
+        }
+        for l in ["east", "west.2", "v2", "backup", "12a", "previous-old", ".2", "12..3"] {
+            assert!(!install_label(l), "{l}");
+        }
+    }
+
+    /// #720: a volume a start marked by name and the rule no longer takes
+    /// (`data@east`) is no copy; one an install marked is, whatever its name.
+    #[test]
+    fn a_by_name_mark_is_only_as_good_as_the_name() {
+        let vols = vec![
+            v("data", None),
+            v("data@east", Some((0, "data", "east"))),
+            v("data@weekly", Some((3, "data", "weekly"))),
+            v("data@previous", None),
+        ];
+        let mut vols = vols;
+        vols[1].mark.as_mut().unwrap().set_aside_at = 0;
+        let copies = recognise(&vols, &HashSet::new());
+        let names: Vec<(&str, bool)> = copies.iter().map(|c| (c.name.as_str(), c.by_name)).collect();
+        assert_eq!(names, [("data@previous", true), ("data@weekly", false)]);
+    }
 
     fn v(name: &str, mark: Option<(u32, &str, &str)>) -> Seen {
         Seen {
@@ -241,6 +294,8 @@ mod tests {
     #[test]
     fn forge1s_pile_is_recognised_and_pruned_to_one() {
         let mut vols = vec![v("cadvisor-data.golden", None), v("fastetcd-data.golden", None), v("odd@name", None)];
+        // A person's names beside a live base: never copies (#720).
+        vols.extend([v("data", None), v("data@east", None), v("data@west", None), v("data@east.2", None)]);
         for s in ["", ".2", ".3", ".4", ".5"] {
             vols.push(v(&format!("cadvisor-data.golden@previous{s}"), None));
             vols.push(v(&format!("fastetcd-data.golden@previous{s}"), None));

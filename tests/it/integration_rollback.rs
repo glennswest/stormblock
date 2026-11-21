@@ -1,6 +1,8 @@
 //! Rollback copies (#565): what installs set aside is said (`kind: rollback`,
 //! `rollback {of, from, generation}`), and pruned to the newest `keep` of
 //! each name, never one in use, a stage's, or anything while a stage waits.
+//! A copy known by its name only is pruned only when asked, and a person's
+//! `data@east` beside `data` is never one (#720).
 
 use crate::common;
 use std::sync::Arc;
@@ -70,6 +72,13 @@ async fn rollback_copies_are_said_and_pruned_to_the_newest_of_each_name() {
     }
     // A name with an `@` and nothing beside it: not a copy.
     vm.create_volume_any("odd@name", 1 << 20).await.unwrap();
+    // A person's volumes beside their base (#720, finding 6f750e62ad35):
+    // never copies. `data@east` carries the mark a start before #720 wrote
+    // for it by name.
+    vm.create_volume_any("data", 1 << 20).await.unwrap();
+    let east = vm.create_volume_any("data@east", 1 << 20).await.unwrap();
+    vm.set_rollback(east, Some(RollbackMark { of: "data".into(), from: "east".into(), generation: 1, set_aside_at: 0 })).unwrap();
+    vm.create_volume_any("data@west", 1 << 20).await.unwrap();
     // A #122 stage's previous generation: its own bookkeeping, never pruned.
     vm.create_volume_any("svc", 1 << 20).await.unwrap();
     let staged_svc = vm.create_volume_any("svc@11.80", 1 << 20).await.unwrap();
@@ -97,8 +106,10 @@ async fn rollback_copies_are_said_and_pruned_to_the_newest_of_each_name() {
         serve: false,
     });
 
-    // The copies before #565 are marked at start, nothing deleted.
+    // The copies before #565 are marked at start, nothing deleted; the
+    // mark on a person's `data@east` is cleared.
     assert_eq!(stormblock::mgmt::rollback::mark_by_name(&state).await, 3);
+    assert!(state.volume_manager.lock().await.rollback(&east).is_none(), "data@east is no rollback copy");
     let rb = names(&c, format!("{base}/api/v1/volumes?kind=rollback")).await;
     assert_eq!(
         rb,
@@ -116,6 +127,9 @@ async fn rollback_copies_are_said_and_pruned_to_the_newest_of_each_name() {
     let vols = names(&c, format!("{base}/api/v1/volumes?kind=volume")).await;
     assert!(!vols.iter().any(|n| n.contains("@previous") || n.starts_with("logs@")), "{vols:?}");
     assert!(vols.contains(&"odd@name".to_string()) && vols.contains(&"svc@11.80".to_string()), "{vols:?}");
+    for n in ["data", "data@east", "data@west"] {
+        assert!(vols.contains(&n.to_string()), "{n} is a volume: {vols:?}");
+    }
     let all: Value = c.get(format!("{base}/api/v1/volumes")).send().await.unwrap().json().await.unwrap();
     let by = |n: &str| all["items"].as_array().unwrap().iter().find(|v| v["name"] == n).unwrap().clone();
     let r = by("cadvisor-data.golden@previous.2")["rollback"].clone();
@@ -127,6 +141,10 @@ async fn rollback_copies_are_said_and_pruned_to_the_newest_of_each_name() {
     let l: Value = c.get(format!("{base}/api/v1/rollback")).send().await.unwrap().json().await.unwrap();
     assert_eq!((l["keep"].as_u64(), l["prune"].as_str()), (Some(1), Some("boot-ok")));
     assert_eq!(l["copies"].as_array().unwrap().len(), 7);
+    let inferred: Vec<&str> =
+        l["copies"].as_array().unwrap().iter().filter(|c| c["inferred"] == true).map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(inferred.len(), 3, "the copies known by name only: {l}");
+    assert!(inferred.iter().all(|n| n.starts_with("cadvisor-data.golden@")), "{inferred:?}");
 
     // A dry run says what would go, and deletes nothing.
     let r = c.post(format!("{base}/api/v1/rollback/prune")).json(&serde_json::json!({ "dry_run": true })).send().await.unwrap();
@@ -137,9 +155,17 @@ async fn rollback_copies_are_said_and_pruned_to_the_newest_of_each_name() {
         n.sort();
         n
     };
-    assert_eq!(pick(&d["pruned"]), ["cadvisor-data.golden@previous", "cadvisor-data.golden@previous.2", "logs@11.91", "logs@11.92"]);
-    assert_eq!(pick(&d["kept"]), ["cadvisor-data.golden@previous.3", "logs@11.93"]);
-    assert_eq!(d["skipped"][0]["name"], "logs@11.90", "the exported one is never pruned");
+    // Only what an install marked is in the plan; the copies known by name
+    // only are skipped and say why (#720).
+    assert_eq!(pick(&d["pruned"]), ["logs@11.91", "logs@11.92"]);
+    assert_eq!(pick(&d["kept"]), ["logs@11.93"]);
+    assert_eq!(
+        pick(&d["skipped"]),
+        ["cadvisor-data.golden@previous", "cadvisor-data.golden@previous.2", "cadvisor-data.golden@previous.3", "logs@11.90"]
+    );
+    let why = |n: &str| d["skipped"].as_array().unwrap().iter().find(|x| x["name"] == n).unwrap()["why"].as_str().unwrap().to_string();
+    assert!(why("cadvisor-data.golden@previous").contains("include_inferred"));
+    assert!(why("logs@11.90").contains("in use"), "the exported one is never pruned");
     assert_eq!(names(&c, format!("{base}/api/v1/volumes?kind=rollback")).await.len(), 7);
 
     // A stage waiting to be activated: an upgrade not confirmed, nothing goes.
@@ -161,22 +187,52 @@ async fn rollback_copies_are_said_and_pruned_to_the_newest_of_each_name() {
     assert_eq!(names(&c, format!("{base}/api/v1/volumes?kind=rollback")).await.len(), 7);
     std::fs::write(&gens, before).unwrap();
 
-    // The prune, at the node's keep: the newest of each name stays.
+    // The prune, at the node's keep, as a boot-ok runs it: the newest marked
+    // copy of each name stays, the copies known by name only all stay.
     let r = c.post(format!("{base}/api/v1/rollback/prune")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(
+        names(&c, format!("{base}/api/v1/volumes?kind=rollback")).await,
+        [
+            "cadvisor-data.golden@previous",
+            "cadvisor-data.golden@previous.2",
+            "cadvisor-data.golden@previous.3",
+            "logs@11.90",
+            "logs@11.93"
+        ]
+    );
+    let left = names(&c, format!("{base}/api/v1/volumes?kind=all")).await;
+    for n in ["cadvisor-data.golden", "logs", "odd@name", "svc", "svc@11.80", "data", "data@east", "data@west"] {
+        assert!(left.contains(&n.to_string()), "{n} kept: {left:?}");
+    }
+
+    // Asked for with include_inferred, after the list: the older copies
+    // known by name go too. A person's volumes stay whatever is asked.
+    let r = c
+        .post(format!("{base}/api/v1/rollback/prune"))
+        .json(&serde_json::json!({ "include_inferred": true }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(
         names(&c, format!("{base}/api/v1/volumes?kind=rollback")).await,
         ["cadvisor-data.golden@previous.3", "logs@11.90", "logs@11.93"]
     );
-    let left = names(&c, format!("{base}/api/v1/volumes?kind=all")).await;
-    for n in ["cadvisor-data.golden", "logs", "odd@name", "svc", "svc@11.80"] {
-        assert!(left.contains(&n.to_string()), "{n} kept: {left:?}");
-    }
 
     // keep = 0, asked: every copy but the one in use goes.
-    let r = c.post(format!("{base}/api/v1/rollback/prune")).json(&serde_json::json!({ "keep": 0 })).send().await.unwrap();
+    let r = c
+        .post(format!("{base}/api/v1/rollback/prune"))
+        .json(&serde_json::json!({ "keep": 0, "include_inferred": true }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(names(&c, format!("{base}/api/v1/volumes?kind=rollback")).await, ["logs@11.90"]);
+    let left = names(&c, format!("{base}/api/v1/volumes?kind=all")).await;
+    for n in ["data", "data@east", "data@west"] {
+        assert!(left.contains(&n.to_string()), "{n} kept: {left:?}");
+    }
 
     // Renamed back to its plain name, a copy is no longer one.
     state.exports.write().await.clear();

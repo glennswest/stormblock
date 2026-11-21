@@ -86,7 +86,7 @@ Then N+1's boot pallet goes on top. The renames are checked before any is made, 
 
 ## Why the boot after it keeps the disk
 
-An install's set-aside copies (`<name>@<previous>`) are rollback copies (#565): pruned to the newest `[rollback] keep` per name after a boot-ok, never a volume this file names, and not at all while a stage is staged and not activated (README, "Rollback copies are kept to one generation").
+An install's set-aside copies (`<name>@<previous>`) are rollback copies (#565): pruned to the newest `[rollback] keep` per name after a boot-ok (only what an install marked; a copy recognised by its name alone goes only when asked, #720), never a volume this file names, and not at all while a stage is staged and not activated (README, "Rollback copies are kept to one generation").
 
 A boot whose claim is another release than the disk holds is an install: it lays the system half again and keeps the data half (#311, which replaced #261's wipe). `slab holds <disk> <claimed image>` decides, and it compares the image's goldens by id with the disk's sealed volumes. A staged update is still the way to change release without losing the system half's own volumes.
 
