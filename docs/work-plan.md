@@ -5,22 +5,26 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 ## #723 — keep-data install on drive-managed SMR: the carry written sequentially, said (2026-11-21, stormcos#942)
-- [ ] `carry_split`: each system-half slot once (shared slots deduped), in
+- [x] `carry_split`: each system-half slot once (shared slots deduped), in
   source slot order, through `migrate_window_unlocked` (the flow-over's
   coalesced mover, #401/#490): windows of two runs, runs of 64 MiB on a
   rotating data half (32 MiB on an SSD), each run read back (#239), the
   maps swept once a window; an all-zero slot unmapped. A domain collision
   refused before anything moves
-- [ ] said: a start line (volumes, slots, MiB), a line every 10 s (slots,
+- [x] said: a start line (volumes, slots, MiB), a line every 10 s (slots,
   MiB, MB/s), a summary with its time split opening/copying/recording
-- [ ] the share count of a moved slot (`Slab::carry_shares`, = `inc_ref_batch`)
+- [x] the share count of a moved slot (`Slab::carry_shares`, = `inc_ref_batch`)
   set in memory and published with the slot's entry at the next sync, in
   `move_slot`, `migrate_leg_unlocked` and the window: not a synchronous
   table write once a share (the flow-over's write side too: a golden's
   clones made every moved shared slot several scattered table writes).
   `inc_ref_batch` prefetches only table pages memory does not hold
-- [ ] test `an_install_carries_a_golden_and_its_clones_as_one_run_with_their_shares`;
-  targeted build, negative control, check.sh, release
+- [x] tests `an_install_carries_a_golden_and_its_clones_as_one_run_with_their_shares`,
+  `a_window_of_shared_slots_is_one_write_and_its_shares_come_with_the_sync`:
+  pass with clippy on afbdbfdd (the carry's console lines seen); negative
+  control (a table write a share again, `wip/723-negative`, deleted) fails
+  the window test with 10 writes against <= 3
+- [ ] check.sh on main; release
 - [ ] measured on an X9 (`replacing the system half` → `laid out and handed`,
   the flow-over's MB/s): needs a keep-data install on the test machine
 
