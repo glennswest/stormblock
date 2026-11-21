@@ -11,7 +11,9 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   (`target/nvmeof/mod.rs`: discovery/ANA/unknown, changed-NS list), which
   had the same unbounded resize. Test: an unregistered discovery connection
   asks for 8 GiB and is refused, a normal discovery read still answers
-- [ ] crate tests + check.sh on the fix commit; release; close
+- [x] crate tests 37/37 on 13b4f638; check.sh ALL PASS on 73435e68
+  (1596/1596, 1782 s; a first run failed clippy identity_op in the test,
+  #726, fixed and closed by the pass); v24.45.5; DONE, closed
 
 ## #713 — finding 95472f7cca9a in nvmeof-target/src/overlay.rs (2026-11-20, P1)
 - [x] `Overlay::create`: the scratch file an opaque random name (lowercase

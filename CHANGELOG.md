@@ -4,6 +4,11 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.45.5] — 2026-11-21
+
+### Fixed
+- #714 (finding c001083c059d): a Get Log Page longer than the target's MDTS is refused (Invalid Field, DNR) before anything is allocated, in `stormboot-serve` and the engine's NVMe/TCP target; an unregistered discovery connection could ask for 8 GiB in one command.
+
 ### 2026-11-20
 - **fix:** #714 (finding c001083c059d, major): a Get Log Page's length (NUMDL/NUMDU) is decoded in u64 and refused with Invalid Field (DNR) past the target's MDTS, before anything is allocated, in `stormboot-serve` and in the engine's NVMe/TCP target (the discovery log, ANA, unknown pages and the changed-namespace list). The discovery controller takes a host no subsystem admits, and NUMDU 0x7fff with NUMDL 0xffff had it allocate and zero 8 GiB for one 72-byte command; every NUMD bit set overflowed the u32 count.
 
