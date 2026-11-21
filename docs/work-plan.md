@@ -29,23 +29,21 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
   the flow-over's MB/s): needs a keep-data install on the test machine
 
 ## #720 — finding 6f750e62ad35 in volume/rollback.rs (2026-11-21, P1)
-- [ ] a copy is the install's only by the mark it wrote (`set_aside_at` > 0);
+- [x] a copy is the install's only by the mark it wrote (`set_aside_at` > 0);
   one recognised by its name (no mark, or the 0 mark start wrote) is
   *inferred*: listed, said `inferred`, never pruned on boot-ok or by a
   plain `POST /rollback/prune`, only with `include_inferred: true` (admin,
   after the list)
-- [ ] the name rule narrowed to the labels installs wrote: `previous` or a
+- [x] the name rule narrowed to the labels installs wrote: `previous` or a
   release number (digits and dots), `.N` after; `data@east` is not a copy,
   and an inferred mark start wrote on one is cleared
-- [ ] tests: `data@east`/`data@west` beside `data` never marked or pruned;
+- [x] tests: `data@east`/`data@west` beside `data` never marked or pruned;
   forge1's pile skipped by the prune, gone with `include_inferred`. check.sh;
   release; close
-- status 2026-11-21 06:30: fix dfdae2e8 pushed, its targeted build passed
-  (5/5 rollback unit, 2/2 integration_rollback, clippy). Still to do: the
-  negative control (fb21e34f, the `wip/720-negative` branch, deleted again; push
-  it back to rerun), `check.sh` on main, v24.45.11, image, shipped. Blocked on
-  stormcentral#1638: sc-build cannot submit (empty job id, 404), and the first
-  negative run's VM 3901 never answered ssh
+- done 2026-11-21: fix dfdae2e8; negative control fb21e34f (any label a copy,
+  inferred pruned unasked) fails the four new tests (3 unit, 1 integration);
+  check.sh ALL PASS on 4b2f35aa (1606/1606, carries dfdae2e8); v24.45.11;
+  DONE, closed
 
 ## #719 — finding 021e897d6367 in mgmt/volume_move.rs (2026-11-21, P1)
 - [x] `Moves::reserve`: the volume's slot taken under the jobs mutex before
