@@ -4,6 +4,15 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #719 — finding 021e897d6367 in mgmt/volume_move.rs (2026-11-21, P1)
+- [ ] `Moves::reserve`: the volume's slot taken under the jobs mutex before
+  the target is resolved or kept (409 while a worker is live, a flag the
+  worker's task clears when it ends); a reservation not committed (every
+  validation or persistence error) puts back the move it replaced, or none.
+  Only the committed request keeps the target and spawns the worker
+- [ ] tests: `Moves::reserve` twice, a dropped reservation restores; two
+  concurrent POSTs, one 202 and one 409, one worker. check.sh; release; close
+
 ## #718 — finding 0f237e79c424 in raid/mod.rs (2026-11-21, P1)
 - [x] `RaidArray::hold_for_release`: the grow lock taken (refused, 409,
   while a grow holds it) with the rebuild/scrub check; the API's release
