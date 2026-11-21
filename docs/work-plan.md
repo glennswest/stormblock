@@ -715,7 +715,7 @@ ISO. stormblock's side, in steps (each its own commit):
   - [x] the patch, Cargo.lock by hand (mkfs-iso 0.1.1 @ 0ac298a). Cargo
     refuses a patch on the patched URL itself ("points to the same source"),
     so it is spelt `https://www.github.com/…` (GitHub's redirect).
-  - [ ] check.sh, README/CHANGELOG, a tag; stormdist#25 told
+  - [x] check.sh ALL PASS on 6dc27615 (1608/1608); README/CHANGELOG; v24.45.13; stormdist#25 told
   - left for after: the firmware boot of a release ISO (stormcentral#1476),
     stormblock-test#6, stormdist#17
 

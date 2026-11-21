@@ -4,6 +4,8 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.45.13] — 2026-11-21
+
 ### Fixed
 - #442: a release ISO on a CD or a USB stick is read by `stormdist://` and `rd.stormblock.iso`: mkfs-iso v0.1.1 under stormdist sizes a block device (mkfs.iso.rs#35), taken here by a `[patch]` until stormdist's pin carries it (stormdist#25).
 
