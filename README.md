@@ -1123,7 +1123,7 @@ with a job; `GET /restores[/{id}]` reads it (`running|done|failed`, `report:
 `restore` (mode `restore`, every golden and the forge inventory), `install`
 (a full ISO's `flavour`) or `upgrade` (diffs from `current`, the installed
 release's identity), run against this engine.
-- `iso` is a file on this node. A device (`/dev/sr0`, a USB stick) is not read yet: stormdist's reader takes a block device's size as 0 (mkfs.iso.rs#35).
+- `iso` is a file or a block device on this node (`/dev/sr0`, a USB stick): mkfs-iso v0.1.1 sizes a block device (mkfs.iso.rs#35).
 - `base` lists a diff ISO's bases, oldest first.
 - `key` is the pinned Ed25519 public key (hex). A key from the media is never
   used.
@@ -1179,8 +1179,12 @@ clone is):
   volume adopt from it. A write reads back with the ISO untouched. A wrong
   key, a flavour with no disk and a corrupt chunk are refused.
   `tests/initramfs-iso.sh` covers `/init`'s claim.
-- **Not yet from a CD or USB stick:** stormdist's reader takes a block
-  device's size as 0 (mkfs.iso.rs#35). A file works.
+- **From a CD or USB stick:** a block device is read like a file since
+  mkfs-iso v0.1.1 (mkfs.iso.rs#35), taken here by a `[patch]` until
+  stormdist's own pin carries it (stormdist#25).
+  `ci-isodev-blockdev-verify.sh` attaches a release ISO to a QEMU guest as a
+  CD (`/dev/sr0`) and as a raw disk (`/dev/vda`) and finds the flavour's slab
+  and its volume through `stormdist:///dev/…` on each.
 
 ## Pulling a volume from a peer
 
@@ -3478,11 +3482,11 @@ every unit there and fails one at or below the budget.
 
 What earlier docs described and the code does not do, each with its issue:
 
-- **The ISO install from a CD or USB stick** (#442): built for an ISO file
-  (`stormdist://`, `rd.stormblock.iso`). A block device is not read until
-  stormdist's reader sizes one (mkfs.iso.rs#35), and no release ISO carries
-  a flavour's disk until stormcentral#1556. The eject after the flow-over is
-  not built: the ISO is left attached. The restore and upgrade from an ISO on
+- **The ISO install's firmware boot** (#442): `stormdist://` and
+  `rd.stormblock.iso` read the ISO from a file, a CD or a USB stick, and the
+  release ISO carries each flavour's disk (stormcentral#1556). A machine
+  booting the release ISO from its firmware waits on stormcentral#1476. The
+  eject after the flow-over is not built: the ISO is left attached. The restore and upgrade from an ISO on
   a running engine are built (`/api/v1/stormdist`). A restored golden is presented at the
   default LBA (4096). stormdist's manifest does not carry a golden's LBA
   (#228).

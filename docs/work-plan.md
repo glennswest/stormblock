@@ -703,14 +703,21 @@ ISO. stormblock's side, in steps (each its own commit):
   release, no new dependencies; stormdist's `Media` then sizes a block
   device). The patch goes when stormdist's tag carries v0.1.1. The stormdist
   rev stays at 8e645d1: nothing here needs v0.7.0.
-  - [ ] `ci-isodev-blockdev-verify.sh`: a QEMU guest with the ISO as a CD
+  - [x] `ci-isodev-blockdev-verify.sh`: a QEMU guest with the ISO as a CD
     (`/dev/sr0`) and as a raw disk (`/dev/vda`, a USB stick's stand-in);
     `stormblock slab volumes stormdist:///dev/…` finds the slab and its
     volume. The ISO is made by an `#[ignore]`d it test
     (`STORMBLOCK_ISO_OUT`). Negative control: the script on the commit
     before the patch fails on both devices.
-  - [ ] the patch, Cargo.lock by hand (mkfs-iso 0.1.1 @ 0ac298a), the script
-    passes, check.sh, README/CHANGELOG, a tag
+    Control on 7ce0f01b: both `cannot open (… [image] 0 bytes: too small for
+    a volume descriptor set)`. With the patch (376aac71): PASS on sr0 and
+    vda, `volume pod-logs (16.0 MB, 1 slots)` read through each.
+  - [x] the patch, Cargo.lock by hand (mkfs-iso 0.1.1 @ 0ac298a). Cargo
+    refuses a patch on the patched URL itself ("points to the same source"),
+    so it is spelt `https://www.github.com/…` (GitHub's redirect).
+  - [ ] check.sh, README/CHANGELOG, a tag; stormdist#25 told
+  - left for after: the firmware boot of a release ISO (stormcentral#1476),
+    stormblock-test#6, stormdist#17
 
 ## #677 — the seal's check on the sequential path (2026-11-19, P0)
 - [x] `fs::readahead::ReadAhead`: a read-only chunk cache (1 MiB I/Os, 512 MiB cap); the seal prefetches the volume's mapped extents in order, then runs read_layout/seal_blockers/fsck (ext4, XFS) through it

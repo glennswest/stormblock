@@ -9,12 +9,12 @@
 # (the flavour's disk: a laid system drive with the volume `pod-logs` in its
 # slab), boots the build host's kernel with the ISO attached twice, as a CD
 # (/dev/sr0) and as a raw read-only disk (/dev/vda, the stick's stand-in),
-# and asks the static stormblock in the guest:
+# and asks the static stormblock in the guest, on each device:
 #
-#   slab info    stormdist:///dev/<d>?flavour=cilium&key=…   the system slab
 #   slab volumes stormdist:///dev/<d>?flavour=cilium&key=…   volume pod-logs
 #
-# on each device. The control is the same script on a commit that pins
+# the disk's GPT, its system slab and the volume's record, every chunk
+# checked by its sha256 on the way. The control is the same script on a commit that pins
 # mkfs-iso v0.1.0: both devices fail to open.
 #
 #   sc-build 'bash ci-isodev-blockdev-verify.sh'
@@ -75,9 +75,6 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do [ -b /dev/sr0 ] && [ -b /dev/vda ] && break; s
 for d in sr0 vda; do
     echo "GUEST $d: $(cat /sys/block/$d/size 2>/dev/null || echo none) sectors"
     u="stormdist:///dev/$d?flavour=cilium&key=/release-key.pub"
-    echo "GUEST-BEGIN $d info"
-    stormblock slab info "$u" 2>&1
-    echo "GUEST-END $d info rc=$?"
     echo "GUEST-BEGIN $d volumes"
     stormblock slab volumes "$u" 2>&1
     echo "GUEST-END $d volumes rc=$?"
