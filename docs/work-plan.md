@@ -4,6 +4,13 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #712 — finding c113e8f8eb01 in target/iscsi/scsi.rs (2026-11-20, P1)
+- [x] `byte_range`: lba + count against capacity in blocks, checked_add /
+  checked_mul, for read, write, write same, every UNMAP descriptor (all
+  checked before any discard); MAX TRANSFER LENGTH enforced on read/write.
+  Test `an_lba_that_would_wrap_is_out_of_range_and_touches_nothing`
+- [ ] check.sh, patch release, close
+
 ## #711 — findings 4dbf706d9a2b, 78ed70cc2493 in mgmt/auth.rs (2026-11-20, P1)
 - [x] 4dbf706d9a2b: the ListNamespaces fallback only on `GET /api/v1/volumes`
   (verb list); test `the_namespace_list_fallback_is_the_rest_listing_only`

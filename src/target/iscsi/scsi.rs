@@ -514,13 +514,33 @@ async fn handle_read_16(cdb: &[u8], device: &Arc<dyn BlockDevice>) -> ScsiResult
     do_read(lba, block_count, device).await
 }
 
-async fn do_read(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>) -> ScsiResult {
-    let bs = device.block_size() as u64;
-    let offset = lba * bs;
-    let len = block_count * bs;
+/// The most blocks one READ or WRITE moves: the Block Limits page's
+/// MAXIMUM TRANSFER LENGTH (0xB0).
+const MAX_TRANSFER_BLOCKS: u64 = 65536;
 
-    if offset + len > device.capacity_bytes() {
+/// `lba` and `blocks` as a byte range on `device`, checked in blocks before
+/// anything is multiplied (finding c113e8f8eb01): an LBA past the end, or a
+/// range that runs past it, is `None`, whatever the u64 arithmetic would
+/// have wrapped to. On a 4096-byte device LBA 2^52 used to wrap to byte 0.
+fn byte_range(lba: u64, blocks: u64, device: &Arc<dyn BlockDevice>) -> Option<(u64, u64)> {
+    let bs = device.block_size() as u64;
+    if bs == 0 {
+        return None;
+    }
+    let total = device.capacity_bytes() / bs;
+    let end = lba.checked_add(blocks)?;
+    if end > total {
+        return None;
+    }
+    Some((lba.checked_mul(bs)?, blocks.checked_mul(bs)?))
+}
+
+async fn do_read(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>) -> ScsiResult {
+    let Some((offset, len)) = byte_range(lba, block_count, device) else {
         return ScsiResult::check_condition(SenseData::lba_out_of_range());
+    };
+    if block_count > MAX_TRANSFER_BLOCKS {
+        return ScsiResult::check_condition(SenseData::invalid_field_in_cdb());
     }
 
     let mut buf = vec![0u8; len as usize];
@@ -545,13 +565,13 @@ async fn handle_write_16(cdb: &[u8], device: &Arc<dyn BlockDevice>, data: &[u8])
 /// `fua`: the CDB's Force Unit Access bit (#366): the data is durable
 /// before GOOD is returned.
 async fn do_write(lba: u64, block_count: u64, device: &Arc<dyn BlockDevice>, data: &[u8], fua: bool) -> ScsiResult {
-    let bs = device.block_size() as u64;
-    let offset = lba * bs;
-    let expected_len = (block_count * bs) as usize;
-
-    if offset + expected_len as u64 > device.capacity_bytes() {
+    let Some((offset, len)) = byte_range(lba, block_count, device) else {
         return ScsiResult::check_condition(SenseData::lba_out_of_range());
+    };
+    if block_count > MAX_TRANSFER_BLOCKS {
+        return ScsiResult::check_condition(SenseData::invalid_field_in_cdb());
     }
+    let expected_len = len as usize;
 
     if data.len() < expected_len {
         return ScsiResult::check_condition(SenseData::illegal_request());
@@ -582,12 +602,9 @@ async fn handle_write_same(
     data: &[u8],
 ) -> ScsiResult {
     let bs = device.block_size() as u64;
-    let offset = lba * bs;
-    let len = block_count * bs;
-
-    if offset + len > device.capacity_bytes() {
+    let Some((offset, len)) = byte_range(lba, block_count, device) else {
         return ScsiResult::check_condition(SenseData::lba_out_of_range());
-    }
+    };
     // A block count of zero means "to the end of the device" in SBC; refuse
     // it rather than silently wiping the remainder.
     if block_count == 0 {
@@ -632,16 +649,24 @@ async fn handle_unmap(device: &Arc<dyn BlockDevice>, data: &[u8]) -> ScsiResult 
 
     let desc_len = u16::from_be_bytes([data[2], data[3]]) as usize;
     let desc_data = &data[8..];
-    let bs = device.block_size() as u64;
 
+    // Every descriptor checked before any is discarded (finding
+    // c113e8f8eb01): one past the end refuses the whole list.
+    let mut ranges = Vec::new();
     let mut offset = 0;
     while offset + 16 <= desc_len && offset + 16 <= desc_data.len() {
         let lba = u64::from_be_bytes(desc_data[offset..offset + 8].try_into().unwrap());
         let count = u32::from_be_bytes(desc_data[offset + 8..offset + 12].try_into().unwrap()) as u64;
         if count > 0 {
-            let _ = device.discard(lba * bs, count * bs).await;
+            match byte_range(lba, count, device) {
+                Some(r) => ranges.push(r),
+                None => return ScsiResult::check_condition(SenseData::lba_out_of_range()),
+            }
         }
         offset += 16;
+    }
+    for (o, l) in ranges {
+        let _ = device.discard(o, l).await;
     }
 
     ScsiResult::good_empty()
@@ -788,6 +813,92 @@ mod tests {
         let fua16 = [WRITE_16, 0x08, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0];
         assert_eq!(handle_scsi_command(&fua16, &dev, &data, &[0]).await.status, ScsiStatus::Good);
         assert_eq!(flushes(), 2, "WRITE(16) FUA");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Counts every I/O that reaches the backend (finding c113e8f8eb01).
+    struct CountIo(Arc<dyn BlockDevice>, std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl BlockDevice for CountIo {
+        fn id(&self) -> &crate::drive::DeviceId { self.0.id() }
+        fn capacity_bytes(&self) -> u64 { self.0.capacity_bytes() }
+        fn block_size(&self) -> u32 { self.0.block_size() }
+        fn optimal_io_size(&self) -> u32 { self.0.optimal_io_size() }
+        fn device_type(&self) -> crate::drive::DriveType { self.0.device_type() }
+        async fn read(&self, o: u64, b: &mut [u8]) -> crate::drive::DriveResult<usize> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.read(o, b).await
+        }
+        async fn write(&self, o: u64, b: &[u8]) -> crate::drive::DriveResult<usize> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.write(o, b).await
+        }
+        async fn flush(&self) -> crate::drive::DriveResult<()> { self.0.flush().await }
+        async fn discard(&self, o: u64, l: u64) -> crate::drive::DriveResult<()> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.discard(o, l).await
+        }
+    }
+
+    /// Finding c113e8f8eb01: an LBA whose byte offset wraps u64 (2^52 on a
+    /// 4096-byte device wraps to 0), u64::MAX, or a range running past the
+    /// end is LBA OUT OF RANGE for READ(16), WRITE(16), WRITE SAME(16) (with
+    /// and without UNMAP) and UNMAP, and nothing reaches the device; the
+    /// last block itself is served.
+    #[tokio::test]
+    async fn an_lba_that_would_wrap_is_out_of_range_and_touches_nothing() {
+        let (inner, path) = test_device().await;
+        let block0 = vec![0xC3u8; 4096];
+        inner.write(0, &block0).await.unwrap();
+        let counted = Arc::new(CountIo(inner.clone(), Default::default()));
+        let dev: Arc<dyn BlockDevice> = counted.clone();
+        let ios = || counted.1.load(std::sync::atomic::Ordering::SeqCst);
+        let last = dev.capacity_bytes() / 4096 - 1;
+        let cdb16 = |op: u8, flags: u8, lba: u64, n: u32| {
+            let mut c = [0u8; 16];
+            c[0] = op;
+            c[1] = flags;
+            c[2..10].copy_from_slice(&lba.to_be_bytes());
+            c[10..14].copy_from_slice(&n.to_be_bytes());
+            c
+        };
+        let out_of_range = |r: &ScsiResult| {
+            r.status == ScsiStatus::CheckCondition && r.sense.as_ref().is_some_and(|s| s.asc == 0x21 && s.ascq == 0)
+        };
+        let zero = vec![0u8; 4096];
+        let pattern = vec![0x11u8; 4096];
+        for (lba, n) in [(1u64 << 52, 1u32), (u64::MAX, 1), (u64::MAX - 1, 4), (last, 2), (last + 1, 1)] {
+            let r = handle_scsi_command(&cdb16(WRITE_16, 0, lba, n), &dev, &vec![0xEEu8; 4096 * n as usize], &[0]).await;
+            assert!(out_of_range(&r), "WRITE(16) at {lba} x{n}");
+            let r = handle_scsi_command(&cdb16(READ_16, 0, lba, n), &dev, &[], &[0]).await;
+            assert!(out_of_range(&r), "READ(16) at {lba} x{n}");
+            let r = handle_scsi_command(&cdb16(WRITE_SAME_16, 0, lba, n), &dev, &pattern, &[0]).await;
+            assert!(out_of_range(&r), "WRITE SAME(16) at {lba} x{n}");
+            let r = handle_scsi_command(&cdb16(WRITE_SAME_16, 0x08, lba, n), &dev, &zero, &[0]).await;
+            assert!(out_of_range(&r), "WRITE SAME(16) UNMAP at {lba} x{n}");
+            // An UNMAP list: one good descriptor, then this one: neither done.
+            let mut list = vec![0u8; 8 + 32];
+            list[2..4].copy_from_slice(&32u16.to_be_bytes());
+            list[8..16].copy_from_slice(&1u64.to_be_bytes());
+            list[16..20].copy_from_slice(&1u32.to_be_bytes());
+            list[24..32].copy_from_slice(&lba.to_be_bytes());
+            list[32..36].copy_from_slice(&n.to_be_bytes());
+            let mut unmap = [0u8; 16];
+            unmap[0] = UNMAP;
+            let r = handle_scsi_command(&unmap, &dev, &list, &[0]).await;
+            assert!(out_of_range(&r), "UNMAP at {lba} x{n}");
+        }
+        assert_eq!(ios(), 0, "nothing reached the device");
+        let mut got = vec![0u8; 4096];
+        inner.read(0, &mut got).await.unwrap();
+        assert_eq!(got, block0, "block 0 is not overwritten");
+
+        // The last block is the device's.
+        let r = handle_scsi_command(&cdb16(WRITE_16, 0, last, 1), &dev, &pattern, &[0]).await;
+        assert_eq!(r.status, ScsiStatus::Good);
+        let r = handle_scsi_command(&cdb16(READ_16, 0, last, 1), &dev, &[], &[0]).await;
+        assert_eq!((r.status, r.data), (ScsiStatus::Good, pattern.clone()));
         let _ = std::fs::remove_file(&path);
     }
 
