@@ -23,7 +23,7 @@ review asks about a user the apiserver would authenticate the same way.
   real TLS, stand-in apiserver); README, docs/auth.md, CHANGELOG
 - [x] check.sh ALL PASS on 431ae01e (1628/1628 on sc-build's second run; the
   first lost #526's `listings_keep_their_time…`, 2.9 s); v24.47.0
-- [ ] stormcos#1553: the `storage-admin` ClusterRoleBinding for group
+- [x] stormcos#1553 (commented 2026-11-23): the `storage-admin` ClusterRoleBinding for group
   `stormcentral:forge`; the serving pair's SANs (FQDN, every address) are
   stormcos's `stormcert-serving-stormblock` args, not the engine's
 
