@@ -790,7 +790,7 @@ pub(crate) fn serve_device(
 
 /// What a `Range` header asked for, once resolved against the real size.
 #[derive(Debug, PartialEq, Eq)]
-enum RangeSpec {
+pub(crate) enum RangeSpec {
     /// No usable range, or one covering everything: serve 200.
     Whole,
     /// Inclusive byte offsets, both already clamped to the image.
@@ -806,7 +806,7 @@ enum RangeSpec {
 /// several would be a quiet lie about what was sent — so a multi-range request
 /// falls back to the whole image, which is what RFC 9110 permits and what a
 /// caller can actually use.
-fn parse_range(raw: &str, total: u64) -> RangeSpec {
+pub(crate) fn parse_range(raw: &str, total: u64) -> RangeSpec {
     if total == 0 {
         return RangeSpec::Unsatisfiable;
     }

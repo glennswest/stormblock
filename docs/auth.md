@@ -63,6 +63,10 @@ a SubjectAccessReview allows. `serve::api::classify` decides which is which.
 - detach-like DELETEs: a volume's attach, an export, a LUN, a rebuild, a
   drain, a scrub, a StormFS pin, and `/v1`'s volumes, snapshots and group
   snapshots, which a CSI controller deletes as Kubernetes objects go.
+- a blob's delete and an upload session's abort (`DELETE
+  /api/v1/blobs/sha256:<hex>`, `DELETE /api/v1/blobs/uploads/{id}`, #732):
+  the registry's garbage collection deletes blobs as a CSI controller
+  deletes volumes; a blob is put again by the next push of it.
 
 **Destructive:**
 - a scrub's repairs an operator asks for (#160): `POST

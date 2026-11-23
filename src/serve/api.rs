@@ -323,6 +323,14 @@ fn attestation_read(method: &Method, path: &str) -> Option<String> {
 fn is_detach_like(path: &str) -> bool {
     let p = path.trim_end_matches('/');
     let seg: Vec<&str> = p.split('/').collect();
+    // /api/v1/blobs/{digest}, /api/v1/blobs/uploads/{id} (#732): the
+    // registry's garbage collection deletes blobs as a CSI controller
+    // deletes volumes, and aborts its own uploads; content-addressed, a blob
+    // deleted is put again by the next push of it. The node's token, as the
+    // issue asks.
+    if seg.len() >= 5 && seg.len() <= 6 && seg[1] == "api" && seg[2] == "v1" && seg[3] == "blobs" {
+        return seg.len() == 5 || seg[4] == "uploads";
+    }
     // /api/v1/volumes/{id}/attach, /api/v1/drives/{id}/drain,
     // /api/v1/arrays/{id}/scrub
     if seg.len() == 6 && seg[1] == "api" && seg[2] == "v1" {
@@ -1822,6 +1830,18 @@ mod tests {
                 .is_err(),
             "writing past the end of the volume must be refused"
         );
+    }
+
+    #[test]
+    fn a_blob_delete_takes_the_node_token() {
+        // #732: the registry's GC deletes blobs and aborts its uploads.
+        let d = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(classify(&Method::DELETE, &format!("/api/v1/blobs/{d}"), None), Class::Ordinary);
+        assert_eq!(classify(&Method::DELETE, "/api/v1/blobs/uploads/0b8c2b5e-8b7a-4c55-9d3e-0d1b2a3c4d5e", None), Class::Ordinary);
+        assert_eq!(classify(&Method::PUT, &format!("/api/v1/blobs/{d}"), None), Class::Ordinary);
+        // Nothing else under it, nor a volume's delete, moves.
+        assert_eq!(classify(&Method::DELETE, "/api/v1/blobs/x/y/z", None), Class::Destructive);
+        assert_eq!(classify(&Method::DELETE, "/api/v1/blobstore", None), Class::Destructive);
     }
 
     #[test]

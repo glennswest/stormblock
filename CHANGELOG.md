@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### Added
+- #732: a content-addressed blob store in the engine, for the registry's OCI blobs (stormblock-registry#241): `PUT|GET|HEAD|DELETE /api/v1/blobs/sha256:<hex>` (hashed as it lands, a mismatch or a full pool (`507`) keeps nothing, a held digest writes nothing; `Range` reads; a delete waits for reads in flight), `GET /api/v1/blobs` paged, upload sessions (`/api/v1/blobs/uploads`: append at the length, verify and seal, abort; journaled, so they survive a restart), `GET /api/v1/blobstore` (used, the pool's free), a scrub. One thin volume, `stormblock-blobs`: whole slots for a blob's body, its tail in 4 KiB blocks of a shared pack, an epoch'd crc'd journal with checkpoints, and every slot nothing names discarded at open. A blob's delete takes the node's token. `docs/blobstore.md`.
+
 ## [v24.45.13] — 2026-11-21
 
 ### Fixed

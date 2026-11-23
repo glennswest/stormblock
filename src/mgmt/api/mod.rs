@@ -4,6 +4,7 @@ pub mod drives;
 pub mod arrays;
 pub mod shelves;
 pub mod volumes;
+pub mod blobs;
 pub mod exports;
 pub mod fstemplates;
 pub mod images;
@@ -822,6 +823,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .nest("/api/v1/shelves", shelves::shelves_router(state.clone()))
         .nest("/api/v1/spares", shelves::spares_router(state.clone()))
         .nest("/api/v1/volumes", volumes::router(state.clone()))
+        // The content-addressed blob store (#732).
+        .nest("/api/v1/blobs", blobs::router(state.clone()))
+        .nest("/api/v1/blobstore", blobs::store_router(state.clone()))
         .nest("/api/v1/exports", exports::router(state.clone()))
         .nest("/api/v1/slabs", slabs::router(state.clone()))
         .nest("/api/v1/pallets", pallets::router(state.clone()))

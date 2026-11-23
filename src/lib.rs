@@ -2,6 +2,7 @@ pub mod cli;
 pub mod drive;
 pub mod raid;
 pub mod volume;
+pub mod blobs;
 pub mod fs;
 pub mod target;
 pub mod mgmt;

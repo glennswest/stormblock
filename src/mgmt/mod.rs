@@ -259,6 +259,8 @@ pub struct AppState {
     pub volume_presence: crate::volume::VolumePresence,
     /// What the volume listing reads without `volume_manager`'s lock (#364).
     pub volume_catalog: crate::volume::catalog::CatalogCell,
+    /// The content-addressed blob store (#732), opened on first use.
+    pub blobs: tokio::sync::Mutex<Option<Arc<crate::blobs::BlobStore>>>,
     pub exports: tokio::sync::RwLock<Vec<ExportEntry>>,
     pub slab_registry: Arc<crate::lockwatch::TrackedRwLock<SlabRegistry>>,
     pub gem: Arc<crate::lockwatch::TrackedRwLock<GlobalExtentMap>>,
@@ -635,6 +637,7 @@ impl AppState {
             volume_manager,
             volume_presence,
             volume_catalog,
+            blobs: tokio::sync::Mutex::new(None),
             exports: tokio::sync::RwLock::new(Vec::new()),
             slab_registry,
             gem,

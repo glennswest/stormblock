@@ -17,6 +17,7 @@ mod contract_v1_wire;
 mod crash_recovery;
 mod integration_array_pin;
 mod integration_auth;
+mod integration_blobs;
 mod integration_backup_creds;
 mod integration_capacity;
 mod integration_kernelopt;
