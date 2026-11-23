@@ -4,6 +4,8 @@
 
 <!-- New unreleased changes go here -->
 
+## [v24.47.0] — 2026-11-23
+
 ### Added
 - #731 (stormcentral#1676): a node-CA client certificate's destructive call is reviewed with the node's apiserver as the apiserver reads that certificate (user = its CN, groups = its O values and `system:authenticated`), so RBAC makes it admin: stormcentral's `CN=stormcentral, O=stormcentral:forge` from the node's cluster CA, once stormcos binds `storage-admin` to that group. Denied: 403 with the apiserver's reason; the apiserver unreachable: 503; no `[management.kubernetes]`: the node token's tier, as before. The audit log names it `client-cert-kubernetes:<user>:sha256:<16 hex>`.
 

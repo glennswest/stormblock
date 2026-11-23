@@ -14,12 +14,15 @@ itself reads that certificate (user = CN, groups = every O plus
 `system:authenticated`), so RBAC decides. The node CA is the first
 certificate of the apiserver's `--client-ca-file` (stormcos#572), so the
 review asks about a user the apiserver would authenticate the same way.
-- [ ] subject CN + O read from the leaf (`tls::subject_names`), on `ClientCert`
-- [ ] `KubeAuth::review_identity` (SAR only, cached as a bearer's review)
-- [ ] `require_token`: a node-CA certificate's destructive call reviewed;
+- [x] subject CN + O read from the leaf (`tls::subject_names`), on `ClientCert`
+- [x] `KubeAuth::review_identity` (SAR only, cached as a bearer's review)
+- [x] `require_token`: a node-CA certificate's destructive call reviewed;
   allowed → `client-cert-kubernetes:<user>:<fp>`, denied → refused as before
   with the apiserver's reason; no `[management.kubernetes]` → as before
-- [ ] tests; README, docs/auth.md, CHANGELOG; check.sh
+- [x] tests (`integration_mgmt_tls::a_node_ca_certificate_is_admin_when_rbac_allows_its_subject`,
+  real TLS, stand-in apiserver); README, docs/auth.md, CHANGELOG
+- [x] check.sh ALL PASS on 431ae01e (1628/1628 on sc-build's second run; the
+  first lost #526's `listings_keep_their_time…`, 2.9 s); v24.47.0
 - [ ] stormcos#1553: the `storage-admin` ClusterRoleBinding for group
   `stormcentral:forge`; the serving pair's SANs (FQDN, every address) are
   stormcos's `stormcert-serving-stormblock` args, not the engine's
