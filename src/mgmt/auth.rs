@@ -428,8 +428,8 @@ pub struct HostCredential {
 /// `storage.storm.io` resource the path names; the node token covers the
 /// ordinary verbs, including deleting an unsealed volume that is no template
 /// or golden. A node-CA client certificate with a subject CN is reviewed the
-/// same way, as the apiserver reads it (user CN, groups O, #731). Every destructive call is recorded in the audit log, refusals
-/// included.
+/// same way, as the apiserver reads it (user CN, groups O, #731). Every
+/// destructive call is recorded in the audit log, refusals included.
 pub async fn require_token(
     State(state): State<Arc<AppState>>,
     mut req: Request,
