@@ -4,6 +4,33 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #732 — a content-addressed blob store in the engine (2026-11-23, stormblock-registry#241)
+The registry's OCI blobs off the growable ext4 `registry-data` onto the
+engine: write-once, by sha256. The design is stormblock's (the issue says so):
+- one thin volume, `stormblock-blobs` (data role where the node has one),
+  holding everything: slot 0 two superblocks (A/B, generation), a journal
+  (a chain of slots; batches of records, each batch whole 4 KiB blocks with
+  epoch, seq and crc32c, never rewritten; a checkpoint writes the live set
+  as a fresh chain under the next epoch and flips the superblock)
+- a blob = whole slots for its body + its tail (< a slot) in a **pack**: a
+  shared slot cut in 4 KiB blocks, so a 1 KB config takes 4 KiB, not a slot
+- a put: hashed as it lands, data flushed, then its journal record; a
+  mismatch or a full pool (`507`) frees what it wrote; a digest held answers
+  at once. Upload sessions: slots of their own, appends at the current
+  length, journaled, so they survive a restart; commit hashes (in memory, or
+  read back after a restart), moves the tail into a pack, seals
+- a delete journaled first; the space freed when the last read in flight of
+  it ends; a pack given back when nothing in it lives, a sparse one repacked
+- open: replay; every mapped slot nothing names is discarded (what a crash
+  between a journal record and a discard left)
+- `/api/v1/blobs` (put, get with Range, head, delete, list paged),
+  `/api/v1/blobs/uploads`, `/api/v1/blobstore` (stats: used, pool free),
+  `/api/v1/blobstore/scrub`; the node's token, a blob delete included
+  (registry GC), as a CSI delete is
+- [ ] `src/blobs/` + API + auth + tests (unit: format, replay, crash, packs;
+  it: the HTTP surface on a real engine)
+- [ ] README, CHANGELOG, docs/blobstore.md; check.sh
+
 ## #721 — finding 93dc7ea1ce1c in mgmt/link.rs (2026-11-21, P1)
 A failed link-counter sample (the drive's log page 0x18 unreadable, or the
 host phy gone) went to `next` as an empty phy list: nothing moving, so a
