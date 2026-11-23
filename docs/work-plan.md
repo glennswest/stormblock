@@ -4,6 +4,26 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #731 — the admin tier for a node-CA certificate by SubjectAccessReview (2026-11-23, stormcentral#1676)
+stormcentral's credential on a forge becomes `CN=stormcentral,
+O=stormcentral:forge` from the node's own cluster CA (stormcos#1553); its
+retention passes delete, so it needs the admin tier there. Chosen: the
+review (the issue's "better"), no config list: a node-CA certificate's
+destructive call is reviewed with the node's apiserver as the apiserver
+itself reads that certificate (user = CN, groups = every O plus
+`system:authenticated`), so RBAC decides. The node CA is the first
+certificate of the apiserver's `--client-ca-file` (stormcos#572), so the
+review asks about a user the apiserver would authenticate the same way.
+- [ ] subject CN + O read from the leaf (`tls::subject_names`), on `ClientCert`
+- [ ] `KubeAuth::review_identity` (SAR only, cached as a bearer's review)
+- [ ] `require_token`: a node-CA certificate's destructive call reviewed;
+  allowed → `client-cert-kubernetes:<user>:<fp>`, denied → refused as before
+  with the apiserver's reason; no `[management.kubernetes]` → as before
+- [ ] tests; README, docs/auth.md, CHANGELOG; check.sh
+- [ ] stormcos#1553: the `storage-admin` ClusterRoleBinding for group
+  `stormcentral:forge`; the serving pair's SANs (FQDN, every address) are
+  stormcos's `stormcert-serving-stormblock` args, not the engine's
+
 ## #732 — a content-addressed blob store in the engine (2026-11-23, stormblock-registry#241)
 The registry's OCI blobs off the growable ext4 `registry-data` onto the
 engine: write-once, by sha256. The design is stormblock's (the issue says so):
