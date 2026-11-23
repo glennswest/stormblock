@@ -51,6 +51,11 @@ pub struct ClientCert {
     /// a node forge enrolled (#383, stormcert#78). It may only read a sealed
     /// volume's content and a release's manifest (`serve::api::forge_node_read`).
     pub forge_node: bool,
+    /// Verified against the node CA, which is the apiserver's client CA too
+    /// (stormcos#572): who the apiserver takes it for (#731). A destructive
+    /// call it makes is reviewed for that user and those groups, so RBAC
+    /// decides whether it is admin.
+    pub kube: Option<super::kubeauth::KubeUser>,
 }
 
 impl ClientCert {
@@ -58,7 +63,7 @@ impl ClientCert {
         use sha2::Digest;
         let d = sha2::Sha256::digest(der);
         let hex: String = d.iter().take(8).map(|b| format!("{b:02x}")).collect();
-        ClientCert { fingerprint: format!("sha256:{hex}"), node: false, admin: None, forge_node: false }
+        ClientCert { fingerprint: format!("sha256:{hex}"), node: false, admin: None, forge_node: false, kube: None }
     }
 }
 
@@ -119,6 +124,9 @@ impl Classifier {
         let leaf = chain.first()?;
         let mut c = ClientCert::from_der(leaf.as_ref());
         c.node = !self.node_cas.is_empty() && Self::verifies(&self.node_cas, &[], chain).is_some();
+        if c.node {
+            c.kube = kube_identity(leaf.as_ref());
+        }
         if !self.admin_cas.is_empty() && Self::verifies(&self.admin_cas, &self.crls, chain).is_some() {
             let ee = webpki::EndEntityCert::try_from(leaf).ok()?;
             c.admin = self
@@ -144,11 +152,35 @@ impl Classifier {
 }
 
 /// The subject's common name of a DER certificate, when it has exactly one
-/// (#453). Read only from a certificate the chain check has already passed,
-/// so the walk can be plain: Certificate → TBSCertificate → (version) serial,
-/// signature, issuer, validity → subject → each RDN's attributes. A name that
-/// is not a string type, or two CNs, gives `None`: nothing to match.
+/// (#453). Read only from a certificate the chain check has already passed.
+/// A name that is not a string type, or two CNs, gives `None`: nothing to
+/// match.
 pub fn subject_cn(der: &[u8]) -> Option<String> {
+    let mut cns = subject_values(der, OID_CN)?;
+    (cns.len() == 1).then(|| cns.remove(0))
+}
+
+/// Who a client certificate is to the node's apiserver (#731): the user its
+/// subject's one CN, the groups its O values, as kube-apiserver's x509
+/// authenticator reads them, plus `system:authenticated`, which the apiserver
+/// adds to every authenticated user. `None` without one CN, or with an O
+/// that is not a string.
+pub fn kube_identity(der: &[u8]) -> Option<super::kubeauth::KubeUser> {
+    let username = subject_cn(der)?;
+    let mut groups = subject_values(der, OID_O)?;
+    groups.retain(|g| g != "system:authenticated");
+    groups.push("system:authenticated".into());
+    Some(super::kubeauth::KubeUser { username, groups })
+}
+
+const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
+const OID_O: &[u8] = &[0x55, 0x04, 0x0A];
+
+/// Every value of attribute `oid` in a DER certificate's subject, in order.
+/// The walk is plain: Certificate → TBSCertificate → (version) serial,
+/// signature, issuer, validity → subject → each RDN's attributes. `None`
+/// when the DER does not parse, or a value of `oid` is not a string type.
+fn subject_values(der: &[u8], oid: &[u8]) -> Option<Vec<String>> {
     // One TLV at `at`: (tag, start of contents, end of contents).
     fn tlv(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
         let tag = *b.get(at)?;
@@ -171,7 +203,6 @@ pub fn subject_cn(der: &[u8]) -> Option<String> {
     }
     const SEQ: u8 = 0x30;
     const SET: u8 = 0x31;
-    const CN: &[u8] = &[0x55, 0x04, 0x03];
     let (t, cert, _) = tlv(der, 0)?;
     if t != SEQ {
         return None;
@@ -193,7 +224,7 @@ pub fn subject_cn(der: &[u8]) -> Option<String> {
     if t != SEQ || subj_end > tbs_end {
         return None;
     }
-    let mut found: Option<String> = None;
+    let mut found = Vec::new();
     while rdn < subj_end {
         let (t, mut atv, set_end) = tlv(der, rdn)?;
         if t != SET {
@@ -204,23 +235,20 @@ pub fn subject_cn(der: &[u8]) -> Option<String> {
             if t != SEQ {
                 return None;
             }
-            let (t, oid, oid_end) = tlv(der, inner)?;
-            if t == 0x06 && &der[oid..oid_end] == CN {
-                let (st, vs, ve) = tlv(der, oid_end)?;
+            let (t, o, o_end) = tlv(der, inner)?;
+            if t == 0x06 && &der[o..o_end] == oid {
+                let (st, vs, ve) = tlv(der, o_end)?;
                 // UTF8String, PrintableString, IA5String, T61String.
                 if !matches!(st, 0x0C | 0x13 | 0x16 | 0x14) {
                     return None;
                 }
-                let v = std::str::from_utf8(&der[vs..ve]).ok()?.to_string();
-                if found.replace(v).is_some() {
-                    return None; // two CNs: not one name
-                }
+                found.push(std::str::from_utf8(&der[vs..ve]).ok()?.to_string());
             }
             atv = atv_end;
         }
         rdn = set_end;
     }
-    found
+    Some(found)
 }
 
 /// The files the listener serves from.

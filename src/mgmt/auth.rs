@@ -394,7 +394,7 @@ fn admin_note(r: &Resolved) -> String {
     if r.auth.audit_only {
         format!("; destructive verbs: admin_gate = audit, the node token still covers them and each such call is logged (admin token: {from})")
     } else {
-        format!("; destructive verbs require the admin token ({from}) or a Kubernetes bearer a SubjectAccessReview allows")
+        format!("; destructive verbs require the admin token ({from}) or a Kubernetes bearer or node-CA client certificate a SubjectAccessReview allows")
     }
 }
 
@@ -427,7 +427,8 @@ pub struct HostCredential {
 /// Kubernetes bearer that a SubjectAccessReview allows for the
 /// `storage.storm.io` resource the path names; the node token covers the
 /// ordinary verbs, including deleting an unsealed volume that is no template
-/// or golden. Every destructive call is recorded in the audit log, refusals
+/// or golden. A node-CA client certificate with a subject CN is reviewed the
+/// same way, as the apiserver reads it (user CN, groups O, #731). Every destructive call is recorded in the audit log, refusals
 /// included.
 pub async fn require_token(
     State(state): State<Arc<AppState>>,
@@ -671,8 +672,16 @@ pub async fn require_token(
         (None, false) => String::new(),
     };
     let other_bearer = presented.is_some() && !is_admin && presented.as_deref() != Some(api_token);
-    // The namespace a bearer's review is in (#408).
-    let (req, review_ns) = if other_bearer && state.kube_auth.is_some() {
+    // A node-CA certificate with a Kubernetes identity (#731): its
+    // destructive call is reviewed as the apiserver would review that user,
+    // so RBAC (`storage-admin` bound to its group) makes it admin.
+    let cert_user = if !is_admin && !other_bearer && state.kube_auth.is_some() {
+        cert.as_ref().and_then(|c| c.kube.clone())
+    } else {
+        None
+    };
+    // The namespace a bearer's or a certificate's review is in (#408).
+    let (req, review_ns) = if (other_bearer || cert_user.is_some()) && state.kube_auth.is_some() {
         review_namespace(&state, req, &method, &path).await
     } else {
         (req, None)
@@ -683,6 +692,36 @@ pub async fn require_token(
             _ => "admin-token".into(),
         };
         rec.decision = "allowed".into();
+    } else if let (Some(user), Some(kube)) = (cert_user.as_ref(), state.kube_auth.as_ref()) {
+        use super::kubeauth::Review;
+        let fp = cert.as_ref().map(|c| c.fingerprint.clone()).unwrap_or_default();
+        rec.who = format!("client-cert-kubernetes:{}:{fp}", user.username);
+        let (code, why) = match kube.review_identity(user, &resource, &verb, target.as_deref(), review_ns.as_deref()).await {
+            Review::Allowed(_) => (None, String::new()),
+            Review::Denied(u, why) => {
+                (Some(StatusCode::FORBIDDEN), format!("{} may not {verb} storage.storm.io {resource}: {why}", u.username))
+            }
+            Review::Unauthenticated(why) => (Some(StatusCode::UNAUTHORIZED), why),
+            Review::Unavailable(why) => (
+                Some(StatusCode::SERVICE_UNAVAILABLE),
+                format!("cannot review client certificate {} with {}: {why}", user.username, kube.api_url()),
+            ),
+        };
+        match code {
+            None => {
+                if let Some(s) = &slot {
+                    s.set("client-cert-kubernetes");
+                }
+                rec.decision = "allowed".into();
+            }
+            // Not allowed: as the node token's tier, which audit mode lets
+            // through and enforce refuses.
+            Some(_) if auth.audit_only => {
+                rec.decision = "allowed-audit-only".into();
+                rec.reason = Some(format!("admin_gate = audit: enforce would refuse: {why}"));
+            }
+            Some(code) => return refuse(rec, code, why),
+        }
     } else if is_node && !other_bearer {
         rec.who = node_who;
         if !auth.audit_only {

@@ -598,7 +598,7 @@ for a certificate and verifies it against that CA:
 
 | the client presents | result |
 |---|---|
-| a certificate the node CA issued | the **node token's tier**: every ordinary verb and attestation reads, with no token on the wire. A destructive verb still needs the admin token or a reviewed Kubernetes bearer (#274); with `admin_gate = audit` it is allowed and recorded. The audit log names it `client-cert:sha256:<16 hex>`. |
+| a certificate the node CA issued | the **node token's tier**: every ordinary verb and attestation reads, with no token on the wire. A destructive verb still needs the admin token or a reviewed Kubernetes bearer (#274); with `admin_gate = audit` it is allowed and recorded. The audit log names it `client-cert:sha256:<16 hex>`. With `[management.kubernetes]` set and one subject CN, its destructive verb is **reviewed** instead (#731, below). |
 | a certificate forge's CA (`tls_admin_ca`) issued, whose one subject CN is in `tls_admin_subjects` (#453) or valid for a name in `tls_admin_names` (#379), not revoked by `tls_admin_crl` | the **admin token's tier**: every verb, destructive ones included. The audit log names it `client-cert-admin:<name>:sha256:<16 hex>`. |
 | a certificate forge's CA issued to any other name (an enrolled node's, stormcert#78) | **a forge node** (#383): it may read a sealed volume's content (`GET /api/v1/volumes/{id}/content`) and a release's manifest (`GET /api/v1/releases/{v}/manifest`), nothing else (401). What a node pulls its kernel's optional images with. The request log names it `forge-node:sha256:<16 hex>` |
 | a certificate forge's CRL revokes | **no credential** (401, as with no certificate) |
@@ -632,6 +632,35 @@ with forge, and forge's CA signs its certificate.
   revoked certificate stays admin; both are said at start.
 - **The node CA's certificates** are checked against the node CA alone, and
   keep the node token's tier.
+
+**A node-CA certificate RBAC makes admin (#731, stormcentral#1676).**
+stormcentral's credential on a forge is a client certificate from the node's
+own cluster CA, `CN=stormcentral, O=stormcentral:forge` (signer
+`kubernetes.io/kube-apiserver-client`, approved by stormcert's Policy,
+stormcos#1553); its retention passes delete. The node CA is the first
+certificate of the apiserver's `--client-ca-file` (stormcos#572), so the
+apiserver authenticates that certificate as a user. The engine asks about
+the same user:
+- **Who:** the user is the subject's one CN, the groups every O, plus
+  `system:authenticated`, as kube-apiserver's x509 authenticator reads it.
+  No CN, two CNs or an O that is not a string: no identity, the node token's
+  tier as before.
+- **What is asked:** a destructive call is a SubjectAccessReview to
+  `[management.kubernetes]`'s apiserver for that user and those groups, the
+  verb and `storage.storm.io` resource the path names (in the volume's
+  namespace when it has one), as for a bearer, with no TokenReview. Cached
+  for a minute per user, groups and question.
+- **Answers:** allowed → served; the audit log names it
+  `client-cert-kubernetes:<user>:sha256:<16 hex>`. Denied → 403 with the
+  apiserver's reason. The apiserver unreachable → 503. With
+  `admin_gate = audit` a refusal is let through and recorded
+  (`allowed-audit-only`), as for the node token.
+- **Who grants it:** RBAC, e.g. `storage-admin` bound to group
+  `stormcentral:forge` (stormcos). No list in the engine's config and no
+  second CA.
+- **Without `[management.kubernetes]`:** nothing is reviewed; the node
+  token's tier, as before. The ordinary verbs are never reviewed: a
+  node-CA certificate holds them already.
 
 **Renewal.** stormcert renews the pair. The listener looks at the pair's and
 the CA's modification times at most every 5 s, as connections arrive. A set

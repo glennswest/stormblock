@@ -4,6 +4,12 @@
 
 <!-- New unreleased changes go here -->
 
+### Added
+- #731 (stormcentral#1676): a node-CA client certificate's destructive call is reviewed with the node's apiserver as the apiserver reads that certificate (user = its CN, groups = its O values and `system:authenticated`), so RBAC makes it admin: stormcentral's `CN=stormcentral, O=stormcentral:forge` from the node's cluster CA, once stormcos binds `storage-admin` to that group. Denied: 403 with the apiserver's reason; the apiserver unreachable: 503; no `[management.kubernetes]`: the node token's tier, as before. The audit log names it `client-cert-kubernetes:<user>:sha256:<16 hex>`.
+
+### 2026-11-23
+- **feat:** #731: `tls::kube_identity` (CN and every O from the verified leaf; `subject_cn` now reads through the same walk), `ClientCert.kube`, `KubeAuth::review_identity` (the SubjectAccessReview alone, cached a minute per user and groups as a bearer's is), and `require_token` reviewing a node-CA certificate's destructive call. Test: `integration_mgmt_tls::a_node_ca_certificate_is_admin_when_rbac_allows_its_subject` over real TLS with a stand-in apiserver. The engine's serving pair's SANs are stormcos's (`stormcert-serving-stormblock`), raised there (stormcos#1553).
+
 ## [v24.46.0] — 2026-11-23
 
 ### Added

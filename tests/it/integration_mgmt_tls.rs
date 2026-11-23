@@ -1031,3 +1031,103 @@ async fn the_boot_port_answers_the_boot_verbs_beside_a_tls_api() {
     let url = url.expect("an answer");
     assert!(url.starts_with("http://") && url.ends_with(&format!(":{boot}")), "{url}");
 }
+
+/// A stand-in apiserver that answers SubjectAccessReviews only: allowed
+/// when the groups hold `stormcentral:forge` (stormcos binding
+/// `storage-admin` to it), and keeps what it was asked. A TokenReview is a
+/// 404: a certificate's identity is never a bearer.
+async fn sar_apiserver(asked: Arc<std::sync::Mutex<Vec<serde_json::Value>>>) -> String {
+    use axum::{routing::post, Json, Router};
+    let app = Router::new().route(
+        "/apis/authorization.k8s.io/v1/subjectaccessreviews",
+        post(move |Json(b): Json<serde_json::Value>| {
+            let a = asked.clone();
+            async move {
+                a.lock().unwrap().push(b.clone());
+                let ok = b["spec"]["groups"].as_array().is_some_and(|g| g.iter().any(|x| x == "stormcentral:forge"))
+                    && b["spec"]["resourceAttributes"]["group"] == "storage.storm.io";
+                Json(serde_json::json!({ "status": { "allowed": ok, "reason": if ok { "storage-admin" } else { "no RBAC policy matched" } } }))
+            }
+        }),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+/// stormcentral's credential on a forge (#731, stormcentral#1676): a client
+/// certificate from the node's own CA, `CN=stormcentral,
+/// O=stormcentral:forge`. Its destructive call is reviewed with the node's
+/// apiserver as that user and group (no TokenReview), so RBAC makes it
+/// admin; a node-CA certificate RBAC does not allow stays at the node
+/// token's tier (403 with the apiserver's reason). The audit log names who.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_ca_certificate_is_admin_when_rbac_allows_its_subject() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    let d = pki.dir.clone();
+    leaf_no_san(&d, "node-ca", "stormcentral", "/O=stormcentral:forge/CN=stormcentral");
+    leaf_no_san(&d, "node-ca", "two-groups", "/O=a/O=b/CN=two-groups");
+    let who = stormblock::mgmt::tls::kube_identity(&pem_der(&pki.read("stormcentral.crt"))).expect("an identity");
+    assert_eq!(who.username, "stormcentral");
+    assert_eq!(who.groups, vec!["stormcentral:forge", "system:authenticated"]);
+    let two = stormblock::mgmt::tls::kube_identity(&pem_der(&pki.read("two-groups.crt"))).expect("an identity");
+    assert_eq!(two.groups, vec!["a", "b", "system:authenticated"]);
+
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = sar_apiserver(asked.clone()).await;
+    let port = free_port();
+    let mut cfg = config(&pki, &format!("127.0.0.1:{port}"));
+    cfg.management.admin_token = Some("admin-731".into());
+    let data = tmp.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    cfg.management.data_dir = Some(data.display().to_string());
+    cfg.management.kubernetes =
+        Some(stormblock::mgmt::config::KubeAuthConfig { api_url: api, ..Default::default() });
+    cfg.validate().expect("the config validates");
+    let state = state_with(&tmp, cfg).await;
+    tokio::spawn(stormblock::mgmt::start_management_server(state));
+    wait_listening(port).await;
+    let base = format!("https://127.0.0.1:{port}");
+    let slab = uuid::Uuid::new_v4();
+
+    // stormcentral: past the admin gate (the slab is not there: 404).
+    let sc = pki.client(Some("stormcentral"));
+    let r = sc.delete(format!("{base}/api/v1/slabs/{slab}")).send().await.unwrap();
+    assert_eq!(r.status(), 404, "admin by RBAC: {}", r.text().await.unwrap_or_default());
+    assert_eq!(sc.get(format!("{base}/api/v1/volumes")).send().await.unwrap().status(), 200);
+    {
+        let a = asked.lock().unwrap();
+        let spec = &a.last().expect("a review was asked")["spec"];
+        assert_eq!(spec["user"], "stormcentral");
+        assert_eq!(spec["groups"], serde_json::json!(["stormcentral:forge", "system:authenticated"]));
+        assert_eq!(spec["resourceAttributes"]["resource"], "slabs");
+        assert!(spec.get("uid").is_none(), "no uid: {spec}");
+    }
+
+    // A node-CA certificate RBAC does not allow: the node token's tier.
+    let kubelet = pki.client(Some("kubelet"));
+    let r = kubelet.delete(format!("{base}/api/v1/slabs/{slab}")).send().await.unwrap();
+    assert_eq!(r.status(), 403);
+    let body = r.text().await.unwrap();
+    assert!(body.contains("kubelet may not") && body.contains("no RBAC policy matched"), "{body}");
+    assert_eq!(kubelet.get(format!("{base}/api/v1/volumes")).send().await.unwrap().status(), 200);
+
+    let log = std::fs::read_to_string(data.join("audit.log")).unwrap_or_default();
+    let recs: Vec<serde_json::Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(
+        recs.iter().any(|r| r["decision"] == "allowed"
+            && r["who"].as_str().is_some_and(|w| w.starts_with("client-cert-kubernetes:stormcentral:sha256:"))),
+        "{log}"
+    );
+    assert!(
+        recs.iter().any(|r| r["decision"] == "refused"
+            && r["who"].as_str().is_some_and(|w| w.starts_with("client-cert-kubernetes:kubelet:"))),
+        "{log}"
+    );
+}

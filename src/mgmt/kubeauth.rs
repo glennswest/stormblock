@@ -338,18 +338,45 @@ impl KubeAuth {
     /// in a family's namespace on forge's apiserver grants it that family's
     /// volumes and no other's. `None`: the cluster-wide question.
     pub async fn review_in(&self, bearer: &str, resource: &str, verb: &str, name: Option<&str>, namespace: Option<&str>) -> Review {
+        self.cached(Who::Bearer(bearer), resource, verb, name, namespace).await
+    }
+
+    /// [`review_in`](Self::review_in) for a user already known (#731): a
+    /// client certificate the node CA verified, which is who the apiserver
+    /// would take it for. No TokenReview: only the SubjectAccessReview.
+    pub async fn review_identity(
+        &self,
+        user: &KubeUser,
+        resource: &str,
+        verb: &str,
+        name: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Review {
+        self.cached(Who::User(user), resource, verb, name, namespace).await
+    }
+
+    async fn cached(&self, who: Who<'_>, resource: &str, verb: &str, name: Option<&str>, namespace: Option<&str>) -> Review {
         let target = match self.target() {
             Ok(t) => t,
             Err(e) => return Review::Unavailable(e),
         };
-        let key =
-            (digest(bearer), resource.to_string(), verb.to_string(), name.map(str::to_string), namespace.map(str::to_string));
+        // A bearer by its digest; a user by its name and groups, apart from
+        // every digest (a `user:` key is never a hex digest).
+        let id = match &who {
+            Who::Bearer(b) => digest(b),
+            Who::User(u) => format!("user:{}\0{}", u.username, u.groups.join("\0")),
+        };
+        let key = (id, resource.to_string(), verb.to_string(), name.map(str::to_string), namespace.map(str::to_string));
         if let Some((at, r)) = self.cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             if at.elapsed() < CACHE_TTL && !matches!(r, Review::Unavailable(_)) {
                 return r.clone();
             }
         }
-        let r = match review_uncached(&target, bearer, resource, verb, name, namespace).await {
+        let r = match who {
+            Who::Bearer(b) => review_uncached(&target, b, resource, verb, name, namespace).await,
+            Who::User(u) => access_review(&target, u.clone(), None, resource, verb, name, namespace).await,
+        };
+        let r = match r {
             Review::Unavailable(why) => Review::Unavailable(self.why_own(&target, why)),
             r => r,
         };
@@ -360,6 +387,12 @@ impl KubeAuth {
         }
         r
     }
+}
+
+/// Whom a review is for.
+enum Who<'a> {
+    Bearer(&'a str),
+    User(&'a KubeUser),
 }
 
 async fn review_uncached(t: &Target, bearer: &str, resource: &str, verb: &str, name: Option<&str>, namespace: Option<&str>) -> Review {
@@ -383,6 +416,20 @@ async fn review_uncached(t: &Target, bearer: &str, resource: &str, verb: &str, n
             .map(|g| g.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
             .unwrap_or_default(),
     };
+    access_review(t, user, Some(tr["status"]["user"]["uid"].clone()), resource, verb, name, namespace).await
+}
+
+/// The SubjectAccessReview: may `user` `verb` the `storage.storm.io`
+/// resource?
+async fn access_review(
+    t: &Target,
+    user: KubeUser,
+    uid: Option<Value>,
+    resource: &str,
+    verb: &str,
+    name: Option<&str>,
+    namespace: Option<&str>,
+) -> Review {
     let mut attrs = json!({ "group": "storage.storm.io", "resource": resource, "verb": verb });
     if let Some(n) = name {
         attrs["name"] = json!(n);
@@ -390,18 +437,21 @@ async fn review_uncached(t: &Target, bearer: &str, resource: &str, verb: &str, n
     if let Some(ns) = namespace {
         attrs["namespace"] = json!(ns);
     }
+    let mut spec = json!({
+        "user": user.username,
+        "groups": user.groups,
+        "resourceAttributes": attrs,
+    });
+    if let Some(uid) = uid.filter(|u| !u.is_null()) {
+        spec["uid"] = uid;
+    }
     let sar = match t
         .post(
             "/apis/authorization.k8s.io/v1/subjectaccessreviews",
             json!({
                 "apiVersion": "authorization.k8s.io/v1",
                 "kind": "SubjectAccessReview",
-                "spec": {
-                    "user": user.username,
-                    "groups": user.groups,
-                    "uid": tr["status"]["user"]["uid"],
-                    "resourceAttributes": attrs,
-                },
+                "spec": spec,
             }),
         )
         .await
