@@ -27,9 +27,14 @@ engine: write-once, by sha256. The design is stormblock's (the issue says so):
   `/api/v1/blobs/uploads`, `/api/v1/blobstore` (stats: used, pool free),
   `/api/v1/blobstore/scrub`; the node's token, a blob delete included
   (registry GC), as a CSI delete is
-- [ ] `src/blobs/` + API + auth + tests (unit: format, replay, crash, packs;
-  it: the HTTP surface on a real engine)
-- [ ] README, CHANGELOG, docs/blobstore.md; check.sh
+- [x] `src/blobs/` + API + auth + tests: 17 unit (format, replay, crash
+  between data and record, torn batch, checkpoints, packs and repack, a full
+  pool, a delete under a reader, sessions across a restart, scrub, expiry),
+  `a_blob_delete_takes_the_node_token`, and
+  `integration_blobs::the_registry_surface_…` over HTTP on a real engine
+  (the store reopened from its volume): 19/19 on wip/732 (fdc77ba6)
+- [x] README, CHANGELOG, docs/blobstore.md, docs/auth.md; v24.46.0
+- [ ] check.sh on main's head
 
 ## #721 — finding 93dc7ea1ce1c in mgmt/link.rs (2026-11-21, P1)
 A failed link-counter sample (the drive's log page 0x18 unreadable, or the
