@@ -34,7 +34,7 @@ engine: write-once, by sha256. The design is stormblock's (the issue says so):
   `integration_blobs::the_registry_surface_…` over HTTP on a real engine
   (the store reopened from its volume): 19/19 on wip/732 (fdc77ba6)
 - [x] README, CHANGELOG, docs/blobstore.md, docs/auth.md; v24.46.0
-- [ ] check.sh on main's head
+- [x] check.sh ALL PASS on 50b76f01 (1627/1627, 1150 s); v24.46.0 tagged
 
 ## #721 — finding 93dc7ea1ce1c in mgmt/link.rs (2026-11-21, P1)
 A failed link-counter sample (the drive's log page 0x18 unreadable, or the
