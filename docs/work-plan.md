@@ -4,6 +4,20 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #737 — a sealed volume as a source: imports and an image build's members and ESP (2026-11-24, stormblock-registry#244/#248)
+The registry keeps each blob as a raw sealed volume with its length; a
+pallet publish already reads one in place (`source: volume`), the import and
+the image build made it stream the blob to a temp file. Same source in both,
+by the #733 pattern: resolved and held by the handler before anything is
+made, read in place, the volume unchanged; not sealed `409`, secret `409`,
+not there `404`, `byte_len` past its size `400`. Held with a serve hold
+(#267) so a `DELETE` meanwhile is refused; an unseal meanwhile fails the read.
+`byte_len` optional (the volume's size), as the pallet publish has it.
+- [ ] `volume::source::VolumeSource` (handle, length, seal epoch, hold)
+- [ ] `image::decode::Input::Volume`; import `volume` + `byte_len`
+- [ ] image build: member `volume` + `byte_len`, ESP `from_volume` + `byte_len`
+- [ ] tests, README, docs, CHANGELOG; check.sh
+
 ## #733 — the blob store as a source: pallet members, imports, image-spec members by digest (2026-11-24, stormblock-registry#241)
 Three engine operations took a registry blob by file path; each now takes it
 from the #732 store by digest, read in place (no staging copy), holding the
