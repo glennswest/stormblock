@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-24
+- **feat:** #733 (stormblock-registry#241): the blob store as a source, by digest, read in place (no staging copy): a pallet member `"source": "blob", "digest": "sha256:<hex>"` (publish and recompose), an import's `"blob": "sha256:<hex>"` (raw/ISO, qcow2, sparse VMDK, OVA), an image-spec member's `blob = "sha256:<hex>"` (`POST /api/v1/images/build`). A digest not held is a `404` naming it before anything is made; the blob is held until the operation ends, so a concurrent `DELETE` frees nothing under it. `blobs::source::BlobSource`; the image decoders read an `image::decode::Input` (a file or a blob). `docs/blobstore.md`.
+
 ### 2026-11-23
 - **test:** #735 (stormcentral#1679): the forge-trust test's bootstrap token is one plain placeholder const (`BOOTSTRAP`), so gitleaks' `generic-api-key` no longer matches the kubeadm-shaped `abcdef.0123456789abcdef` it held five times; never a credential, nothing allowlisted.
 

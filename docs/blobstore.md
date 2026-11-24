@@ -44,6 +44,28 @@ and opened again from its volume when the engine starts and is first asked.
 Reads, lists and stats with no store answer as an empty store (`404` for a
 blob).
 
+## A blob as the source of something else (#733)
+
+Three engine operations take a blob from the store by digest instead of a
+file path, and read it **in place**: nothing is staged or copied first, so a
+5 GB ISO costs no temporary space.
+
+| operation | the blob |
+|---|---|
+| pallet publish (`POST /api/v1/pallets`) and recompose (`…/{id}/recompose`, `add`) | a member `{"name", "role", "kind"?, "source": "blob", "digest": "sha256:<hex>"}` |
+| volume import (`POST /api/v1/volumes/import`) | `"blob": "sha256:<hex>"` in place of `file` or `url`; raw (an ISO, a disk image: `"format": "iso"`), qcow2, a sparse or streamOptimized VMDK, or an OVA. A descriptor VMDK names extent files beside it and is refused from a blob |
+| image build (`POST /api/v1/images/build`) | a pallet member's `blob = "sha256:<hex>"` in place of `file` or `text` (one of the three) |
+
+The blob is looked up **before** the work starts: a digest the store does not
+hold answers `404` naming it (and nothing is made: no pallet, no import job,
+no image file); a malformed digest `400`. Each operation then **holds** the
+blob until it ends: a `DELETE` of it meanwhile answers as usual and takes the
+digest out of the index at once, but its space goes back only when the
+publish, the import or the build lets go, as with a `GET` in flight.
+
+Only a build the engine runs reads the store: `stormblock image build` on
+the command line has none, and a spec member naming a blob fails there.
+
 ## Where the bytes go
 
 One thin volume, `stormblock-blobs` in the default namespace, placed in the
