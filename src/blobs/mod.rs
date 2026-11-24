@@ -37,6 +37,7 @@
 
 pub mod engine;
 pub mod format;
+pub mod source;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU8, Ordering};

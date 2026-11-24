@@ -263,6 +263,8 @@ pub async fn start(state: &Arc<AppState>, req: Request) -> Result<Vec<Status>, (
             name: entry.name.clone(),
             file: None,
             url: Some(format!("{forge}/api/v1/volumes/{}/content", entry.name)),
+            blob: None,
+            blob_source: None,
             format: Some("raw".into()),
             redundancy: None,
             size: entry.size_bytes.map(|b| b.to_string()),

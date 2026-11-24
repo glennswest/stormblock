@@ -594,3 +594,103 @@ async fn a_volume_that_holds_something_else_is_not_formatted() {
     t.write(0, &[0x5a; 4096]).await.unwrap();
     assert!(matches!(BlobStore::open(Arc::new(Mem(t.clone())), cfg()).await, Err(BlobError::Invalid(_))));
 }
+
+/// #733: a blob as the source of a pallet member, an import or an image
+/// member: read in place, short at its end, and held against a delete
+/// until the source is dropped.
+#[tokio::test]
+async fn a_blob_source_reads_in_place_and_holds_the_blob_against_a_delete() {
+    use super::source::BlobSource;
+    let t = Thin::new(SLOT, 1 << 20);
+    let s = open(&t).await;
+    let b = data(3 * SLOT as usize + 5_000, 11);
+    let d = put(&s, &b).await;
+    let name = format::digest_string(&d);
+
+    // Not held, and spelt wrong.
+    let other = format::digest_string(&sha(b"never put"));
+    match BlobSource::open(&s, &other).await {
+        Err(BlobError::NotFound(m)) => assert!(m.contains(&other), "{m}"),
+        e => panic!("{e:?}"),
+    }
+    assert!(matches!(BlobSource::open(&s, "sha256:XYZ").await, Err(BlobError::Invalid(_))));
+
+    let src = BlobSource::open(&s, &name).await.unwrap();
+    assert_eq!((src.len(), src.name()), (b.len() as u64, name.clone()));
+    // Exact reads at awkward offsets, across a slot and into the tail.
+    let mut buf = vec![0u8; 70_001];
+    src.read_exact_at(SLOT - 3, &mut buf).await.unwrap();
+    assert_eq!(&buf[..], &b[SLOT as usize - 3..SLOT as usize - 3 + 70_001]);
+    // Short at the end, nothing past it, an error for an exact read past it.
+    let mut tail = vec![0u8; 10_000];
+    assert_eq!(src.read_at(b.len() as u64 - 100, &mut tail).await.unwrap(), 100);
+    assert_eq!(&tail[..100], &b[b.len() - 100..]);
+    assert_eq!(src.read_at(b.len() as u64, &mut tail).await.unwrap(), 0);
+    assert!(src.read_exact_at(b.len() as u64 - 100, &mut tail).await.is_err());
+    // As a pallet member: past the end is OutOfRange, not a short read.
+    {
+        use crate::pallet::MemberContent;
+        assert_eq!(src.byte_len(), b.len() as u64);
+        let mut x = vec![0u8; 200];
+        assert!(MemberContent::read_at(&src, b.len() as u64 - 100, &mut x).await.is_err());
+    }
+
+    // Deleted while held: gone from the index, its slots kept, its bytes
+    // the same even after other blobs are put where they could have gone.
+    let slots = s.get(&d).await.unwrap().layout.slots.clone();
+    assert!(s.delete(&d).await.unwrap());
+    assert!(s.get(&d).await.is_none());
+    s.settle().await;
+    for i in 0..4u8 {
+        put(&s, &data(SLOT as usize + 17, 100 + i)).await;
+    }
+    for sl in &slots {
+        assert!(t.mapped().contains(sl), "slot {sl} given back under a source");
+    }
+    let mut all = vec![0u8; b.len()];
+    src.read_exact_at(0, &mut all).await.unwrap();
+    assert_eq!(all, b, "the source reads what it began on");
+    // Its clone holds it too; the last one dropped frees it.
+    let second = src.clone();
+    drop(src);
+    s.settle().await;
+    assert!(t.mapped().contains(&slots[0]));
+    drop(second);
+    s.settle().await;
+    for sl in &slots {
+        assert!(!t.mapped().contains(sl), "slot {sl} kept after the last source");
+    }
+    consistent(&s, &t).await;
+}
+
+/// #733: the image decoders read a blob as they read a file: a qcow2 and a
+/// raw image, through the import's own opener.
+#[tokio::test]
+async fn an_image_in_a_blob_decodes_as_a_file_does() {
+    use crate::image::decode::qcow2::testimg as q;
+    use crate::image::decode::{Input, SourceFormat};
+    use super::source::BlobSource;
+    let t = Thin::new(SLOT, 1 << 20);
+    let s = open(&t).await;
+    let a: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+    let c: Vec<u8> = (0..4096).map(|i| ((i * 7) % 253) as u8).collect();
+    let img = q::build(12, &[q::C::Data(a.clone()), q::C::Zero, q::C::Hole, q::C::Compressed(c.clone())]);
+    let d = put(&s, &img).await;
+    let src = BlobSource::open(&s, &format::digest_string(&d)).await.unwrap();
+    let (mut image, format) = crate::image::import::open_input(Input::Blob(src.clone()), None, None).await.unwrap();
+    assert_eq!(format, SourceFormat::Qcow2);
+    assert_eq!(image.virtual_size(), 4 * 4096);
+    let mut buf = vec![0u8; 4 * 4096];
+    image.read_at(0, &mut buf).await.unwrap();
+    assert_eq!(&buf[..4096], &a[..]);
+    assert!(buf[4096..3 * 4096].iter().all(|&b| b == 0));
+    assert_eq!(&buf[3 * 4096..], &c[..], "a compressed cluster inflates from a blob");
+
+    // The same blob forced raw: its bytes as they are, zeros past the end.
+    let (mut raw, format) = crate::image::import::open_input(Input::Blob(src), Some("raw"), None).await.unwrap();
+    assert_eq!((format, raw.virtual_size()), (SourceFormat::Raw, img.len() as u64));
+    let mut buf = vec![0xAAu8; 8192];
+    raw.read_at(img.len() as u64 - 4096, &mut buf).await.unwrap();
+    assert_eq!(&buf[..4096], &img[img.len() - 4096..]);
+    assert!(buf[4096..].iter().all(|&b| b == 0));
+}

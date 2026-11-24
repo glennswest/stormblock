@@ -206,9 +206,14 @@ pub struct MemberEntry {
     /// Content from a file…
     #[serde(default)]
     pub file: Option<PathBuf>,
-    /// …or written inline, for a kernel command line or a small config.
+    /// …or written inline, for a kernel command line or a small config…
     #[serde(default)]
     pub text: Option<String>,
+    /// …or a blob in the engine's blob store, `sha256:<hex>` (#733), read in
+    /// place. Only a build the engine runs (`POST /api/v1/images`) has a
+    /// store; it looks each one up, and holds it, before the build starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
 }
 
 /// A partition that is not a pallet: firmware blobs, a data image, anything.
@@ -403,6 +408,22 @@ impl ImageSpec {
                     p.name.as_deref().unwrap_or("(from_image)")
                 ))
             })?;
+        }
+        // One source a member (#733): a blob beside a file or text would
+        // leave which one is published to the order the builder reads them.
+        for p in &self.pallets {
+            for m in &p.members {
+                if m.blob.is_some() && (m.file.is_some() || m.text.is_some()) {
+                    return Err(ImageError::Spec(format!(
+                        "member '{}': give one of file, text or blob",
+                        m.name
+                    )));
+                }
+                if let Some(d) = &m.blob {
+                    crate::blobs::format::parse_digest(d)
+                        .map_err(|e| ImageError::Spec(format!("member '{}': blob: {e}", m.name)))?;
+                }
+            }
         }
         // A grow policy (#691) or an owner (#670) that cannot be applied is
         // refused before anything is laid down, not when the golden is.

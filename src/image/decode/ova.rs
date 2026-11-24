@@ -5,17 +5,20 @@
 use std::path::Path;
 
 use super::vmdk::Window;
+use super::Input;
 
 /// Where the first VMDK member sits in the archive: `(offset, size)`.
 pub async fn find_vmdk(path: &Path) -> std::io::Result<Option<(u64, u64, String)>> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let mut f = tokio::fs::File::open(path).await?;
-    let total = f.metadata().await?.len();
+    find_vmdk_in(&mut Input::file(path).await?).await
+}
+
+/// The same, in a file or a blob (#733).
+pub async fn find_vmdk_in(input: &mut Input) -> std::io::Result<Option<(u64, u64, String)>> {
+    let total = input.len();
     let mut off = 0u64;
     let mut hdr = [0u8; 512];
     while off + 512 <= total {
-        f.seek(std::io::SeekFrom::Start(off)).await?;
-        f.read_exact(&mut hdr).await?;
+        input.read_exact_at(off, &mut hdr).await?;
         if hdr.iter().all(|&b| b == 0) {
             break;
         }
@@ -34,9 +37,13 @@ pub async fn find_vmdk(path: &Path) -> std::io::Result<Option<(u64, u64, String)
 
 /// A window over the OVA's VMDK member.
 pub async fn vmdk_window(path: &Path) -> std::io::Result<Option<(Window, String)>> {
-    let Some((off, size, name)) = find_vmdk(path).await? else { return Ok(None) };
-    let file = tokio::fs::File::open(path).await?;
-    Ok(Some((Window::inside(file, off, size), name)))
+    vmdk_window_in(Input::file(path).await?).await
+}
+
+/// A window over the VMDK member of an OVA in a file or a blob (#733).
+pub async fn vmdk_window_in(mut input: Input) -> std::io::Result<Option<(Window, String)>> {
+    let Some((off, size, name)) = find_vmdk_in(&mut input).await? else { return Ok(None) };
+    Ok(Some((Window::inside(input, off, size), name)))
 }
 
 #[cfg(test)]

@@ -61,7 +61,9 @@ pub fn store_router(state: Arc<AppState>) -> Router {
     Router::new().route("/", get(stats)).route("/scrub", get(scrub_status).post(scrub)).with_state(state)
 }
 
-fn err(e: BlobError) -> Response {
+/// A blob store error as its answer: also what an operation that takes a
+/// blob as its source answers when the blob is not there (#733).
+pub(crate) fn err(e: BlobError) -> Response {
     let code = match &e {
         BlobError::NoSpace(_) => StatusCode::INSUFFICIENT_STORAGE,
         BlobError::Mismatch { .. } | BlobError::Invalid(_) | BlobError::Body(_) => StatusCode::BAD_REQUEST,

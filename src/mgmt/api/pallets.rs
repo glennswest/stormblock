@@ -392,6 +392,10 @@ pub enum MemberSource {
     Volume { volume_id: String, byte_len: Option<u64> },
     /// A file on the node.
     File { path: String },
+    /// A blob in the engine's blob store (#733), by `sha256:<hex>`, read in
+    /// place and held until the publish ends: a `DELETE` of it meanwhile
+    /// frees nothing until then.
+    Blob { digest: String },
     /// Content in the request, base64. For small members: a kernel command
     /// line, a boot config.
     Inline { base64: String },
@@ -450,7 +454,7 @@ fn yes() -> bool {
 }
 
 async fn build_members(
-    state: &AppState,
+    state: &Arc<AppState>,
     reqs: Vec<MemberRequest>,
 ) -> Result<Vec<MemberSpec>, Response> {
     let mut out = Vec::with_capacity(reqs.len());
@@ -473,6 +477,13 @@ async fn build_members(
                     Ok(s) => s,
                     Err(e) => return Err(err(e)),
                 }
+            }
+            MemberSource::Blob { digest } => {
+                let src = match crate::blobs::source::BlobSource::from_engine(state, &digest).await {
+                    Ok(s) => s,
+                    Err(e) => return Err(super::blobs::err(e)),
+                };
+                MemberSpec::new(r.name, r.role, kind, Arc::new(src))
             }
             MemberSource::Inline { base64 } => {
                 use base64::Engine;

@@ -50,9 +50,17 @@ pub struct ImportSpec {
     /// A local file…
     #[serde(default)]
     pub file: Option<String>,
-    /// …or a URL to stream first.
+    /// …or a URL to stream first…
     #[serde(default)]
     pub url: Option<String>,
+    /// …or a blob in the engine's blob store, `sha256:<hex>` (#733), read
+    /// in place: nothing staged, the blob held until the import ends.
+    #[serde(default)]
+    pub blob: Option<String>,
+    /// The blob, held: resolved by the caller before [`Imports::start`] so
+    /// a digest not held is refused there (`404`), never a failed job.
+    #[serde(skip)]
+    pub blob_source: Option<crate::blobs::source::BlobSource>,
     /// `raw`, `qcow2`, `vmdk`, `ova`; absent = detect by magic.
     #[serde(default)]
     pub format: Option<String>,
@@ -309,11 +317,15 @@ impl Imports {
                 return Err(format!("'{ns}' is not a namespace name (a DNS-1123 label)"));
             }
         }
-        let source = match (&spec.file, &spec.url) {
-            (Some(f), None) => f.clone(),
-            (None, Some(u)) => u.clone(),
-            (Some(_), Some(_)) => return Err("give file or url, not both".into()),
-            (None, None) => return Err("give file or url".into()),
+        let source = match (&spec.file, &spec.url, &spec.blob) {
+            (Some(f), None, None) => f.clone(),
+            (None, Some(u), None) => u.clone(),
+            (None, None, Some(_)) => match &spec.blob_source {
+                Some(b) => b.name(),
+                None => return Err("the blob was not looked up before the import started".into()),
+            },
+            (None, None, None) => return Err("give file, url or blob".into()),
+            _ => return Err("give one of file, url or blob".into()),
         };
         if let Some(r) = &spec.redundancy {
             RedundancyPolicy::parse(r).map_err(|e| format!("redundancy: {e}"))?;
@@ -391,7 +403,7 @@ impl Imports {
 
 /// A readable image of any supported shape.
 pub enum Source {
-    Raw { file: tokio::fs::File, len: u64 },
+    Raw { input: decode::Input, len: u64 },
     Qcow2(decode::qcow2::Qcow2),
     Vmdk(decode::vmdk::Vmdk),
 }
@@ -444,22 +456,8 @@ impl Source {
 
     pub async fn read_at(&mut self, off: u64, buf: &mut [u8]) -> Result<(), String> {
         match self {
-            Source::Raw { file, len } => {
-                use tokio::io::{AsyncReadExt, AsyncSeekExt};
-                if off >= *len {
-                    buf.fill(0);
-                    return Ok(());
-                }
-                file.seek(std::io::SeekFrom::Start(off)).await.map_err(|e| e.to_string())?;
-                let take = ((*len - off) as usize).min(buf.len());
-                let mut got = 0usize;
-                while got < take {
-                    let n = file.read(&mut buf[got..take]).await.map_err(|e| e.to_string())?;
-                    if n == 0 {
-                        break;
-                    }
-                    got += n;
-                }
+            Source::Raw { input, .. } => {
+                let got = input.read_at(off, buf).await.map_err(|e| e.to_string())?;
                 buf[got..].fill(0);
                 Ok(())
             }
@@ -471,7 +469,25 @@ impl Source {
 
 /// Open a file as whatever it is.
 pub async fn open_source(path: &Path, forced: Option<&str>) -> Result<(Source, SourceFormat), String> {
-    let detected = decode::detect_file(path).await.map_err(|e| format!("{}: {e}", path.display()))?;
+    let input = decode::Input::file(path).await.map_err(|e| format!("{}: {e}", path.display()))?;
+    open_input(input, forced, Some(path)).await.map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Where the bytes of an import are.
+enum Origin<'a> {
+    Path(&'a Path),
+    Blob(&'a crate::blobs::source::BlobSource),
+}
+
+/// Open a file or a blob (#733) as whatever it is. `path` is the file's,
+/// where a VMDK descriptor's extent files are found; a blob has none, and a
+/// descriptor VMDK from one is refused.
+pub async fn open_input(
+    mut input: decode::Input,
+    forced: Option<&str>,
+    path: Option<&Path>,
+) -> Result<(Source, SourceFormat), String> {
+    let detected = decode::detect_input(&mut input).await.map_err(|e| e.to_string())?;
     let format = match forced.map(|f| f.to_ascii_lowercase()) {
         Some(f) => match f.as_str() {
             "raw" | "iso" => SourceFormat::Raw,
@@ -484,14 +500,17 @@ pub async fn open_source(path: &Path, forced: Option<&str>) -> Result<(Source, S
     };
     let src = match format {
         SourceFormat::Raw => {
-            let file = tokio::fs::File::open(path).await.map_err(|e| e.to_string())?;
-            let len = file.metadata().await.map_err(|e| e.to_string())?.len();
-            Source::Raw { file, len }
+            let len = input.len();
+            Source::Raw { input, len }
         }
-        SourceFormat::Qcow2 => Source::Qcow2(decode::qcow2::Qcow2::open(path).await.map_err(|e| e.to_string())?),
-        SourceFormat::Vmdk => Source::Vmdk(decode::vmdk::Vmdk::open(path).await.map_err(|e| e.to_string())?),
+        SourceFormat::Qcow2 => Source::Qcow2(decode::qcow2::Qcow2::from_input(input).await.map_err(|e| e.to_string())?),
+        SourceFormat::Vmdk => Source::Vmdk(match path {
+            Some(p) => decode::vmdk::Vmdk::open(p).await,
+            None => decode::vmdk::Vmdk::from_input(input).await,
+        }
+        .map_err(|e| e.to_string())?),
         SourceFormat::Ova => {
-            let (win, name) = decode::ova::vmdk_window(path)
+            let (win, name) = decode::ova::vmdk_window_in(input)
                 .await
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| "no .vmdk member in the OVA".to_string())?;
@@ -513,6 +532,11 @@ async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportSta
     // times over. qcow2 and VMDK still stage: their decoders seek.
     if let (Some(url), Some("raw" | "iso" | "iso9660")) = (&spec.url, spec.format.as_deref()) {
         return stream_raw(state, spec, st, url).await;
+    }
+
+    // A blob is read where it is, held until the import ends (#733).
+    if let Some(b) = &spec.blob_source {
+        return write_and_seal(state, spec, st, Origin::Blob(b)).await;
     }
 
     // 1. Fetch, if a URL.
@@ -543,7 +567,7 @@ async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportSta
         _ => unreachable!("validated at start"),
     };
 
-    let result = write_and_seal(state, spec, st, &path).await;
+    let result = write_and_seal(state, spec, st, Origin::Path(&path)).await;
     if let Some(p) = downloaded {
         if !spec.keep_download {
             let _ = tokio::fs::remove_file(&p).await;
@@ -781,8 +805,19 @@ async fn record_golden(state: &Arc<AppState>, spec: &ImportSpec, vol_id: VolumeI
     }
 }
 
-async fn write_and_seal(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportStatus>>, path: &Path) -> Result<(), Fail> {
-    let (mut src, format) = open_source(path, spec.format.as_deref()).await.map_err(|e| Fail::new(Phase::Verify, e))?;
+async fn write_and_seal(
+    state: &Arc<AppState>,
+    spec: &ImportSpec,
+    st: &Arc<RwLock<ImportStatus>>,
+    origin: Origin<'_>,
+) -> Result<(), Fail> {
+    let opened = match origin {
+        Origin::Path(path) => open_source(path, spec.format.as_deref()).await,
+        Origin::Blob(b) => open_input(decode::Input::Blob(b.clone()), spec.format.as_deref(), None)
+            .await
+            .map_err(|e| format!("blob {}: {e}", b.name())),
+    };
+    let (mut src, format) = opened.map_err(|e| Fail::new(Phase::Verify, e))?;
     let vsize = src.virtual_size();
     if vsize == 0 {
         return Err(Fail::new(Phase::Verify, "image is empty"));

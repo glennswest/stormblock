@@ -122,6 +122,9 @@ pub struct ImageBuilder {
     spec: ImageSpec,
     /// The engine holding any `volume:` goldens the spec names.
     engine: Option<String>,
+    /// The blobs the spec's members name (#733), by `sha256:<hex>`, looked
+    /// up and held by whoever runs the build: the engine's API.
+    blobs: std::collections::BTreeMap<String, crate::blobs::source::BlobSource>,
 }
 
 fn align_up(v: u64, a: u64) -> u64 {
@@ -156,7 +159,40 @@ impl ImageBuilder {
 
     pub fn new(spec: ImageSpec) -> Self {
         ImageBuilder {
-            engine: None, spec }
+            engine: None, spec, blobs: Default::default() }
+    }
+
+    /// The blobs the members name (#733), each held until the builder is
+    /// dropped. A member naming a blob not given here fails the build.
+    pub fn blobs(mut self, blobs: impl IntoIterator<Item = crate::blobs::source::BlobSource>) -> Self {
+        self.blobs = blobs.into_iter().map(|b| (b.name(), b)).collect();
+        self
+    }
+
+    fn blob(&self, m: &MemberEntry, digest: &str) -> Result<&crate::blobs::source::BlobSource> {
+        let name = crate::blobs::format::parse_digest(digest)
+            .map(|d| crate::blobs::format::digest_string(&d))
+            .map_err(|e| ImageError::Spec(format!("member '{}': blob: {e}", m.name)))?;
+        self.blobs.get(&name).ok_or_else(|| {
+            ImageError::Spec(format!(
+                "member '{}': blob {name} is not available here: only a build the engine runs \
+                 (POST /api/v1/images) reads its blob store",
+                m.name
+            ))
+        })
+    }
+
+    async fn member_len(&self, m: &MemberEntry) -> Result<u64> {
+        match &m.blob {
+            Some(d) => Ok(self.blob(m, d)?.len()),
+            None => member_len(m).await,
+        }
+    }
+
+    async fn member_spec(&self, m: &MemberEntry) -> Result<MemberSpec> {
+        let Some(d) = &m.blob else { return member_spec(m).await };
+        let kind = m.kind.as_deref().map(parse_member_kind).unwrap_or(MemberKind::Raw);
+        Ok(MemberSpec::new(m.name.to_string(), m.role.to_string(), kind, Arc::new(self.blob(m, d)?.clone())))
     }
 
     pub fn spec(&self) -> &ImageSpec {
@@ -220,7 +256,7 @@ impl ImageBuilder {
         }
         let mut bytes = 0u64;
         for m in &p.members {
-            bytes += align_up(member_len(m).await?, 4096);
+            bytes += align_up(self.member_len(m).await?, 4096);
         }
         Ok(bytes + PALLET_SLACK)
     }
@@ -946,7 +982,7 @@ impl ImageBuilder {
             spec.tries = t;
         }
         for m in &entry.members {
-            spec.members.push(member_spec(m).await?);
+            spec.members.push(self.member_spec(m).await?);
         }
         if spec.members.is_empty() {
             return Err(ImageError::Spec(format!(
@@ -1304,7 +1340,7 @@ async fn member_len(m: &MemberEntry) -> Result<u64> {
         (Some(f), _) => file_len(f).await,
         (None, Some(t)) => Ok(t.len() as u64),
         (None, None) => Err(ImageError::Spec(format!(
-            "member '{}' has neither `file` nor `text`",
+            "member '{}' has none of `file`, `text` or `blob`",
             m.name
         ))),
     }
@@ -1327,7 +1363,7 @@ async fn member_spec(m: &MemberEntry) -> Result<MemberSpec> {
             Arc::new(BytesContent(t.clone().into_bytes())),
         )),
         (None, None) => Err(ImageError::Spec(format!(
-            "member '{}' has neither `file` nor `text`",
+            "member '{}' has none of `file`, `text` or `blob`",
             m.name
         ))),
     }

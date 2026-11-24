@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::Path;
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use super::Input;
 
 const MAGIC: &[u8; 4] = b"QFI\xfb";
 const L1E_OFFSET_MASK: u64 = 0x00ff_ffff_ffff_fe00;
@@ -62,7 +62,7 @@ pub enum ClusterState {
 }
 
 pub struct Qcow2 {
-    file: tokio::fs::File,
+    input: Input,
     pub version: u32,
     pub cluster_bits: u32,
     pub cluster_size: u64,
@@ -81,9 +81,13 @@ fn be32(b: &[u8], at: usize) -> u32 {
 
 impl Qcow2 {
     pub async fn open(path: &Path) -> Result<Self, Qcow2Error> {
-        let mut file = tokio::fs::File::open(path).await?;
+        Self::from_input(Input::file(path).await?).await
+    }
+
+    /// A qcow2 read from a file or a blob (#733).
+    pub async fn from_input(mut input: Input) -> Result<Self, Qcow2Error> {
         let mut hdr = vec![0u8; 112];
-        let n = file.read(&mut hdr).await?;
+        let n = input.read_at(0, &mut hdr).await?;
         if n < 72 || &hdr[..4] != MAGIC {
             return Err(Qcow2Error::NotQcow2);
         }
@@ -132,11 +136,10 @@ impl Qcow2 {
         let l2_entries = cluster_size / 8;
         let mut l1 = vec![0u8; l1_size * 8];
         if l1_size > 0 {
-            file.seek(std::io::SeekFrom::Start(l1_offset)).await?;
-            file.read_exact(&mut l1).await?;
+            input.read_exact_at(l1_offset, &mut l1).await?;
         }
         let l1: Vec<u64> = l1.chunks_exact(8).map(|c| u64::from_be_bytes(c.try_into().unwrap())).collect();
-        Ok(Qcow2 { file, version, cluster_bits, cluster_size, virtual_size, l1, l2_entries, l2_cache: HashMap::new() })
+        Ok(Qcow2 { input, version, cluster_bits, cluster_size, virtual_size, l1, l2_entries, l2_cache: HashMap::new() })
     }
 
     pub fn virtual_size(&self) -> u64 {
@@ -157,8 +160,7 @@ impl Qcow2 {
         }
         if !self.l2_cache.contains_key(&l2_off) {
             let mut raw = vec![0u8; self.cluster_size as usize];
-            self.file.seek(std::io::SeekFrom::Start(l2_off)).await?;
-            self.file.read_exact(&mut raw).await?;
+            self.input.read_exact_at(l2_off, &mut raw).await?;
             let table: Vec<u64> = raw.chunks_exact(8).map(|c| u64::from_be_bytes(c.try_into().unwrap())).collect();
             if self.l2_cache.len() > 64 {
                 self.l2_cache.clear();
@@ -198,16 +200,8 @@ impl Qcow2 {
             let start_sector = host_off & !511;
             let len = ((extra + 1) * 512) as usize + (host_off - start_sector) as usize;
             let mut comp = vec![0u8; len];
-            self.file.seek(std::io::SeekFrom::Start(host_off)).await?;
             // Read what is there; the last sector may run past EOF.
-            let mut got = 0usize;
-            while got < len {
-                let n = self.file.read(&mut comp[got..]).await?;
-                if n == 0 {
-                    break;
-                }
-                got += n;
-            }
+            let got = self.input.read_at(host_off, &mut comp).await?;
             let mut dec = flate2::read::DeflateDecoder::new(&comp[..got]);
             let mut filled = 0usize;
             loop {
@@ -229,15 +223,8 @@ impl Qcow2 {
         if host == 0 {
             return Ok(out);
         }
-        self.file.seek(std::io::SeekFrom::Start(host)).await?;
-        let mut got = 0usize;
-        while got < out.len() {
-            let n = self.file.read(&mut out[got..]).await?;
-            if n == 0 {
-                break; // a short final cluster reads as zeros past EOF
-            }
-            got += n;
-        }
+        // A short final cluster reads as zeros past EOF.
+        self.input.read_at(host, &mut out).await?;
         Ok(out)
     }
 

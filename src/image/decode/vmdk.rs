@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use super::Input;
 
 const MAGIC: &[u8; 4] = b"KDMV";
 const SECTOR: u64 = 512;
@@ -60,22 +60,26 @@ pub enum GrainState {
     Data,
 }
 
-/// A byte window over a file: the whole file, or a member inside a tar.
+/// A byte window over a file or a blob (#733): the whole of it, or a member
+/// inside a tar.
 pub struct Window {
-    file: tokio::fs::File,
+    input: Input,
     base: u64,
     len: u64,
 }
 
 impl Window {
     pub async fn whole(path: &Path) -> std::io::Result<Window> {
-        let file = tokio::fs::File::open(path).await?;
-        let len = file.metadata().await?.len();
-        Ok(Window { file, base: 0, len })
+        Ok(Window::over(Input::file(path).await?))
     }
 
-    pub fn inside(file: tokio::fs::File, base: u64, len: u64) -> Window {
-        Window { file, base, len }
+    pub fn over(input: Input) -> Window {
+        let len = input.len();
+        Window { input, base: 0, len }
+    }
+
+    pub fn inside(input: Input, base: u64, len: u64) -> Window {
+        Window { input, base, len }
     }
 
     pub fn len(&self) -> u64 {
@@ -92,16 +96,7 @@ impl Window {
             return Ok(0);
         }
         let take = ((self.len - off) as usize).min(buf.len());
-        self.file.seek(std::io::SeekFrom::Start(self.base + off)).await?;
-        let mut got = 0usize;
-        while got < take {
-            let n = self.file.read(&mut buf[got..take]).await?;
-            if n == 0 {
-                break;
-            }
-            got += n;
-        }
-        Ok(got)
+        self.input.read_at(self.base + off, &mut buf[..take]).await
     }
 
     async fn read_exact_at(&mut self, off: u64, buf: &mut [u8]) -> Result<(), VmdkError> {
@@ -288,6 +283,24 @@ impl Vmdk {
         }
         let text = tokio::fs::read_to_string(path).await?;
         Self::from_descriptor(&text, path.parent().unwrap_or(Path::new("."))).await
+    }
+
+    /// A VMDK read from a file or a blob (#733) that is one sparse extent.
+    /// A descriptor names extent files beside it, and a blob has no
+    /// "beside": refused, naming what to send instead.
+    pub async fn from_input(input: Input) -> Result<Self, VmdkError> {
+        let mut win = Window::over(input);
+        let mut head = vec![0u8; 512];
+        let n = win.read_at(0, &mut head).await?;
+        if n >= 4 && &head[..4] == MAGIC {
+            return Self::from_window(win).await;
+        }
+        if head.starts_with(b"# Disk DescriptorFile") {
+            return Err(VmdkError::Unsupported(
+                "a descriptor VMDK names extent files beside it; send a monolithicSparse or streamOptimized VMDK, or an OVA".into(),
+            ));
+        }
+        Err(VmdkError::NotVmdk)
     }
 
     /// Open a sparse extent from a window (a member of an OVA).

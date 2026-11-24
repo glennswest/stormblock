@@ -15,6 +15,85 @@ pub mod vmdk;
 
 use std::path::Path;
 
+/// What an image is read from: a file, or a blob in the engine's blob store
+/// read in place (#733). Positional reads only: the decoders seek.
+pub enum Input {
+    File { file: tokio::fs::File, len: u64 },
+    Blob(crate::blobs::source::BlobSource),
+}
+
+impl std::fmt::Debug for Input {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Input::File { len, .. } => write!(f, "Input::File({len} bytes)"),
+            Input::Blob(b) => write!(f, "Input::{b:?}"),
+        }
+    }
+}
+
+impl Input {
+    pub async fn file(path: &Path) -> std::io::Result<Input> {
+        let file = tokio::fs::File::open(path).await?;
+        let len = file.metadata().await?.len();
+        Ok(Input::File { file, len })
+    }
+
+    pub fn len(&self) -> u64 {
+        match self {
+            Input::File { len, .. } => *len,
+            Input::Blob(b) => b.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// A second reader over the same bytes, with its own position.
+    pub async fn try_clone(&self) -> std::io::Result<Input> {
+        Ok(match self {
+            Input::File { file, len } => Input::File { file: file.try_clone().await?, len: *len },
+            Input::Blob(b) => Input::Blob(b.clone()),
+        })
+    }
+
+    /// Up to `buf.len()` bytes at `off`: short at the end, 0 past it.
+    pub async fn read_at(&mut self, off: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Input::File { file, len } => {
+                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                if off >= *len {
+                    return Ok(0);
+                }
+                let take = ((*len - off) as usize).min(buf.len());
+                file.seek(std::io::SeekFrom::Start(off)).await?;
+                let mut got = 0usize;
+                while got < take {
+                    let n = file.read(&mut buf[got..take]).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    got += n;
+                }
+                Ok(got)
+            }
+            Input::Blob(b) => b.read_at(off, buf).await.map_err(|e| std::io::Error::other(format!("blob {}: {e}", b.name()))),
+        }
+    }
+
+    /// Exactly `buf.len()` bytes at `off`, or `UnexpectedEof`.
+    pub async fn read_exact_at(&mut self, off: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let n = self.read_at(off, buf).await?;
+        if n != buf.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("short read at {off}: {n} of {} byte(s)", buf.len()),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceFormat {
     Raw,
@@ -67,10 +146,13 @@ pub fn detect(head: &[u8]) -> SourceFormat {
 
 /// Read enough of a file to detect its format.
 pub async fn detect_file(path: &Path) -> std::io::Result<SourceFormat> {
-    use tokio::io::AsyncReadExt;
-    let mut f = tokio::fs::File::open(path).await?;
+    detect_input(&mut Input::file(path).await?).await
+}
+
+/// Read enough of an input to detect its format.
+pub async fn detect_input(input: &mut Input) -> std::io::Result<SourceFormat> {
     let mut head = [0u8; 512];
-    let n = f.read(&mut head).await?;
+    let n = input.read_at(0, &mut head).await?;
     Ok(detect(&head[..n]))
 }
 

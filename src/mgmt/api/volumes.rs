@@ -2509,7 +2509,8 @@ async fn detach_volume(
     Json(serde_json::json!({ "id": uuid, "attached": false })).into_response()
 }
 
-/// `POST /api/v1/volumes/import {name, file|url, format?, redundancy?, size?, seal?, role?, verify?}`
+/// `POST /api/v1/volumes/import {name, file|url|blob, format?, redundancy?, size?, seal?, role?, verify?}`
+/// — `blob` is `sha256:<hex>` in the engine's blob store, read in place (#733);
 /// — `role` (`system`|`data`) is the half the golden lands in (#93); a held
 /// VM image or any media a node keeps says `data`, which no install lays
 /// again (#349).
@@ -2787,6 +2788,14 @@ async fn start_import(
 ) -> Response {
     // The volume it makes is the caller's (#422).
     spec.creator = Some(crate::mgmt::creators::who(caller.as_deref()));
+    // A blob is looked up, and held, before the job (#733): one not held is
+    // a 404 naming it, never a job that fails.
+    if let Some(d) = &spec.blob {
+        match crate::blobs::source::BlobSource::from_engine(&state, d).await {
+            Ok(b) => spec.blob_source = Some(b),
+            Err(e) => return super::blobs::err(e),
+        }
+    }
     let started = state.imports.write().await.start(state.clone(), spec);
     match started {
         Ok(status) => {

@@ -279,6 +279,21 @@ async fn build(State(state): State<Arc<AppState>>, Json(req): Json<BuildRequest>
         return ApiError::bad_request(e);
     }
 
+    // Each blob a member names, looked up and held for the build (#733): one
+    // not held is a 404 naming it, before anything is laid.
+    if let Err(e) = spec.check() {
+        return err(e);
+    }
+    let mut blobs = Vec::new();
+    for m in spec.pallets.iter().flat_map(|p| p.members.iter()) {
+        if let Some(d) = &m.blob {
+            match crate::blobs::source::BlobSource::from_engine(&state, d).await {
+                Ok(b) => blobs.push(b),
+                Err(e) => return super::blobs::err(e),
+            }
+        }
+    }
+
     let out_path = match allowed_out(&state, Path::new(&req.out), format).await {
         Ok((p, _)) => p,
         Err(m) => return ApiError::bad_request(m),
@@ -297,7 +312,7 @@ async fn build(State(state): State<Arc<AppState>>, Json(req): Json<BuildRequest>
         out_path.display(),
         spec.pallets.len()
     );
-    let report = match ImageBuilder::new(spec).build(&raw_path).await {
+    let report = match ImageBuilder::new(spec).blobs(blobs).build(&raw_path).await {
         Ok(r) => r,
         Err(e) => return err(e),
     };

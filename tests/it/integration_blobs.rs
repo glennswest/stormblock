@@ -205,3 +205,184 @@ async fn the_registry_surface_puts_reads_lists_uploads_and_deletes_by_digest() {
     let (_, v) = json(c.get(format!("{base}/api/v1/blobstore")).header("authorization", &auth).send().await.unwrap()).await;
     assert_eq!(v["blobs"].as_u64(), Some(21), "{v}");
 }
+
+/// #733: the blob store as a source, by digest, over HTTP: a pallet
+/// member, an import (a qcow2 and an ISO) and an image-spec member, each
+/// read in place; a digest not held is a 404 naming it, and nothing is made.
+#[tokio::test]
+async fn pallet_members_imports_and_image_members_come_from_the_blob_store_by_digest() {
+    use stormblock::drive::filedev::FileDevice;
+    use stormblock::pallet::format::MemberExt;
+    use stormblock::pallet::{PalletManager, PalletStore};
+    use stormblock::volume::VolumeId;
+
+    let dir = TempDir::new().unwrap();
+    let images = dir.path().join("images");
+    std::fs::create_dir_all(&images).unwrap();
+    let st = {
+        let mut c = StormBlockConfig::default();
+        c.management.node_name = Some("n1".to_string());
+        c.management.api_token = Some(TOKEN.to_string());
+        c.management.admin_token = Some("admin-token".to_string());
+        c.images.dir = Some(images.to_string_lossy().to_string());
+        let devices = common::create_file_devices(&dir, 2, 96 * 1024 * 1024).await;
+        let array = RaidArray::create(RaidLevel::Raid1, devices, None).await.unwrap();
+        let array_id = array.array_id();
+        let backing: Arc<dyn BlockDevice> = Arc::new(array);
+        let mut vm = VolumeManager::new(SLOT);
+        vm.add_backing_device(array_id, backing).await;
+        let (reg, gem) = (vm.registry().clone(), vm.gem().clone());
+        Arc::new(AppState::new(c, vm, reg, gem))
+    };
+    // A drive for pallets, with its GPT.
+    let pallet_drive: Arc<dyn BlockDevice> = Arc::new(
+        FileDevice::open_with_capacity(dir.path().join("pallets.img").to_str().unwrap(), 64 * 1024 * 1024).await.unwrap(),
+    );
+    {
+        let mut s = PalletStore::default();
+        s.add_drive("/dev/pallets", pallet_drive.clone());
+        PalletManager::new(s).init_gpt(0, true).await.unwrap();
+    }
+    st.drives.write().await.push(stormblock::mgmt::DriveInfo {
+        device: pallet_drive.clone(),
+        path: "/dev/pallets".into(),
+        labels: Default::default(),
+        dhchap: false,
+    });
+    let base = serve(st.clone()).await;
+    let c = reqwest::Client::new();
+    let admin = "Bearer admin-token";
+    let put = |b: Vec<u8>| {
+        let (c, base) = (c.clone(), base.clone());
+        async move {
+            let d = digest(&b);
+            let r = c.put(format!("{base}/api/v1/blobs/{d}")).header("authorization", admin).body(b).send().await.unwrap();
+            assert_eq!(r.status().as_u16(), 201);
+            d
+        }
+    };
+    let missing = digest(b"never put");
+
+    // --- pallet publish
+    let kernel = data(200_000, 21);
+    let cmdline = b"console=ttyS0 root=LABEL=x".to_vec();
+    let (dk, dc) = (put(kernel.clone()).await, put(cmdline.clone()).await);
+    let publish = |members: Value| {
+        let (c, base) = (c.clone(), base.clone());
+        async move {
+            json(c.post(format!("{base}/api/v1/pallets")).header("authorization", admin)
+                .json(&serde_json::json!({ "name": "blob-boot", "members": members, "priority": 0 }))
+                .send().await.unwrap()).await
+        }
+    };
+    let (s, v) = publish(serde_json::json!([
+        { "name": "vmlinuz", "role": "kernel", "source": "blob", "digest": dk },
+        { "name": "cmdline", "role": "cmdline", "source": "blob", "digest": dc },
+    ])).await;
+    assert_eq!(s, 201, "{v}");
+    let id = v["id"].as_str().unwrap().to_string();
+    let (s, v) = json(c.get(format!("{base}/api/v1/pallets/{id}")).header("authorization", admin).send().await.unwrap()).await;
+    assert_eq!(s, 200, "{v}");
+    let members = v["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2, "{v}");
+    for (m, d, n) in [(&members[0], &dk, kernel.len()), (&members[1], &dc, cmdline.len())] {
+        assert_eq!(format!("sha256:{}", m["digest"].as_str().unwrap()), *d, "{v}");
+        assert_eq!(m["byte_len"].as_u64(), Some(n as u64));
+    }
+    let (s, v) = json(c.post(format!("{base}/api/v1/pallets/{id}/verify")).header("authorization", admin).send().await.unwrap()).await;
+    assert_eq!(s, 200, "{v}");
+    // A digest not held: 404 naming it, and no pallet.
+    let (s, v) = publish(serde_json::json!([{ "name": "vmlinuz", "role": "kernel", "source": "blob", "digest": missing }])).await;
+    assert_eq!(s, 404, "{v}");
+    assert!(v["error"].as_str().unwrap().contains(&missing), "{v}");
+    let (s, v) = publish(serde_json::json!([{ "name": "vmlinuz", "role": "kernel", "source": "blob", "digest": "sha256:nope" }])).await;
+    assert_eq!(s, 400, "{v}");
+
+    // --- import: a qcow2, then an ISO (raw), each from a blob
+    use stormblock::image::decode::qcow2::testimg::{build, C};
+    let a: Vec<u8> = (0..65536).map(|i| (i % 251) as u8).collect();
+    let z: Vec<u8> = (0..65536).map(|i| ((i * 7) % 253) as u8).collect();
+    let qcow = build(16, &[C::Data(a.clone()), C::Hole, C::Compressed(z.clone()), C::Zero]);
+    let iso = data(3 * 65536 + 2048, 33);
+    let (dq, di) = (put(qcow).await, put(iso.clone()).await);
+    let import = |body: Value| {
+        let (c, base) = (c.clone(), base.clone());
+        async move {
+            let (s, v) = json(c.post(format!("{base}/api/v1/volumes/import")).header("authorization", admin).json(&body).send().await.unwrap()).await;
+            if s != 202 {
+                return (s, v);
+            }
+            let id = v["id"].as_str().unwrap().to_string();
+            for _ in 0..600 {
+                let (_, v) = json(c.get(format!("{base}/api/v1/volumes/import/{id}")).header("authorization", admin).send().await.unwrap()).await;
+                if v["state"] == "done" || v["state"] == "failed" {
+                    return (s, v);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("import {id} never ended");
+        }
+    };
+    let read_volume = |id: &str, len: usize| {
+        let (st, id) = (st.clone(), id.parse::<uuid::Uuid>().unwrap());
+        async move {
+            let dev = st.volume_manager.lock().await.get_volume(&VolumeId(id)).expect("the volume");
+            let mut buf = vec![0u8; len.div_ceil(4096) * 4096];
+            dev.read(0, &mut buf).await.unwrap();
+            buf.truncate(len);
+            buf
+        }
+    };
+    let (s, v) = import(serde_json::json!({ "name": "from-qcow2", "blob": dq, "verify": false })).await;
+    assert_eq!((s, v["state"].as_str()), (202, Some("done")), "{v}");
+    assert_eq!((v["format"].as_str(), v["virtual_size"].as_u64(), v["source"].as_str()), (Some("qcow2"), Some(4 * 65536), Some(dq.as_str())), "{v}");
+    let got = read_volume(v["volume_id"].as_str().unwrap(), 4 * 65536).await;
+    assert_eq!(&got[..65536], &a[..]);
+    assert!(got[65536..2 * 65536].iter().all(|&b| b == 0));
+    assert_eq!(&got[2 * 65536..3 * 65536], &z[..]);
+    let (s, v) = import(serde_json::json!({ "name": "from-iso", "blob": di, "format": "iso", "verify": false })).await;
+    assert_eq!((s, v["state"].as_str()), (202, Some("done")), "{v}");
+    assert_eq!(read_volume(v["volume_id"].as_str().unwrap(), iso.len()).await, iso);
+    // Not held: 404 naming it, no job; a blob with a file is refused.
+    let (s, v) = import(serde_json::json!({ "name": "nothing", "blob": missing })).await;
+    assert_eq!(s, 404, "{v}");
+    assert!(v["error"].as_str().unwrap().contains(&missing), "{v}");
+    let (s, v) = import(serde_json::json!({ "name": "both", "blob": di, "file": "/x" })).await;
+    assert_eq!(s, 400, "{v}");
+    let (_, v) = json(c.get(format!("{base}/api/v1/volumes/import")).header("authorization", admin).send().await.unwrap()).await;
+    assert_eq!(v["count"].as_u64(), Some(2), "{v}");
+
+    // --- image build: a spec member by blob
+    let out = images.join("blob.img");
+    let spec = serde_json::json!({
+        "name": "blob-image",
+        "pallet": [{ "name": "boot", "members": [
+            { "name": "vmlinuz", "role": "kernel", "blob": dk },
+            { "name": "cmdline", "role": "cmdline", "text": "console=ttyS0" },
+        ]}],
+    });
+    let (s, v) = json(c.post(format!("{base}/api/v1/images/build")).header("authorization", admin)
+        .json(&serde_json::json!({ "spec": spec, "out": out.to_string_lossy() })).send().await.unwrap()).await;
+    assert_eq!(s, 200, "{v}");
+    let img: Arc<dyn BlockDevice> = Arc::new(FileDevice::open(out.to_str().unwrap()).await.unwrap());
+    let mut store = PalletStore::default();
+    store.add_drive("blob.img", img);
+    let found = store.scan().await;
+    assert_eq!(found.len(), 1, "one pallet in the image");
+    let pallet = store.open(&found[0]).await.unwrap();
+    let m = pallet.members().into_iter().find(|m| m.name() == "vmlinuz").expect("the blob member");
+    assert_eq!((format!("sha256:{}", m.digest_hex()), m.byte_len), (dk.clone(), kernel.len() as u64));
+    // Not held: 404 naming it, nothing written.
+    let out2 = images.join("missing.img");
+    let spec = serde_json::json!({ "name": "x", "pallet": [{ "name": "boot", "members": [{ "name": "k", "role": "kernel", "blob": missing }] }] });
+    let (s, v) = json(c.post(format!("{base}/api/v1/images/build")).header("authorization", admin)
+        .json(&serde_json::json!({ "spec": spec, "out": out2.to_string_lossy() })).send().await.unwrap()).await;
+    assert_eq!(s, 404, "{v}");
+    assert!(v["error"].as_str().unwrap().contains(&missing), "{v}");
+    assert!(!out2.exists());
+    // A member with a blob and a file is refused.
+    let spec = serde_json::json!({ "name": "x", "pallet": [{ "name": "boot", "members": [{ "name": "k", "role": "kernel", "blob": dk, "text": "x" }] }] });
+    let (s, v) = json(c.post(format!("{base}/api/v1/images/build")).header("authorization", admin)
+        .json(&serde_json::json!({ "spec": spec, "out": out2.to_string_lossy() })).send().await.unwrap()).await;
+    assert_eq!(s, 400, "{v}");
+}
