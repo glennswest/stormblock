@@ -7,17 +7,22 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 ## #733 — the blob store as a source: pallet members, imports, image-spec members by digest (2026-11-24, stormblock-registry#241)
 Three engine operations took a registry blob by file path; each now takes it
 from the #732 store by digest, read in place (no staging copy), holding the
-blob's `Placement` for the whole read so a concurrent `DELETE` frees nothing
-until it ends (as a `GET` in flight). A digest not held: `404` naming it
-(an import: refused at start, `400`… see below); a malformed one `400`.
-- [ ] `blobs::source::BlobSource` (store + placement; read_at exact; the
-  pallet's `MemberContent`)
-- [ ] pallet publish/recompose: member `source: "blob", digest`
-- [ ] import: `blob: "sha256:<hex>"`; the decoders read an `Input` (a file
-  or a blob), so raw/ISO, qcow2, sparse VMDK and OVA all come from a blob
-- [ ] image build: a spec member's `blob = "sha256:<hex>"`, resolved (and
-  held) by the API before the build; the CLI build refuses it (no store)
-- [ ] tests; README, docs/blobstore.md, CHANGELOG; check.sh
+blob's `Placement` for the whole operation so a concurrent `DELETE` frees
+nothing until it ends (as a `GET` in flight). A digest not held: `404`
+naming it, looked up before anything is made; a malformed one `400`.
+- [x] `blobs::source::BlobSource` (store + placement; exact and short reads;
+  the pallet's `MemberContent`)
+- [x] pallet publish/recompose: member `source: "blob", digest`
+- [x] import: `blob: "sha256:<hex>"`, resolved and held by the handler; the
+  decoders read an `image::decode::Input` (a file or a blob): raw/ISO,
+  qcow2, sparse VMDK, OVA; a descriptor VMDK from a blob refused
+- [x] image build: a spec member's `blob`, resolved (and held) by
+  `POST /api/v1/images/build`; the CLI build has no store and fails it
+- [x] tests: `blobs::tests::a_blob_source_reads_in_place_and_holds_the_blob_against_a_delete`,
+  `…::an_image_in_a_blob_decodes_as_a_file_does`,
+  `integration_blobs::pallet_members_imports_and_image_members_come_from_the_blob_store_by_digest`;
+  docs/blobstore.md, README, CHANGELOG (691ef5cd, ef501327)
+- [x] check.sh ALL PASS on ef501327 (sc-build, 1157 s)
 
 ## #735 — secret scan: the forge-trust test's placeholder bootstrap token (2026-11-23, stormcentral#1679)
 gitleaks' `generic-api-key` matched `"bootstrap_token": "abcdef.0123456789abcdef"`
