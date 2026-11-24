@@ -13,10 +13,12 @@ made, read in place, the volume unchanged; not sealed `409`, secret `409`,
 not there `404`, `byte_len` past its size `400`. Held with a serve hold
 (#267) so a `DELETE` meanwhile is refused; an unseal meanwhile fails the read.
 `byte_len` optional (the volume's size), as the pallet publish has it.
-- [ ] `volume::source::VolumeSource` (handle, length, seal epoch, hold)
-- [ ] `image::decode::Input::Volume`; import `volume` + `byte_len`
-- [ ] image build: member `volume` + `byte_len`, ESP `from_volume` + `byte_len`
-- [ ] tests, README, docs, CHANGELOG; check.sh
+- [x] `volume::source::VolumeSource` (handle, length, seal epoch, hold)
+- [x] `image::decode::Input::Volume`; import `volume` + `byte_len` (id or name)
+- [x] image build: member `volume` + `byte_len`, ESP `from_volume` + `byte_len`
+- [x] tests (`integration_volume_source`: the source itself; import and build
+  over HTTP), README, docs/blobstore.md, CHANGELOG (412c46be)
+- [ ] check.sh
 
 ## #733 — the blob store as a source: pallet members, imports, image-spec members by digest (2026-11-24, stormblock-registry#241)
 Three engine operations took a registry blob by file path; each now takes it
