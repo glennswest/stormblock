@@ -10,8 +10,8 @@ five times in `tests/it/integration_forge.rs`: a placeholder in kubeadm's
 token shape, never a credential (the engine checks only one non-empty
 token). Changed the test rather than allowlisting: one `const BOOTSTRAP`
 with a plain placeholder, used everywhere; no `.gitleaks.toml`.
-- [ ] the test reads `BOOTSTRAP`; CHANGELOG
-- [ ] check.sh on the pushed commit; gitleaks over the tree clean
+- [x] the test reads `BOOTSTRAP`; CHANGELOG (d943a09d)
+- [x] check.sh ALL PASS on d943a09d (1628/1628, the forge-trust test passes); no gitleaks run here (not installed, not fetched onto the VM): the nightly scan confirms and closes
 
 ## #731 — the admin tier for a node-CA certificate by SubjectAccessReview (2026-11-23, stormcentral#1676)
 stormcentral's credential on a forge becomes `CN=stormcentral,
