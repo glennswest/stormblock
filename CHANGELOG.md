@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-23
+- **test:** #735 (stormcentral#1679): the forge-trust test's bootstrap token is one plain placeholder const (`BOOTSTRAP`), so gitleaks' `generic-api-key` no longer matches the kubeadm-shaped `abcdef.0123456789abcdef` it held five times; never a credential, nothing allowlisted.
+
 ## [v24.47.0] — 2026-11-23
 
 ### Added

@@ -307,6 +307,8 @@ async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writ
     use std::os::unix::fs::PermissionsExt;
     use stormblock::mgmt::forge_trust;
     const CA: &str = "-----BEGIN CERTIFICATE-----\nMIIBforge\n-----END CERTIFICATE-----\n";
+    // A placeholder in the token's place, never a credential (#735).
+    const BOOTSTRAP: &str = "example.placeholder";
     let dir = TempDir::new().unwrap();
     let node_dir = dir.path().join("run/stormblock/forge");
     std::env::set_var("STORMBLOCK_FORGE_TRUST_DIR", &node_dir);
@@ -331,12 +333,12 @@ async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writ
     let r = c.put(format!("{base}/api/v1/forge/trust")).json(&serde_json::json!({"ca": "nope", "bootstrap_token": "t"})).send().await.unwrap();
     assert_eq!(r.status(), 400);
     let r = c.put(format!("{base}/api/v1/forge/trust"))
-        .json(&serde_json::json!({"ca": CA, "bootstrap_token": "abcdef.0123456789abcdef"}))
+        .json(&serde_json::json!({"ca": CA, "bootstrap_token": BOOTSTRAP}))
         .send().await.unwrap();
     assert_eq!(r.status(), 200);
     let st: serde_json::Value = r.json().await.unwrap();
     assert_eq!((st["set"].as_bool(), st["url"].as_str()), (Some(true), Some("https://127.0.0.1:6443")), "{st}");
-    assert!(!st.to_string().contains("abcdef.0123"), "the token is never shown: {st}");
+    assert!(!st.to_string().contains(BOOTSTRAP), "the token is never shown: {st}");
     // Kept 0600.
     let kept = dir.path().join("engine").join(forge_trust::TRUST_FILE);
     assert_eq!(std::fs::metadata(&kept).unwrap().permissions().mode() & 0o777, 0o600);
@@ -347,13 +349,13 @@ async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writ
     let v = claim().await;
     assert_eq!(v["forge_trust"]["ca"], CA);
     assert_eq!(v["forge_trust"]["url"], "https://127.0.0.1:6443");
-    assert_eq!(v["forge_trust"]["bootstrap_token"], "abcdef.0123456789abcdef");
+    assert_eq!(v["forge_trust"]["bootstrap_token"], BOOTSTRAP);
     let booted = dir.path().join("booted/run/stormblock/forge");
     assert_eq!(forge_trust::from_claim(&booted, &base, &v), Ok("written"));
     let mode = |p: std::path::PathBuf| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(std::fs::read_to_string(booted.join("ca.crt")).unwrap(), CA);
     assert_eq!(std::fs::read_to_string(booted.join("url")).unwrap(), "https://127.0.0.1:6443\n");
-    assert_eq!(std::fs::read_to_string(booted.join("bootstrap.token")).unwrap(), "abcdef.0123456789abcdef\n");
+    assert_eq!(std::fs::read_to_string(booted.join("bootstrap.token")).unwrap(), format!("{BOOTSTRAP}\n"));
     assert_eq!((mode(booted.join("ca.crt")), mode(booted.join("url")), mode(booted.join("bootstrap.token"))), (0o644, 0o644, 0o600));
 
     // #540 (stormcert#136): forge names what its apiserver's certificate
@@ -362,11 +364,11 @@ async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writ
     assert!(booted.exists() && !booted.join("apiserver-ca.crt").exists());
     const NODE_CA: &str = "-----BEGIN CERTIFICATE-----\nMIIBnodeca\n-----END CERTIFICATE-----\n";
     let r = c.put(format!("{base}/api/v1/forge/trust"))
-        .json(&serde_json::json!({"ca": CA, "bootstrap_token": "abcdef.0123456789abcdef", "apiserver_ca": "nope"}))
+        .json(&serde_json::json!({"ca": CA, "bootstrap_token": BOOTSTRAP, "apiserver_ca": "nope"}))
         .send().await.unwrap();
     assert_eq!(r.status(), 400, "a malformed apiserver_ca is refused");
     let r = c.put(format!("{base}/api/v1/forge/trust"))
-        .json(&serde_json::json!({"ca": CA, "bootstrap_token": "abcdef.0123456789abcdef", "apiserver_ca": NODE_CA}))
+        .json(&serde_json::json!({"ca": CA, "bootstrap_token": BOOTSTRAP, "apiserver_ca": NODE_CA}))
         .send().await.unwrap();
     assert_eq!(r.status(), 200);
     let got: serde_json::Value = c.get(format!("{base}/api/v1/forge/trust")).send().await.unwrap().json().await.unwrap();
@@ -379,7 +381,7 @@ async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writ
     assert_eq!(std::fs::read_to_string(booted.join("ca.crt")).unwrap(), CA);
     // Set again with none: the next claim takes the file away.
     let r = c.put(format!("{base}/api/v1/forge/trust"))
-        .json(&serde_json::json!({"ca": CA, "bootstrap_token": "abcdef.0123456789abcdef"}))
+        .json(&serde_json::json!({"ca": CA, "bootstrap_token": BOOTSTRAP}))
         .send().await.unwrap();
     assert_eq!(r.status(), 200);
     let v = claim().await;
@@ -392,7 +394,7 @@ async fn a_node_booting_from_a_forge_is_handed_its_trust_and_the_first_node_writ
     let r = c.put(format!("{base}/api/v1/forge")).json(&serde_json::json!({"listen_addr": format!("127.0.0.1:{port}")})).send().await.unwrap();
     assert!(r.status().is_success());
     let r = c.put(format!("{base}/api/v1/forge/trust"))
-        .json(&serde_json::json!({"ca": CA, "url": "https://forge.g8.lo:6443", "bootstrap_token": "abcdef.0123456789abcdef", "apiserver_ca": NODE_CA}))
+        .json(&serde_json::json!({"ca": CA, "url": "https://forge.g8.lo:6443", "bootstrap_token": BOOTSTRAP, "apiserver_ca": NODE_CA}))
         .send().await.unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(forge_trust::read_from(&node_dir).as_deref(), Some("self"));

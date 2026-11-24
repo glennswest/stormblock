@@ -4,6 +4,15 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #735 — secret scan: the forge-trust test's placeholder bootstrap token (2026-11-23, stormcentral#1679)
+gitleaks' `generic-api-key` matched `"bootstrap_token": "abcdef.0123456789abcdef"`
+five times in `tests/it/integration_forge.rs`: a placeholder in kubeadm's
+token shape, never a credential (the engine checks only one non-empty
+token). Changed the test rather than allowlisting: one `const BOOTSTRAP`
+with a plain placeholder, used everywhere; no `.gitleaks.toml`.
+- [ ] the test reads `BOOTSTRAP`; CHANGELOG
+- [ ] check.sh on the pushed commit; gitleaks over the tree clean
+
 ## #731 — the admin tier for a node-CA certificate by SubjectAccessReview (2026-11-23, stormcentral#1676)
 stormcentral's credential on a forge becomes `CN=stormcentral,
 O=stormcentral:forge` from the node's own cluster CA (stormcos#1553); its
