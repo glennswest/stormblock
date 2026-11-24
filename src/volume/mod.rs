@@ -31,6 +31,7 @@ pub mod digest;
 #[cfg(test)]
 mod scheme_tests;
 pub mod holds;
+pub mod source;
 pub mod pressure;
 pub mod relocate;
 pub mod rollback;

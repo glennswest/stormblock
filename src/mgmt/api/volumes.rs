@@ -2509,8 +2509,10 @@ async fn detach_volume(
     Json(serde_json::json!({ "id": uuid, "attached": false })).into_response()
 }
 
-/// `POST /api/v1/volumes/import {name, file|url|blob, format?, redundancy?, size?, seal?, role?, verify?}`
+/// `POST /api/v1/volumes/import {name, file|url|blob|volume, byte_len?, format?, redundancy?, size?, seal?, role?, verify?}`
 /// — `blob` is `sha256:<hex>` in the engine's blob store, read in place (#733);
+/// — `volume` is a sealed volume (id or name), its first `byte_len` bytes
+/// (all of it when absent), read in place and held until the import ends (#737);
 /// — `role` (`system`|`data`) is the half the golden lands in (#93); a held
 /// VM image or any media a node keeps says `data`, which no install lays
 /// again (#349).
@@ -2781,6 +2783,27 @@ pub(crate) async fn resolve_volume(state: &Arc<AppState>, key: &str) -> Result<V
     }
 }
 
+/// A sealed volume as the source of an import or an image build (#737), by
+/// id or name, its first `byte_len` bytes, held by `what` until dropped: a
+/// volume not there is 404, one not sealed or secret 409, a `byte_len` past
+/// its end 400.
+pub(crate) async fn volume_source(
+    state: &Arc<AppState>,
+    key: &str,
+    byte_len: Option<u64>,
+    what: &str,
+) -> Result<crate::volume::source::VolumeSource, Response> {
+    use crate::volume::source::{SourceError, VolumeSource};
+    let id = volume_key(state, key).await?;
+    let vm = state.volume_manager.lock().await;
+    VolumeSource::open(&vm, id, byte_len, what).await.map_err(|e| match e {
+        SourceError::NotFound(m) => ApiError::not_found(m),
+        SourceError::Conflict(m) => ApiError::conflict(m),
+        SourceError::Invalid(m) => ApiError::bad_request(m),
+        SourceError::Io(m) => ApiError::internal(m),
+    })
+}
+
 async fn start_import(
     State(state): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::mgmt::auth::Caller>>,
@@ -2794,6 +2817,14 @@ async fn start_import(
         match crate::blobs::source::BlobSource::from_engine(&state, d).await {
             Ok(b) => spec.blob_source = Some(b),
             Err(e) => return super::blobs::err(e),
+        }
+    }
+    // A sealed volume likewise (#737): missing 404, not sealed 409.
+    if let Some(v) = &spec.volume {
+        let what = format!("an import (golden {})", spec.name);
+        match volume_source(&state, v, spec.byte_len, &what).await {
+            Ok(src) => spec.volume_source = Some(src),
+            Err(r) => return r,
         }
     }
     let started = state.imports.write().await.start(state.clone(), spec);

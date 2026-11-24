@@ -61,6 +61,18 @@ pub struct ImportSpec {
     /// a digest not held is refused there (`404`), never a failed job.
     #[serde(skip)]
     pub blob_source: Option<crate::blobs::source::BlobSource>,
+    /// …or a sealed volume in this engine, by id (#737), read in place as a
+    /// blob is: the registry's raw blob volumes. Never written; held against
+    /// a delete until the import ends.
+    #[serde(default)]
+    pub volume: Option<String>,
+    /// How many bytes of `volume` are the image (absent: all of it).
+    #[serde(default)]
+    pub byte_len: Option<u64>,
+    /// The volume, held: resolved by the caller before [`Imports::start`],
+    /// so one missing or not sealed is refused there, never a failed job.
+    #[serde(skip)]
+    pub volume_source: Option<crate::volume::source::VolumeSource>,
     /// `raw`, `qcow2`, `vmdk`, `ova`; absent = detect by magic.
     #[serde(default)]
     pub format: Option<String>,
@@ -317,16 +329,23 @@ impl Imports {
                 return Err(format!("'{ns}' is not a namespace name (a DNS-1123 label)"));
             }
         }
-        let source = match (&spec.file, &spec.url, &spec.blob) {
-            (Some(f), None, None) => f.clone(),
-            (None, Some(u), None) => u.clone(),
-            (None, None, Some(_)) => match &spec.blob_source {
+        let source = match (&spec.file, &spec.url, &spec.blob, &spec.volume) {
+            (Some(f), None, None, None) => f.clone(),
+            (None, Some(u), None, None) => u.clone(),
+            (None, None, Some(_), None) => match &spec.blob_source {
                 Some(b) => b.name(),
                 None => return Err("the blob was not looked up before the import started".into()),
             },
-            (None, None, None) => return Err("give file, url or blob".into()),
-            _ => return Err("give one of file, url or blob".into()),
+            (None, None, None, Some(_)) => match &spec.volume_source {
+                Some(v) => v.describe(),
+                None => return Err("the volume was not looked up before the import started".into()),
+            },
+            (None, None, None, None) => return Err("give file, url, blob or volume".into()),
+            _ => return Err("give one of file, url, blob or volume".into()),
         };
+        if spec.byte_len.is_some() && spec.volume.is_none() {
+            return Err("byte_len is the length of a `volume` source; give it with one".into());
+        }
         if let Some(r) = &spec.redundancy {
             RedundancyPolicy::parse(r).map_err(|e| format!("redundancy: {e}"))?;
         }
@@ -477,6 +496,7 @@ pub async fn open_source(path: &Path, forced: Option<&str>) -> Result<(Source, S
 enum Origin<'a> {
     Path(&'a Path),
     Blob(&'a crate::blobs::source::BlobSource),
+    Volume(&'a crate::volume::source::VolumeSource),
 }
 
 /// Open a file or a blob (#733) as whatever it is. `path` is the file's,
@@ -537,6 +557,10 @@ async fn run(state: &Arc<AppState>, spec: &ImportSpec, st: &Arc<RwLock<ImportSta
     // A blob is read where it is, held until the import ends (#733).
     if let Some(b) = &spec.blob_source {
         return write_and_seal(state, spec, st, Origin::Blob(b)).await;
+    }
+    // A sealed volume likewise (#737).
+    if let Some(v) = &spec.volume_source {
+        return write_and_seal(state, spec, st, Origin::Volume(v)).await;
     }
 
     // 1. Fetch, if a URL.
@@ -816,6 +840,9 @@ async fn write_and_seal(
         Origin::Blob(b) => open_input(decode::Input::Blob(b.clone()), spec.format.as_deref(), None)
             .await
             .map_err(|e| format!("blob {}: {e}", b.name())),
+        Origin::Volume(v) => open_input(decode::Input::Volume(v.clone()), spec.format.as_deref(), None)
+            .await
+            .map_err(|e| format!("{}: {e}", v.describe())),
     };
     let (mut src, format) = opened.map_err(|e| Fail::new(Phase::Verify, e))?;
     let vsize = src.virtual_size();

@@ -5,6 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-24
+- **feat:** #737 (stormblock-registry#244, #248): a sealed volume as a source, read in place, as a pallet publish's `source: volume` has: an import's `"volume": "<id or name>", "byte_len": <n>` and an image-spec member's `volume` + `byte_len`, the ESP's `from_volume` + `byte_len`. Not there `404`, not sealed or secret `409`, `byte_len` past the end `400`, all before anything is made; the volume is never written, held (a serve hold, #267) against a delete until the operation ends, and an unseal meanwhile fails the read. `volume::source::VolumeSource`, `image::decode::Input::Volume`. Tests: `integration_volume_source`. `docs/blobstore.md`.
 - **feat:** #733 (stormblock-registry#241): the blob store as a source, by digest, read in place (no staging copy): a pallet member `"source": "blob", "digest": "sha256:<hex>"` (publish and recompose), an import's `"blob": "sha256:<hex>"` (raw/ISO, qcow2, sparse VMDK, OVA), an image-spec member's `blob = "sha256:<hex>"` (`POST /api/v1/images/build`). A digest not held is a `404` naming it before anything is made; the blob is held until the operation ends, so a concurrent `DELETE` frees nothing under it. `blobs::source::BlobSource`; the image decoders read an `image::decode::Input` (a file or a blob). `docs/blobstore.md`.
 
 ### 2026-11-23

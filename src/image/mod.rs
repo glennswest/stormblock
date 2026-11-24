@@ -151,6 +151,14 @@ pub struct EspSpec {
     /// Or copy a filesystem image in verbatim.
     #[serde(default)]
     pub from_image: Option<PathBuf>,
+    /// Or copy one in from a sealed volume in this engine, by id or name
+    /// (#737), its first `byte_len` bytes, read in place. Only a build the
+    /// engine runs (`POST /api/v1/images`) has volumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_volume: Option<String>,
+    /// How many bytes of `from_volume` are the image (absent: all of it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_len: Option<u64>,
     #[serde(default)]
     pub label: Option<String>,
 }
@@ -214,6 +222,15 @@ pub struct MemberEntry {
     /// store; it looks each one up, and holds it, before the build starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob: Option<String>,
+    /// …or a sealed volume in this engine, by id or name (#737), its first
+    /// `byte_len` bytes, read in place: a registry blob kept as a volume.
+    /// Only a build the engine runs has volumes; it looks each one up, and
+    /// holds it, before the build starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
+    /// How many bytes of `volume` are the member (absent: all of it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_len: Option<u64>,
 }
 
 /// A partition that is not a pallet: firmware blobs, a data image, anything.
@@ -400,6 +417,27 @@ impl ImageSpec {
     /// What a spec says that cannot be built as written, refused before
     /// anything is laid down: a pallet's priority or tries past the four
     /// bits its GPT attribute holds (#102).
+    /// Every sealed volume the spec reads (#737), as `(volume, byte_len,
+    /// who reads it)`: the members' `volume` and the ESP's `from_volume`.
+    /// Whoever runs the build opens each one and hands it to
+    /// [`ImageBuilder::volumes`](build::ImageBuilder::volumes).
+    pub fn volume_sources(&self) -> Vec<(String, Option<u64>, String)> {
+        let mut out = Vec::new();
+        if let Some(esp) = &self.esp {
+            if let Some(v) = &esp.from_volume {
+                out.push((v.clone(), esp.byte_len, "an image build's ESP".to_string()));
+            }
+        }
+        for p in &self.pallets {
+            for m in &p.members {
+                if let Some(v) = &m.volume {
+                    out.push((v.clone(), m.byte_len, format!("an image build's member '{}'", m.name)));
+                }
+            }
+        }
+        out
+    }
+
     pub fn check(&self) -> Result<()> {
         for p in &self.pallets {
             crate::pallet::manager::check_attributes(p.priority, p.tries.unwrap_or(0)).map_err(|e| {
@@ -409,13 +447,21 @@ impl ImageSpec {
                 ))
             })?;
         }
-        // One source a member (#733): a blob beside a file or text would
-        // leave which one is published to the order the builder reads them.
+        // One source a member (#733, #737): a blob or a volume beside a file
+        // or text would leave which one is published to the order the
+        // builder reads them.
         for p in &self.pallets {
             for m in &p.members {
-                if m.blob.is_some() && (m.file.is_some() || m.text.is_some()) {
+                let given = [m.file.is_some(), m.text.is_some(), m.blob.is_some(), m.volume.is_some()];
+                if given.iter().filter(|&&g| g).count() > 1 {
                     return Err(ImageError::Spec(format!(
-                        "member '{}': give one of file, text or blob",
+                        "member '{}': give one of file, text, blob or volume",
+                        m.name
+                    )));
+                }
+                if m.byte_len.is_some() && m.volume.is_none() {
+                    return Err(ImageError::Spec(format!(
+                        "member '{}': byte_len is the length of a `volume` source; give it with one",
                         m.name
                     )));
                 }
@@ -423,6 +469,17 @@ impl ImageSpec {
                     crate::blobs::format::parse_digest(d)
                         .map_err(|e| ImageError::Spec(format!("member '{}': blob: {e}", m.name)))?;
                 }
+            }
+        }
+        if let Some(esp) = &self.esp {
+            let given = [esp.from_dir.is_some(), esp.from_image.is_some(), esp.from_volume.is_some()];
+            if given.iter().filter(|&&g| g).count() > 1 {
+                return Err(ImageError::Spec("esp: give one of from_dir, from_image or from_volume".into()));
+            }
+            if esp.byte_len.is_some() && esp.from_volume.is_none() {
+                return Err(ImageError::Spec(
+                    "esp: byte_len is the length of `from_volume`; give it with one".into(),
+                ));
             }
         }
         // A grow policy (#691) or an owner (#670) that cannot be applied is

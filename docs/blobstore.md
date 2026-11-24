@@ -66,6 +66,29 @@ publish, the import or the build lets go, as with a `GET` in flight.
 Only a build the engine runs reads the store: `stormblock image build` on
 the command line has none, and a spec member naming a blob fails there.
 
+## A sealed volume as the source (#737)
+
+The registry keeps each blob as a raw **sealed volume** holding its exact
+bytes, its length recorded beside it (stormblock-registry#244, #248). A
+pallet publish already takes such a volume as a member (`"source":
+"volume", "volume_id", "byte_len"`); the import and the image build take it
+the same way, read in place, so the registry never writes a blob to a file:
+
+| operation | the volume |
+|---|---|
+| volume import (`POST /api/v1/volumes/import`) | `"volume": "<id or name>", "byte_len": <n>` in place of `file`, `url` or `blob`; detection, conversion, verification and sealing as for a file |
+| image build (`POST /api/v1/images/build`) | a pallet member's `volume = "<id or name>"`, `byte_len = <n>` (one of `file`, `text`, `blob`, `volume`); the ESP's `from_volume`, `byte_len` (one of `from_dir`, `from_image`, `from_volume`) |
+
+`byte_len` is how many bytes from the volume's start are the content; absent,
+the whole volume (its size, padding and all). The volume is looked up before
+anything is made: not there `404`, **not sealed `409`** (a source read in
+place must not change under the read), secret `409`, a `byte_len` past its
+end `400`, `byte_len` without a volume `400`. The volume is never written.
+While the import or the build runs it holds a serve hold on the volume
+(#267), so a `DELETE` of it is refused (`409`, naming the import or the
+build); an unseal meanwhile fails the read instead of letting it finish on
+other bytes. `stormblock image build` on the command line has no volumes.
+
 ## Where the bytes go
 
 One thin volume, `stormblock-blobs` in the default namespace, placed in the

@@ -125,6 +125,9 @@ pub struct ImageBuilder {
     /// The blobs the spec's members name (#733), by `sha256:<hex>`, looked
     /// up and held by whoever runs the build: the engine's API.
     blobs: std::collections::BTreeMap<String, crate::blobs::source::BlobSource>,
+    /// The sealed volumes the members and the ESP read (#737), by what the
+    /// spec says (`volume`, `byte_len`), opened and held by the engine's API.
+    volumes: std::collections::BTreeMap<(String, Option<u64>), crate::volume::source::VolumeSource>,
 }
 
 fn align_up(v: u64, a: u64) -> u64 {
@@ -159,7 +162,7 @@ impl ImageBuilder {
 
     pub fn new(spec: ImageSpec) -> Self {
         ImageBuilder {
-            engine: None, spec, blobs: Default::default() }
+            engine: None, spec, blobs: Default::default(), volumes: Default::default() }
     }
 
     /// The blobs the members name (#733), each held until the builder is
@@ -182,17 +185,42 @@ impl ImageBuilder {
         })
     }
 
+    /// The sealed volumes the spec reads (#737), each held until the
+    /// builder is dropped, keyed as [`ImageSpec::volume_sources`] gives them.
+    /// A member or an ESP naming one not given here fails the build.
+    pub fn volumes(
+        mut self,
+        volumes: impl IntoIterator<Item = ((String, Option<u64>), crate::volume::source::VolumeSource)>,
+    ) -> Self {
+        self.volumes = volumes.into_iter().collect();
+        self
+    }
+
+    fn volume(&self, what: &str, v: &str, byte_len: Option<u64>) -> Result<&crate::volume::source::VolumeSource> {
+        self.volumes.get(&(v.to_string(), byte_len)).ok_or_else(|| {
+            ImageError::Spec(format!(
+                "{what}: volume {v} is not available here: only a build the engine runs \
+                 (POST /api/v1/images) reads its volumes"
+            ))
+        })
+    }
+
     async fn member_len(&self, m: &MemberEntry) -> Result<u64> {
-        match &m.blob {
-            Some(d) => Ok(self.blob(m, d)?.len()),
-            None => member_len(m).await,
+        match (&m.blob, &m.volume) {
+            (Some(d), _) => Ok(self.blob(m, d)?.len()),
+            (None, Some(v)) => Ok(self.volume(&format!("member '{}'", m.name), v, m.byte_len)?.len()),
+            (None, None) => member_len(m).await,
         }
     }
 
     async fn member_spec(&self, m: &MemberEntry) -> Result<MemberSpec> {
-        let Some(d) = &m.blob else { return member_spec(m).await };
         let kind = m.kind.as_deref().map(parse_member_kind).unwrap_or(MemberKind::Raw);
-        Ok(MemberSpec::new(m.name.to_string(), m.role.to_string(), kind, Arc::new(self.blob(m, d)?.clone())))
+        let content: Arc<dyn crate::pallet::MemberContent> = match (&m.blob, &m.volume) {
+            (Some(d), _) => Arc::new(self.blob(m, d)?.clone()),
+            (None, Some(v)) => Arc::new(self.volume(&format!("member '{}'", m.name), v, m.byte_len)?.clone()),
+            (None, None) => return member_spec(m).await,
+        };
+        Ok(MemberSpec::new(m.name.to_string(), m.role.to_string(), kind, content))
     }
 
     pub fn spec(&self) -> &ImageSpec {
@@ -242,6 +270,9 @@ impl ImageBuilder {
         }
         if let Some(img) = &esp.from_image {
             return Ok(Some(file_len(img).await?));
+        }
+        if let Some(v) = &esp.from_volume {
+            return Ok(Some(self.volume("esp", v, esp.byte_len)?.len()));
         }
         Ok(Some(DEFAULT_ESP))
     }
@@ -948,6 +979,9 @@ impl ImageBuilder {
         len: u64,
         esp: &EspSpec,
     ) -> Result<()> {
+        if let Some(v) = &esp.from_volume {
+            return copy_volume_into(device, start, len, self.volume("esp", v, esp.byte_len)?).await;
+        }
         match (&esp.from_image, &esp.from_dir) {
             (Some(img), _) => copy_file_into(device, start, len, img).await,
             (None, Some(dir)) => {
@@ -1340,7 +1374,7 @@ async fn member_len(m: &MemberEntry) -> Result<u64> {
         (Some(f), _) => file_len(f).await,
         (None, Some(t)) => Ok(t.len() as u64),
         (None, None) => Err(ImageError::Spec(format!(
-            "member '{}' has none of `file`, `text` or `blob`",
+            "member '{}' has none of `file`, `text`, `blob` or `volume`",
             m.name
         ))),
     }
@@ -1363,7 +1397,7 @@ async fn member_spec(m: &MemberEntry) -> Result<MemberSpec> {
             Arc::new(BytesContent(t.clone().into_bytes())),
         )),
         (None, None) => Err(ImageError::Spec(format!(
-            "member '{}' has none of `file`, `text` or `blob`",
+            "member '{}' has none of `file`, `text`, `blob` or `volume`",
             m.name
         ))),
     }
@@ -1389,6 +1423,31 @@ async fn copy_file_into(
     while off < size {
         let take = ((size - off) as usize).min(COPY_CHUNK);
         f.read_exact(&mut buf[..take]).await?;
+        view.write_at(off, &buf[..take]).await?;
+        off += take as u64;
+    }
+    view.flush().await?;
+    Ok(())
+}
+
+/// Copy a sealed volume's first `src.len()` bytes into a partition (#737),
+/// refusing one that does not fit, as [`copy_file_into`] does.
+async fn copy_volume_into(
+    device: &Arc<dyn BlockDevice>,
+    start: u64,
+    len: u64,
+    src: &crate::volume::source::VolumeSource,
+) -> Result<()> {
+    let size = src.len();
+    if size > len {
+        return Err(ImageError::TooSmall { need: size, have: len });
+    }
+    let view = PartitionView::new(device.clone(), start, len);
+    let mut buf = vec![0u8; COPY_CHUNK];
+    let mut off = 0u64;
+    while off < size {
+        let take = ((size - off) as usize).min(COPY_CHUNK);
+        src.read_exact_at(off, &mut buf[..take]).await.map_err(|e| ImageError::Other(e.to_string()))?;
         view.write_at(off, &buf[..take]).await?;
         off += take as u64;
     }

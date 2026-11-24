@@ -293,6 +293,15 @@ async fn build(State(state): State<Arc<AppState>>, Json(req): Json<BuildRequest>
             }
         }
     }
+    // Each sealed volume a member or the ESP reads (#737), likewise: missing
+    // 404, not sealed 409, held against a delete until the build ends.
+    let mut volumes = Vec::new();
+    for (v, byte_len, what) in spec.volume_sources() {
+        match super::volumes::volume_source(&state, &v, byte_len, &what).await {
+            Ok(src) => volumes.push(((v, byte_len), src)),
+            Err(r) => return r,
+        }
+    }
 
     let out_path = match allowed_out(&state, Path::new(&req.out), format).await {
         Ok((p, _)) => p,
@@ -312,7 +321,7 @@ async fn build(State(state): State<Arc<AppState>>, Json(req): Json<BuildRequest>
         out_path.display(),
         spec.pallets.len()
     );
-    let report = match ImageBuilder::new(spec).blobs(blobs).build(&raw_path).await {
+    let report = match ImageBuilder::new(spec).blobs(blobs).volumes(volumes).build(&raw_path).await {
         Ok(r) => r,
         Err(e) => return err(e),
     };

@@ -15,11 +15,13 @@ pub mod vmdk;
 
 use std::path::Path;
 
-/// What an image is read from: a file, or a blob in the engine's blob store
-/// read in place (#733). Positional reads only: the decoders seek.
+/// What an image is read from: a file, a blob in the engine's blob store
+/// (#733) or a sealed volume (#737), the last two read in place.
+/// Positional reads only: the decoders seek.
 pub enum Input {
     File { file: tokio::fs::File, len: u64 },
     Blob(crate::blobs::source::BlobSource),
+    Volume(crate::volume::source::VolumeSource),
 }
 
 impl std::fmt::Debug for Input {
@@ -27,6 +29,7 @@ impl std::fmt::Debug for Input {
         match self {
             Input::File { len, .. } => write!(f, "Input::File({len} bytes)"),
             Input::Blob(b) => write!(f, "Input::{b:?}"),
+            Input::Volume(v) => write!(f, "Input::{v:?}"),
         }
     }
 }
@@ -42,6 +45,7 @@ impl Input {
         match self {
             Input::File { len, .. } => *len,
             Input::Blob(b) => b.len(),
+            Input::Volume(v) => v.len(),
         }
     }
 
@@ -54,6 +58,7 @@ impl Input {
         Ok(match self {
             Input::File { file, len } => Input::File { file: file.try_clone().await?, len: *len },
             Input::Blob(b) => Input::Blob(b.clone()),
+            Input::Volume(v) => Input::Volume(v.clone()),
         })
     }
 
@@ -78,6 +83,7 @@ impl Input {
                 Ok(got)
             }
             Input::Blob(b) => b.read_at(off, buf).await.map_err(|e| std::io::Error::other(format!("blob {}: {e}", b.name()))),
+            Input::Volume(v) => v.read_at(off, buf).await.map_err(|e| std::io::Error::other(e.to_string())),
         }
     }
 
