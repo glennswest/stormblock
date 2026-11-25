@@ -2340,9 +2340,12 @@ Plan, on main:
 - [x] test `freeing_erased_slots_keeps_no_reader_waiting`: passes; control (wip/521-control, deleted) fails, a reader waited 854 ms
 - [x] `handler=` before `owed_persist=`; fsck steps `snapshot= check= release=`; README, docs/erase.md, CHANGELOG
 - [x] check.sh at 0a5c2f0b ALL PASS (nextest 1634/1634, runtime tests)
-- [ ] metal on a release with it (owner-scheduled hardware): no `held … by the eraser` over 1 s, fsck lines split
-- [ ] owner's decision: the clone/delete persist is 3 ordered flushes (1.5-5 s on server7's SMR); fewer means
-      answering before the record is durable. Asked on #521 2026-11-24
+- [x] the persist question went back as session work (owner-queue controller, 2026-11-25 10:26Z): the standing
+      rule decides, and #171's order stands: a clone or delete answers once its record is durable. Not changed
+- [x] metal, pvetest1/3 2026-11-25 09:27-10:12Z, an engine printing `handler=` (so after 37c45712): no eraser hold
+      over 1 s (18 and 25 slots erased: light), every volume/slab list ≤ 9 ms, clone `persist=` 0.8 s (the kept
+      cost). No fsck ran there, so its steps are unseen
+- [ ] `stormcentral shipped` with a console proof of the fsck steps on a pve install; closes on it
 
 Read on metal, 2026-11-07 (consoles of 2026-11-04..07): pvetest1 12.66 `the slab registry (write) was held 18.7s by the
 flow-over`, 47 waiting, `GET /volumes` 18.5 s, straight after `Flow-over: validated`; pvetest1 and forge1 12-14 s too. It is
