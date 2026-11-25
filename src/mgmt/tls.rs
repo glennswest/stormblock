@@ -286,14 +286,15 @@ pub fn subject_alt_names(der: &[u8]) -> Option<Sans> {
 /// overlays', kube-proxy's IPVS (every ClusterIP). The same list stormcert's
 /// `serving --node-names` leaves out (stormcert#173), so what the engine
 /// calls uncovered is what a renewal would add.
-const NOT_THE_NODES: &[&str] = &["lo", "cilium", "lxc", "veth", "flowsdn", "kube-ipvs", "docker", "cni", "flannel"];
+/// `lo` by its whole name, the rest by prefix, as stormcert matches them.
+const NOT_THE_NODES: &[&str] = &["lo", "cilium_", "lxc", "veth", "flowsdn", "kube-ipvs", "docker", "cni", "flannel"];
 
 /// Whether a caller off the node could reach it on `addr` (#662): a global
 /// unicast address, not loopback, link-local, multicast, unspecified or
 /// IPv4-mapped, on an interface that is the node's own.
 pub fn callers_address(interface: &str, loopback: bool, addr: std::net::IpAddr) -> bool {
     use std::net::IpAddr;
-    if loopback || NOT_THE_NODES.iter().any(|p| interface.starts_with(p)) {
+    if loopback || NOT_THE_NODES.iter().any(|p| if *p == "lo" { interface == "lo" } else { interface.starts_with(p) }) {
         return false;
     }
     match addr {
@@ -857,6 +858,7 @@ mod tests {
             assert!(!ok(pod, "10.244.0.5"), "{pod}");
         }
         assert!(!callers_address("eno1", true, "192.0.2.1".parse().unwrap()), "IFF_LOOPBACK");
+        assert!(ok("lom0", "192.0.2.9"), "only `lo` itself is lo");
     }
 
     #[test]
