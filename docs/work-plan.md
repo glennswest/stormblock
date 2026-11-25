@@ -45,7 +45,8 @@ gitleaks matched `docs/work-plan.md:44` at 0a5c2f0b: #735's own entry quoted the
 with its key name. Not a credential. The entry now describes its shape instead; so does CHANGELOG's
 #735 line. No allowlist, no `.gitleaks.toml`.
 - [x] both reworded; `grep` finds the value nowhere in the tree
-- [ ] gitleaks 8.30.1 (default rules) over the tree on a build VM: no finding; the nightly scan closes #740
+- [ ] gitleaks over the tree: not run here (a build job that downloads and runs the gitleaks release was
+  refused by this session's permission check, 2026-11-25); the nightly scan of 49d47618 is the check and closes #740
 
 ## #735 — secret scan: the forge-trust test's placeholder bootstrap token (2026-11-23, stormcentral#1679)
 gitleaks' `generic-api-key` matched the test's `bootstrap_token` (kubeadm's documented
