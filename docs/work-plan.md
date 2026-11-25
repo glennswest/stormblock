@@ -38,8 +38,11 @@ the whole walk.
   the next wiping install. /init runs `hba write-cliff` (4 GiB, `sd*`/`nvme*`
   non-rotational) past the lay's go-ahead, before the lay;
   `rd.stormblock.writecliff=off|<GiB>`; `no cliff in <GiB>` said
-- [ ] items 2/3 held (recommended): until server8's next install shows what
-  the read-ahead fix moved
+- [x] items 2/3 held (recommended): item 2 is #672 (P0), item 3 filed as
+  #744 (held until server8's numbers); item 1's memory tier is #673
+- [x] write cliff: initramfs-storage test under sh + busybox; check.sh ALL
+  PASS at f20cdc6c (1647/1647); `shipped` (--commit f20cdc6c), proof
+  `on server8 console:Boot read-ahead: [1-9][0-9]* file\(s\)`
 - [x] check.sh ALL PASS at 0d8497a1 (1646/1646); numbers and the two
   questions on the issue (2026-11-25); waits on the owner
 - [ ] server8's next install: the read-ahead line with files in it, the
@@ -52,7 +55,7 @@ runs (`ECONNRESET` at its reconnect). `Conn::run` refused every accept before re
   of 0 or ECONNRESET); one after the hang-up is served next (`accept_loop`'s `next`); test
   `a_vmm_that_reconnects_at_once_is_served` (d66fabd9)
 - [x] clippy + vhost tests 5x5 pass at d66fabd9 (sc-build)
-- [ ] check.sh
+- [x] check.sh ALL PASS at f20cdc6c (1647/1647); closed
 
 ## #662 — the serving certificate names every address the node holds (2026-11-25, P0)
 
