@@ -698,7 +698,12 @@ async fn serve_queue(
     stop: Arc<AtomicBool>,
     wake: Arc<tokio::sync::Notify>,
 ) -> u16 {
-    let kick_fd = match AsyncFd::new(kick.as_raw_fd()) {
+    // The AsyncFd owns a handle to the kick eventfd, not its bare number
+    // (tokio RUSTSEC-2026-0386, #568): the descriptor cannot be closed or
+    // reused while the reactor still has it registered.
+    // SAFETY: `kick` is an `Arc<OwnedFd>`; the clone the AsyncFd holds keeps
+    // that descriptor open, the same one, until the AsyncFd is dropped.
+    let kick_fd = match unsafe { AsyncFd::register(kick.clone()) } {
         Ok(k) => k,
         Err(e) => {
             tracing::error!("vhost-user-blk: kick fd: {e}");

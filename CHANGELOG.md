@@ -5,7 +5,7 @@
 <!-- New unreleased changes go here -->
 
 ### 2026-11-25
-- **deps:** #568, #469: `cargo update -p h2 -p tokio -p rustls -p rustls-webpki -p webpki-roots`, a commit of its own (4696a07f): h2 0.4.19 → 0.4.21 (RUSTSEC-2026-0258, empty DATA frames queued without bound: a DoS on the API), tokio 1.53.1 → 1.54.1 (RUSTSEC-2026-0386, `AsyncFd::new`), rustls 0.23.45 → 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349), rustls-webpki 0.103.15 → 0.103.17 (RUSTSEC-2026-0382: chains through distrusted emSign intermediates), webpki-roots 1.0.9 → 1.0.12 (RUSTSEC-2026-0381). Nothing else in the lock moves; no code changes.
+- **deps:** #568, #469: `cargo update -p h2 -p tokio -p rustls -p rustls-webpki -p webpki-roots`, a commit of its own (4696a07f): h2 0.4.19 → 0.4.21 (RUSTSEC-2026-0258, empty DATA frames queued without bound: a DoS on the API), tokio 1.53.1 → 1.54.1 (RUSTSEC-2026-0386, `AsyncFd::new`), rustls 0.23.45 → 0.23.46 (RUSTSEC-2026-0346, -0347, -0348, -0349), rustls-webpki 0.103.15 → 0.103.17 (RUSTSEC-2026-0382: chains through distrusted emSign intermediates), webpki-roots 1.0.9 → 1.0.12 (RUSTSEC-2026-0381). Nothing else in the lock moves. tokio 1.54 deprecates `AsyncFd::new` for that advisory: the vhost-user-blk queue now registers its kick eventfd with `AsyncFd::register` on a clone of the queue's `Arc<OwnedFd>`, so the descriptor stays open while the reactor holds it (it took the bare fd number before).
 - **docs:** #740 (stormcentral#1679): the work plan's and this changelog's #735 entries describe the kubeadm example token instead of quoting it, so gitleaks' `generic-api-key` no longer matches `docs/work-plan.md`; never a credential, nothing allowlisted.
 
 ### 2026-11-24

@@ -188,7 +188,10 @@ webpki-roots 1.0.9 (-0381). No code change asked.
 - [x] `cargo update -p h2 -p tokio -p rustls -p rustls-webpki -p webpki-roots` on a build VM, Cargo.lock
   carried out (`SC_BUILD_OUT`), its own commit 4696a07f: h2 0.4.21, tokio 1.54.1, rustls 0.23.46,
   rustls-webpki 0.103.17, webpki-roots 1.0.12; nothing else moves
-- [ ] check.sh; CHANGELOG; close both
+- [x] check.sh at 4696a07f FAILED: clippy `-D warnings`, tokio 1.54 deprecates `AsyncFd::new` (the advisory's
+  call). `vhost_user_blk::serve_queue` now `AsyncFd::register(kick.clone())`: the AsyncFd owns an Arc of the
+  queue's OwnedFd, so the fd stays open and the same while registered
+- [ ] check.sh and ci-vhost-user-blk-verify.sh on the fix; CHANGELOG; close both
 
 ## #727 — a rebuild or scrub started during an array release (2026-11-24, P1) — DONE
 - [x] `RaidArray`: a `releasing` flag the hold sets under a lifecycle mutex (cleared if the hold is dropped
