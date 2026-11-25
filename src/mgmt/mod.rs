@@ -7,6 +7,7 @@ pub mod hotplug;
 pub mod auth;
 pub mod kubeauth;
 pub mod kube_publish;
+pub mod kube_goldens;
 pub mod capacity;
 pub mod goldens;
 pub mod boot_override;

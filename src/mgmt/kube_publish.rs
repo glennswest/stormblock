@@ -36,7 +36,7 @@
 //! The engine's bearer is the one it reviews callers with
 //! (`[management.kubernetes]`, or the cluster's record on a worker, #557);
 //! it must be allowed volumes, volumes/status, replications and
-//! replications/status (and nodeinstalls, nodeinstalls/status) in `storage.storm.io` (`deploy/crds.yaml` has the
+//! replications/status (and nodeinstalls, nodeinstalls/status, goldens, goldens/status) in `storage.storm.io` (`deploy/crds.yaml` has the
 //! ClusterRole). Nothing is published when no apiserver is configured.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -90,6 +90,10 @@ pub struct Publisher {
     install_plan: crate::mgmt::install_plan::Cache,
     /// The last error, said when it changes.
     last_error: Option<String>,
+    /// Golden objects being made here, and those said (#743).
+    goldens: crate::mgmt::kube_goldens::Goldens,
+    /// The Golden pass's last error, said when it changes (#743).
+    golden_error: Option<String>,
 }
 
 impl Publisher {
@@ -212,7 +216,7 @@ fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-async fn call(state: &AppState, method: &str, path: &str, body: Option<&Value>) -> Result<Value, (u16, String)> {
+pub(crate) async fn call(state: &AppState, method: &str, path: &str, body: Option<&Value>) -> Result<Value, (u16, String)> {
     let kube = state.kube_auth.as_ref().ok_or((0, "no apiserver configured".to_string()))?;
     let (code, v) = kube.call(method, path, body).await.map_err(|e| (0, e))?;
     if (200..300).contains(&code) {
@@ -224,7 +228,7 @@ async fn call(state: &AppState, method: &str, path: &str, body: Option<&Value>) 
 }
 
 /// Every object of `plural` on the apiserver, by name.
-async fn listed(state: &AppState, plural: &str) -> Result<BTreeMap<String, Value>, String> {
+pub(crate) async fn listed(state: &AppState, plural: &str) -> Result<BTreeMap<String, Value>, String> {
     let v = call(state, "GET", &format!("{GROUP_PATH}/{plural}"), None).await.map_err(|(_, e)| e)?;
     let mut out = BTreeMap::new();
     for it in v["items"].as_array().into_iter().flatten() {
@@ -317,6 +321,21 @@ pub async fn pass(state: &Arc<AppState>, p: &mut Publisher) -> Result<Summary, S
     let mut s = Summary::default();
     volumes(state, p, &mut s).await?;
     replications(state, p, &mut s).await?;
+    // Golden objects (#743): their own errors (the CRD not on the cluster
+    // yet) said once, never stopping the others.
+    match crate::mgmt::kube_goldens::pass(state, &mut p.goldens, &mut s).await {
+        Ok(()) => {
+            if p.golden_error.take().is_some() {
+                tracing::info!("kubernetes: Golden objects are read again (#743)");
+            }
+        }
+        Err(e) => {
+            if p.golden_error.as_deref() != Some(e.as_str()) {
+                tracing::warn!("kubernetes: reading Golden objects: {e} (#743)");
+                p.golden_error = Some(e);
+            }
+        }
+    }
     match node_install(state, &mut p.install_plan, &mut s).await {
         Ok(()) => {
             if p.install_error.take().is_some() {

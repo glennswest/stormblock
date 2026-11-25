@@ -60,10 +60,10 @@ file, 256 KiB in all, absolute paths, no `..`) out of the **golden**, never the 
 Acted on when `observedSpec` differs from spec or a `Making` was cut short; never twice for the same spec.
 RBAC: what stormfn already has (`goldens create`) plus `get` to read the status; the engine's ClusterRole
 gains goldens, goldens/status. The CRD's copy is stormcos's (an issue there).
-- [ ] `fs::files::read_file_bounded` (stat first: a big file never read)
-- [ ] `mgmt::kube_goldens`: spec parse/validate, the pass (from `kube_publish::pass`), the make on a task
-- [ ] deploy/crds.yaml: Golden CRD, the ClusterRole; docs (docs/kubernetes-objects or README), CHANGELOG
-- [ ] tests: integration over the stand-in apiserver (made, files, a bad path, over-size, in use, unlabelled,
+- [x] `fs::files::read_file_bounded` (stat first: a big file never read)
+- [x] `mgmt::kube_goldens`: spec parse/validate, the pass (from `kube_publish::pass`), the make on a task
+- [x] deploy/crds.yaml: Golden CRD, the ClusterRole; docs (docs/kubernetes-objects or README), CHANGELOG
+- [x] tests: integration over the stand-in apiserver (made, files, a bad path, over-size, in use, unlabelled,
   not twice, a spec change makes again), unit (validation)
 - [ ] check.sh; stormcos issue (the CRD copy + RBAC), stormfn#62 told the contract
 

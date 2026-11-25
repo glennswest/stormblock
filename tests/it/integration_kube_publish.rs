@@ -1,5 +1,6 @@
 //! #655: the engine's Volume and Replication objects on the cluster's
-//! apiserver, and the spec changes asked there. A small apiserver stands in
+//! apiserver, and the spec changes asked there; #743: Golden objects made
+//! here. A small apiserver stands in
 //! (the CRDs' REST: list, create, get, merge-patch, `/status`, delete).
 
 use crate::common;
@@ -254,4 +255,142 @@ fn regex_lite(text: &str) -> bool {
         let rest = &text[at + i + m.len()..];
         rest.chars().take_while(|c| c.is_ascii_digit()).count() >= 8
     })
+}
+
+/// Until the Golden's phase is no longer `Making`: the make runs on a task.
+async fn settled(store: &Store, name: &str) -> Value {
+    for _ in 0..600 {
+        if let Some(o) = obj(store, "goldens", name) {
+            if !matches!(o["status"]["phase"].as_str(), None | Some("Making")) {
+                return o;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("Golden {name} never left Making: {:?}", obj(store, "goldens", name));
+}
+
+fn golden_object(name: &str, node: Option<&str>, spec: Value) -> Value {
+    let labels = match node {
+        Some(n) => json!({ "storm.io/node": n }),
+        None => json!({}),
+    };
+    json!({ "apiVersion": "storage.storm.io/v1", "kind": "Golden", "metadata": { "name": name, "labels": labels }, "spec": spec })
+}
+
+fn put(store: &Store, plural: &str, name: &str, v: Value) {
+    store.lock().unwrap().insert((plural.to_string(), name.to_string()), v);
+}
+
+/// #743 (stormfn#62): a Golden created on the apiserver for this node is
+/// made here from its volume, and its files read out of the golden,
+/// bounded, into its status; acted on once a spec, again when the spec
+/// changes; a spec that cannot be done, a missing volume, an unlabelled
+/// object and another node's are each left as the contract says.
+#[tokio::test]
+async fn a_golden_asked_on_the_apiserver_is_made_and_its_files_read() {
+    use base64::Engine;
+    use sha2::Digest;
+    use stormblock::fs::{ext4, files::SeedFile};
+    let (api, store) = apiserver().await;
+    let dir = TempDir::new().unwrap();
+    let state = setup(&dir, &api).await;
+    let id = state.volume_manager.lock().await.create_volume_any("pvc-shop-checkout-build", 64 << 20).await.unwrap();
+    let dev = state.volume_manager.lock().await.get_volume(&id).unwrap();
+    ext4::format(&dev, &ext4::Ext4Params::default()).await.unwrap();
+    let deps = b"requests==2.32.0\nflask==3.0.0\n".to_vec();
+    let mut seed = vec![
+        SeedFile::new("/dependencies.txt", deps.clone()),
+        SeedFile::new("/big.bin", vec![7u8; 100 * 1024]),
+        SeedFile::new("/dir/x", b"x".to_vec()),
+    ];
+    for i in 0..5 {
+        seed.push(SeedFile::new(format!("/f{i}"), vec![i as u8; 60 * 1024]));
+    }
+    stormblock::fs::files::write_files(&dev, &seed).await.unwrap();
+    drop(dev);
+    let mut p = Publisher::new();
+
+    let spec = json!({
+        "volume": "pvc-shop-checkout-build", "name": "fn-shop-checkout",
+        "provenance": { "component": "stormfn", "commit": "0123abc" },
+        "files": ["/dependencies.txt", "/big.bin", "/dir", "/missing", "/f0", "/f1", "/f2", "/f3", "/f4"],
+    });
+    put(&store, "goldens", "fn-shop-checkout-r1", golden_object("fn-shop-checkout-r1", Some("forge1"), spec.clone()));
+    let s = pass(&state, &mut p).await.unwrap();
+    assert_eq!(s.applied, 1, "{s:?}");
+    let o = settled(&store, "fn-shop-checkout-r1").await;
+    let st = &o["status"];
+    assert_eq!(st["phase"], "Ready", "{o}");
+    assert_eq!(st["observedSpec"], spec);
+    let gname = st["golden"]["name"].as_str().unwrap();
+    assert!(gname.starts_with("golden-fn-shop-checkout-"), "{o}");
+    assert_eq!(st["golden"]["sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(st["golden"]["existing"], false);
+    let gid = Uuid::parse_str(st["golden"]["volumeId"].as_str().unwrap()).unwrap();
+    assert_ne!(gid, id.0, "a golden of its own, not the source");
+
+    let f = st["files"].as_array().unwrap();
+    assert_eq!(f.len(), 9, "one entry a path, in order: {o}");
+    assert_eq!(f[0]["path"], "/dependencies.txt");
+    let got = base64::engine::general_purpose::STANDARD.decode(f[0]["contentsBase64"].as_str().unwrap()).unwrap();
+    assert_eq!(got, deps);
+    assert_eq!(f[0]["sha256"], json!(hex::encode(sha2::Sha256::digest(&deps))));
+    assert_eq!(f[0]["size"], deps.len());
+    assert!(f[1]["error"].as_str().unwrap().contains("65536 a file"), "over a file's bound, not read: {}", f[1]);
+    assert!(f[1].get("contentsBase64").is_none());
+    assert!(f[2]["error"].as_str().unwrap().contains("directory"), "{}", f[2]);
+    assert!(f[3]["error"].is_string(), "{}", f[3]);
+    for e in &f[4..8] {
+        assert!(e["contentsBase64"].is_string(), "four 60 KiB files fit the 256 KiB: {e}");
+    }
+    assert!(f[8]["error"].as_str().unwrap().contains("together"), "the fifth is over the whole bound: {}", f[8]);
+
+    // The golden on this node: sealed, recorded with who asked.
+    {
+        let vm = state.volume_manager.lock().await;
+        let h = vm.get_volume_handle(&stormblock::volume::VolumeId(gid)).expect("the golden is here");
+        assert_eq!(h.name().await, gname);
+        assert!(vm.is_sealed(&stormblock::volume::VolumeId(gid)), "sealed");
+    }
+    let rec = stormblock::mgmt::goldens::load(&state).into_iter().find(|r| r.name == gname).expect("recorded");
+    assert_eq!(rec.made_by.as_deref(), Some("kubernetes:Golden/fn-shop-checkout-r1"));
+    assert_eq!(rec.provenance.get("commit").map(String::as_str), Some("0123abc"));
+
+    // Not made twice for the same spec.
+    let s = pass(&state, &mut p).await.unwrap();
+    assert_eq!((s.applied, s.refused), (0, 0), "{s:?}");
+
+    // A spec changed there: acted on again; the same content is the same golden.
+    store.lock().unwrap().get_mut(&("goldens".to_string(), "fn-shop-checkout-r1".to_string())).unwrap()["spec"]["files"] = json!(["/dependencies.txt"]);
+    let s = pass(&state, &mut p).await.unwrap();
+    assert_eq!(s.applied, 1, "{s:?}");
+    let o = settled(&store, "fn-shop-checkout-r1").await;
+    assert_eq!(o["status"]["phase"], "Ready", "{o}");
+    assert_eq!(o["status"]["golden"]["name"], gname);
+    assert_eq!(o["status"]["golden"]["existing"], true, "{o}");
+    assert_eq!(o["status"]["files"].as_array().unwrap().len(), 1);
+
+    // A path that climbs out: refused before anything is made, once.
+    put(&store, "goldens", "bad", golden_object("bad", Some("forge1"), json!({ "volume": "pvc-shop-checkout-build", "name": "x", "files": ["/a/../../etc/shadow"] })));
+    // A volume this node does not have: failed with its 404.
+    put(&store, "goldens", "gone", golden_object("gone", Some("forge1"), json!({ "volume": "pvc-nowhere", "name": "x" })));
+    // No node label, and another node's: nobody here touches them.
+    put(&store, "goldens", "nolabel", golden_object("nolabel", None, json!({ "volume": "pvc-shop-checkout-build", "name": "x" })));
+    put(&store, "goldens", "server8s", golden_object("server8s", Some("server8"), json!({ "volume": "pvc-shop-checkout-build", "name": "x" })));
+    let s = pass(&state, &mut p).await.unwrap();
+    assert_eq!((s.applied, s.refused), (1, 1), "{s:?}");
+    let b = obj(&store, "goldens", "bad").unwrap();
+    assert_eq!(b["status"]["phase"], "Failed", "{b}");
+    assert_eq!(b["status"]["error"]["code"], 422);
+    assert!(b["status"]["error"]["message"].as_str().unwrap().contains(". or .."), "{b}");
+    let g = settled(&store, "gone").await;
+    assert_eq!(g["status"]["phase"], "Failed", "{g}");
+    assert_eq!(g["status"]["error"]["code"], 404, "{g}");
+    assert!(obj(&store, "goldens", "nolabel").unwrap().get("status").is_none());
+    assert!(obj(&store, "goldens", "server8s").unwrap().get("status").is_none());
+    let s = pass(&state, &mut p).await.unwrap();
+    assert_eq!((s.applied, s.refused), (0, 0), "a failure as it stands is not asked again: {s:?}");
+    let goldens = stormblock::mgmt::goldens::load(&state);
+    assert_eq!(goldens.len(), 1, "nothing else was made: {goldens:?}");
 }

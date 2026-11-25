@@ -94,6 +94,39 @@ pub async fn read_file(dev: &Arc<dyn BlockDevice>, path: &str) -> anyhow::Result
         .map_err(|e| anyhow::anyhow!("reading {path}: {e}"))
 }
 
+/// What [`read_file_bounded`] found at a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bounded {
+    /// The file's bytes: it held at most the bound.
+    Bytes(Vec<u8>),
+    /// A file of this many bytes, over the bound: not read.
+    TooBig(u64),
+    /// A directory, not a file.
+    Dir,
+}
+
+/// Read one file out of a volume's filesystem only when it holds at most
+/// `max` bytes (#743): its size is looked at first, so a big file is never
+/// read into memory.
+pub async fn read_file_bounded(dev: &Arc<dyn BlockDevice>, path: &str, max: u64) -> anyhow::Result<Bounded> {
+    let vol = Volume::open(VolumeDevice::opaque(dev.clone()))
+        .await
+        .map_err(|e| anyhow::anyhow!("opening the filesystem: {e}"))?;
+    let st = vol.stat(path).await.map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+    if st.is_dir() {
+        return Ok(Bounded::Dir);
+    }
+    if st.size > max {
+        return Ok(Bounded::TooBig(st.size));
+    }
+    let b = vol.read(path).await.map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
+    // Grown between the stat and the read: still bounded.
+    if b.len() as u64 > max {
+        return Ok(Bounded::TooBig(b.len() as u64));
+    }
+    Ok(Bounded::Bytes(b))
+}
+
 /// One entry in a directory listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {

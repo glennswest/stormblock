@@ -2733,6 +2733,23 @@ pub(crate) async fn volume_key(state: &Arc<AppState>, key: &str) -> Result<Volum
     volume_key_in(state, key, request_namespace()).await
 }
 
+/// [`volume_key_in`] for a caller with no HTTP reply to give (a controller,
+/// #743): the refusal as its status code and its words.
+pub(crate) async fn volume_key_text(state: &Arc<AppState>, key: &str, ns: Option<String>) -> Result<VolumeId, (u16, String)> {
+    match volume_key_in(state, key, ns).await {
+        Ok(v) => Ok(v),
+        Err(r) => {
+            let code = r.status().as_u16();
+            let body = axum::body::to_bytes(r.into_body(), 64 * 1024).await.unwrap_or_default();
+            let words = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v["error"].as_str().or(v["message"].as_str()).map(str::to_string))
+                .unwrap_or_else(|| String::from_utf8_lossy(&body).into_owned());
+            Err((code, words))
+        }
+    }
+}
+
 /// [`volume_key`] with the namespace given, for a caller outside the
 /// volumes router (the auth layer, finding 78ed70cc2493): the same volume
 /// the handler will act on.
