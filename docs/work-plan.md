@@ -172,6 +172,14 @@ failing link went `ok`, said recovered, and lost its baseline.
   check.sh ALL PASS on 4b2f35aa (1606/1606, carries dfdae2e8); v24.45.11;
   DONE, closed
 
+## #727 — a rebuild or scrub started during an array release (2026-11-24, P1)
+- [ ] `RaidArray`: a `releasing` flag the hold sets under a lifecycle mutex (cleared if the hold is dropped
+  unreleased); `replace` (a failed slot to rebuilding, `take_spares`), `replace_proactively` and `start_scrub`
+  check it under the same mutex and refuse. The release blocker also counts a proactive replacement
+- [ ] API: if `hold.release()` still refuses, 409 and the array and its drives stay here (stopped)
+- [ ] test: under a hold, a spare's rebuild, a replacement and a scrub are refused; dropped unreleased, they start.
+  Negative control; docs/raid-sets.md, CHANGELOG; check.sh
+
 ## #719 — finding 021e897d6367 in mgmt/volume_move.rs (2026-11-21, P1)
 - [x] `Moves::reserve`: the volume's slot taken under the jobs mutex before
   the target is resolved or kept (409 while a worker is live, a flag the
