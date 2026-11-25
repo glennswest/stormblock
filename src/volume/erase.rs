@@ -207,32 +207,38 @@ impl Eraser {
             *last = started.elapsed();
             done.push((job, res));
         }
-        // Free what was overwritten; put back what failed. Their table pages
-        // read first, with no lock held (#155).
-        {
-            let tables: Vec<_> = {
-                let reg = self.registry.read().await;
-                done.iter().filter_map(|(j, _)| reg.get(&j.slab).map(|s| (s.table(), j.slot))).collect()
-            };
-            for (t, idx) in tables {
-                t.prefetch([idx]).await;
+        // Free what was overwritten; put back what failed. The free entries
+        // are written with no registry lock (#521): under its write lock, a
+        // table write a slot held every reader 1-2 s a batch on pvetest3.
+        let mut by_slab: HashMap<crate::drive::slab::SlabId, Vec<u64>> = HashMap::new();
+        for (job, res) in &done {
+            if res.is_ok() {
+                by_slab.entry(job.slab).or_default().push(job.slot);
+            }
+        }
+        let finishers: Vec<_> = {
+            let reg = self.registry.read().await;
+            by_slab.into_iter().filter_map(|(id, slots)| reg.get(&id).map(|s| (id, s.erase_finisher(), slots))).collect()
+        };
+        let mut freed: std::collections::HashSet<(crate::drive::slab::SlabId, u64)> = Default::default();
+        for (id, finisher, slots) in finishers {
+            match finisher.finish(&slots).await {
+                Ok(f) => freed.extend(f.into_iter().map(|s| (id, s))),
+                Err(e) => tracing::warn!(slab = %id.0, slots = slots.len(), "erased slots not freed: {e}"),
             }
         }
         let mut results: Vec<(EraseJob, Option<Outcome>)> = Vec::with_capacity(done.len());
         let still: HashMap<VolumeId, u64>;
         {
-            let mut reg = self.registry.write().await;
+            let reg = self.registry.read().await;
             for (job, res) in done {
-                let Some(slab) = reg.get_mut(&job.slab) else { continue };
+                let Some(slab) = reg.get(&job.slab) else { continue };
                 let ok = match res {
-                    Ok(o) => match slab.finish_erase(job.slot).await {
-                        Ok(()) => Some(o),
-                        Err(e) => {
-                            tracing::warn!(slab = %job.slab.0, slot = job.slot, "erased slot not freed: {e}");
-                            slab.return_erase(job.slot);
-                            None
-                        }
-                    },
+                    Ok(o) if freed.contains(&(job.slab, job.slot)) => Some(o),
+                    Ok(_) => {
+                        slab.return_erase(job.slot);
+                        None
+                    }
                     Err(e) => {
                         tracing::warn!(slab = %job.slab.0, slot = job.slot, level = %job.level, "erase failed, retrying later: {e}");
                         slab.return_erase(job.slot);
@@ -517,5 +523,108 @@ mod tests {
         assert_eq!(eraser.drain().await, 1);
         let e = &eraser.status().await.finished[0];
         assert_eq!((e.level, e.passes, e.verified), (EraseLevel::Dod7, 7, true));
+    }
+
+    /// A device whose writes take `ms` once it is set.
+    struct SlowWrites {
+        inner: Arc<dyn BlockDevice>,
+        ms: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockDevice for SlowWrites {
+        fn id(&self) -> &crate::drive::DeviceId {
+            self.inner.id()
+        }
+        fn capacity_bytes(&self) -> u64 {
+            self.inner.capacity_bytes()
+        }
+        fn block_size(&self) -> u32 {
+            self.inner.block_size()
+        }
+        fn optimal_io_size(&self) -> u32 {
+            self.inner.optimal_io_size()
+        }
+        fn device_type(&self) -> DriveType {
+            self.inner.device_type()
+        }
+        async fn read(&self, offset: u64, buf: &mut [u8]) -> DriveResult<usize> {
+            self.inner.read(offset, buf).await
+        }
+        async fn write(&self, offset: u64, buf: &[u8]) -> DriveResult<usize> {
+            let ms = self.ms.load(Relaxed);
+            if ms > 0 {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            }
+            self.inner.write(offset, buf).await
+        }
+        async fn flush(&self) -> DriveResult<()> {
+            self.inner.flush().await
+        }
+    }
+
+    /// #521: pvetest3 12.74, `the slab registry (write) was held 1.0-2.0s by
+    /// the eraser`, seven times in ten minutes, and `GET /volumes` and
+    /// `/slabs` waited 1.0-1.9 s for it. The eraser freed a batch's slots
+    /// under the registry's write lock, one table write after another. A
+    /// reader now never waits on a slot's table write, and every slot is
+    /// still freed, on the device too.
+    #[tokio::test]
+    async fn freeing_erased_slots_keeps_no_reader_waiting() {
+        const WRITE_MS: u64 = 50;
+        let dir = tempfile::tempdir().unwrap();
+        let file: Arc<dyn BlockDevice> = Arc::new(
+            FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 64 * MIB)
+                .await
+                .unwrap(),
+        );
+        let ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let dev: Arc<dyn BlockDevice> = Arc::new(SlowWrites { inner: file.clone(), ms: ms.clone() });
+        let mut vm = VolumeManager::new(MIB);
+        vm.add_backing_device(RaidArrayId(uuid::Uuid::new_v4()), dev.clone()).await;
+        vm.registry().write().await.set_erase_default(EraseLevel::Once);
+        let id = vm.create_volume_any("v", BATCH as u64 * MIB).await.unwrap();
+        let h = vm.get_volume(&id).unwrap();
+        h.write(0, &vec![0x5A; BATCH * MIB as usize]).await.unwrap();
+        h.flush().await.unwrap();
+        drop(h);
+        vm.delete_volume(id).await.unwrap();
+        let reg = vm.registry().clone();
+        assert_eq!(reg.read().await.erasing_slots(), BATCH as u64);
+
+        ms.store(WRITE_MS, Relaxed);
+        let eraser = Eraser::new(reg.clone(), None);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let reader = async {
+            let mut worst = Duration::ZERO;
+            while !done.load(Relaxed) {
+                let asked = Instant::now();
+                drop(reg.read().await);
+                worst = worst.max(asked.elapsed());
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            worst
+        };
+        let erasing = async {
+            let n = eraser.drain().await;
+            done.store(true, Relaxed);
+            n
+        };
+        let (erased, worst) = tokio::join!(erasing, reader);
+        assert_eq!(erased, BATCH, "every slot erased and freed");
+        // A table write a slot under the write lock: 16 × 50 ms = 0.8 s.
+        assert!(worst < Duration::from_millis(300), "a reader waited {worst:?}");
+        assert_eq!(reg.read().await.erasing_slots(), 0);
+
+        // On the device: a slab opened again finds every slot free.
+        ms.store(0, Relaxed);
+        let slab_id = reg.read().await.iter().map(|(id, _)| *id).next().unwrap();
+        crate::drive::slab::sync_registered(&reg, slab_id).await.unwrap();
+        let again = crate::drive::slab::Slab::open(file.clone()).await.unwrap();
+        assert_eq!(again.erasing_slots(), 0, "an erased slot still says erasing on the device");
+        assert_eq!(again.allocated_slots(), 0);
+        let mut all = vec![0u8; file.capacity_bytes() as usize];
+        file.read(0, &mut all).await.unwrap();
+        assert!(!holds(&all, &[0x5A; 4096]), "the deleted volume's data is still on the device");
     }
 }

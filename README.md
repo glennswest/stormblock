@@ -911,6 +911,10 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   went away first is said too (`abandoned by its caller after Ns`).
   A clone, a delete and the volume and slab listings also say where the time went
   (#521): `steps check=0ms preread=0ms snapshot=0ms stamp=26ms readback=8ms persist=169ms`.
+  Each step is the time since the one before. A request that owes a metadata
+  persist ends with `handler=` (the rest of its handler) and then
+  `owed_persist=` (the persist alone); an fsck says `snapshot=`, `check=` and
+  `release=`.
 - `GET /serve/v1/health` and `GET /serve/v1/ready` — public. `health` also says
   `allow_any_host` (#212): `false` (the default since v24.0.0) means an export
   that names no `host_nqn` admits no host. `ready` is 200 only

@@ -2291,7 +2291,22 @@ NIC rely on those names; mlx4_core's 7 s firmware init would still be the wait.
       check.sh ALL PASS on ab49e144 (1531/1531); v24.32.0 (0ea78209, `--locked` says 24.32.0); stage 4176975153a0
 - [ ] metal: server8 named `server8` from DNS on its reboot (`shipped --proof`); R6415 (C2NR0Q2) still unread
 
-### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; back 2026-11-07: letting go of a flow-over's sources stalls every reader
+### Engine answers over 1 s: lists, clones, deletes, fsck (2026-11-06, #521, P2, stormcos#804 fix 7) — v23.22.1 SHIPPED; back 2026-11-07: letting go of a flow-over's sources stalls every reader; back 2026-11-24: the eraser
+
+Read 2026-11-24 from `stormcentral logs` (pvetest1/2/3 12.74, 2026-11-25Z) and the 12.72 server7 comment:
+- `GET /volumes` 1.0-1.9 s, all lock wait in `generation=`; `GET /slabs` 1.2 s in `account=`: behind
+  `the slab registry (write) was held 1.0-2.0s by the eraser` (7 in 10 min on pvetest3). `Eraser::round`
+  freed its 16 slots under the registry's write lock, a table write each (`finish_erase`).
+- fsck `steps owed_persist=…` is the whole handler: `owed_persist` is "since the last step", fsck marks none.
+- clone `persist=674-959ms` (pvetests), 1.5-1.7 s (server7 SMR); delete `owed_persist=1.07 s` (pvetest3),
+  5.1 s (server7): the persist's ordered flushes, as read on 2026-11-06. Fewer would mean answering before the
+  record is durable: the owner's to decide, not done.
+- `the API runtime has not run its heartbeat for 5-7s`: only at `adopt: SIGTERM — stopping`, not this issue.
+Plan, on main:
+- [x] `slab::EraseFinisher`: a batch's free entries in one table write, no registry lock; `freeing` after the write
+- [x] test `freeing_erased_slots_keeps_no_reader_waiting`; control: the same test against the old round
+- [x] `handler=` before `owed_persist=`; fsck steps `snapshot= check= release=`; README, docs/erase.md, CHANGELOG
+- [ ] check.sh ALL PASS; then metal on a release with it: no `held … by the eraser` over 1 s, fsck lines split
 
 Read on metal, 2026-11-07 (consoles of 2026-11-04..07): pvetest1 12.66 `the slab registry (write) was held 18.7s by the
 flow-over`, 47 waiting, `GET /volumes` 18.5 s, straight after `Flow-over: validated`; pvetest1 and forge1 12-14 s too. It is

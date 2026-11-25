@@ -237,6 +237,10 @@ pub async fn track(State(state): State<Arc<AppState>>, mut req: Request, next: N
     // before the caller hears the answer.
     let owed_persist = activity.take_owed_persist();
     if owed_persist {
+        // What the handler took since its last step, apart from the persist
+        // (#521): a handler that marks no steps (fsck) had its whole run
+        // said as `owed_persist`, 225 s on server7.
+        activity.step("handler");
         let persisted = crate::lockwatch::scope(
             activity.clone(),
             crate::volume::VolumeManager::persist_detached_checked(&state.volume_manager),

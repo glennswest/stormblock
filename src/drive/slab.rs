@@ -876,6 +876,72 @@ impl SlabSyncHandle {
     }
 }
 
+/// Frees slots the eraser overwrote (#286), with no slab or registry lock
+/// held (#521).
+///
+/// The eraser freed each slot under the registry's write lock, one table
+/// write after another: on pvetest3 (12.74) that held the registry 1-2 s a
+/// batch, and every listing, allocation and volume I/O that reads the
+/// registry waited behind it. An erasing slot is nobody's and nothing but
+/// the eraser changes it, so its free entry is written here with only the
+/// table's own page lock, one write a page.
+pub struct EraseFinisher {
+    pending: Arc<std::sync::Mutex<Pending>>,
+    table: Arc<super::slottable::SlotTable>,
+}
+
+impl EraseFinisher {
+    /// Free `slots`: their free entries written, then each `freeing`
+    /// (reusable once a flush makes the entry durable). A slot no longer
+    /// waiting for or taken by the eraser is left alone. The slots freed.
+    pub async fn finish(&self, slots: &[u64]) -> DriveResult<Vec<u64>> {
+        let mut idxs: Vec<u64> = slots.to_vec();
+        idxs.sort_unstable();
+        idxs.dedup();
+        let erasing = |p: &Pending, idx: &u64| p.erasing_now.contains_key(idx) || p.erasing.contains_key(idx);
+        idxs.retain(|i| erasing(&self.pending.lock().unwrap_or_else(|e| e.into_inner()), i));
+        if idxs.is_empty() {
+            return Ok(idxs);
+        }
+        let free = Slot::free().to_bytes();
+        let entries: Vec<(u64, [u8; SLOT_ENTRY_SIZE as usize])> = idxs.iter().map(|&i| (i, free)).collect();
+        let pending = self.pending.clone();
+        let wrote = self
+            .table
+            .write_checked(&entries, || {
+                let p = pending.lock().unwrap_or_else(|e| e.into_inner());
+                idxs.iter().all(|i| erasing(&p, i))
+            })
+            .await?;
+        if !wrote {
+            // Only the eraser takes a slot off the queue: not reached.
+            return Ok(Vec::new());
+        }
+        // `freeing` only now the entry is on the device (#171): a flush that
+        // releases the slot for reuse covers its free entry.
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        for &idx in &idxs {
+            let job = p.erasing_now.remove(&idx).or_else(|| p.erasing.remove(&idx));
+            if let Some((_, vol)) = job {
+                if let Some(n) = p.erasing_by_volume.get_mut(&vol) {
+                    *n -= 1;
+                    if *n == 0 {
+                        p.erasing_by_volume.remove(&vol);
+                    }
+                }
+            }
+            // The device says free now: memory need not say it too.
+            if p.unpublished.contains(&idx) {
+                p.entries.insert(idx, Slot::free());
+            } else {
+                p.entries.remove(&idx);
+            }
+            p.freeing.push(idx);
+        }
+        Ok(idxs)
+    }
+}
+
 /// Discards freed slots on a slab's device, with no lock on the slab (#521).
 pub struct SlotDiscarder {
     device: Arc<dyn BlockDevice>,
@@ -2294,24 +2360,15 @@ impl Slab {
     }
 
     /// The slot is overwritten: free it the ordinary way (its free entry
-    /// written now, reusable once that is durable).
-    pub async fn finish_erase(&mut self, slot_idx: u64) -> DriveResult<()> {
-        // An erasing slot is nobody's and nothing changes it but this, so
-        // the queue's record of it is the entry (no table read, #155).
-        {
-            let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            let job = p.erasing_now.remove(&slot_idx).or_else(|| p.erasing.remove(&slot_idx));
-            let Some((_, vol)) = job else { return Ok(()) };
-            if let Some(n) = p.erasing_by_volume.get_mut(&vol) {
-                *n -= 1;
-                if *n == 0 {
-                    p.erasing_by_volume.remove(&vol);
-                }
-            }
-            p.entries.insert(slot_idx, Slot::free());
-            p.freeing.push(slot_idx);
-        }
-        self.persist_slot(slot_idx).await
+    /// written now, reusable once that is durable). See [`EraseFinisher`].
+    pub async fn finish_erase(&self, slot_idx: u64) -> DriveResult<()> {
+        self.erase_finisher().finish(&[slot_idx]).await.map(|_| ())
+    }
+
+    /// What freeing overwritten slots needs, to do it with no slab or
+    /// registry lock held (#521).
+    pub fn erase_finisher(&self) -> EraseFinisher {
+        EraseFinisher { pending: self.pending.clone(), table: self.table.clone() }
     }
 
     /// Where the slots begin, in bytes from the start of the device. Slot

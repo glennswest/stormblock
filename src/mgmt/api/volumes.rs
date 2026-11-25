@@ -3394,6 +3394,7 @@ async fn fsck_snapshot(state: &Arc<AppState>, uuid: Uuid, dev: Arc<dyn BlockDevi
             Err(e) => Err(e.to_string()),
         }
     };
+    crate::lockwatch::step("snapshot");
     let (snap, snap_dev) = match taken {
         Ok(t) => t,
         Err(why) => {
@@ -3407,6 +3408,7 @@ async fn fsck_snapshot(state: &Arc<AppState>, uuid: Uuid, dev: Arc<dyn BlockDevi
         }
     };
     let checked = crate::fs::ext4::check_replayed(&snap_dev).await;
+    crate::lockwatch::step("check");
     drop(snap_dev);
     // Let go of the snapshot whatever the check said: it is nobody's.
     let pre = crate::volume::VolumeManager::preread_unlocked(&state.volume_manager, snap).await.ok();
@@ -3414,6 +3416,7 @@ async fn fsck_snapshot(state: &Arc<AppState>, uuid: Uuid, dev: Arc<dyn BlockDevi
         tracing::warn!("fsck: the check's snapshot {} ({name}) of volume {uuid} was not deleted: {e}", snap.0);
     }
     state.eraser.kick();
+    crate::lockwatch::step("release");
     match checked {
         Ok((r, replayed)) => fsck_json(uuid, &r, serde_json::json!({
             "view": "snapshot",

@@ -28,7 +28,11 @@ where anyone holding the drive could read them.
    - for the DoD levels, reads the last pass back and compares it;
    - discards the range afterwards, except on a spinning disk.
 3. **It is freed the ordinary way.** Its free entry is written, and the slot
-   becomes reusable once that entry is durable (#171).
+   becomes reusable once that entry is durable (#171). A batch's free entries
+   are written together, one write per table page, with no slab or registry
+   lock held (#521): nothing but the eraser changes a slot it took. Written
+   one slot at a time under the registry's write lock, they held every
+   listing, allocation and volume I/O for 1-2 s per batch on pvetest3.
 
 **After a crash or a stop.** Opening a slab puts every `Erasing` entry back in
 the queue, so an interrupted erase is finished, not skipped. An erased slot
