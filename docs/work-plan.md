@@ -4,6 +4,25 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #729 — EMI / SSC vs link reliability, an A/B on forge1 bays 1 and 3 (2026-11-25, P2) — PAUSED (master: blocked, #652 first)
+
+SSC is not in 0x19/1 (#646): it is the phy capabilities of the enhanced phy
+control subpage 0x19/3 (SPL: programmed / current / attached, the G1–G5
+WITH/WITHOUT SSC bits, TX SSC TYPE; NEGOTIATED SSC at descriptor byte 18).
+The drive's programmed capabilities are the knob that this code reaches (the
+mpt card's SSC is in its firmware's NVDATA, not touched). No pre-emphasis or
+amplitude control is standard; a vendor's is not guessed at.
+- [ ] scsi: `PhyCaps`, `parse_enhanced_phy_control`, `ssc_select`, `phy_caps`,
+  `set_ssc` (SP=0 only, never saved: a power cycle gives the drive's own)
+- [ ] `stormblock hba ssc --sas|--dev [--set off|on|down|center|restore]`
+- [ ] `stormblock hba ssc-ab --sas A --sas B --settings off,on --window 900`:
+  per setting: set, link reset, wait up, both sides' counters at the start
+  and end (deltas: no LOG SELECT, which can reset every page's counters);
+  per-minute rates in a table + JSON; the drive's own page restored and the
+  link reset at the end, an error or not
+- [ ] check.sh; release
+- [ ] the run on forge1 (hardware: the master's), the table on the issue
+
 ## #737 — a sealed volume as a source: imports and an image build's members and ESP (2026-11-24, stormblock-registry#244/#248)
 The registry keeps each blob as a raw sealed volume with its length; a
 pallet publish already reads one in place (`source: volume`), the import and
