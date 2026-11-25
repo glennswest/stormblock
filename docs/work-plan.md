@@ -172,7 +172,7 @@ failing link went `ok`, said recovered, and lost its baseline.
   check.sh ALL PASS on 4b2f35aa (1606/1606, carries dfdae2e8); v24.45.11;
   DONE, closed
 
-## #727 — a rebuild or scrub started during an array release (2026-11-24, P1)
+## #727 — a rebuild or scrub started during an array release (2026-11-24, P1) — DONE
 - [x] `RaidArray`: a `releasing` flag the hold sets under a lifecycle mutex (cleared if the hold is dropped
   unreleased); `replace` (a failed slot to rebuilding, `take_spares`), `replace_proactively` and `start_scrub`
   check it under the same mutex and refuse (`RaidError::Releasing`, 409). The release blocker also counts a
@@ -181,7 +181,7 @@ failing link went `ok`, said recovered, and lost its baseline.
 - [x] test `nothing_that_writes_members_starts_while_a_release_holds_the_set`: 56/56 raid + clippy on 30e4a782;
   negative control (the hold sets no flag; wip/727-control, deleted) fails, `a spare was taken under a release`;
   docs/raid-sets.md, CHANGELOG
-- [ ] check.sh
+- [x] check.sh at 4da6bfce ALL PASS (nextest 1635/1635, runtime tests); DONE, closed
 
 ## #719 — finding 021e897d6367 in mgmt/volume_move.rs (2026-11-21, P1)
 - [x] `Moves::reserve`: the volume's slot taken under the jobs mutex before
