@@ -305,7 +305,7 @@ async fn concurrent_writes_to_one_stripe_keep_parity() {
     for h in handles {
         h.await.unwrap();
     }
-    let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false });
+    let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false }).unwrap();
     while !p.is_finished() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -615,17 +615,17 @@ async fn scrub_finds_and_repairs() {
         let model = fill(&a, 101).await;
         // Damage one member's copy of the first unit.
         mems[n - 1].poke(DATA_OFFSET + 100, &[0x5A; 64]);
-        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false });
+        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false }).unwrap();
         while !p.is_finished() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(p.found(), 1, "{level}: report-only scrub");
-        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: true });
+        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: true }).unwrap();
         while !p.is_finished() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(p.repaired(), 1, "{level}");
-        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false });
+        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false }).unwrap();
         while !p.is_finished() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -646,7 +646,7 @@ async fn scrub_finds_and_repairs() {
 #[tokio::test]
 async fn a_scrub_puts_a_flipped_data_strip_right_from_the_two_parities() {
     let scrub = |a: Arc<RaidArray>, repair: bool| async move {
-        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair });
+        let p = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair }).unwrap();
         while !p.is_finished() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -838,4 +838,47 @@ async fn a_release_and_a_grow_never_run_at_once() {
     assert_eq!((mems[0].zeroes.load(Ordering::SeqCst), mems[1].zeroes.load(Ordering::SeqCst)), zeroes);
     let after = (mems[0].peek(0, (DATA_OFFSET + 12 * MIB) as usize), mems[1].peek(0, (DATA_OFFSET + 12 * MIB) as usize));
     assert!(after == before, "a member byte changed after the release");
+}
+
+/// #727: no rebuild, replacement or scrub starts while a release holds the
+/// set, so the check the release made at its start still holds when it lets
+/// go. A member that fails meanwhile keeps its spare in the pool; a replace,
+/// a proactive replacement and a scrub asked meanwhile are refused; the
+/// release goes. A hold dropped unreleased lets them start again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nothing_that_writes_members_starts_while_a_release_holds_the_set() {
+    let pool = spares::SparePool::new();
+    let spare = MemDev::new(SIZE);
+    pool.add(spare.clone(), "").await.unwrap();
+    let (_mems, dyns) = devs(4);
+    let a = Arc::new(RaidArray::create(RaidLevel::Raid5, dyns, Some(UNIT)).await.unwrap());
+    fill(&a, 727).await;
+    a.start(Some(pool.clone()));
+
+    let hold = a.hold_for_release().expect("nothing runs now");
+    assert!(a.fail_member(2, "test"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(pool.list().len(), 1, "a spare was taken under a release");
+    let err = a.replace(2, MemDev::new(SIZE)).await.unwrap_err();
+    assert!(matches!(err, RaidError::Releasing(_)), "{err}");
+    let err = a.replace_proactively(0, MemDev::new(SIZE)).await.unwrap_err();
+    assert!(matches!(err, RaidError::Releasing(_)), "{err}");
+    let err = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false }).unwrap_err();
+    assert!(matches!(err, RaidError::Releasing(_)), "{err}");
+    assert!(a.scrub_progress().is_none());
+    assert_eq!(a.release_blocker(), None, "something started under the hold");
+    hold.release().expect("the release goes");
+    assert!(a.is_released());
+    let err = a.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false }).unwrap_err();
+    assert!(err.to_string().contains("released"), "{err}");
+
+    // A hold let go of unreleased (the API refused for another reason).
+    let (b, _) = make(RaidLevel::Raid5, 4).await;
+    let hold = b.hold_for_release().unwrap();
+    assert!(b.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false }).is_err());
+    drop(hold);
+    b.start_scrub(rebuild::ScrubConfig { max_bytes_per_sec: 0, repair: false }).expect("a scrub starts once the hold is gone");
+    assert!(b.fail_member(1, "test"));
+    b.replace(1, MemDev::new(SIZE)).await.expect("a rebuild starts once the hold is gone");
+    b.stop();
 }

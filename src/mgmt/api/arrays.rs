@@ -606,10 +606,15 @@ async fn release_array(
         Err(e) => return ApiError::conflict(format!("cannot release array {array_id}: {e}")),
     };
     if let Err(why) = hold.release() {
-        // A rebuild began in between: the volumes are already let go of in
-        // memory, written nowhere; the set stays here, stopped.
+        // Not reached: no rebuild, replacement or scrub starts while the
+        // hold is held (#727). Were one running, the set and its drives stay
+        // here, stopped, and the caller is told: never "released" while this
+        // engine still writes its members.
         info.array.stop();
         tracing::error!("array {array_id}: released its volumes but not the set: {why}");
+        return ApiError::conflict(format!(
+            "cannot release array {array_id}: {why}; its volumes were let go of here, the set is stopped and stays"
+        ));
     }
     let members: Vec<Uuid> = info.array.members_view().iter().filter_map(|m| m.drive.as_ref().map(|d| d.uuid)).collect();
     state.arrays.write().await.remove(&array_id);
@@ -752,6 +757,7 @@ async fn replace_member(
     let res = if active { info.array.replace_proactively(slot, device).await } else { info.array.replace(slot, device).await };
     match res {
         Ok(_) => (axum::http::StatusCode::ACCEPTED, Json(full_response(&state, array_id, &info).await)).into_response(),
+        Err(e @ crate::raid::RaidError::Releasing(_)) => ApiError::conflict(format!("cannot replace slot {slot}: {e}")),
         Err(e) => ApiError::bad_request(format!("cannot replace slot {slot}: {e}")),
     }
 }
@@ -778,8 +784,11 @@ async fn start_scrub(
         Err(r) => return r,
     };
     let req = body.map(|b| b.0).unwrap_or_default();
-    let p = info.array.start_scrub(ScrubConfig { max_bytes_per_sec: req.max_bytes_per_sec, repair: req.repair.unwrap_or(false) });
-    (axum::http::StatusCode::ACCEPTED, Json(p.status())).into_response()
+    match info.array.start_scrub(ScrubConfig { max_bytes_per_sec: req.max_bytes_per_sec, repair: req.repair.unwrap_or(false) }) {
+        Ok(p) => (axum::http::StatusCode::ACCEPTED, Json(p.status())).into_response(),
+        // A release holds the set (#727).
+        Err(e) => ApiError::conflict(format!("cannot scrub: {e}")),
+    }
 }
 
 async fn get_scrub(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {

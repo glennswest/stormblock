@@ -182,6 +182,9 @@ pub enum RaidError {
     CannotRemoveMember(String),
     /// The array cannot grow now (#318): why.
     CannotGrow(String),
+    /// A release holds the set, or it was released (#727): no rebuild,
+    /// replacement or scrub starts.
+    Releasing(String),
 }
 
 impl fmt::Display for RaidError {
@@ -199,6 +202,7 @@ impl fmt::Display for RaidError {
             RaidError::NotSupported(msg) => write!(f, "not supported: {msg}"),
             RaidError::CannotRemoveMember(msg) => write!(f, "cannot remove member: {msg}"),
             RaidError::CannotGrow(msg) => write!(f, "cannot grow: {msg}"),
+            RaidError::Releasing(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -368,25 +372,43 @@ pub struct RaidArray {
     /// took, which the `released` checks on array I/O do not stop. A release
     /// holds it from its first check to `released` ([`ReleaseHold`]).
     grow_lock: tokio::sync::Mutex<()>,
+    /// A release holds the set (#727): no rebuild, replacement or scrub
+    /// starts. Set and read under `lifecycle`, so a start and a release's
+    /// check cannot both pass.
+    releasing: AtomicBool,
+    /// Taken (briefly, never across an await) by a release's check and by
+    /// every start of work that writes members directly (#727).
+    lifecycle: std::sync::Mutex<()>,
 }
 
 /// A release under way (#718, finding 0f237e79c424): no grow runs while it
 /// is held, and one asked meanwhile waits and then finds the set released.
+/// Nor does a rebuild, a replacement or a scrub start (#727): each refuses
+/// while the hold is held, so the check the release made at its start
+/// still holds at [`release`](Self::release). Dropped unreleased (the
+/// release refused for another reason), they may start again.
 pub struct ReleaseHold<'a> {
     array: &'a RaidArray,
     _grow: tokio::sync::MutexGuard<'a, ()>,
 }
 
 impl ReleaseHold<'_> {
-    /// Let go of the set (see [`RaidArray::release`]). A rebuild or a scrub
-    /// that began since the hold was taken still refuses.
+    /// Let go of the set (see [`RaidArray::release`]).
     pub fn release(self) -> Result<(), String> {
+        let _l = self.array.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = self.array.release_blocker() {
             return Err(why);
         }
         self.array.released.store(true, Ordering::SeqCst);
         self.array.stop();
         Ok(())
+    }
+}
+
+impl Drop for ReleaseHold<'_> {
+    fn drop(&mut self) {
+        let _l = self.array.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+        self.array.releasing.store(false, Ordering::SeqCst);
     }
 }
 
@@ -521,6 +543,8 @@ impl RaidArray {
             stopped: AtomicBool::new(false),
             released: AtomicBool::new(false),
             grow_lock: tokio::sync::Mutex::new(()),
+            releasing: AtomicBool::new(false),
+            lifecycle: std::sync::Mutex::new(()),
         }
     }
 
@@ -1693,16 +1717,22 @@ impl RaidArray {
 
     /// Verify (and with `repair`, fix) every stripe or mirror unit, in the
     /// background. Returns the running scrub's progress if one is running.
-    pub fn start_scrub(self: &Arc<Self>, config: ScrubConfig) -> Arc<ScrubProgress> {
+    /// Refused while a release holds the set or after it (#727).
+    pub fn start_scrub(self: &Arc<Self>, config: ScrubConfig) -> Result<Arc<ScrubProgress>, RaidError> {
+        let lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         let mut slot = self.scrub_progress.lock().unwrap();
         if let Some(p) = slot.as_ref() {
             if !p.is_finished() {
-                return p.clone();
+                return Ok(p.clone());
             }
+        }
+        if let Some(why) = self.start_refused() {
+            return Err(RaidError::Releasing(format!("no scrub: {why}")));
         }
         let progress = ScrubProgress::new(self.data_size(), config.repair);
         *slot = Some(progress.clone());
         drop(slot);
+        drop(lifecycle);
         let array = Arc::clone(self);
         let p = progress.clone();
         tokio::spawn(async move {
@@ -1729,7 +1759,7 @@ impl RaidArray {
                 array.level, array.id, p.found(), p.repaired()
             );
         });
-        progress
+        Ok(progress)
     }
 
     pub fn scrub_progress(&self) -> Option<Arc<ScrubProgress>> {
@@ -1752,6 +1782,11 @@ impl RaidArray {
         }
         let uuid = Uuid::new_v4();
         {
+            // No rebuild starts while a release holds the set (#727).
+            let _l = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(why) = self.start_refused() {
+                return Err(RaidError::Releasing(format!("slot {slot} not replaced: {why}")));
+            }
             let mut members = self.members.write().unwrap();
             let Some(m) = members.get_mut(slot) else {
                 return Err(RaidError::InvalidStripe(format!("no slot {slot}")));
@@ -1797,6 +1832,10 @@ impl RaidArray {
         }
         let tee;
         {
+            let _l = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(why) = self.start_refused() {
+                return Err(RaidError::Releasing(format!("slot {slot} not replaced: {why}")));
+            }
             let mut r = self.replacing.lock().unwrap();
             if let Some(other) = *r {
                 return Err(RaidError::InvalidStripe(format!("slot {other} is being replaced already")));
@@ -1839,6 +1878,9 @@ impl RaidArray {
     /// no spare fits, or a replacement or rebuild is already under way.
     pub async fn replace_failing(self: &Arc<Self>, slot: usize) -> Result<Option<Uuid>, RaidError> {
         if self.replacing.lock().unwrap().is_some() || self.rebuilding_count() > 0 {
+            return Ok(None);
+        }
+        if self.releasing.load(Ordering::SeqCst) || self.is_released() {
             return Ok(None);
         }
         let Some(pool) = self.spares.read().unwrap().clone() else { return Ok(None) };
@@ -2265,6 +2307,10 @@ impl RaidArray {
 
     /// Put spares into failed slots, as many as there are.
     pub async fn take_spares(self: &Arc<Self>) {
+        // A release holds the set (#727): the spare stays a spare.
+        if self.releasing.load(Ordering::SeqCst) || self.is_released() {
+            return;
+        }
         let Some(pool) = self.spares.read().unwrap().clone() else { return };
         if !self.data_intact() {
             return;
@@ -2291,6 +2337,12 @@ impl RaidArray {
                     "{} {} ({}): slot {slot} replaced by spare {} ({path}) from pool '{}'",
                     self.level, self.id, self.name(), spare.uuid, spare.pool
                 ),
+                Err(RaidError::Releasing(why)) => {
+                    // Refused before anything was written: still a spare.
+                    pool.adopt(spare.device.clone(), &superblock::Superblock::spare(spare.uuid, &spare.pool));
+                    tracing::info!("{} {}: spare {path} kept for slot {slot}: {why}", self.level, self.id);
+                    return;
+                }
                 Err(e) => {
                     tracing::error!("{} {}: spare {path} could not take slot {slot}: {e}", self.level, self.id);
                     return;
@@ -2401,10 +2453,14 @@ impl RaidArray {
         Ok(report(true, new))
     }
 
-    /// Why the set cannot be released now (#296): a rebuild or a scrub runs.
+    /// Why the set cannot be released now (#296): a rebuild, a proactive
+    /// replacement (#727) or a scrub runs.
     pub fn release_blocker(&self) -> Option<String> {
         if self.rebuilding_count() > 0 {
             return Some("a rebuild is running: wait for it or cancel it".into());
+        }
+        if let Some(slot) = *self.replacing.lock().unwrap() {
+            return Some(format!("slot {slot} is being replaced: wait for it"));
         }
         if self.scrub_progress().is_some_and(|p| !p.is_finished()) {
             return Some("a scrub is running: cancel it first".into());
@@ -2426,10 +2482,25 @@ impl RaidArray {
     /// while it is held no grow starts (#718).
     pub fn hold_for_release(&self) -> Result<ReleaseHold<'_>, String> {
         let grow = self.grow_lock.try_lock().map_err(|_| "a grow is running: wait for it".to_string())?;
+        let _l = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = self.release_blocker() {
             return Err(why);
         }
+        // Only one hold at a time: the grow lock is taken.
+        self.releasing.store(true, Ordering::SeqCst);
         Ok(ReleaseHold { array: self, _grow: grow })
+    }
+
+    /// Why no rebuild, replacement or scrub may start now (#727): a release
+    /// holds the set, or it was released. Called with `lifecycle` held.
+    fn start_refused(&self) -> Option<&'static str> {
+        if self.released.load(Ordering::SeqCst) {
+            Some("the array was released to another engine")
+        } else if self.releasing.load(Ordering::SeqCst) {
+            Some("the array is being released")
+        } else {
+            None
+        }
     }
 
     /// Whether the set was handed to another engine (#296).
