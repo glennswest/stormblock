@@ -261,7 +261,8 @@ enum HbaAction {
         sas: Vec<String>,
         #[arg(long)]
         all: bool,
-        /// Block devices instead (`/dev/sda`), by their SAS address
+        /// Block devices instead (`/dev/sda`): by their SAS address on a
+        /// card, else (#661: SATA on the board) through the device itself
         #[arg(long = "dev-name")]
         dev_name: Vec<String>,
         #[arg(long, default_value_t = 1024)]
@@ -279,6 +280,28 @@ enum HbaAction {
         sys: String,
         #[arg(long, default_value = "/dev")]
         dev: String,
+    },
+    /// A sustained sequential write (#661): `--gib` from `--offset-pct` into
+    /// the drive in 4 MiB O_DIRECT writes, timed in `--step-mib` steps each
+    /// synced, so a DRAM-less SSD's cliff (its SLC cache full) shows: each
+    /// step's MB/s, the peak, the floor and where it first fell below half.
+    /// For any block device (SATA on the board too). **Overwrites that
+    /// range**: `--confirm` is the device again, and a drive in use (the
+    /// layout, a holder, a mount, a stormraid member, any process holding it
+    /// open: the engine's slabs) is refused with every reason.
+    WriteCliff {
+        #[arg(long)]
+        dev: String,
+        #[arg(long)]
+        confirm: String,
+        #[arg(long, default_value_t = 4)]
+        gib: u64,
+        #[arg(long, default_value_t = 50)]
+        offset_pct: u8,
+        #[arg(long, default_value_t = 256)]
+        step_mib: u64,
+        #[arg(long)]
+        json: bool,
     },
     /// An action on a drive (#611): spin_up, spin_down, self_test,
     /// self_test_extended, or format (`--block-size`, `--pi none|type1`;
@@ -10981,13 +11004,19 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
         HbaAction::ReadTest { sas, all, dev_name, mib, offset_pct, secs, out, json, sys, dev } => {
             let (devp, sysp) = (Path::new(dev), Path::new(sys));
             let mut list = Vec::new();
+            let mut direct = Vec::new();
             for s in sas {
                 list.push(mpt::parse_addr(s).ok_or_else(|| anyhow::anyhow!("hba read-test: {s} is no SAS address"))?);
             }
+            // A drive on no SAS card (#661: SATA on the board's AHCI) is
+            // tested through its own block device.
             for d in dev_name {
-                list.push(crate::mgmt::link::sas_of_dev(sysp, d).ok_or_else(|| anyhow::anyhow!("hba read-test: {d} has no SAS address in sysfs"))?);
+                match crate::mgmt::link::sas_of_dev(sysp, d) {
+                    Some(a) => list.push(a),
+                    None => direct.push(devp.join(d.trim_start_matches("/dev/"))),
+                }
             }
-            if list.is_empty() || *all {
+            if (list.is_empty() && direct.is_empty()) || *all {
                 let (cards, _) = mpt::cards(devp, sysp, false);
                 for r in cards.iter().flat_map(|c| c.rows_json()) {
                     if r["present"] == true {
@@ -10999,7 +11028,7 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
                     }
                 }
             }
-            if list.is_empty() {
+            if list.is_empty() && direct.is_empty() {
                 anyhow::bail!("hba read-test: no card lists a present drive");
             }
             let o = crate::drive::read_test::Opts {
@@ -11008,12 +11037,47 @@ fn handle_hba(action: &HbaAction) -> anyhow::Result<()> {
                 random_secs: *secs,
                 ..Default::default()
             };
-            let all = crate::mgmt::hba::run_read_tests(devp, sysp, &list, &o, &|l| println!("{l}"));
+            let all = crate::mgmt::hba::run_read_tests_with(devp, sysp, &list, &direct, &o, &|l| println!("{l}"));
             if let Some(p) = out {
                 std::fs::write(p, serde_json::to_vec(&all)?)?;
             }
             if *json {
                 println!("{}", serde_json::to_string_pretty(&all)?);
+            }
+        }
+        HbaAction::WriteCliff { dev, confirm, gib, offset_pct, step_mib, json } => {
+            use crate::drive::read_test;
+            let name = dev.trim_start_matches("/dev/").to_string();
+            if confirm.trim_start_matches("/dev/") != name || name.is_empty() || name.contains('/') {
+                anyhow::bail!("hba write-cliff: it overwrites {} GiB of /dev/{name}: --confirm with the same device", gib);
+            }
+            let why = crate::mgmt::drive_busy::offline_reasons(&name);
+            if !why.is_empty() {
+                anyhow::bail!("hba write-cliff: /dev/{name} is in use, nothing written: {}", why.join("; "));
+            }
+            let path = Path::new("/dev").join(&name);
+            let size = std::fs::read_to_string(Path::new("/sys/block").join(&name).join("size"))
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .map(|sectors| sectors * 512)
+                .ok_or_else(|| anyhow::anyhow!("hba write-cliff: /dev/{name}: no size in /sys/block (a whole disk is asked)"))?;
+            let mib = 1u64 << 20;
+            let bytes = (*gib).clamp(1, 64) << 30;
+            if size < bytes + 8 * mib {
+                anyhow::bail!("hba write-cliff: /dev/{name} holds {} GiB, less than the {} GiB asked", size >> 30, gib);
+            }
+            let room = size - bytes - 8 * mib;
+            let off = ((size / 100 * (*offset_pct).min(90) as u64).min(room) / mib) * mib;
+            let mut w = read_test::BlockWriter::open(&path).map_err(|e| anyhow::anyhow!("hba write-cliff: {}: O_DIRECT open: {e}", path.display()))?;
+            let c = read_test::write_cliff(&mut w, &name, off, bytes, 4 * mib, (*step_mib).max(4) * mib);
+            for l in read_test::cliff_lines(&c) {
+                println!("{l}");
+            }
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&c)?);
+            }
+            if c.error.is_some() {
+                std::process::exit(1);
             }
         }
         HbaAction::Act { sas, action, block_size, pi, wait, sys, dev } => {

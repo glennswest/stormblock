@@ -124,6 +124,53 @@ pub fn kernel_reasons(sys: &Path, devdir: &Path, mounts: &str, name: &str) -> Ve
     out
 }
 
+/// Processes that hold the disk or one of its partitions open (#661): the
+/// engine's slabs (O_DIRECT), stormraid's members, anything else, read from
+/// `proc` (`/proc`), each said with its pid and name; this process is not
+/// counted. For a caller that is not the engine and cannot ask it.
+pub fn process_reasons(proc: &Path, devdir: &Path, sys: &Path, name: &str) -> Vec<String> {
+    let mut targets = vec![devdir.join(name)];
+    if let Ok(rd) = std::fs::read_dir(sys.join("block").join(name)) {
+        for e in rd.flatten() {
+            if e.path().join("partition").exists() {
+                targets.push(devdir.join(e.file_name()));
+            }
+        }
+    }
+    let me = std::process::id().to_string();
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(proc) else { return out };
+    for e in rd.flatten() {
+        let pid = e.file_name().to_string_lossy().into_owned();
+        if !pid.bytes().all(|b| b.is_ascii_digit()) || pid == me {
+            continue;
+        }
+        let Ok(fds) = std::fs::read_dir(e.path().join("fd")) else { continue };
+        let held: Vec<String> = fds
+            .flatten()
+            .filter_map(|f| std::fs::read_link(f.path()).ok())
+            .filter(|l| targets.iter().any(|t| t == l))
+            .map(|l| l.display().to_string())
+            .collect();
+        if let Some(first) = held.first() {
+            let comm = std::fs::read_to_string(e.path().join("comm")).unwrap_or_default();
+            out.push(format!("process {pid} ({}) holds {first} open", comm.trim()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Every reason a drive is in use that a process other than the engine can
+/// see (#661): the layout, the kernel, the partitions, open file handles.
+pub fn offline_reasons(name: &str) -> Vec<String> {
+    let mut out = layout_reasons(Path::new(crate::install_progress::RUN), &format!("/dev/{name}"));
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    out.extend(kernel_reasons(Path::new("/sys"), Path::new("/dev"), &mounts, name));
+    out.extend(process_reasons(Path::new("/proc"), Path::new("/dev"), Path::new("/sys"), name));
+    out
+}
+
 /// A stormraid superblock (`STORMRD1`) in the first MiB of `path`.
 fn carries_stormraid(path: &Path) -> bool {
     use std::io::Read;
@@ -169,6 +216,31 @@ mod tests {
         assert!(r.iter().any(|s| s.contains("mounted at /boot")), "{r:?}");
         assert!(r.iter().any(|s| s.contains("sdb4 is a stormraid set's member")), "{r:?}");
         assert_eq!(r.len(), 3, "{r:?}");
+    }
+
+    /// #661: a process with the disk or a partition open is a reason,
+    /// named; one with another file open is not.
+    #[test]
+    fn a_process_holding_the_drive_open_is_a_reason() {
+        let w = tempfile::tempdir().unwrap();
+        let (proc, devdir, sys) = (w.path().join("proc"), w.path().join("dev"), w.path().join("sys"));
+        std::fs::create_dir_all(&devdir).unwrap();
+        std::fs::create_dir_all(sys.join("block/sdc/sdc2")).unwrap();
+        std::fs::write(sys.join("block/sdc/sdc2/partition"), "2\n").unwrap();
+        let pid = |n: &str, comm: &str, links: &[std::path::PathBuf]| {
+            let d = proc.join(n);
+            std::fs::create_dir_all(d.join("fd")).unwrap();
+            std::fs::write(d.join("comm"), format!("{comm}\n")).unwrap();
+            for (i, l) in links.iter().enumerate() {
+                std::os::unix::fs::symlink(l, d.join("fd").join(i.to_string())).unwrap();
+            }
+        };
+        pid("100", "stormblock", &[devdir.join("sdc2")]);
+        pid("200", "bash", &[devdir.join("sdd"), w.path().join("x")]);
+        pid("self", "nope", &[devdir.join("sdc")]);
+        let r = process_reasons(&proc, &devdir, &sys, "sdc");
+        assert_eq!(r, vec![format!("process 100 (stormblock) holds {} open", devdir.join("sdc2").display())]);
+        assert!(process_reasons(&proc, &devdir, &sys, "sde").is_empty());
     }
 
     /// #701: a drive the node's layout lays (forge1's sda..sdd: a system leg

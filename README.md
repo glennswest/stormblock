@@ -790,7 +790,11 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
     check), random 4 KiB reads, the caching, control, power-condition and
     exception pages and the background scan. Each drive's `level` is set
     against the best of its class (`ok`, `slow` below 80 %, `very_slow` below
-    50 %), and lines starting `read-test` go on the console.
+    50 %), and lines starting `read-test` go on the console. A drive on no
+    SAS card (SATA on the board, #661) is tested through its own block
+    device. `stormblock hba write-cliff` writes a sustained sequential range
+    (destructive, `--confirm`, refused on a drive in use) and says where a
+    DRAM-less SSD's rate falls off (#661).
     [docs/storage-layout.md](docs/storage-layout.md#the-read-test-each-drive-against-its-class-652).
   - Drive error and PI-check counters (#648), sampled with the link every
     minute: the drive's error log pages (read, write, verify, non-medium),

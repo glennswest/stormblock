@@ -337,10 +337,42 @@ pub fn read_tests() -> Vec<Value> {
 /// `say`.
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 pub fn run_read_tests(dev: &std::path::Path, sys: &std::path::Path, sas: &[u64], o: &crate::drive::read_test::Opts, say: &(dyn Fn(&str) + Sync)) -> Vec<crate::drive::read_test::ReadTest> {
+    run_read_tests_with(dev, sys, sas, &[], o, say)
+}
+
+/// [`run_read_tests`], and beside the card's drives `direct` block devices
+/// that are on no SAS card (#661: a blade's SATA SSD and its SMR disk on the
+/// board's AHCI): each asked through SG_IO on its own block device (libata
+/// translates INQUIRY, READ CAPACITY, READ(16) and the VPD pages) and read
+/// O_DIRECT through it, named by the device (`sdb`). All at once, ranked
+/// together by class.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+pub fn run_read_tests_with(
+    dev: &std::path::Path,
+    sys: &std::path::Path,
+    sas: &[u64],
+    direct: &[std::path::PathBuf],
+    o: &crate::drive::read_test::Opts,
+    say: &(dyn Fn(&str) + Sync),
+) -> Vec<crate::drive::read_test::ReadTest> {
     use crate::drive::read_test;
-    let (cards, _) = crate::drive::mpt::cards(dev, sys, false);
+    let (cards, _) = if sas.is_empty() { (Vec::new(), Vec::new()) } else { crate::drive::mpt::cards(dev, sys, false) };
     let rows: Vec<Value> = cards.iter().flat_map(|c| c.rows_json()).collect();
     let mut all: Vec<read_test::ReadTest> = std::thread::scope(|sc| {
+        let direct_hs: Vec<_> = direct
+            .iter()
+            .map(|p| {
+                sc.spawn(move || {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+                    let mut t = match crate::drive::scsi::Sg::open(p) {
+                        Ok(t) => read_test::run(&t, Some(p.as_path()), o),
+                        Err(e) => read_test::ReadTest { errors: vec![format!("{}: SG_IO open: {e}", p.display())], level: "unknown".into(), ..Default::default() },
+                    };
+                    t.sas_address = name;
+                    t
+                })
+            })
+            .collect();
         let hs: Vec<_> = sas
             .iter()
             .map(|&a| {
@@ -357,7 +389,7 @@ pub fn run_read_tests(dev: &std::path::Path, sys: &std::path::Path, sas: &[u64],
                 })
             })
             .collect();
-        hs.into_iter().filter_map(|h| h.join().ok()).collect()
+        hs.into_iter().chain(direct_hs).filter_map(|h| h.join().ok()).collect()
     });
     read_test::rank(&mut all);
     for r in &all {

@@ -744,7 +744,11 @@ All four were 7200 rpm, at 4096 + PI type 1, with clean link counters.
   MB/s is 43 % of the best of its class (238 MB/s)`.
 - **Where:**
   - `stormblock hba read-test [SAS…] [--dev-name /dev/sda…] [--all] [--mib
-    1024] [--offset-pct 10] [--secs 10] [--out FILE] [--json]` on the node;
+    1024] [--offset-pct 10] [--secs 10] [--out FILE] [--json]` on the node.
+    A `--dev-name` drive on no SAS card (#661: a blade's SATA SSD and SMR
+    disk on the board's AHCI) is tested through its own block device: SG_IO
+    on it (libata translates the commands) and O_DIRECT reads, named by the
+    device (`read-test sdb (sdb, ATA Patriot P210 …)`), ranked with the rest;
   - `POST /api/v1/storage/hba/read-test` (`{sas: [], bytes, offset_pct,
     random_secs}`; every present drive by default; the node token, since it
     only reads). Its lines are logged at WARN and reach the console. `GET`
@@ -760,6 +764,22 @@ All four were 7200 rpm, at 4096 + PI type 1, with clean link counters.
   fix it points to (a mode page) is made through the Drive object
   (stormdrive#146), never by hand.
 
+
+### The sustained write, where a DRAM-less SSD falls off (#661)
+
+A blade's Patriot P210 (DRAM-less SATA) writes fast into its SLC cache and
+then at a fraction of that. `stormblock hba write-cliff --dev /dev/sdX
+--confirm /dev/sdX [--gib 4] [--offset-pct 50] [--step-mib 256] [--json]`
+writes `--gib` sequentially in 4 MiB O_DIRECT writes, timed in steps each
+synced (so the drive's cache cannot hide its medium), and says each step's
+MB/s, the peak, the floor and where a step first fell below half the best
+before it: `write-cliff sdb: a cliff at 1.25 GiB: from 480 MB/s down to 62`.
+
+**It overwrites that range.** `--confirm` repeats the device, and a drive in
+use is refused with every reason: this node's layout names it, the kernel
+holds it or a partition, it is mounted, a partition is a stormraid member,
+or any process holds it open (the engine's slabs, stormraid's members). Never
+run by /init.
 ### The drive's own link rate, mode page 0x19/1 (#646)
 
 forge1 bay 3's replacement (a HITACHI with EMC firmware) negotiated 6 Gbit

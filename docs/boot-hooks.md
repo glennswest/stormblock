@@ -646,10 +646,24 @@ the engine, kubelet, fastetcd, control-plane volumes and the root's `/sbin`. A
 release replaces them with `/etc/stormblock/boot-readahead` in its root volume: a
 path per line from the root, a directory meaning every regular file under it,
 `#` a comment, an empty file meaning nothing. A path this node does not carry is
-skipped. The read is bounded (`STORM_READAHEAD_SECS` 5, `STORM_READAHEAD_MIB`
-512, a quarter of the memory available) and what it read stays cached if it
-stops early. The console says what it did: `Boot read-ahead: N file(s), M MiB in
-S s (list: …)`. `rd.stormblock.readahead=off` turns it off.
+skipped. A directory is walked on its own filesystem (`find -xdev`). The read is
+bounded (`STORM_READAHEAD_SECS` 5, `STORM_READAHEAD_MIB` 512, a quarter of the
+memory available) and what it read stays cached if it stops early.
+
+A file bigger than what is left of the budget is skipped and the walk goes on
+(#661). Until then one such file ended it: every console kept on stormcentral
+(forge1, pvetest1-3, server8) said `0 file(s), 0 MiB … stopped at its memory
+bound`, so the read-ahead had read nothing on any node. The skipped files are
+counted and the largest named.
+
+It is scaled to the node (#661): with 64 GiB of memory or more the bounds are
+MemTotal/32 (4 GiB on a 128 GiB blade) and 15 s, and after the defaults every
+other volume under `/p` (the mount list's) is read too. The memory figures are
+read in KiB, never as a byte count through awk's `%d`.
+
+The console says what it did: `Boot read-ahead: N file(s), M MiB in S s, R MiB/s
+(list: …; bound B MiB, T s, memory G GiB; skipped K file(s) over what was left,
+the largest X MiB: <path>)`. `rd.stormblock.readahead=off` turns it off.
 
 ## A volume of the mount list the kernel refuses (#532)
 

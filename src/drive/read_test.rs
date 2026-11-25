@@ -292,6 +292,144 @@ pub fn random_pass(r: &mut dyn Reader, path: &str, span: u64, block: u64, secs: 
     }
 }
 
+// ---- the sustained-write pass (#661) ----
+
+/// Something a drive is written through, for [`write_cliff`].
+pub trait Writer {
+    fn write_at(&mut self, buf: &[u8], off: u64) -> Result<(), String>;
+    /// What was written is on the medium (fdatasync).
+    fn sync(&mut self) -> Result<(), String>;
+}
+
+/// The kernel's block device, O_DIRECT, for writing.
+#[cfg(target_os = "linux")]
+pub struct BlockWriter {
+    pub file: std::fs::File,
+}
+
+#[cfg(target_os = "linux")]
+impl BlockWriter {
+    pub fn open(path: &std::path::Path) -> std::io::Result<BlockWriter> {
+        use std::os::unix::fs::OpenOptionsExt;
+        Ok(BlockWriter { file: std::fs::OpenOptions::new().write(true).custom_flags(libc::O_DIRECT).open(path)? })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Writer for BlockWriter {
+    fn write_at(&mut self, buf: &[u8], off: u64) -> Result<(), String> {
+        use std::os::unix::fs::FileExt;
+        self.file.write_all_at(buf, off).map_err(|e| format!("pwrite: {e}"))
+    }
+    fn sync(&mut self) -> Result<(), String> {
+        self.file.sync_data().map_err(|e| format!("fdatasync: {e}"))
+    }
+}
+
+/// One step of a sustained write: `bytes` from `at` (bytes into the pass),
+/// synced, at `mb_s`.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct WriteStep {
+    pub at: u64,
+    pub bytes: u64,
+    pub secs: f64,
+    pub mb_s: f64,
+}
+
+/// A sustained sequential write (#661): what a DRAM-less SSD writes once its
+/// SLC cache is full, and where that starts.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct WriteCliff {
+    pub device: String,
+    pub offset_bytes: u64,
+    pub chunk_bytes: u64,
+    pub steps: Vec<WriteStep>,
+    /// The best step's rate and the slowest step's, MB/s.
+    pub peak_mb_s: Option<f64>,
+    pub floor_mb_s: Option<f64>,
+    /// Bytes into the pass where a step first fell below half the peak of
+    /// the steps before it: the cliff. `None` when none did.
+    pub cliff_at: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// Where the rate first fell below half the best step before it.
+pub fn cliff_of(steps: &[WriteStep]) -> Option<u64> {
+    let mut best = 0f64;
+    for s in steps {
+        if best > 0.0 && s.mb_s < best / 2.0 {
+            return Some(s.at);
+        }
+        best = best.max(s.mb_s);
+    }
+    None
+}
+
+/// `bytes` written sequentially from `off` in `chunk`s, a step every
+/// `step` bytes, each step synced and timed with its sync, so a drive's
+/// cache cannot hide its medium. **Overwrites that range.** Stops at the
+/// first error, said.
+pub fn write_cliff(w: &mut dyn Writer, device: &str, off: u64, bytes: u64, chunk: u64, step: u64) -> WriteCliff {
+    let mut a = Aligned::new(chunk as usize);
+    // Not zeros: a drive that compresses or dedups zeros would not write.
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    for c in a.buf().chunks_mut(8) {
+        let v = next(&mut x).to_le_bytes();
+        c.copy_from_slice(&v[..c.len()]);
+    }
+    let step = step.max(chunk) / chunk * chunk;
+    let mut out = WriteCliff { device: device.into(), offset_bytes: off, chunk_bytes: chunk, ..Default::default() };
+    let mut done = 0u64;
+    'steps: while done < bytes {
+        let start = std::time::Instant::now();
+        let from = done;
+        let end = (done + step).min(bytes);
+        while done < end {
+            if let Err(e) = w.write_at(a.buf(), off + done) {
+                out.error = Some(e);
+                break 'steps;
+            }
+            done += chunk;
+        }
+        if let Err(e) = w.sync() {
+            out.error = Some(e);
+            break;
+        }
+        let secs = start.elapsed().as_secs_f64();
+        let n = done - from;
+        out.steps.push(WriteStep { at: from, bytes: n, secs, mb_s: if secs > 0.0 { n as f64 / secs / 1e6 } else { 0.0 } });
+    }
+    out.peak_mb_s = out.steps.iter().map(|s| s.mb_s).reduce(f64::max);
+    out.floor_mb_s = out.steps.iter().map(|s| s.mb_s).reduce(f64::min);
+    out.cliff_at = cliff_of(&out.steps);
+    out
+}
+
+/// What a sustained write says, a line each, starting `write-cliff`.
+pub fn cliff_lines(c: &WriteCliff) -> Vec<String> {
+    let who = format!("write-cliff {}", c.device);
+    let gib = |b: u64| format!("{:.2} GiB", b as f64 / (1u64 << 30) as f64);
+    let total: u64 = c.steps.iter().map(|s| s.bytes).sum();
+    let mut v = Vec::new();
+    let rates: Vec<String> = c.steps.iter().map(|s| format!("{:.0}", s.mb_s)).collect();
+    v.push(format!(
+        "{who}: {} written from {} in {} MiB steps, each synced: {} MB/s",
+        gib(total),
+        gib(c.offset_bytes),
+        c.steps.first().map(|s| s.bytes >> 20).unwrap_or(0),
+        rates.join(", ")
+    ));
+    match (c.peak_mb_s, c.floor_mb_s, c.cliff_at) {
+        (Some(p), Some(f), Some(at)) => v.push(format!("{who}: a cliff at {}: from {p:.0} MB/s down to {f:.0}", gib(at))),
+        (Some(p), Some(f), None) => v.push(format!("{who}: no cliff: {f:.0}-{p:.0} MB/s throughout")),
+        _ => {}
+    }
+    if let Some(e) = &c.error {
+        v.push(format!("{who}: stopped: {e}"));
+    }
+    v
+}
+
 /// VPD 0xB1's rotation rate.
 fn rotation(t: &dyn Transport) -> Option<u16> {
     let mut b = vec![0u8; 64];
@@ -470,6 +608,54 @@ mod tests {
             buf.fill(0xAB);
             Ok(())
         }
+    }
+
+    struct Cache {
+        /// Bytes taken at full speed before each later chunk costs `slow`.
+        fast: u64,
+        taken: u64,
+        written: Vec<(u64, usize)>,
+        slow: std::time::Duration,
+        syncs: u32,
+    }
+    impl Writer for Cache {
+        fn write_at(&mut self, buf: &[u8], off: u64) -> Result<(), String> {
+            if self.taken >= self.fast {
+                std::thread::sleep(self.slow);
+            }
+            self.taken += buf.len() as u64;
+            self.written.push((off, buf.len()));
+            Ok(())
+        }
+        fn sync(&mut self) -> Result<(), String> {
+            self.syncs += 1;
+            Ok(())
+        }
+    }
+
+    /// #661: a DRAM-less SSD's cliff is found where its cache runs out; the
+    /// range written is exactly what was asked, each step synced.
+    #[test]
+    fn a_sustained_write_finds_the_cliff() {
+        let mib = 1u64 << 20;
+        let mut w = Cache { fast: 8 * mib, taken: 0, written: Vec::new(), slow: std::time::Duration::from_millis(20), syncs: 0 };
+        let c = write_cliff(&mut w, "sdb", 100 * mib, 16 * mib, mib, 4 * mib);
+        assert_eq!(c.steps.len(), 4);
+        assert_eq!(w.syncs, 4);
+        assert_eq!(w.written.first(), Some(&(100 * mib, mib as usize)));
+        assert_eq!(w.written.last(), Some(&(115 * mib, mib as usize)));
+        assert_eq!(c.cliff_at, Some(8 * mib), "{:?}", c.steps);
+        let l = cliff_lines(&c);
+        assert!(l[0].starts_with("write-cliff sdb: 0.02 GiB written from 0.10 GiB in 4 MiB steps, each synced: "), "{l:?}");
+        assert!(l[1].contains("a cliff at 0.01 GiB"), "{l:?}");
+    }
+
+    #[test]
+    fn no_cliff_when_the_rate_holds() {
+        let s = |at: u64, mb_s: f64| WriteStep { at, bytes: 1, secs: 1.0, mb_s };
+        assert_eq!(cliff_of(&[s(0, 500.0), s(1, 480.0), s(2, 300.0)]), None);
+        assert_eq!(cliff_of(&[s(0, 500.0), s(1, 510.0), s(2, 240.0)]), Some(2));
+        assert_eq!(cliff_of(&[]), None);
     }
 
     #[test]
