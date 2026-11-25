@@ -17,18 +17,25 @@ claim probes did not recur on the same disk.
 on every machine's every console kept (forge1, pvetest1-3, server8): #484's
 read-ahead has read nothing anywhere. One file over the budget left `break 2`s
 the whole walk.
-- [ ] /init read-ahead: a file over what is left skipped and named, never
+- [x] /init read-ahead: a file over what is left skipped and named, never
   the end; the memory bound in KiB (no awk `%d` of bytes); `find -xdev`;
   scaled to MemTotal (≥ 64 GiB: MemTotal/32 MiB, 15 s, then every other
-  `/p/*` volume); MiB/s said; tests
-- [ ] item 5: the read test on SATA drives (sd without SAS) + a sustained
-  write pass where asked (the DRAM-less cliff)
-- [ ] item 4: ublk read-ahead stays 1 MiB (measured: 4 MiB slower,
-  ci-boot-pagein-verify.sh); discard already passed through; the rest by
-  numbers
-- [ ] items 2 (SMR cool tier) and 3 (goldens over the fabric): numbers to
-  the owner first — the measured stages do not point at them
-- [ ] check.sh; release; server8 before/after
+  `/p/*` volume); MiB/s said; tests (ef3eb39e)
+- [x] item 5: `hba read-test --dev-name` on a drive on no SAS card (SG_IO on
+  its block device); `hba write-cliff` (destructive, `--confirm`, refused on
+  a drive in use incl. any process holding it open) (85a8e3ad). Clippy +
+  12/12 tests + the initramfs test (sh, busybox) on sc-build-ea01debbd5
+- [x] item 4: ublk read-ahead stays 1 MiB (measured: 4 MiB slower,
+  ci-boot-pagein-verify.sh); discard already passed through; scheduler is
+  already `none` on a multi-queue ublk (server8: 12 queues). TRIM at format
+  and 8 MiB SATA slots not done: not shown by the numbers, and format has
+  119 callers incl. a system half replaced beside a kept data half
+- [ ] items 2 (SMR cool tier) and 3 (goldens over the fabric): asked of the
+  owner with the numbers — the measured stages do not point at them; the
+  flow-over reads the forge at 95–140 MB/s with read ≥ write time
+- [ ] the P210's cliff: write-cliff refuses it in use (it holds every slab);
+  measuring it destroys data there: the owner's call
+- [ ] check.sh; ship; server8's next install: the read-ahead line
 
 ## #662 — the serving certificate names every address the node holds (2026-11-25, P0)
 
