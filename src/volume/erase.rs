@@ -561,6 +561,9 @@ mod tests {
         async fn flush(&self) -> DriveResult<()> {
             self.inner.flush().await
         }
+        async fn discard(&self, offset: u64, len: u64) -> DriveResult<()> {
+            self.inner.discard(offset, len).await
+        }
     }
 
     /// #521: pvetest3 12.74, `the slab registry (write) was held 1.0-2.0s by
