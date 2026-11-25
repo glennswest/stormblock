@@ -191,7 +191,8 @@ clones and the partition scan read them; the 409 said ublk was not on the node.
   `only_a_node_without_ublk_says_ublk_is_not_available`; README, CHANGELOG
 - [x] 36/36 ublk_export + metav2 tests and clippy on 02fbbe3b; negative control (released at once;
   wip/554-control, deleted) fails: `held while its server may still bring it up`, left [] right [STARTING]
-- [ ] check.sh at 02fbbe3b; a ublk QEMU test on a VM with ublk_drv; shipped
+- [x] check.sh at 02fbbe3b ALL PASS (1639/1639); ci-ublk-flow-verify.sh ALL PASS at fd6672ef (same code,
+  32 RESULT lines: ublk attaches over the API on a real kernel, ext4 on them); shipped (--commit 02fbbe3b)
 
 ## #580 — a clone-heavy slab outgrows its v2 metadata region: extent runs (2026-11-25, P1)
 forge's hot slab (2026-11-10): 3,212 volumes, ~3.19 M extent entries for 208,801 allocated slots (15x), a
