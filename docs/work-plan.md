@@ -4,6 +4,23 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #662 — the serving certificate names every address the node holds (2026-11-25, P0)
+
+server8 (.114/.115) and forge1 (.203/.204): the engine's pair names one
+address; callers on the other fail the name check (forge1's 12.94/12.95
+upgrade records). The engine serves stormcert's pair and mints nothing:
+the SANs are stormcert's (`serving --node-names`, stormcert#173, done:
+every global address, re-issued at `renew` when one appears) and the unit's
+flag is stormcos's (stormcos#1553, open). stormblock's half: say it.
+- [ ] tls: the served leaf's SANs parsed (`subject_alt_names`); the node's
+  addresses as stormcert counts them (global unicast, not lo/link-local, not
+  cilium/lxc/veth/flowsdn/kube-ipvs/docker/cni/flannel); `uncovered`
+- [ ] health `tls.names {dns, ip}`, `tls.uncovered`; WARN when the
+  uncovered set changes, INFO when it empties (a re-issued pair re-read)
+- [ ] tests; docs/auth.md; CHANGELOG; check.sh; release
+- [ ] proof on forge1 (needs stormcos#1553 in a release): health's
+  `tls.uncovered` empty and `openssl s_client` on .203 and .204 verifying
+
 ## #729 — EMI / SSC vs link reliability, an A/B on forge1 bays 1 and 3 (2026-11-25, P2) — PAUSED (master: blocked, #652 first)
 
 SSC is not in 0x19/1 (#646): it is the phy capabilities of the enhanced phy
