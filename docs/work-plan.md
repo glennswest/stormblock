@@ -180,6 +180,21 @@ failing link went `ok`, said recovered, and lost its baseline.
   check.sh ALL PASS on 4b2f35aa (1606/1606, carries dfdae2e8); v24.45.11;
   DONE, closed
 
+## #580 — a clone-heavy slab outgrows its v2 metadata region: extent runs (2026-11-25, P1)
+forge's hot slab (2026-11-10): 3,212 volumes, ~3.19 M extent entries for 208,801 allocated slots (15x), a
+slot-sized region 176.5 of 183.5 MB used. Option A of the issue (recommended there, unanswered; queued as
+session work): one entry for a run of consecutive extents on consecutive slots. A format change under
+#159's rule: an engine before it skips an unknown kind (#245) and would read a run as zeros, so readers first.
+- [x] step 1, readers: kind 4 `EXTENT_RUN`, `ExtentRun { count, first }`: extent first_vext+i at slot+i on
+  every leg, first's ref_count and generation; `document_of` and `map_of` (the cold-map pager) expand it;
+  refused: overlap with an extent key or another run, count 0 or > `MAX_RUN` (1 Mi), index or slot overflow.
+  Nothing writes it. Tests `an_extent_run_reads_as_its_extents` (entries, a real store reopened, the pager's
+  map), `an_extent_run_that_overlaps_or_cannot_be_is_refused`. docs/metadata-v2.md, CHANGELOG
+- [ ] check.sh; ships in a release (`shipped`)
+- [ ] step 2, the writer (persist_v2: runs for whole-volume writes, a run split on a change inside it, a
+  delete of a run's extent), only once every node runs step 1 and none can roll back past it: its own item
+  `--after` this release
+
 ## #568 + #469 — dependency advisories: h2, tokio, rustls, rustls-webpki, webpki-roots (2026-11-25, P1) — DONE
 Locked: h2 0.4.19 (RUSTSEC-2026-0258, empty DATA frames queue unbounded: DoS on the API), tokio 1.53.1
 (RUSTSEC-2026-0386, `AsyncFd::new`; used once, `vhost_user_blk::serve_queue`, on a kick fd the queue's

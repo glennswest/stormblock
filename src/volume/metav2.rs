@@ -62,6 +62,82 @@ pub mod kind {
     pub const HEADER: u8 = 1;
     pub const EXTENT: u8 = 2;
     pub const PARITY: u8 = 3;
+    /// A run of consecutive extents (#580): see [`ExtentRun`](super::ExtentRun).
+    /// Read since #580 step 1; not written until no node can roll back to
+    /// an engine that skips it (one would read the run's extents as zeros).
+    pub const EXTENT_RUN: u8 = 4;
+}
+
+/// The value of a [`kind::EXTENT_RUN`] key (#580): `count` consecutive
+/// extents from the key's index, the first at `first`. Extent `first_vext +
+/// i` is at slot `slot_idx + i` on every leg (the primary and each mirror),
+/// with `first`'s share count and generation. A clone maps every extent it
+/// shares, one entry each, so a slab of clones held ~15 entries a slot
+/// (forge's hot slab); a run is one entry for a clone of a golden laid out
+/// in order.
+///
+/// A run's extents are never also named by an extent key or another run:
+/// a writer changing one extent of a run splits it. A store where they
+/// overlap is refused, never read either way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtentRun {
+    pub count: u64,
+    pub first: super::gem::ExtentLocation,
+}
+
+/// The longest run a reader takes (#580): 1 Mi extents (1 TiB of 1 MiB
+/// extents). A writer splits a longer one; a bigger count is refused, so a
+/// damaged value cannot make a reader expand billions of extents.
+pub const MAX_RUN: u64 = 1 << 20;
+
+impl ExtentRun {
+    /// Each extent of the run that starts at `first_vext`, refused when the
+    /// run is empty, longer than [`MAX_RUN`], or would pass the end of an
+    /// index or a slot number.
+    pub fn extents(&self, first_vext: u64) -> io::Result<impl Iterator<Item = (u64, super::gem::ExtentLocation)> + '_> {
+        if self.count == 0 || self.count > MAX_RUN {
+            return Err(err(format!("extent run at {first_vext}: {} extents (1 to {MAX_RUN})", self.count)));
+        }
+        let last = self.count - 1;
+        if first_vext.checked_add(last).is_none() || self.first.legs().any(|l| l.slot_idx.checked_add(last).is_none()) {
+            return Err(err(format!("extent run at {first_vext}: {} extents pass the end of an index", self.count)));
+        }
+        Ok((0..self.count).map(move |i| {
+            let mut loc = self.first.clone();
+            loc.slot_idx += i;
+            for m in &mut loc.mirrors {
+                m.slot_idx += i;
+            }
+            (first_vext + i, loc)
+        }))
+    }
+}
+
+pub fn extent_run_entry(vol: VolumeId, first_vext: u64, run: &ExtentRun) -> (Key, Vec<u8>) {
+    (
+        Key::new(*vol.0.as_bytes(), kind::EXTENT_RUN, first_vext),
+        bincode::serde::encode_to_vec(run, bincode::config::standard()).unwrap_or_default(),
+    )
+}
+
+/// A run's extents into a volume's map (#580), refusing one already mapped.
+fn insert_run(
+    vol: VolumeId,
+    first_vext: u64,
+    v: &[u8],
+    mut insert: impl FnMut(u64, super::gem::ExtentLocation) -> bool,
+) -> io::Result<()> {
+    let (run, _): (ExtentRun, _) = bincode::serde::decode_from_slice(v, bincode::config::standard())
+        .map_err(|e| err(format!("volume {} extent run {first_vext}: {e}", vol.0)))?;
+    for (vext, loc) in run.extents(first_vext).map_err(|e| err(format!("volume {}: {e}", vol.0)))? {
+        if !insert(vext, loc) {
+            return Err(err(format!(
+                "volume {}: extent {vext} is named twice (run at {first_vext}): the store is refused",
+                vol.0
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1630,6 +1706,10 @@ pub fn map_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<Option<super::gem::Vol
                     bincode::serde::decode_from_slice(&v, cfg).map_err(|e| err(format!("stripe {}: {e}", k.idx())))?;
                 map.parity.insert(k.idx(), g);
             }
+            kind::EXTENT_RUN => {
+                let vol = VolumeId(uuid::Uuid::from_bytes(k.vol()));
+                insert_run(vol, k.idx(), &v, |vext, loc| map.extents.insert(vext, loc).is_none())?;
+            }
             _ => {}
         }
     }
@@ -1667,7 +1747,7 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
         // a newer one wrote. Before the volume's bookkeeping: an older
         // engine's delete can leave a newer one's key with no header beside
         // it, and that must not read as a volume.
-        if !matches!(k.kind(), kind::HEADER | kind::EXTENT | kind::PARITY) {
+        if !matches!(k.kind(), kind::HEADER | kind::EXTENT | kind::PARITY | kind::EXTENT_RUN) {
             continue;
         }
         if cur.as_ref().is_none_or(|(id, _, _)| *id != vol) {
@@ -1700,6 +1780,12 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
                     header_ext(&buf[4 + used..], &mut r);
                     *rec = Some(r);
                 }
+            }
+            kind::EXTENT_RUN => {
+                let Some(rec) = rec.as_mut() else {
+                    return Err(err(format!("volume {}: extents before its header", vol.0)));
+                };
+                insert_run(vol, k.idx(), &v, |vext, loc| rec.extents.insert(vext, loc).is_none())?;
             }
             kind::EXTENT | kind::PARITY => {
                 let Some(rec) = rec.as_mut() else {
@@ -2585,5 +2671,126 @@ mod tests {
                 assert!(l.same_slots(&b.extents[i]));
             }
         }
+    }
+
+    fn run_rec(id: VolumeId) -> VolumeRecord {
+        VolumeRecord {
+            id,
+            name: "clone".into(),
+            virtual_size: 64 << 20,
+            array_id: None,
+            extents: BTreeMap::new(),
+            retention: Default::default(),
+            redundancy: Default::default(),
+            parity: BTreeMap::new(),
+            failed_slabs: vec![],
+            parent: None,
+            sealed: false,
+            template: false,
+            access: crate::volume::metadata::Access::ReadWrite,
+            fs: None,
+            owner: None,
+            lba: 4096,
+            extent_size: 0,
+            origin: Default::default(),
+            tier: None,
+            digest: None,
+            scheme: None,
+            layout: Default::default(),
+            secret: false,
+            namespace: None,
+            rollback: None,
+            grow: None,
+        }
+    }
+
+    /// #580 step 1: a run of extents reads as each of its extents, every
+    /// leg's slot advancing with the index and the share count and
+    /// generation kept, beside single extent entries, from a store's entries
+    /// and through a real store reopened from its device; one volume's map
+    /// (the cold-map pager's read) the same.
+    #[tokio::test]
+    async fn an_extent_run_reads_as_its_extents() {
+        let sid = SlabId(uuid::Uuid::new_v4());
+        let mid = SlabId(uuid::Uuid::new_v4());
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let mut rec = run_rec(id);
+        rec.extents.insert(0, ExtentLocation::new(sid, 900));
+        rec.extents.insert(50, ExtentLocation::new(sid, 901));
+        let mut first = ExtentLocation::with_legs(Leg::new(sid, 1000), vec![Leg::new(mid, 70)]);
+        first.ref_count = 3;
+        first.generation = 7;
+        let run = ExtentRun { count: 40, first };
+        let mut entries = volume_entries(&rec, 1 << 20);
+        entries.push(extent_run_entry(id, 10, &run));
+        entries.push(doc_entry(1 << 20, &[]));
+        entries.sort_by_key(|e| e.0);
+
+        let check = |r: &VolumeRecord| {
+            assert_eq!(r.extents.len(), 42);
+            assert_eq!(r.extents[&0].slot_idx, 900);
+            assert_eq!(r.extents[&50].slot_idx, 901);
+            for i in 0..40u64 {
+                let l = &r.extents[&(10 + i)];
+                assert_eq!((l.slab_id, l.slot_idx, l.ref_count, l.generation), (sid, 1000 + i, 3, 7), "extent {}", 10 + i);
+                assert_eq!((l.mirrors[0].slab_id, l.mirrors[0].slot_idx), (mid, 70 + i));
+            }
+            assert!(!r.extents.contains_key(&9) && !r.extents.contains_key(&51));
+        };
+        let doc = document_of(entries.clone()).unwrap();
+        check(&doc.volumes[0]);
+        let map = map_of(entries.iter().filter(|(k, _)| k.vol() == *id.0.as_bytes()).cloned().collect()).unwrap().unwrap();
+        assert_eq!(map.extents.len(), 42);
+        assert_eq!(map.extents.get(&49).unwrap().slot_idx, 1039);
+
+        // Through a store: logged, checkpointed, reopened.
+        let size = 4 << 20;
+        let dev = mem(size).await;
+        let mut store = MetaV2::format(dev.clone(), 0, size).await.unwrap();
+        store.append(entries.iter().map(|(k, v)| Op::Put(*k, v.clone())).collect()).await.unwrap();
+        store.checkpoint().await.unwrap();
+        let mut store = MetaV2::open(dev, 0, size).await.unwrap().unwrap();
+        check(&document_of(store.scan().await.unwrap()).unwrap().volumes[0]);
+        let map = map_of(store.scan_volume(*id.0.as_bytes()).await.unwrap()).unwrap().unwrap();
+        assert_eq!(map.extents.len(), 42);
+    }
+
+    /// #580 step 1: an extent named both by a run and by an extent key, or
+    /// by two runs, refuses the store; so do an empty run, one past
+    /// [`MAX_RUN`] and one past the end of an index or a slot number. None
+    /// is read either way.
+    #[test]
+    fn an_extent_run_that_overlaps_or_cannot_be_is_refused() {
+        let sid = SlabId(uuid::Uuid::new_v4());
+        let id = VolumeId(uuid::Uuid::new_v4());
+        let read = |extents: &[(u64, u64)], runs: &[(u64, ExtentRun)]| {
+            let mut rec = run_rec(id);
+            for (v, slot) in extents {
+                rec.extents.insert(*v, ExtentLocation::new(sid, *slot));
+            }
+            let mut e = volume_entries(&rec, 1 << 20);
+            e.extend(runs.iter().map(|(v, r)| extent_run_entry(id, *v, r)));
+            e.sort_by_key(|x| x.0);
+            let vol: Vec<_> = e.clone();
+            (document_of(e).map(|d| d.volumes[0].extents.len()), map_of(vol).map(|m| m.map(|m| m.extents.len())))
+        };
+        let run = |count, slot| ExtentRun { count, first: ExtentLocation::new(sid, slot) };
+
+        let (d, m) = read(&[(0, 1)], &[(1, run(4, 10))]);
+        assert_eq!((d.unwrap(), m.unwrap().unwrap()), (5, 5), "adjacent, not overlapping");
+        for (extents, runs, what) in [
+            (vec![(3u64, 1u64)], vec![(1u64, run(4, 10))], "a run over an extent key"),
+            (vec![], vec![(0, run(4, 10)), (2, run(4, 20))], "two runs over each other"),
+            (vec![], vec![(0, run(0, 10))], "an empty run"),
+            (vec![], vec![(0, run(MAX_RUN + 1, 10))], "a run past MAX_RUN"),
+            (vec![], vec![(u64::MAX - 1, run(4, 10))], "a run past the last index"),
+            (vec![], vec![(0, run(4, u64::MAX - 1))], "a run past the last slot"),
+        ] {
+            let (d, m) = read(&extents, &runs);
+            assert!(d.is_err(), "{what}: the document was read");
+            assert!(m.is_err(), "{what}: the map was read");
+        }
+        let (d, _) = read(&[], &[(0, run(MAX_RUN, 10))]);
+        assert_eq!(d.unwrap() as u64, MAX_RUN, "the longest run is read");
     }
 }

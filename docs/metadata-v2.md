@@ -178,8 +178,18 @@ on first open"), and as built:
     does not know, so every engine before #74 reads all that comes before
     the secret's tag and serves the volume as an ordinary one (no data is
     misread; what it loses is the refusals), and an engine of #74 before
-    #408 still reads a secret as one and the volume as `stormcos`'s. Kinds 4 and up are skipped by every
-    reader since #245 step 1, and none is written.
+    #408 still reads a secret as one and the volume as `stormcos`'s. Kind 4 is a run of extents (#580):
+    `count` (1 to 1 Mi) consecutive extents from the key's index, the first
+    at the value's location; extent `i` of the run is at slot `slot + i` on
+    every leg, with the first's share count and generation. Read since
+    #580 step 1 and **not written yet**: an engine before it skips kind 4
+    and would read the run's extents as unmapped (zeros), so the writer
+    comes only once no node can roll back past the reader (the rule #159
+    used). A run's extents are never also named by an extent key or by
+    another run; a store where they overlap, or a run that is empty, longer
+    than 1 Mi or past the end of an index or a slot, is refused. Kinds 5
+    and up are skipped by every reader since #245 step 1, and none is
+    written.
   - Log record: magic, the store's nonce, sequence, length, kind (ops or
     wrap), CRC, then the ops (`Put`, `Del`, `DropVolume`), padded to pages. A
     record that does not fit before the end of the ring is preceded by a wrap
