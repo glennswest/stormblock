@@ -2304,9 +2304,12 @@ Read 2026-11-24 from `stormcentral logs` (pvetest1/2/3 12.74, 2026-11-25Z) and t
 - `the API runtime has not run its heartbeat for 5-7s`: only at `adopt: SIGTERM — stopping`, not this issue.
 Plan, on main:
 - [x] `slab::EraseFinisher`: a batch's free entries in one table write, no registry lock; `freeing` after the write
-- [x] test `freeing_erased_slots_keeps_no_reader_waiting`; control: the same test against the old round
+- [x] test `freeing_erased_slots_keeps_no_reader_waiting`: passes; control (wip/521-control, deleted) fails, a reader waited 854 ms
 - [x] `handler=` before `owed_persist=`; fsck steps `snapshot= check= release=`; README, docs/erase.md, CHANGELOG
-- [ ] check.sh ALL PASS; then metal on a release with it: no `held … by the eraser` over 1 s, fsck lines split
+- [x] check.sh at 0a5c2f0b ALL PASS (nextest 1634/1634, runtime tests)
+- [ ] metal on a release with it (owner-scheduled hardware): no `held … by the eraser` over 1 s, fsck lines split
+- [ ] owner's decision: the clone/delete persist is 3 ordered flushes (1.5-5 s on server7's SMR); fewer means
+      answering before the record is durable. Asked on #521 2026-11-24
 
 Read on metal, 2026-11-07 (consoles of 2026-11-04..07): pvetest1 12.66 `the slab registry (write) was held 18.7s by the
 flow-over`, 47 waiting, `GET /volumes` 18.5 s, straight after `Flow-over: validated`; pvetest1 and forge1 12-14 s too. It is
