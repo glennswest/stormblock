@@ -4,6 +4,32 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #661 — speed games for slow-disk nodes, numbers first (2026-11-25, P1)
+
+Item 1's memory tier is #673's (it says it replaces it); here: the boot
+read-ahead scaled to memory.
+Baseline, server8 12.94 (server8-1795036790, 2026-11-18 21:19Z, passed): warm
+container start 0.6 s, warm claim bind 5.4 s (4.6 s of it the pod sandbox),
+VM guest up 21.7 s, boot→node Ready 179 s (firmware 67, initramfs 67),
+reboot→Ready 113 s (firmware 40, initramfs 33, stormbootx 20). 12.92's failed
+claim probes did not recur on the same disk.
+**Found:** `Boot read-ahead: 0 file(s), 0 MiB … stopped at its memory bound`
+on every machine's every console kept (forge1, pvetest1-3, server8): #484's
+read-ahead has read nothing anywhere. One file over the budget left `break 2`s
+the whole walk.
+- [ ] /init read-ahead: a file over what is left skipped and named, never
+  the end; the memory bound in KiB (no awk `%d` of bytes); `find -xdev`;
+  scaled to MemTotal (≥ 64 GiB: MemTotal/32 MiB, 15 s, then every other
+  `/p/*` volume); MiB/s said; tests
+- [ ] item 5: the read test on SATA drives (sd without SAS) + a sustained
+  write pass where asked (the DRAM-less cliff)
+- [ ] item 4: ublk read-ahead stays 1 MiB (measured: 4 MiB slower,
+  ci-boot-pagein-verify.sh); discard already passed through; the rest by
+  numbers
+- [ ] items 2 (SMR cool tier) and 3 (goldens over the fabric): numbers to
+  the owner first — the measured stages do not point at them
+- [ ] check.sh; release; server8 before/after
+
 ## #662 — the serving certificate names every address the node holds (2026-11-25, P0)
 
 server8 (.114/.115) and forge1 (.203/.204): the engine's pair names one
