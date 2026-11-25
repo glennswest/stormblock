@@ -304,6 +304,57 @@ async fn a_renewed_pair_is_served_without_a_restart() {
     assert_eq!(still, renewed, "the previous pair is kept while the new one does not load");
 }
 
+/// The served certificate's names and the node's addresses it misses
+/// (#662: forge1 holds .203 and .204, its pair named .204 alone, and every
+/// caller on .203 failed the name check). The node's addresses stand in
+/// through `STORMBLOCK_IFADDRS`; a pod's interface is no caller's address.
+#[tokio::test]
+async fn health_names_the_addresses_the_served_certificate_misses() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    // Holds STORMBLOCK_IFADDRS against the other tests that set it, and
+    // removes it on drop.
+    let _env = common::nvme_tcp_env(None).await;
+    std::env::set_var("STORMBLOCK_IFADDRS", "eno1=192.0.2.4/20,eno2=192.0.2.3/20,lxc9=10.244.0.5/24,cilium_host=10.0.0.1/32");
+    let tmp = TempDir::new().unwrap();
+    let pki = Pki::new(&tmp);
+    // forge1's pair: the node name, localhost, one lease.
+    leaf_san(&pki.dir, "node-ca", "server", "serverAuth", 365, "DNS:forge1-p2,DNS:localhost,IP:192.0.2.4,IP:127.0.0.1");
+    let r = Reloader::with_interval(pki.files(), Duration::ZERO).unwrap();
+    let st = r.status();
+    let names = st.names.clone().expect("the served certificate's names");
+    assert_eq!(names.dns, vec!["forge1-p2", "localhost"]);
+    assert_eq!(names.ip, vec!["192.0.2.4".parse::<std::net::IpAddr>().unwrap(), "127.0.0.1".parse().unwrap()]);
+    assert_eq!(st.uncovered, vec!["192.0.2.3".parse::<std::net::IpAddr>().unwrap()], "the second lease, not the pods'");
+    let v = serde_json::to_value(&st).unwrap();
+    assert_eq!(v["uncovered"], serde_json::json!(["192.0.2.3"]));
+    assert_eq!(v["names"]["ip"], serde_json::json!(["192.0.2.4", "127.0.0.1"]));
+
+    // Re-issued with every address (stormcert's `--node-names`): taken up
+    // when the files change, nothing uncovered.
+    leaf_san(
+        &pki.dir,
+        "node-ca",
+        "server",
+        "serverAuth",
+        365,
+        "DNS:forge1-p2,DNS:localhost,IP:192.0.2.4,IP:192.0.2.3,IP:2001:db8::4,IP:127.0.0.1",
+    );
+    r.refresh();
+    let st = r.status();
+    assert!(st.uncovered.is_empty(), "every address named: {:?}", st.uncovered);
+    assert!(st.names.as_ref().unwrap().ip.contains(&"2001:db8::4".parse().unwrap()), "an IPv6 SAN is read");
+    assert!(serde_json::to_value(&st).unwrap().get("uncovered").is_none(), "left out when empty");
+
+    // An address that appears (a new lease, a VIP) is uncovered until the
+    // pair is re-issued, without a change to the files.
+    std::env::set_var("STORMBLOCK_IFADDRS", "eno1=192.0.2.4/20,eno2=192.0.2.3/20,eno3=198.51.100.20/24,eno3=fe80::1/64");
+    r.refresh();
+    assert_eq!(r.status().uncovered, vec!["198.51.100.20".parse::<std::net::IpAddr>().unwrap()], "link-local is no caller's");
+}
+
 /// A client CA without a serving pair is a configuration error, said at
 /// startup rather than served as plain HTTP.
 #[test]

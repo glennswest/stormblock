@@ -173,6 +173,163 @@ pub fn kube_identity(der: &[u8]) -> Option<super::kubeauth::KubeUser> {
     Some(super::kubeauth::KubeUser { username, groups })
 }
 
+/// One DER TLV at `at`: (tag, start of contents, end of contents).
+fn der_tlv(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
+    let tag = *b.get(at)?;
+    let first = *b.get(at + 1)? as usize;
+    let (len, start) = if first < 0x80 {
+        (first, at + 2)
+    } else {
+        let n = first & 0x7F;
+        if n == 0 || n > 4 {
+            return None;
+        }
+        let mut len = 0usize;
+        for i in 0..n {
+            len = (len << 8) | *b.get(at + 2 + i)? as usize;
+        }
+        (len, at + 2 + n)
+    };
+    let end = start.checked_add(len)?;
+    (end <= b.len()).then_some((tag, start, end))
+}
+
+/// The names a serving certificate is valid for (#662): its subject
+/// alternative names, DNS and IP, in the certificate's order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Sans {
+    pub dns: Vec<String>,
+    pub ip: Vec<std::net::IpAddr>,
+}
+
+const OID_SAN: &[u8] = &[0x55, 0x1D, 0x11];
+
+/// A DER certificate's subject alternative names (#662). The walk:
+/// Certificate → TBSCertificate → past (version) serial, signature, issuer,
+/// validity, subject, key, the optional unique IDs → `[3]` extensions →
+/// 2.5.29.17 → each GeneralName: `[2]` dNSName, `[7]` iPAddress (4 or 16
+/// bytes). Other kinds are left out. `None` when the DER does not parse;
+/// empty lists when the certificate has no SAN extension.
+pub fn subject_alt_names(der: &[u8]) -> Option<Sans> {
+    let tlv = der_tlv;
+    const SEQ: u8 = 0x30;
+    let (t, cert, _) = tlv(der, 0)?;
+    if t != SEQ {
+        return None;
+    }
+    let (t, tbs, tbs_end) = tlv(der, cert)?;
+    if t != SEQ {
+        return None;
+    }
+    let mut at = tbs;
+    if tlv(der, at)?.0 == 0xA0 {
+        at = tlv(der, at)?.2;
+    }
+    // serial, signature, issuer, validity, subject, subjectPublicKeyInfo.
+    for _ in 0..6 {
+        at = tlv(der, at)?.2;
+    }
+    let mut sans = Sans::default();
+    while at < tbs_end {
+        let (t, c, end) = tlv(der, at)?;
+        at = end;
+        if t != 0xA3 {
+            continue; // [1], [2]: the unique IDs.
+        }
+        let (t, mut ext, exts_end) = tlv(der, c)?;
+        if t != SEQ {
+            return None;
+        }
+        while ext < exts_end {
+            let (t, e, e_end) = tlv(der, ext)?;
+            ext = e_end;
+            if t != SEQ {
+                return None;
+            }
+            let (t, o, o_end) = tlv(der, e)?;
+            if t != 0x06 || &der[o..o_end] != OID_SAN {
+                continue;
+            }
+            // critical BOOLEAN, if there; then the OCTET STRING.
+            let mut v = o_end;
+            if tlv(der, v)?.0 == 0x01 {
+                v = tlv(der, v)?.2;
+            }
+            let (t, os, _) = tlv(der, v)?;
+            if t != 0x04 {
+                return None;
+            }
+            let (t, mut gn, gns_end) = tlv(der, os)?;
+            if t != SEQ {
+                return None;
+            }
+            while gn < gns_end {
+                let (t, vs, ve) = tlv(der, gn)?;
+                gn = ve;
+                let b = &der[vs..ve];
+                match t {
+                    0x82 => sans.dns.push(std::str::from_utf8(b).ok()?.to_string()),
+                    0x87 => match b.len() {
+                        4 => sans.ip.push(std::net::IpAddr::from(<[u8; 4]>::try_from(b).ok()?)),
+                        16 => sans.ip.push(std::net::IpAddr::from(<[u8; 16]>::try_from(b).ok()?)),
+                        _ => return None,
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+    Some(sans)
+}
+
+/// Interfaces whose addresses are no caller's way to the node (#662): pods',
+/// overlays', kube-proxy's IPVS (every ClusterIP). The same list stormcert's
+/// `serving --node-names` leaves out (stormcert#173), so what the engine
+/// calls uncovered is what a renewal would add.
+const NOT_THE_NODES: &[&str] = &["lo", "cilium", "lxc", "veth", "flowsdn", "kube-ipvs", "docker", "cni", "flannel"];
+
+/// Whether a caller off the node could reach it on `addr` (#662): a global
+/// unicast address, not loopback, link-local, multicast, unspecified or
+/// IPv4-mapped, on an interface that is the node's own.
+pub fn callers_address(interface: &str, loopback: bool, addr: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    if loopback || NOT_THE_NODES.iter().any(|p| interface.starts_with(p)) {
+        return false;
+    }
+    match addr {
+        IpAddr::V4(a) => !(a.is_loopback() || a.is_link_local() || a.is_multicast() || a.is_unspecified() || a.is_broadcast()),
+        IpAddr::V6(a) => {
+            let s = a.segments();
+            !(a.is_loopback()
+                || a.is_multicast()
+                || a.is_unspecified()
+                || (s[0] & 0xffc0) == 0xfe80
+                || a.to_ipv4_mapped().is_some())
+        }
+    }
+}
+
+/// The node's addresses (as [`callers_address`] counts them) that `sans`
+/// does not name, sorted, each once.
+pub fn uncovered(sans: &Sans, addrs: &[crate::netif::IfAddr]) -> Vec<std::net::IpAddr> {
+    let mut v: Vec<std::net::IpAddr> = addrs
+        .iter()
+        .filter(|a| callers_address(&a.interface, a.loopback, a.address))
+        .map(|a| a.address)
+        .filter(|a| !sans.ip.contains(a))
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The SANs of the first certificate in the PEM file at `path`; `None` when
+/// it is not there or does not parse.
+fn served_names(path: &Path) -> Option<Sans> {
+    let certs = read_certs(path).ok()??;
+    subject_alt_names(certs.first()?.as_ref())
+}
+
 const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
 const OID_O: &[u8] = &[0x55, 0x04, 0x0A];
 
@@ -181,26 +338,7 @@ const OID_O: &[u8] = &[0x55, 0x04, 0x0A];
 /// signature, issuer, validity → subject → each RDN's attributes. `None`
 /// when the DER does not parse, or a value of `oid` is not a string type.
 fn subject_values(der: &[u8], oid: &[u8]) -> Option<Vec<String>> {
-    // One TLV at `at`: (tag, start of contents, end of contents).
-    fn tlv(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
-        let tag = *b.get(at)?;
-        let first = *b.get(at + 1)? as usize;
-        let (len, start) = if first < 0x80 {
-            (first, at + 2)
-        } else {
-            let n = first & 0x7F;
-            if n == 0 || n > 4 {
-                return None;
-            }
-            let mut len = 0usize;
-            for i in 0..n {
-                len = (len << 8) | *b.get(at + 2 + i)? as usize;
-            }
-            (len, at + 2 + n)
-        };
-        let end = start.checked_add(len)?;
-        (end <= b.len()).then_some((tag, start, end))
-    }
+    let tlv = der_tlv;
     const SEQ: u8 = 0x30;
     const SET: u8 = 0x31;
     let (t, cert, _) = tlv(der, 0)?;
@@ -436,6 +574,14 @@ struct Current {
     stamps: Vec<Option<SystemTime>>,
     missing: Vec<&'static str>,
     checked: Instant,
+    /// The served leaf's SANs (#662); `None` while no pair is served, or its
+    /// certificate's SANs could not be read.
+    names: Option<Sans>,
+    /// The node's addresses the served certificate does not name, as last
+    /// looked at (#662).
+    uncovered: Vec<std::net::IpAddr>,
+    /// `uncovered` has been looked at for this pair (and said).
+    addresses_judged: bool,
 }
 
 /// What `/api/v1/health` says of the management TLS (#483).
@@ -447,6 +593,15 @@ pub struct TlsStatus {
     pub missing: Vec<&'static str>,
     /// `required`, or `optional` (#525): plain is taken beside TLS.
     pub mode: &'static str,
+    /// The served certificate's subject alternative names (#662): a client
+    /// on an address or name not here fails its name check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub names: Option<Sans>,
+    /// The node's own addresses (global unicast, on its own interfaces) the
+    /// served certificate does not name (#662): a caller on one of them is
+    /// refused by its own name check. Empty when every one is named.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub uncovered: Vec<std::net::IpAddr>,
 }
 
 /// The acceptor, re-made when the files change.
@@ -480,14 +635,53 @@ impl Reloader {
             tracing::warn!("management TLS: {key} is configured and not there yet: {}", meanwhile(key));
         }
         let (judged, _) = tokio::sync::watch::channel(0);
-        Ok(Reloader {
+        let names = if acceptor.is_some() { served_names(&files.cert) } else { None };
+        let r = Reloader {
             files,
-            current: Mutex::new(Current { acceptor, classifier, stamps, missing, checked: Instant::now() }),
+            current: Mutex::new(Current {
+                acceptor,
+                classifier,
+                stamps,
+                missing,
+                checked: Instant::now(),
+                names,
+                uncovered: Vec::new(),
+                addresses_judged: false,
+            }),
             check_every,
             judged,
             optional: false,
             plain: Arc::new(super::plain::PlainTally::new(None)),
-        })
+        };
+        r.look_at_addresses();
+        Ok(r)
+    }
+
+    /// Whether the served certificate names every address the node holds
+    /// (#662): looked at with the files, said when that changes. Nothing is
+    /// held while the kernel's list is read.
+    fn look_at_addresses(&self) {
+        let Some(names) = self.lock().names.clone() else { return };
+        let now = uncovered(&names, &crate::netif::interface_addresses());
+        let mut cur = self.lock();
+        if cur.names.as_ref() != Some(&names) || (cur.addresses_judged && now == cur.uncovered) {
+            return;
+        }
+        cur.addresses_judged = true;
+        if now.is_empty() {
+            tracing::info!("management TLS: the served certificate names every address this node holds (#662)");
+        } else {
+            let list: Vec<String> = now.iter().map(|a| a.to_string()).collect();
+            let has: Vec<String> = names.ip.iter().map(|a| a.to_string()).chain(names.dns.iter().cloned()).collect();
+            tracing::warn!(
+                "management TLS: the served certificate does not name {} (it names {}): a client on {} fails its name check; \
+                 stormcert's `serving --node-names` re-issues the pair with every address, and the engine takes it up when the files change (#662)",
+                list.join(", "),
+                has.join(", "),
+                if now.len() == 1 { "it" } else { "them" }
+            );
+        }
+        cur.uncovered = now;
     }
 
     /// `tls_mode` (#525), and where the first plain request of a caller and
@@ -534,6 +728,8 @@ impl Reloader {
             serving: if cur.acceptor.is_some() { "https" } else { "http" },
             missing: cur.missing.clone(),
             mode: if self.optional { "optional" } else { "required" },
+            names: cur.names.clone(),
+            uncovered: cur.uncovered.clone(),
         }
     }
 
@@ -553,12 +749,19 @@ impl Reloader {
             cur.checked = Instant::now();
             cur.stamps.clone()
         };
+        self.reload_files(before);
+        self.look_at_addresses();
+    }
+
+    /// The files read again when one changed since `before`.
+    fn reload_files(&self, before: Vec<Option<SystemTime>>) {
         let stamps = self.files.stamps();
         let missing = self.files.missing(&stamps);
         if stamps == before {
             return;
         }
         let loaded = load(&self.files).and_then(|cfg| Ok((cfg, classifier(&self.files)?)));
+        let names = served_names(&self.files.cert);
         let mut cur = self.lock();
         let was = std::mem::replace(&mut cur.missing, missing.clone());
         let (cfg, cls) = match loaded {
@@ -586,6 +789,10 @@ impl Reloader {
             Some(cfg) => {
                 let first = cur.acceptor.is_none();
                 cur.acceptor = Some(TlsAcceptor::from(Arc::new(cfg)));
+                // A new pair is judged afresh against the node's addresses.
+                cur.names = names;
+                cur.uncovered.clear();
+                cur.addresses_judged = false;
                 if first {
                     tracing::info!(
                         "management TLS: {} is there: new connections are HTTPS, plain ones end after their request",
@@ -625,3 +832,44 @@ pub fn client_cert<IO>(stream: &tokio_rustls::server::TlsStream<IO>, classifier:
         stream.get_ref().1.peer_certificates()?.iter().map(|c| c.clone().into_owned()).collect();
     classifier.classify(&chain)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::netif::IfAddr;
+
+    fn a(i: &str, addr: &str) -> IfAddr {
+        IfAddr { interface: i.into(), address: addr.parse().unwrap(), prefix: 24, loopback: false }
+    }
+
+    #[test]
+    fn a_callers_address_is_global_unicast_on_the_nodes_own_interface() {
+        let ok = |i: &str, s: &str| callers_address(i, false, s.parse().unwrap());
+        assert!(ok("eno1", "192.168.31.203"));
+        assert!(ok("eno1.100", "10.1.2.3"));
+        assert!(ok("eno1", "2001:db8::1"));
+        assert!(!ok("eno1", "169.254.1.1"), "link-local v4");
+        assert!(!ok("eno1", "fe80::1"), "link-local v6");
+        assert!(!ok("eno1", "::ffff:192.0.2.1"), "v4-mapped");
+        assert!(!ok("eno1", "127.0.0.2"));
+        assert!(!ok("eno1", "224.0.0.1"));
+        for pod in ["lo", "lxc12", "veth3", "cilium_host", "flowsdn0", "kube-ipvs0", "docker0", "cni0", "flannel.1"] {
+            assert!(!ok(pod, "10.244.0.5"), "{pod}");
+        }
+        assert!(!callers_address("eno1", true, "192.0.2.1".parse().unwrap()), "IFF_LOOPBACK");
+    }
+
+    #[test]
+    fn uncovered_is_what_the_sans_miss_sorted_once() {
+        let sans = Sans { dns: vec!["forge1-p2".into()], ip: vec!["192.168.31.204".parse().unwrap()] };
+        let addrs = [a("eno1", "192.168.31.204"), a("eno2", "192.168.31.203"), a("eno3", "192.168.31.203"), a("lxc1", "10.0.0.9")];
+        assert_eq!(uncovered(&sans, &addrs), vec!["192.168.31.203".parse::<std::net::IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn subject_alt_names_of_garbage_is_none() {
+        assert_eq!(subject_alt_names(&[]), None);
+        assert_eq!(subject_alt_names(&[0x30, 0x03, 0x30, 0x01, 0x00]), None);
+    }
+}
+

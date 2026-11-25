@@ -711,8 +711,8 @@ was asked for no certificate, and one forge has just revoked keeps nothing. A
 renewed pair alone ends nothing.
 
 The start logs each one. `GET /api/v1/health` has `tls: {serving: "https"|"http",
-missing: ["tls_admin_crl", …]}` (key names only; left out with no TLS
-configured). The scheme a golden's ticket URL and the appliance finder hand out
+missing: ["tls_admin_crl", …], names, uncovered}` (key names only; left out
+with no TLS configured; `names` and `uncovered` below, #662). The scheme a golden's ticket URL and the appliance finder hand out
 follows what is served. `[fabric]`'s certificate and CA, which default to these
 files, are the same: until they are there a peer sees no credential and cannot
 be verified.
@@ -720,6 +720,23 @@ be verified.
 A file that **is** there and does not parse is still an error at start: no API
 is served, and the engine logs it. After start it is a renewal half-written, as
 above. Plain and TLS at once on :9090 while callers move is #525.
+
+**The names the pair is valid for (#662).** The engine serves the pair it is
+given and mints nothing: which names and addresses the certificate carries is
+stormcert's (`stormcert-agent serving --node-names`, stormcert#173: the
+hostname, its FQDN and every global address, found again at each renewal and
+re-issued when one appears) and the unit's flags are stormcos's
+(`stormcert-serving-stormblock`, stormcos#1553). A node with two leases and a
+pair naming one refuses every caller on the other at its name check (server8,
+forge1's appliance upgrades 12.94 and 12.95). So the engine says it: health's
+`tls.names` is the served certificate's SANs (`{dns: [...], ip: [...]}`) and
+`tls.uncovered` the node's own addresses it does not name, left out when there
+are none. An address counts as stormcert counts it: global unicast, not
+loopback, link-local or IPv4-mapped, not on `lo`, `cilium*`, `lxc*`, `veth*`,
+`flowsdn*`, `kube-ipvs*`, `docker*`, `cni*` or `flannel*`. The addresses are
+looked at with the files (every few seconds, on a connection); a change of the
+uncovered set is logged at WARN (`management TLS: the served certificate does
+not name …`), and a pair that names them all at INFO.
 
 **The boot port (#524).** Pre-boot firmware cannot do TLS, so
 `[management] boot_listen` (9089 by convention; unset, no such listener) serves
