@@ -2615,6 +2615,8 @@ itself; #391 was proven in QEMU). Engine work now:
 - [x] re-proven at da90e3b8 (2026-11-25, after #718 and #727 changed the release paths):
       ci-shelf-raid6-verify.sh ALL PASS, 27 RESULT lines, none failed. The shelf was unplugged on
       purpose (owner, 2026-11-07); hardware time is the owner's to schedule (master, 2026-11-25)
+- [x] 2026-11-25: `wait-owner --action`: the shelf cabled and powered on C2NR0Q2, a to-do card; Done puts
+      #390 back in line (then stormdrive's dry run, #391 on the Dell, the formats, the run)
 - [ ] **the shelf is not attached**: no enclosure behind the Dell's SAS9300-4i4e, its 17 drives
       `missing` since 2026-10-10 23:15Z (stormdrive#30, #85, read 2026-11-03); stormcentral's
       assets on 2026-11-06 list one drive on C2NR0Q2, the internal bay 4. Owner's hands:
