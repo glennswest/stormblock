@@ -65,7 +65,9 @@ gains goldens, goldens/status. The CRD's copy is stormcos's (an issue there).
 - [x] deploy/crds.yaml: Golden CRD, the ClusterRole; docs (docs/kubernetes-objects or README), CHANGELOG
 - [x] tests: integration over the stand-in apiserver (made, files, a bad path, over-size, in use, unlabelled,
   not twice, a spec change makes again), unit (validation)
-- [ ] check.sh; stormcos issue (the CRD copy + RBAC), stormfn#62 told the contract
+- [x] clippy + 13/13 targeted tests at 6c05a7d6; check.sh ALL PASS at 6c05a7d6 (1650/1650,
+  sc-build 20261125-214514-6c05a7d6); stormcos#1642 (the CRD copy + RBAC); stormfn#62 told the
+  contract; closed
 
 ## #745 — check.sh: a vhost-user-blk VMM reconnecting at once was refused (2026-11-25, filed by sc-build)
 check.sh at 33c507a7 failed `read_only_is_enforced_and_a_vmm_can_reconnect_but_not_double_up` on both
