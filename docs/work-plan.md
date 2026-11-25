@@ -35,7 +35,10 @@ the whole walk.
   flow-over reads the forge at 95–140 MB/s with read ≥ write time
 - [ ] the P210's cliff: write-cliff refuses it in use (it holds every slab);
   measuring it destroys data there: the owner's call
-- [ ] check.sh; ship; server8's next install: the read-ahead line
+- [x] check.sh ALL PASS at 0d8497a1 (1646/1646); numbers and the two
+  questions on the issue (2026-11-25); waits on the owner
+- [ ] server8's next install: the read-ahead line with files in it, the
+  stormd/stormport slow starts against 4.6/5.6 s
 
 ## #662 — the serving certificate names every address the node holds (2026-11-25, P0)
 
