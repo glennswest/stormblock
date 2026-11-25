@@ -1967,6 +1967,8 @@ async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) 
     // `nvme_tcp` skips it: the caller has said the I/O comes over the
     // network (#149).
     if want != WantTransport::NvmeTcp && ublk_possible {
+        // Why a device that was tried was not made (#554).
+        let mut no_device: Option<String> = None;
         if let Some(local) = local_id {
             let (device, secret) = {
                 let vm = state.volume_manager.lock().await;
@@ -1981,20 +1983,23 @@ async fn attach_data_path(state: Arc<AppState>, id: String, req: AttachRequest) 
             }
             if let Some(device) = device {
                 match crate::mgmt::ublk_export::attach_local(&state, &id, local, device).await {
-                    Err(gone) => {
+                    Err(crate::mgmt::ublk_export::LocalAttachError::Deleted(gone)) => {
                         forget_attachment(&state, &id, &req.node).await;
                         return Err(V1Error::NotFound(gone));
                     }
-                    Ok(Some(path)) => return Ok(Json(AttachInfo::Ublk { device_hint: path })),
-                    Ok(None) => {}
+                    Ok(path) => return Ok(Json(AttachInfo::Ublk { device_hint: path })),
+                    Err(crate::mgmt::ublk_export::LocalAttachError::NoDevice(why)) => no_device = Some(why),
                 }
             }
         }
         if want == WantTransport::Ublk {
             forget_attachment(&state, &id, &req.node).await;
-            return Err(V1Error::Conflict(
-                "ublk was asked for but is not available on this node (kernel ublk_drv not loaded)".into(),
-            ));
+            // Why, when a device was tried (#554); "not available" only when
+            // none could be.
+            return Err(V1Error::Conflict(match no_device {
+                Some(why) => format!("ublk was asked for and no device was made: {why}"),
+                None => format!("ublk was asked for: {}", crate::mgmt::ublk_export::NOT_AVAILABLE),
+            }));
         }
     }
     // NVMe-oF path: hot-add the volume as a namespace on the shared

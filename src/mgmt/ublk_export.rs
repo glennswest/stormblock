@@ -391,39 +391,54 @@ pub struct UblkExportManager {
 }
 
 /// What an attach that is still coming up will answer: `None` until it has,
-/// then the device path or `None` (it did not come up).
-type Answer = tokio::sync::watch::Receiver<Option<Option<String>>>;
+/// then the device path or why it did not come up (#554).
+type Answer = tokio::sync::watch::Receiver<Option<Result<String, String>>>;
 
 /// The first half of an attach, under the export lock (#231).
 pub enum Begin {
     /// Already exported: its device.
     Ready(String),
-    /// ublk is not available here.
-    Unavailable,
+    /// No device can be made here: why (#554).
+    Unavailable(String),
     /// Another attach of this volume is bringing its device up: wait for it.
     Wait(Answer),
     /// A server was started: wait for its device without the lock, then
     /// [`UblkExportManager::finish`].
-    Started(Launch, tokio::sync::watch::Sender<Option<Option<String>>>),
+    Started(Launch, tokio::sync::watch::Sender<Option<Result<String, String>>>),
 }
 
 /// What holds a volume while its ublk device is coming up (#493).
 const STARTING: &str = "a ublk device being started";
 
+/// Why no device is made on a node without ublk (#554: said only then, never
+/// for a device that did not come up).
+pub const NOT_AVAILABLE: &str = "ublk is not available on this node (kernel ublk_drv not loaded)";
+
+/// Why [`attach_local`] made no device.
+#[derive(Debug)]
+pub enum LocalAttachError {
+    /// The volume was deleted while its device came up (#493): the caller
+    /// answers 404.
+    Deleted(String),
+    /// No device was made, and why (#554): ublk is not on this node, or the
+    /// device did not come up. The caller may use NVMe/TCP instead.
+    NoDevice(String),
+}
+
 /// [`attach`] for a volume of this engine: when the volume was deleted
 /// while its device came up (a delete that came before the device's hold),
-/// the device is taken down again and `Err` says so: the caller answers 404
+/// the device is taken down again and says so: the caller answers 404
 /// rather than a device serving a volume that is gone (#493).
 pub async fn attach_local(
     state: &Arc<crate::mgmt::AppState>,
     volume_id: &str,
     volume: uuid::Uuid,
     device: Arc<dyn BlockDevice>,
-) -> Result<Option<String>, String> {
-    let path = attach(state, volume_id, device).await;
-    if path.is_some() && !state.volume_presence.contains(&crate::volume::VolumeId(volume)) {
+) -> Result<String, LocalAttachError> {
+    let path = attach(state, volume_id, device).await.map_err(LocalAttachError::NoDevice)?;
+    if !state.volume_presence.contains(&crate::volume::VolumeId(volume)) {
         state.ublk_exports.lock().await.remove(volume_id);
-        return Err(format!("volume {volume} was deleted while its ublk device was being started"));
+        return Err(LocalAttachError::Deleted(format!("volume {volume} was deleted while its ublk device was being started")));
     }
     Ok(path)
 }
@@ -492,8 +507,12 @@ impl Launch {
 }
 
 /// How long the kernel has to assign a device id, and then to make the
-/// block device appear (#231: unchanged from the blocking loops it replaces).
-const ID_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+/// block device appear (#231). The id's wait was 1 s until #554: on forge1
+/// (12.64), right after a flow-over's validation, attaches that succeeded
+/// took 1.7-2.0 s and five whose id came later than 1 s failed together. An
+/// id slower than [`ID_SLOW`] is said with its time.
+const ID_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const ID_SLOW: std::time::Duration = std::time::Duration::from_millis(500);
 const NODE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 const POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
@@ -511,16 +530,21 @@ pub async fn wait_ready(
     // device that has not appeared in a second is not going to, and
     // returning a path that never materialises would wedge whatever tries to
     // open it.
-    let deadline = tokio::time::Instant::now() + id_wait;
+    let asked = tokio::time::Instant::now();
+    let deadline = asked + id_wait;
     let id = loop {
         if let Some(id) = dev_id() {
             break id;
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("the kernel assigned no device".into());
+            return Err(format!("the kernel assigned no device in {:.1} s", id_wait.as_secs_f64()));
         }
         tokio::time::sleep(POLL).await;
     };
+    let took = asked.elapsed();
+    if took >= ID_SLOW {
+        tracing::warn!("ublk: the kernel took {} ms to assign /dev/ublkb{id} (#554)", took.as_millis());
+    }
     let device_path = format!("/dev/ublkb{id}");
     // The id is assigned at ADD_DEV, but the *block device* appears only at
     // START_DEV — a ~60 ms gap on this hardware — and whoever is handed this
@@ -557,8 +581,9 @@ pub async fn wait_ready(
     Ok(device_path)
 }
 
-/// Attach `volume_id` as a ublk device: its path, or `None` when ublk is not
-/// available or the device did not come up (the caller uses NVMe/TCP).
+/// Attach `volume_id` as a ublk device: its path, or why there is none (ublk
+/// is not available, or the device did not come up, #554); the caller may
+/// use NVMe/TCP instead.
 ///
 /// The export lock is held only to look and to record (#231). The wait for
 /// the kernel — usually ~60 ms, up to 6 s — runs on a task of its own with
@@ -569,11 +594,11 @@ pub async fn attach(
     state: &Arc<crate::mgmt::AppState>,
     volume_id: &str,
     device: Arc<dyn BlockDevice>,
-) -> Option<String> {
+) -> Result<String, String> {
     let begun = state.ublk_exports.lock().await.begin(volume_id, device);
     let mut answer = match begun {
-        Begin::Ready(path) => return Some(path),
-        Begin::Unavailable => return None,
+        Begin::Ready(path) => return Ok(path),
+        Begin::Unavailable(why) => return Err(why),
         Begin::Wait(rx) => rx,
         Begin::Started(launch, tx) => {
             let rx = tx.subscribe();
@@ -600,7 +625,7 @@ pub async fn attach(
             return path;
         }
         if answer.changed().await.is_err() {
-            return None;
+            return Err("the attach bringing the device up went away".into());
         }
     }
 }
@@ -667,7 +692,7 @@ impl UblkExportManager {
             return Begin::Wait(rx.clone());
         }
         if !self.available {
-            return Begin::Unavailable;
+            return Begin::Unavailable(NOT_AVAILABLE.into());
         }
         match self.start(volume_id, device) {
             Some(launch) => {
@@ -679,24 +704,40 @@ impl UblkExportManager {
                 self.pending.insert(volume_id.to_string(), rx);
                 Begin::Started(launch, tx)
             }
-            None => Begin::Unavailable,
+            None => Begin::Unavailable("the ublk server could not be started (the engine's log says why)".into()),
         }
     }
 
     /// The second half of an attach (#231), under the lock again once the
     /// device is ready or is not coming: record the export, or take its
     /// server down. Returns what the attach answers.
-    pub fn finish(&mut self, volume_id: &str, launch: Launch, ready: Result<String, String>) -> Option<String> {
+    pub fn finish(&mut self, volume_id: &str, launch: Launch, ready: Result<String, String>) -> Result<String, String> {
         self.pending.remove(volume_id);
-        self.holds.release(launch.volume_uuid, STARTING);
         let device_path = match ready {
             Ok(p) => p,
             Err(why) => {
                 tracing::error!(volume = volume_id, "ublk export did not come up: {why}");
                 let _ = launch.shutdown.send(true);
-                return None;
+                // Held until the server has exited (#554): told to stop, it
+                // can still bring the device up, and on forge1 the kernel's
+                // partition scan read the volume the kubelet had deleted
+                // meanwhile. A delete before then is refused, as for a
+                // detach still stopping (#502).
+                let mut x = launch.exit.lock().unwrap_or_else(|p| p.into_inner());
+                #[cfg(target_os = "linux")]
+                let serving = launch.server.is_some();
+                #[cfg(not(target_os = "linux"))]
+                let serving = false;
+                if x.exited || !serving {
+                    drop(x);
+                    self.holds.release(launch.volume_uuid, STARTING);
+                } else {
+                    x.release = Some((launch.volume_uuid, STARTING.to_string()));
+                }
+                return Err(format!("the ublk device did not come up: {why}"));
             }
         };
+        self.holds.release(launch.volume_uuid, STARTING);
         let what = format!("ublk device {device_path}");
         self.holds.hold(launch.volume_uuid, what.clone());
         self.exports.insert(
@@ -718,7 +759,7 @@ impl UblkExportManager {
             existing_before = %launch.before,
             "ublk export created"
         );
-        Some(device_path)
+        Ok(device_path)
     }
 
     /// Whether an attach of `volume_id` is still bringing its device up.
@@ -1194,7 +1235,7 @@ mod tests {
         let (again, _) = mgr.lock().await.begin_fake("vol-a");
         let Begin::Wait(mut answer) = again else { panic!("waits for the attach under way") };
         answer.changed().await.unwrap();
-        assert_eq!(answer.borrow().clone(), Some(Some("/dev/ublkb9".to_string())));
+        assert_eq!(answer.borrow().clone(), Some(Ok("/dev/ublkb9".to_string())));
         slow.await.unwrap();
         assert_eq!(mgr.lock().await.device_path("vol-a").as_deref(), Some("/dev/ublkb9"));
         assert!(!mgr.lock().await.is_pending("vol-a"));
@@ -1205,7 +1246,8 @@ mod tests {
         let (begun, mut down_b) = mgr.lock().await.begin_fake("vol-b");
         let Begin::Started(launch, _tx) = begun else { panic!("started") };
         let ready = wait_ready(|| None, |_| true, |_| None, std::time::Duration::from_millis(30), NODE_WAIT).await;
-        assert_eq!(mgr.lock().await.finish("vol-b", launch, ready), None);
+        let why = mgr.lock().await.finish("vol-b", launch, ready).unwrap_err();
+        assert!(why.contains("did not come up") && why.contains("assigned no device"), "{why}");
         assert!(*down_b.borrow_and_update(), "its server is taken down");
         assert!(!mgr.lock().await.is_pending("vol-b"));
         assert_eq!(mgr.lock().await.device_path("vol-b"), None);
@@ -1309,15 +1351,81 @@ mod tests {
         let (begun, _down) = mgr.begin_fake(&a.to_string());
         let Begin::Started(launch, _tx) = begun else { panic!("started") };
         assert_eq!(holds.held_by(a), vec![STARTING.to_string()], "held while the device starts");
-        assert_eq!(mgr.finish(&a.to_string(), launch, Ok("/dev/ublkb85".into())).as_deref(), Some("/dev/ublkb85"));
+        assert_eq!(mgr.finish(&a.to_string(), launch, Ok("/dev/ublkb85".into())).as_deref(), Ok("/dev/ublkb85"));
         assert_eq!(holds.held_by(a), vec!["ublk device /dev/ublkb85".to_string()], "then by the device");
 
         let b = uuid::Uuid::new_v4();
         let (begun, _down) = mgr.begin_fake(&b.to_string());
         let Begin::Started(launch, _tx) = begun else { panic!("started") };
         assert!(!holds.held_by(b).is_empty());
-        assert!(mgr.finish(&b.to_string(), launch, Err("never came up".into())).is_none());
-        assert!(holds.held_by(b).is_empty(), "a device that did not come up holds nothing");
+        assert!(mgr.finish(&b.to_string(), launch, Err("never came up".into())).is_err());
+        assert!(holds.held_by(b).is_empty(), "a device that did not come up, with no server, holds nothing");
+    }
+
+    /// #554: forge1 (12.64): five devices whose id came later than the wait
+    /// failed together; their servers were told to stop, the hold went at
+    /// once, the kubelet deleted the clones, and the kernel's partition scan
+    /// then read the deleted volumes through devices that came up after all.
+    /// A failed start now holds its volume until its server has exited, so a
+    /// delete in between is refused; and the attach says why it failed,
+    /// never that ublk is not on the node.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_device_that_did_not_come_up_holds_its_volume_until_its_server_exits() {
+        let holds = crate::volume::holds::ServeHolds::default();
+        let mut mgr = UblkExportManager::new().with_holds(holds.clone());
+        let a = uuid::Uuid::new_v4();
+        let (begun, mut down) = mgr.begin_fake(&a.to_string());
+        let Begin::Started(mut launch, _tx) = begun else { panic!("started") };
+        // A server behind it, as a real start has (never run: no kernel).
+        let spec = crate::drive::emulated::EmulatedSpec::parse(&format!(
+            "emulated://ublk-fake-{}?size=16M",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .unwrap()
+        .unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(crate::drive::emulated::open(&spec).unwrap());
+        launch.server = Some(Arc::new(crate::drive::ublk::UblkServer::new(dev)));
+        let (exit, done) = (launch.exit.clone(), launch.done.clone());
+
+        let why = mgr.finish(&a.to_string(), launch, Err("the kernel assigned no device in 5.0 s".into())).unwrap_err();
+        assert!(why.contains("did not come up") && why.contains("assigned no device"), "{why}");
+        assert!(!why.contains("not available"), "{why}");
+        assert!(*down.borrow_and_update(), "its server is told to stop");
+        assert_eq!(holds.held_by(a), vec![STARTING.to_string()], "held while its server may still bring it up");
+        assert!(!mgr.is_pending(&a.to_string()), "a new attach may start");
+
+        server_exited(&holds, &exit, &done);
+        assert!(holds.held_by(a).is_empty(), "let go once the server has exited");
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Exited before the start was judged failed: let go at once.
+        let b = uuid::Uuid::new_v4();
+        let (begun, _down) = mgr.begin_fake(&b.to_string());
+        let Begin::Started(mut launch, _tx) = begun else { panic!("started") };
+        let spec = crate::drive::emulated::EmulatedSpec::parse(&format!(
+            "emulated://ublk-fake-{}?size=16M",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .unwrap()
+        .unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(crate::drive::emulated::open(&spec).unwrap());
+        launch.server = Some(Arc::new(crate::drive::ublk::UblkServer::new(dev)));
+        server_exited(&holds, &launch.exit.clone(), &launch.done.clone());
+        assert!(mgr.finish(&b.to_string(), launch, Err("x".into())).is_err());
+        assert!(holds.held_by(b).is_empty(), "a server already gone holds nothing");
+    }
+
+    /// #554: no ublk on the node is the only "not available"; a device
+    /// that did not come up says why.
+    #[test]
+    fn only_a_node_without_ublk_says_ublk_is_not_available() {
+        let mut mgr = UblkExportManager::new();
+        mgr.available = false;
+        let spec = crate::drive::emulated::EmulatedSpec::parse("emulated://ublk-na?size=16M").unwrap().unwrap();
+        let dev: Arc<dyn BlockDevice> = Arc::new(crate::drive::emulated::open(&spec).unwrap());
+        let Begin::Unavailable(why) = mgr.begin("v", dev) else { panic!("unavailable") };
+        assert_eq!(why, NOT_AVAILABLE);
     }
 
     /// #502: a detached device holds its volume until its server has

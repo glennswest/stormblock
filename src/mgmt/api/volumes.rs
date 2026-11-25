@@ -2255,10 +2255,10 @@ async fn attach_volume(
             ));
         }
         return match crate::mgmt::ublk_export::attach_local(&state, &key, uuid, device.clone()).await {
-            Err(gone) => ApiError::not_found(gone),
-            Ok(Some(path)) => Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
-            Ok(None) => ApiError::conflict(format!(
-                "volume {uuid} is secret: it is attached as a local ublk device only, and ublk is not available here"
+            Err(crate::mgmt::ublk_export::LocalAttachError::Deleted(gone)) => ApiError::not_found(gone),
+            Ok(path) => Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
+            Err(crate::mgmt::ublk_export::LocalAttachError::NoDevice(why)) => ApiError::conflict(format!(
+                "volume {uuid} is secret: it is attached as a local ublk device only, and none was made: {why}"
             )),
         };
     }
@@ -2300,19 +2300,19 @@ async fn attach_volume(
             true,
         )
     {
-        match crate::mgmt::ublk_export::attach_local(&state, &key, uuid, device.clone()).await {
-            Err(gone) => return ApiError::not_found(gone),
-            Ok(Some(path)) => return Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
-            Ok(None) => {}
-        }
+        let why = match crate::mgmt::ublk_export::attach_local(&state, &key, uuid, device.clone()).await {
+            Err(crate::mgmt::ublk_export::LocalAttachError::Deleted(gone)) => return ApiError::not_found(gone),
+            Ok(path) => return Json(super::v1::AttachInfo::Ublk { device_hint: path }).into_response(),
+            Err(crate::mgmt::ublk_export::LocalAttachError::NoDevice(why)) => why,
+        };
         if want == WantTransport::Ublk {
             #[cfg(target_os = "linux")]
             if let Err(why) = crate::mgmt::ublk_export::room_for_one(&*device) {
                 return ApiError::conflict(format!("ublk device not made: {why}"));
             }
-            return ApiError::conflict(
-                "ublk was asked for but is not available on this node (kernel ublk_drv, or ublk_transport is off)",
-            );
+            // The reason, not "not available" for a device that did not
+            // come up on a node serving a hundred others (#554).
+            return ApiError::conflict(format!("ublk was asked for and no device was made: {why}"));
         }
     } else if want == WantTransport::Ublk {
         return ApiError::conflict(format!(

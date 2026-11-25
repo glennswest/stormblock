@@ -467,18 +467,17 @@ pub async fn attach(state: &Arc<AppState>, key: &str, read_only: bool) -> Result
     let Some((dev, mut rec)) = connect(state, key, read_only).await? else { return Ok(None) };
     let id = rec.volume.to_string();
     match crate::mgmt::ublk_export::attach(state, &id, dev).await {
-        Some(path) => {
+        Ok(path) => {
             rec.device_hint = path.clone();
             state.peer_attaches.lock().await.insert(rec);
             Ok(Some(path))
         }
-        None => {
+        Err(why) => {
             release(state, &rec.peer, rec.volume, &rec.host_nqn, &rec.holder).await;
             Err(PeerError::new(
                 409,
                 format!(
-                    "volume {} is on {}: this node serves a peer's volume as a ublk device, \
-                     and ublk is not available here (kernel ublk_drv, or ublk_transport is off)",
+                    "volume {} is on {}: this node serves a peer's volume as a ublk device, and none was made: {why}",
                     rec.volume, rec.peer
                 ),
             ))

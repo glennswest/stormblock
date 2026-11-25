@@ -180,6 +180,17 @@ failing link went `ok`, said recovered, and lost its baseline.
   check.sh ALL PASS on 4b2f35aa (1606/1606, carries dfdae2e8); v24.45.11;
   DONE, closed
 
+## #554 — five root attaches fail together, then the kernel reads deleted volumes (forge1 12.64, 2026-11-25, P1)
+`wait_ready`'s 1 s for the kernel's id ran out for five attaches at once (others took 1.7-2.0 s); `finish`
+released the STARTING hold at once while the servers might still bring the devices up; the kubelet deleted the
+clones and the partition scan read them; the 409 said ublk was not on the node.
+- [x] a failed start hands STARTING to its server's exit (`ExitState.release`, as a detach does, #502)
+- [x] ID_WAIT 5 s; an id slower than 500 ms said with its time (the measurement the issue asked for)
+- [x] the reason to the caller: `attach` -> Result<String, String>, `attach_local` -> LocalAttachError; 409s say why
+- [x] tests: `a_device_that_did_not_come_up_holds_its_volume_until_its_server_exits`,
+  `only_a_node_without_ublk_says_ublk_is_not_available`; README, CHANGELOG
+- [ ] ublk_export tests + clippy, negative control, check.sh, ci-ublk-flow / qd on a VM with ublk_drv; shipped
+
 ## #580 — a clone-heavy slab outgrows its v2 metadata region: extent runs (2026-11-25, P1)
 forge's hot slab (2026-11-10): 3,212 volumes, ~3.19 M extent entries for 208,801 allocated slots (15x), a
 slot-sized region 176.5 of 183.5 MB used. Option A of the issue (recommended there, unanswered; queued as

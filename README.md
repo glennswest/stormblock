@@ -2078,6 +2078,10 @@ rest without naming conventions:
   starts, not once it is ready, and a delete reads the holds again right
   before it removes the volume, so a delete racing an attach either is
   refused or the attach answers `404` with its device taken down (#493).
+  A device that does not come up (the kernel's id waited for up to 5 s,
+  one slower than 500 ms logged with its time) keeps the hold until its
+  server has exited, and the attach answers `409` with why, not that ublk
+  is not on the node (#554).
   A detach keeps the hold until the device's server has exited and
   answers only then, so a delete right after it never runs under a device
   still serving reads; a detach of a device held open exclusively (a mount
