@@ -180,6 +180,15 @@ failing link went `ok`, said recovered, and lost its baseline.
   check.sh ALL PASS on 4b2f35aa (1606/1606, carries dfdae2e8); v24.45.11;
   DONE, closed
 
+## #568 + #469 — dependency advisories: h2, tokio, rustls, rustls-webpki, webpki-roots (2026-11-25, P1)
+Locked: h2 0.4.19 (RUSTSEC-2026-0258, empty DATA frames queue unbounded: DoS on the API), tokio 1.53.1
+(RUSTSEC-2026-0386, `AsyncFd::new`; used once, `vhost_user_blk::serve_queue`, on a kick fd the queue's
+Arc<OwnedFd> keeps open), rustls 0.23.45 (-0346/-0347/-0348/-0349), rustls-webpki 0.103.15 (-0382),
+webpki-roots 1.0.9 (-0381). No code change asked.
+- [ ] `cargo update -p h2 -p tokio -p rustls -p rustls-webpki -p webpki-roots` on a build VM, Cargo.lock
+  carried out (`SC_BUILD_OUT`), its own commit; the versions at least the fixed ones
+- [ ] check.sh; CHANGELOG; close both
+
 ## #727 — a rebuild or scrub started during an array release (2026-11-24, P1) — DONE
 - [x] `RaidArray`: a `releasing` flag the hold sets under a lifecycle mutex (cleared if the hold is dropped
   unreleased); `replace` (a failed slot to rebuilding, `take_spares`), `replace_proactively` and `start_scrub`
