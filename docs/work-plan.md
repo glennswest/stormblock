@@ -185,8 +185,9 @@ Locked: h2 0.4.19 (RUSTSEC-2026-0258, empty DATA frames queue unbounded: DoS on 
 (RUSTSEC-2026-0386, `AsyncFd::new`; used once, `vhost_user_blk::serve_queue`, on a kick fd the queue's
 Arc<OwnedFd> keeps open), rustls 0.23.45 (-0346/-0347/-0348/-0349), rustls-webpki 0.103.15 (-0382),
 webpki-roots 1.0.9 (-0381). No code change asked.
-- [ ] `cargo update -p h2 -p tokio -p rustls -p rustls-webpki -p webpki-roots` on a build VM, Cargo.lock
-  carried out (`SC_BUILD_OUT`), its own commit; the versions at least the fixed ones
+- [x] `cargo update -p h2 -p tokio -p rustls -p rustls-webpki -p webpki-roots` on a build VM, Cargo.lock
+  carried out (`SC_BUILD_OUT`), its own commit 4696a07f: h2 0.4.21, tokio 1.54.1, rustls 0.23.46,
+  rustls-webpki 0.103.17, webpki-roots 1.0.12; nothing else moves
 - [ ] check.sh; CHANGELOG; close both
 
 ## #727 — a rebuild or scrub started during an array release (2026-11-24, P1) — DONE
