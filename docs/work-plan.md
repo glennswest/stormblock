@@ -313,6 +313,10 @@ on C2NR0Q2: `SELECTED` from device 1 after a hard-off); close #603 on that
 console. (2026-11-20, handed back with nothing changed: `wait-hardware
 --machine C2NR0Q2` with the media and the lines the boot must show, so the
 master runs the boot.)
+2026-11-25: read again. stormuefi#76 still open; C2NR0Q2 has not booted since 2026-11-15
+(console dir, syslog); the master cancelled the hardware wait (owner: hardware time is
+the owner's to schedule). Still nothing in stormblock to change; stays open until the
+owner schedules the C2NR0Q2 boot.
 
 ## #699 — GET /v1/volumes/{key} by name (2026-11-20, P1)
 - [x] `get_volume`: a `/v1` id, else `volume_by_name` (the backup gate,
