@@ -1261,7 +1261,7 @@ f54a6b3c; v24.26.0. Left: the forge1 run (its next install's /init, or
   stormcos#1050): the live proof is the registry's pull through it
   (`log:pull .* verified: the peer's`), on forge1.
 
-## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1)
+## #652 — a per-drive read test, and why forge1's HGSTs read slowly (2026-11-18, P1) — DONE
 
 forge1: three HGST 10 TB at 12 Gbit read 64–103 MB/s, the HITACHI at 6 Gbit
 238. Owner: "can we look at the raid performance".
@@ -1273,13 +1273,18 @@ forge1: three HGST 10 TB at 12 Gbit read 64–103 MB/s, the HITACHI at 6 Gbit
   (lines at WARN), rows' `read_test`; /init runs it on an install with
   `storage:` (256 MiB a pass, `rd.stormblock.readtest=off`), the engine
   takes `/run/stormblock/read-test.json` into the rows
-- [ ] check.sh; docs; release; stormdrive#149 note
-- [ ] on forge1: the lines say why (block vs sg, background scan, pages);
-  a fix, if a MODE SELECT, through stormdrive#146; proof
-  `console:read-test .* sda .* MB/s`
-- [ ] 2026-11-18: back after pvetest2's install (a VM: says nothing of
-  forge1's HGSTs). Waits `--after-install stormblock>=60cc66c4@forge1`;
-  forge1 runs 24.16.0.
+- [x] check.sh; docs; release v24.26.0; stormdrive#149 note
+- [x] on forge1 (2026-11-25, read from stormcentral's syslog, host
+  `forge1-p2`): /init ran it on five installs, 11-18 21:27Z to 11-22 18:22Z.
+  4 MiB through the block device, sda/sdc/sdd vs sdb: 215/221/229 vs 200,
+  230/237/239 vs 225, 211/222/228 vs 208, 200/216/230 vs 200, 233/225/235
+  vs 213 MB/s; every drive `ok`, no HGST below sdb by more than 0 %. The
+  proof `console:read-test .* sda .* MB/s` with the HGSTs within 20 % of sdb
+  holds on every run. The why: quiet, the HGSTs are not slow; the 64–103 of
+  the issue were `dd` on the node in service, and what else read them then
+  is not in the record. Pages differ (WCE, D_SENSE, ATO, MRIE, idle_a) with
+  no rate following them: no MODE SELECT fix. Background scan active on all
+  four. sda negotiates 6 Gbit since 11-19 at the same rate. Closed.
 
 ## #649 — the Volume object says who owns it; orphans findable (2026-11-18, P1)
 
