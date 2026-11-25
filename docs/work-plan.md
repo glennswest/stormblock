@@ -203,10 +203,9 @@ session work): one entry for a run of consecutive extents on consecutive slots. 
   refused: overlap with an extent key or another run, count 0 or > `MAX_RUN` (1 Mi), index or slot overflow.
   Nothing writes it. Tests `an_extent_run_reads_as_its_extents` (entries, a real store reopened, the pager's
   map), `an_extent_run_that_overlaps_or_cannot_be_is_refused`. docs/metadata-v2.md, CHANGELOG
-- [ ] check.sh; ships in a release (`shipped`)
-- [ ] step 2, the writer (persist_v2: runs for whole-volume writes, a run split on a change inside it, a
-  delete of a run's extent), only once every node runs step 1 and none can roll back past it: its own item
-  `--after` this release
+- [x] 20/20 metav2 + clippy on bc0f77e2; check.sh at 02fbbe3b ALL PASS (1639/1639, carries bc0f77e2)
+- [x] `shipped` (--commit bc0f77e2): closes on an install carrying the reader
+- [x] step 2, the writer: #741, only once every node runs step 1 and none can roll back past it
 
 ## #568 + #469 — dependency advisories: h2, tokio, rustls, rustls-webpki, webpki-roots (2026-11-25, P1) — DONE
 Locked: h2 0.4.19 (RUSTSEC-2026-0258, empty DATA frames queue unbounded: DoS on the API), tokio 1.53.1
