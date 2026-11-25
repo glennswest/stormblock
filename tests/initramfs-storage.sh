@@ -233,6 +233,7 @@ inv_card_act() { return 1; }
 inv_card_ready() { echo "0x5000cca268077301: TEST UNIT READY good; READ CAPACITY 16 2441609216 blocks of 4096 + PI type 1; no Linux device yet"; return 2; }
 inv_card_linkrate() { echo "$*" >> "$W/linkrate.args"; echo "phy-1:2: maximum 6.0 Gbit, link reset"; echo "bay 1 (0x5000cca26a819e69): negotiated 6 Gbit after the reset; drive programmed 12 (hardware 12)"; }
 inv_card_readtest() { echo "$*" >> "$W/readtest.args"; echo "read-test 0x5000cca26801b649 (sda, HGST H7210A521SUN010T A3B0, 7200rpm 10TB): sequential at 931 GiB: 1 MiB 64 MB/s, 4 MiB 103 MB/s through the block device, O_DIRECT (the kernel's DIF path)"; }
+inv_card_writecliff() { echo "$*" >> "$W/writecliff.args"; [ -e "$W/writecliff.rc" ] && { echo "hba write-cliff: /dev/sdb is in use, nothing written: mounted"; return 1; }; echo "write-cliff ${2##*/}: 4.00 GiB written from 238.47 GiB in 256 MiB steps, each synced: 480, 470, 90 MB/s"; echo "write-cliff ${2##*/}: a cliff at 0.50 GiB: from 480 MB/s down to 90"; }
 inv_rescan() { :; }
 inv_settling() { :; }
 EOF
@@ -241,7 +242,7 @@ reset() {
     rm -rf "$WORK/run" "$WORK"/plan.* "$WORK"/slabs.* "$WORK"/at.* "$WORK"/rc.* \
            "$WORK"/sig.* "$WORK/format.log" "$WORK/skips" "$WORK/ldwrite" "$WORK/out" \
            "$WORK/install-config.yaml" "$WORK/dev" "$WORK"/lay.args "$WORK"/lay.rc \
-           "$WORK"/raid.* "$WORK/serve.args" "$WORK"/slow.* "$WORK/report.args" \
+           "$WORK"/raid.* "$WORK/writecliff.args" "$WORK/writecliff.rc" "$WORK/serve.args" "$WORK"/slow.* "$WORK/report.args" \
            "$WORK"/pt.* "$WORK"/layfail.* "$WORK"/card.* "$WORK"/becomes.* "$WORK"/wwn.* "$WORK"/done.* "$WORK/unready" "$WORK/sys/sde" "$WORK/sys/sdf" "$WORK/sg" "$WORK/scsi" "$WORK/sd-bind" \
            "${WORK:?}/plan.stderr" "${WORK:?}/sys/vda" "${WORK:?}/sys/vdb" "${WORK:?}/sys/ublkb65535" "${WORK:?}/sys/loop0"
     for d in sda sdb sdc sdd; do mkdisk "$d"; done
@@ -1048,6 +1049,32 @@ lay "$D4"
 has "type1 when stormraid laid it" "$WORK/out" "storage: node-data PI type1: every member 4096 + PI type 1 with the host's integrity profile (#647)"
 rm -rf "$WORK/raid.say" "$WORK/scsi_host" "$SYS/sdc/device/wwid"
 hasnt "no rescue" "$WORK/out" "RESCUE"
+
+echo "the lay: the write cliff on each solid-state drive, before it is laid (#661)"
+reset
+echo 0 > "$SYS/sda/queue/rotational"; echo 0 > "$SYS/sdc/queue/rotational"; echo 1 > "$SYS/sdb/queue/rotational"
+lay "$D4"
+check "the SSDs only, 4 GiB" "--dev /dev/sda --confirm /dev/sda --gib 4
+--dev /dev/sdc --confirm /dev/sdc --gib 4" "$(cat "$WORK/writecliff.args")"
+has "its lines said" "$WORK/out" "  storage: write-cliff sda: a cliff at 0.50 GiB: from 480 MB/s down to 90"
+has "then laid" "$WORK/lay.args" "^/dev/sda$"
+rm -f "$WORK/writecliff.args"
+lay "$D4" 'WRITECLIFF=16'
+check "=16: 16 GiB" "--dev /dev/sda --confirm /dev/sda --gib 16
+--dev /dev/sdc --confirm /dev/sdc --gib 16" "$(cat "$WORK/writecliff.args")"
+rm -f "$WORK/writecliff.args"
+lay "$D4" 'WRITECLIFF=off'
+check "=off: none" "" "$(cat "$WORK/writecliff.args" 2>/dev/null)"
+touch "$WORK/writecliff.rc"
+lay "$D4"
+has "a refusal said" "$WORK/out" "WARNING: storage: /dev/sda: write cliff (#661): hba write-cliff: /dev/sdb is in use"
+has "never fatal: laid" "$WORK/lay.args" "^/dev/sdc$"
+hasnt "no rescue" "$WORK/out" "RESCUE"
+rm -f "$WORK/writecliff.args" "$WORK/writecliff.rc"
+echo superblock: data slab > "$WORK/slabs.sdc"
+lay "$D4" 'INSTALL_KEEP=1 INSTALL_FRESH=""'
+check "a STOP writes nothing" "" "$(cat "$WORK/writecliff.args" 2>/dev/null)"
+rm -f "$SYS"/sd?/queue/rotational
 
 echo "the lay: a spare is the last member"
 reset

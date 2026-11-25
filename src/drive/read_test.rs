@@ -421,7 +421,9 @@ pub fn cliff_lines(c: &WriteCliff) -> Vec<String> {
     ));
     match (c.peak_mb_s, c.floor_mb_s, c.cliff_at) {
         (Some(p), Some(f), Some(at)) => v.push(format!("{who}: a cliff at {}: from {p:.0} MB/s down to {f:.0}", gib(at))),
-        (Some(p), Some(f), None) => v.push(format!("{who}: no cliff: {f:.0}-{p:.0} MB/s throughout")),
+        // No cliff in the range written says the cache is bigger than it,
+        // not that there is none: a fresh drive's SLC cache can be tens of GiB.
+        (Some(p), Some(f), None) => v.push(format!("{who}: no cliff in {}: {f:.0}-{p:.0} MB/s throughout", gib(total))),
         _ => {}
     }
     if let Some(e) = &c.error {
@@ -656,6 +658,9 @@ mod tests {
         assert_eq!(cliff_of(&[s(0, 500.0), s(1, 480.0), s(2, 300.0)]), None);
         assert_eq!(cliff_of(&[s(0, 500.0), s(1, 510.0), s(2, 240.0)]), Some(2));
         assert_eq!(cliff_of(&[]), None);
+        let c = WriteCliff { device: "sdb".into(), steps: vec![s(0, 500.0), s(1, 480.0)], peak_mb_s: Some(500.0), floor_mb_s: Some(480.0), ..Default::default() };
+        let l = cliff_lines(&c);
+        assert!(l[1].starts_with("write-cliff sdb: no cliff in 0.00 GiB: 480-500 MB/s"), "{l:?}");
     }
 
     #[test]

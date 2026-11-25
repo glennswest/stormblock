@@ -1277,6 +1277,7 @@ DECLARED_NET=""
 STATUS_LISTEN=""
 SCREEN=""
 READTEST=""
+WRITECLIFF=""
 
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -1334,6 +1335,8 @@ for param in $(cat /proc/cmdline); do
         rd.stormblock.status=*)      STATUS_LISTEN="${param#*=}" ;;
         rd.stormblock.screen=*)      SCREEN="${param#*=}" ;;
         rd.stormblock.readtest=*)    READTEST="${param#*=}" ;;
+        # The write cliff before a lay (#661): off, or the GiB to write.
+        rd.stormblock.writecliff=*)  WRITECLIFF="${param#*=}" ;;
         rd.stormblock.meta=*)        META="${param#*=}" ;;
         rd.stormblock.overlay=*)     OVERLAY="${param#*=}" ;;
         rd.stormblock.image-store=*) IMAGE_STORE="${param#*=}" ;;
@@ -2656,6 +2659,7 @@ inv_card() { $INV_HBA "$@" 2>/dev/null || true; }
 inv_card_act() { $INV_HBA act "$@"; } # its exit code and stderr are the format's
 inv_card_linkrate() { $INV_HBA linkrate "$@"; } # the link-rate policy (#642): its line on stdout
 inv_card_readtest() { $INV_HBA read-test "$@"; } # the read test (#652): a line a step, `read-test …`
+inv_card_writecliff() { $INV_HBA write-cliff "$@"; } # the write cliff (#661): destructive, before a lay only
 inv_card_ready() { $INV_HBA ready "$@"; } # one round after a format (#620): one line; 0 Linux has it, 2 ready on the card, 3 not ready
 # A drive that answers and has no readable format (#595: forge1's three SAS
 # drives, left by an interrupted format, answer NOT READY / medium format
@@ -6993,6 +6997,31 @@ $1|$_svp|$3"
             echo "  lost), or leave storage: out."
             storage_fail "laying storage: over what the drives hold, without the wipe word:$_sl_full"
         fi
+        # The write cliff (#661): every solid-state drive about to be laid is
+        # written for a sustained range (4 GiB by default, from half-way in)
+        # in synced steps, so a DRAM-less SSD's cliff (its SLC cache full) is
+        # measured on the install that is about to lay over it anyway, never
+        # on a drive in use. Only here: past the go-ahead above (the wipe
+        # word, a fresh install that keeps nothing, or drives this boot
+        # formatted or found blank), and before anything is laid. A rotating
+        # drive is left out. `rd.stormblock.writecliff=off` skips it,
+        # `=<GiB>` writes that much (1-64). A failure is said, never fatal.
+        case "${WRITECLIFF:-on}" in
+            off|0|no) ;;
+            *)
+                _wc_gib=4
+                case "${WRITECLIFF:-}" in ''|on|yes) ;; *[!0-9]*) echo "  WARNING: rd.stormblock.writecliff=$WRITECLIFF is neither off nor a GiB count: 4 GiB" ;; *) _wc_gib=$WRITECLIFF ;; esac
+                for _dev in $STORAGE_DRIVES; do
+                    case "$_dev" in /dev/sd*|/dev/nvme*) ;; *) continue ;; esac
+                    [ "$(cat "$SURVEY_SYS/${_dev##*/}/queue/rotational" 2>/dev/null || echo 1)" = 0 ] || continue
+                    if _wco=$(inv_card_writecliff --dev "$_dev" --confirm "$_dev" --gib "$_wc_gib" 2>&1); then
+                        printf '%s\n' "$_wco" | sed 's/^/  storage: /'
+                    else
+                        printf '%s\n' "${_wco:-the write cliff did not run}" | sed "s|^|  WARNING: storage: $_dev: write cliff (#661): |"
+                    fi
+                done
+                ;;
+        esac
         # Device paths carry no spaces: the words below are split on purpose
         # (positional parameters are /init's own, never reset here).
         _sl_legs=""

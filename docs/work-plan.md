@@ -30,11 +30,16 @@ the whole walk.
   already `none` on a multi-queue ublk (server8: 12 queues). TRIM at format
   and 8 MiB SATA slots not done: not shown by the numbers, and format has
   119 callers incl. a system half replaced beside a kept data half
-- [ ] items 2 (SMR cool tier) and 3 (goldens over the fabric): asked of the
+- [x] items 2 (SMR cool tier) and 3 (goldens over the fabric): asked of the
   owner with the numbers — the measured stages do not point at them; the
   flow-over reads the forge at 95–140 MB/s with read ≥ write time
-- [ ] the P210's cliff: write-cliff refuses it in use (it holds every slab);
-  measuring it destroys data there: the owner's call
+- [ ] the P210's cliff: write-cliff refuses it in use (it holds every slab).
+  Recommended route taken (2026-11-25, back as session work): measured by
+  the next wiping install. /init runs `hba write-cliff` (4 GiB, `sd*`/`nvme*`
+  non-rotational) past the lay's go-ahead, before the lay;
+  `rd.stormblock.writecliff=off|<GiB>`; `no cliff in <GiB>` said
+- [ ] items 2/3 held (recommended): until server8's next install shows what
+  the read-ahead fix moved
 - [x] check.sh ALL PASS at 0d8497a1 (1646/1646); numbers and the two
   questions on the issue (2026-11-25); waits on the owner
 - [ ] server8's next install: the read-ahead line with files in it, the

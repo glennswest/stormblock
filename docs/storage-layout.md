@@ -778,8 +778,20 @@ before it: `write-cliff sdb: a cliff at 1.25 GiB: from 480 MB/s down to 62`.
 **It overwrites that range.** `--confirm` repeats the device, and a drive in
 use is refused with every reason: this node's layout names it, the kernel
 holds it or a partition, it is mounted, a partition is a stormraid member,
-or any process holds it open (the engine's slabs, stormraid's members). Never
-run by /init.
+or any process holds it open (the engine's slabs, stormraid's members).
+A run that finds no cliff says `no cliff in 4.00 GiB`: the cache is bigger
+than what was written (a fresh drive's dynamic SLC cache can be tens of GiB),
+not absent; `--gib` up to 64 writes more.
+
+**/init, on an install that lays `storage:`:** once the go-ahead to lay is
+given (the wipe word, a fresh install that keeps nothing, or drives this
+boot formatted or found blank) and before anything is laid, every
+solid-state drive taken (`sd*`/`nvme*`, `queue/rotational` 0) is measured
+at 4 GiB from half-way in. The range is laid over right after, so nothing is
+lost that the lay would not lose; a drive in use is never measured (a
+keep-data reinstall stops before this point). The lines go on the console
+(`storage: write-cliff sda: …`); a refusal or failure is a WARNING, never
+fatal. `rd.stormblock.writecliff=off` skips it, `=<GiB>` writes that much.
 ### The drive's own link rate, mode page 0x19/1 (#646)
 
 forge1 bay 3's replacement (a HITACHI with EMC firmware) negotiated 6 Gbit
