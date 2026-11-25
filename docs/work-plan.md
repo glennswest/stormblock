@@ -2594,6 +2594,9 @@ itself; #391 was proven in QEMU). Engine work now:
 - [x] docs (raid-sets.md), CHANGELOG; check.sh at f3e0507c ALL PASS (1293)
 - [x] re-proven at 19bde5e0 (2026-11-06, the RAID code changed since f3e0507c):
       ci-shelf-raid6-verify.sh ALL PASS, 27 RESULT lines, none failed (kernel 7.2.11)
+- [x] re-proven at da90e3b8 (2026-11-25, after #718 and #727 changed the release paths):
+      ci-shelf-raid6-verify.sh ALL PASS, 27 RESULT lines, none failed. The shelf was unplugged on
+      purpose (owner, 2026-11-07); hardware time is the owner's to schedule (master, 2026-11-25)
 - [ ] **the shelf is not attached**: no enclosure behind the Dell's SAS9300-4i4e, its 17 drives
       `missing` since 2026-10-10 23:15Z (stormdrive#30, #85, read 2026-11-03); stormcentral's
       assets on 2026-11-06 list one drive on C2NR0Q2, the internal bay 4. Owner's hands:
