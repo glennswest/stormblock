@@ -173,12 +173,15 @@ failing link went `ok`, said recovered, and lost its baseline.
   DONE, closed
 
 ## #727 — a rebuild or scrub started during an array release (2026-11-24, P1)
-- [ ] `RaidArray`: a `releasing` flag the hold sets under a lifecycle mutex (cleared if the hold is dropped
+- [x] `RaidArray`: a `releasing` flag the hold sets under a lifecycle mutex (cleared if the hold is dropped
   unreleased); `replace` (a failed slot to rebuilding, `take_spares`), `replace_proactively` and `start_scrub`
-  check it under the same mutex and refuse. The release blocker also counts a proactive replacement
-- [ ] API: if `hold.release()` still refuses, 409 and the array and its drives stay here (stopped)
-- [ ] test: under a hold, a spare's rebuild, a replacement and a scrub are refused; dropped unreleased, they start.
-  Negative control; docs/raid-sets.md, CHANGELOG; check.sh
+  check it under the same mutex and refuse (`RaidError::Releasing`, 409). The release blocker also counts a
+  proactive replacement; `take_spares` puts a refused spare back
+- [x] API: if `hold.release()` still refuses, 409 and the array and its drives stay here (stopped)
+- [x] test `nothing_that_writes_members_starts_while_a_release_holds_the_set`: 56/56 raid + clippy on 30e4a782;
+  negative control (the hold sets no flag; wip/727-control, deleted) fails, `a spare was taken under a release`;
+  docs/raid-sets.md, CHANGELOG
+- [ ] check.sh
 
 ## #719 — finding 021e897d6367 in mgmt/volume_move.rs (2026-11-21, P1)
 - [x] `Moves::reserve`: the volume's slot taken under the jobs mutex before
