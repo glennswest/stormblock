@@ -7631,17 +7631,35 @@ fi
 # a handover holds the devices' I/O. The cache belongs to the kernel, so it
 # survives the switch_root and the handover.
 # The list: <root>/etc/stormblock/boot-readahead (a path per line, from the
-# root, a directory for every regular file under it, `#` a comment; empty means
-# nothing), else the defaults below. What is not there is skipped. Bounded by
-# STORM_READAHEAD_SECS and by STORM_READAHEAD_MIB, and a quarter of the memory
-# available: it stops where it is, and what it read is still cached.
+# root, a directory for every regular file under it on its own filesystem, `#`
+# a comment; empty means nothing), else the defaults below. What is not there
+# is skipped. Bounded by STORM_READAHEAD_SECS and STORM_READAHEAD_MIB, and by a
+# quarter of the memory available: a file bigger than what is left is skipped
+# and named, never the end of the walk (#661: one big file ended it on every
+# node, so it read nothing anywhere); the time bound stops it where it is, and
+# what it read is still cached.
+# Scaled to the node (#661): with 64 GiB or more, the bounds are MemTotal/32
+# and 15 s, and after the defaults every other volume under /p (the mount
+# list's) is read too, so a container start touches the disk once.
 # `rd.stormblock.readahead=off` turns it off.
 _ra_root="${STORM_SYSROOT:-/sysroot}"
 _ra_cat="${STORM_READAHEAD_CAT:-cat}"
 _ra_list="$_ra_root/etc/stormblock/boot-readahead"
+_ra_meminfo="${STORM_MEMINFO:-/proc/meminfo}"
 case " $(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null) " in
     *" rd.stormblock.readahead=off "*) echo "Boot read-ahead: off (rd.stormblock.readahead=off)" ;;
     *)
+        # KiB throughout from awk: a byte count past 2^31 is not safe in
+        # every awk's printf %d.
+        _ra_total_kib=$(awk '$1 == "MemTotal:" { printf "%d", $2 }' "$_ra_meminfo" 2>/dev/null)
+        _ra_total_kib=${_ra_total_kib:-0}
+        _ra_big=""
+        [ "$_ra_total_kib" -ge 67108864 ] && _ra_big=1
+        if [ -n "$_ra_big" ]; then
+            _ra_mib_def=$((_ra_total_kib / 1024 / 32)); _ra_secs_def=15
+        else
+            _ra_mib_def=512; _ra_secs_def=5
+        fi
         _ra_from=default
         if [ -r "$_ra_list" ]; then
             _ra_from="/etc/stormblock/boot-readahead"
@@ -7650,22 +7668,40 @@ case " $(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null) " in
             # The engine, then the kubelet, then what the apiserver needs,
             # then the root's own binaries.
             _ra_paths="/p/stormblock /p/rustkube-node /p/fastetcd /p/rustkube-apiserver /p/rustkube-controller-manager /p/rustkube-scheduler /sbin"
+            if [ -n "$_ra_big" ]; then
+                for _ra_v in "$_ra_root"/p/*; do
+                    [ -d "$_ra_v" ] || continue
+                    _ra_v="/p/${_ra_v##*/}"
+                    case " $_ra_paths " in *" $_ra_v "*) ;; *) _ra_paths="$_ra_paths $_ra_v" ;; esac
+                done
+                _ra_from="default + every volume under /p"
+            fi
         fi
-        _ra_left=$((${STORM_READAHEAD_MIB:-512} * 1048576))
-        _ra_avail=$(awk '$1 == "MemAvailable:" { printf "%d", $2 * 256 }' "${STORM_MEMINFO:-/proc/meminfo}" 2>/dev/null)
-        [ -n "$_ra_avail" ] && [ "$_ra_avail" -lt "$_ra_left" ] && _ra_left=$_ra_avail
+        _ra_mib="${STORM_READAHEAD_MIB:-$_ra_mib_def}"
+        _ra_left=$((_ra_mib * 1048576))
+        _ra_avail_kib=$(awk '$1 == "MemAvailable:" { printf "%d", $2 / 4 }' "$_ra_meminfo" 2>/dev/null)
+        if [ -n "$_ra_avail_kib" ] && [ $((_ra_avail_kib * 1024)) -lt "$_ra_left" ]; then
+            _ra_left=$((_ra_avail_kib * 1024))
+        fi
+        _ra_bound=$((_ra_left / 1048576))
         _ra_t0=$(cut -d' ' -f1 /proc/uptime)
-        _ra_secs="${STORM_READAHEAD_SECS:-5}"
-        _ra_n=0; _ra_bytes=0; _ra_stop=""
+        _ra_secs="${STORM_READAHEAD_SECS:-$_ra_secs_def}"
+        _ra_n=0; _ra_bytes=0; _ra_stop=""; _ra_skip=0; _ra_skip_max=0; _ra_skip_name=""
         for _ra_p in $_ra_paths; do
             [ -e "$_ra_root$_ra_p" ] || continue
-            for _ra_f in $(find "$_ra_root$_ra_p" -type f 2>/dev/null); do
+            for _ra_f in $(find "$_ra_root$_ra_p" -xdev -type f 2>/dev/null); do
                 _ra_gone=$(awk -v a="$_ra_t0" -v b="$(cut -d' ' -f1 /proc/uptime)" 'BEGIN { printf "%d", b - a }')
                 _ra_more=$((_ra_secs - _ra_gone))
                 if [ "$_ra_more" -le 0 ]; then _ra_stop="its $_ra_secs s"; break 2; fi
                 _ra_size=$(ls -lnL "$_ra_f" 2>/dev/null | awk '{ print $5 + 0 }')
                 _ra_size=${_ra_size:-0}
-                if [ "$_ra_size" -gt "$_ra_left" ]; then _ra_stop="its memory bound"; break 2; fi
+                if [ "$_ra_size" -gt "$_ra_left" ]; then
+                    _ra_skip=$((_ra_skip + 1))
+                    if [ "$_ra_size" -gt "$_ra_skip_max" ]; then
+                        _ra_skip_max=$_ra_size; _ra_skip_name=${_ra_f#"$_ra_root"}
+                    fi
+                    continue
+                fi
                 # A file the time runs out in is cut there, not waited for.
                 timeout "$_ra_more" $_ra_cat "$_ra_f" > /dev/null 2>&1
                 _ra_left=$((_ra_left - _ra_size))
@@ -7674,7 +7710,11 @@ case " $(cat "${STORM_CMDLINE:-/proc/cmdline}" 2>/dev/null) " in
             done
         done
         _ra_t1=$(cut -d' ' -f1 /proc/uptime)
-        echo "Boot read-ahead: $_ra_n file(s), $((_ra_bytes / 1048576)) MiB in $(awk -v a="$_ra_t0" -v b="$_ra_t1" 'BEGIN { printf "%.2f", b - a }') s (list: $_ra_from${_ra_stop:+; stopped at $_ra_stop})"
+        _ra_took=$(awk -v a="$_ra_t0" -v b="$_ra_t1" 'BEGIN { printf "%.2f", b - a }')
+        _ra_rate=$(awk -v m="$((_ra_bytes / 1048576))" -v a="$_ra_t0" -v b="$_ra_t1" 'BEGIN { d = b - a; if (d > 0) printf "%d", m / d; else printf "0" }')
+        _ra_said=""
+        [ "$_ra_skip" -gt 0 ] && _ra_said="; skipped $_ra_skip file(s) over what was left, the largest $((_ra_skip_max / 1048576)) MiB: $_ra_skip_name"
+        echo "Boot read-ahead: $_ra_n file(s), $((_ra_bytes / 1048576)) MiB in $_ra_took s, $_ra_rate MiB/s (list: $_ra_from; bound $_ra_bound MiB, $_ra_secs s, memory $((_ra_total_kib / 1048576)) GiB$_ra_said${_ra_stop:+; stopped at $_ra_stop})"
         ;;
 esac
 # --- END boot read-ahead

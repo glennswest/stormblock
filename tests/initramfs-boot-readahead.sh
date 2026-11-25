@@ -35,11 +35,13 @@ root() { # a fresh tree: name
     echo "$R"
 }
 : > "$WORK/cmdline"
+printf 'MemTotal:  8388608 kB\nMemAvailable:  8000000 kB\n' > "$WORK/meminfo.default"
 run() { # root name [env…]: the log in $WORK/log.<name>, output in $WORK/out.<name>
     R=$1; N=$2; shift 2
     : > "$WORK/log.$N"
+    # A small node unless the case says otherwise: never the host's memory.
     env STORM_SYSROOT="$R" STORM_READAHEAD_CAT="$WORK/stubcat" STORM_CMDLINE="$WORK/cmdline" \
-        RA_LOG="$WORK/log.$N" "$@" sh "$WORK/block.sh" > "$WORK/out.$N" 2>&1
+        STORM_MEMINFO="$WORK/meminfo.default" RA_LOG="$WORK/log.$N" "$@" sh "$WORK/block.sh" > "$WORK/out.$N" 2>&1
 }
 
 echo "the default list"
@@ -50,7 +52,7 @@ ok "the kubelet" "$(has "$WORK/log.d" '^/p/rustkube-node/kubelet$')"
 ok "the root's init" "$(has "$WORK/log.d" '^/sbin/init$')"
 ok "not a unit Ready does not need" "$(hasnt "$WORK/log.d" 'other/rdp')"
 [ "$(head -1 "$WORK/log.d" | cut -d/ -f3)" = stormblock ]; ok "the engine first" $?
-ok "said, with the list" "$(has "$WORK/out.d" 'Boot read-ahead: 4 file(s), 1 MiB in .* s (list: default)')"
+ok "said, with the list" "$(has "$WORK/out.d" 'Boot read-ahead: 4 file(s), 1 MiB in .* s, .* MiB/s (list: default; bound ')"
 
 echo "a volume this node does not carry is no failure"
 R=$(root m); rm -rf "$R/p/rustkube-node"; run "$R" m
@@ -72,7 +74,27 @@ ok "says so" "$(has "$WORK/out.o" 'off (rd.stormblock.readahead=off)')"
 echo "the bounds"
 R=$(root b); run "$R" b STORM_READAHEAD_MIB=0
 [ ! -s "$WORK/log.b" ]; ok "past the size bound nothing is read" $?
-ok "and said" "$(has "$WORK/out.b" 'stopped at its memory bound')"
+ok "and said, the largest named" "$(has "$WORK/out.b" 'skipped 4 file(s) over what was left, the largest 1 MiB: /p/rustkube-node/kubelet')"
+
+echo "one big file is skipped, never the end of the walk (#661)"
+R=$(root g); head -c 3145728 /dev/zero > "$R/p/stormblock/aaa-big.img"; run "$R" g STORM_READAHEAD_MIB=2
+ok "the file over the bound is not read" "$(hasnt "$WORK/log.g" 'aaa-big.img')"
+ok "what fits after it is read" "$(has "$WORK/log.g" '^/p/rustkube-node/kubelet$')"
+ok "the root's init too" "$(has "$WORK/log.g" '^/sbin/init$')"
+ok "named" "$(has "$WORK/out.g" 'skipped 1 file(s) over what was left, the largest 3 MiB: /p/stormblock/aaa-big.img')"
+ok "not stopped" "$(hasnt "$WORK/out.g" 'stopped at')"
+
+echo "scaled to the node's memory (#661)"
+printf 'MemTotal:  134217728 kB\nMemAvailable:  130000000 kB\n' > "$WORK/meminfo.big"
+R=$(root s); run "$R" s STORM_MEMINFO="$WORK/meminfo.big"
+ok "every volume under /p is read on a 128 GiB node" "$(has "$WORK/log.s" '^/p/other/rdp$')"
+ok "after the defaults" "$([ "$(tail -1 "$WORK/log.s")" = /p/other/rdp ] && echo 0 || echo 1)"
+ok "its bounds said" "$(has "$WORK/out.s" 'bound 4096 MiB, 15 s, memory 128 GiB')"
+ok "and the list" "$(has "$WORK/out.s" 'list: default + every volume under /p')"
+printf 'MemTotal:  16777216 kB\nMemAvailable:  16000000 kB\n' > "$WORK/meminfo.small"
+R=$(root k); run "$R" k STORM_MEMINFO="$WORK/meminfo.small"
+ok "a 16 GiB node reads the defaults only" "$(hasnt "$WORK/log.k" 'other/rdp')"
+ok "its bounds said" "$(has "$WORK/out.k" 'bound 512 MiB, 5 s, memory 16 GiB')"
 printf 'MemAvailable:  1024 kB\n' > "$WORK/meminfo"; R=$(root a); run "$R" a STORM_MEMINFO="$WORK/meminfo"
 ok "a quarter of the memory available: under it" "$(has "$WORK/log.a" '^/p/stormblock/stormblock$')"
 ok "a quarter of the memory available: the kubelet is past it" "$(hasnt "$WORK/log.a" 'kubelet')"
