@@ -45,6 +45,15 @@ the whole walk.
 - [ ] server8's next install: the read-ahead line with files in it, the
   stormd/stormport slow starts against 4.6/5.6 s
 
+## #745 — check.sh: a vhost-user-blk VMM reconnecting at once was refused (2026-11-25, filed by sc-build)
+check.sh at 33c507a7 failed `read_only_is_enforced_and_a_vmm_can_reconnect_but_not_double_up` on both
+runs (`ECONNRESET` at its reconnect). `Conn::run` refused every accept before reading the old VMM's EOF.
+- [x] an extra is refused only while the current VMM is there (`hung_up`: a MSG_PEEK|MSG_DONTWAIT
+  of 0 or ECONNRESET); one after the hang-up is served next (`accept_loop`'s `next`); test
+  `a_vmm_that_reconnects_at_once_is_served` (d66fabd9)
+- [x] clippy + vhost tests 5x5 pass at d66fabd9 (sc-build)
+- [ ] check.sh
+
 ## #662 — the serving certificate names every address the node holds (2026-11-25, P0)
 
 server8 (.114/.115) and forge1 (.203/.204): the engine's pair names one
