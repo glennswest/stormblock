@@ -2933,6 +2933,12 @@ a multi-drive machine. Then: file a `multi-drive` suite on stormblock-test
 (domains by serial/WWN, `mirror:2` apart, failed → rebuild → drain, MiB/s per
 drive and in parallel, shelves + spare, reassembly after a power cycle).
 Nothing built.
+2026-11-25: assets now list four physical drives on **forge1** (SAS, bays 0-3, last seen
+2026-11-18): enough for placement, drain and per-volume rebuild (not the shelf sets). forge1
+is the forge appliance, not a test machine, so running failures and drains there is the
+owner's to schedule (master: hardware time is the owner's, 2026-11-25). P3 under the
+P0/P1 pacing: no new harness built; `integration_multidrive` (file drives) and
+`ci-shelf-raid6-verify.sh` (QEMU, re-proven at da90e3b8 for #390) are the engine-side proof.
 
 ### Git dependencies pinned by rev, not tag (2026-10-22, #480, P0) — DONE (v23.0.4), closed
 
