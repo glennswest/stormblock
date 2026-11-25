@@ -12,14 +12,18 @@ upgrade records). The engine serves stormcert's pair and mints nothing:
 the SANs are stormcert's (`serving --node-names`, stormcert#173, done:
 every global address, re-issued at `renew` when one appears) and the unit's
 flag is stormcos's (stormcos#1553, open). stormblock's half: say it.
-- [ ] tls: the served leaf's SANs parsed (`subject_alt_names`); the node's
+- [x] tls: the served leaf's SANs parsed (`subject_alt_names`); the node's
   addresses as stormcert counts them (global unicast, not lo/link-local, not
-  cilium/lxc/veth/flowsdn/kube-ipvs/docker/cni/flannel); `uncovered`
-- [ ] health `tls.names {dns, ip}`, `tls.uncovered`; WARN when the
-  uncovered set changes, INFO when it empties (a re-issued pair re-read)
-- [ ] tests; docs/auth.md; CHANGELOG; check.sh; release
-- [ ] proof on forge1 (needs stormcos#1553 in a release): health's
-  `tls.uncovered` empty and `openssl s_client` on .203 and .204 verifying
+  cilium_/lxc/veth/flowsdn/kube-ipvs/docker/cni/flannel, `lo` whole); `uncovered`
+- [x] health `tls.names {dns, ip}`, `tls.uncovered`; WARN when the
+  uncovered set changes, INFO when a pair names them all
+- [x] tests (3 unit, `health_names_the_addresses_the_served_certificate_misses`);
+  docs/auth.md; CHANGELOG; 16/16 TLS tests + clippy at f5f2e2dd; check.sh ALL
+  PASS at 54bc8ea6 (sc-build-dd675cac6b); shipped (--commit 54bc8ea6)
+- [ ] stormcos#1553: `--node-names` on `stormcert-serving-stormblock` (asked
+  2026-11-25 as P0 for this, apart from its rustkube#388 hold)
+- [ ] proof on forge1: `management TLS: the served certificate names every
+  address this node holds`; `openssl s_client` on .203 and .204 verifying
 
 ## #729 — EMI / SSC vs link reliability, an A/B on forge1 bays 1 and 3 (2026-11-25, P2) — PAUSED (master: blocked, #652 first)
 
