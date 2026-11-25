@@ -336,3 +336,26 @@ async fn read_only_is_enforced_and_a_vmm_can_reconnect_but_not_double_up() {
     blk.stop(std::time::Duration::from_secs(5));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// #745: a VMM that reconnects the moment it hung up is served, never
+/// refused as a second one: the backend may not have read the old EOF yet.
+/// Before the fix, check.sh failed the test above on it under load.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vmm_that_reconnects_at_once_is_served() {
+    let (dev, sock, dir) = device("again", 4 << 20).await;
+    let blk = VhostUserBlk::serve(&sock, dev, BlkSpec { read_only: false, serial: "again".into() }, tokio::runtime::Handle::current()).unwrap();
+    let path = sock.clone();
+    tokio::task::spawn_blocking(move || {
+        let r = BUFS + 0x8000;
+        for _ in 0..20 {
+            let (mut vmm, _, _) = Vmm::connect(&path);
+            assert_eq!(vmm.submit(T_IN, 0, &[(r, 4096, true)]).0, S_OK);
+            drop(vmm);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(blk.counters.connections.load(Ordering::Relaxed), 20);
+    blk.stop(std::time::Duration::from_secs(5));
+    let _ = std::fs::remove_dir_all(dir);
+}

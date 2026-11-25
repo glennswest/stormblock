@@ -196,13 +196,19 @@ fn accept_loop(
     stop: Arc<AtomicBool>,
     counters: Arc<Counters>,
 ) {
+    // A VMM that connected as the last one hung up (#745): served next.
+    let mut next: Option<UnixStream> = None;
     while !stop.load(Ordering::SeqCst) {
-        match listener.accept() {
-            Ok((stream, _)) => {
+        let accepted = match next.take() {
+            Some(s) => Ok(s),
+            None => listener.accept().map(|(s, _)| s),
+        };
+        match accepted {
+            Ok(stream) => {
                 counters.connections.fetch_add(1, Ordering::Relaxed);
                 counters.connected.store(true, Ordering::SeqCst);
                 let mut conn = Conn::new(stream, dev.clone(), spec.clone(), rt.clone(), counters.clone());
-                if let Err(e) = conn.run(&listener, &stop) {
+                if let Err(e) = conn.run(&listener, &stop, &mut next) {
                     tracing::info!("vhost-user-blk: VMM connection ended: {e}");
                 }
                 conn.reset();
@@ -438,7 +444,11 @@ impl Conn {
         c
     }
 
-    fn run(&mut self, listener: &UnixListener, stop: &AtomicBool) -> std::io::Result<()> {
+    /// Serve this VMM until it hangs up or `stop`. A VMM that connects
+    /// meanwhile is refused while this one is still there; one that
+    /// connects once this one has hung up (its EOF not read yet: a VMM
+    /// reconnecting at once, #745) is left in `next`, served after this.
+    fn run(&mut self, listener: &UnixListener, stop: &AtomicBool, next: &mut Option<UnixStream>) -> std::io::Result<()> {
         self.stream.set_read_timeout(Some(std::time::Duration::from_millis(200)))?;
         loop {
             if stop.load(Ordering::SeqCst) {
@@ -447,6 +457,10 @@ impl Conn {
             // One guest owns a disk: a second VMM is refused, not queued
             // behind the first.
             while let Ok((extra, _)) = listener.accept() {
+                if self.hung_up() {
+                    *next = Some(extra);
+                    return Ok(());
+                }
                 tracing::warn!("vhost-user-blk: a second VMM connected while one is; refused");
                 drop(extra);
             }
@@ -672,6 +686,15 @@ impl Conn {
     }
 
     /// The VMM went away: every queue stops, the memory is let go.
+    /// The VMM has closed its end: nothing left to read but its EOF.
+    /// Bytes still to read (a message) are no hang-up.
+    fn hung_up(&self) -> bool {
+        let mut b = [0u8; 1];
+        // SAFETY: a one-byte peek into a buffer of ours, never blocking.
+        let n = unsafe { libc::recv(self.stream.as_raw_fd(), b.as_mut_ptr().cast(), 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+        n == 0 || (n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECONNRESET))
+    }
+
     fn reset(&mut self) {
         let ids: Vec<u32> = self.queues.keys().copied().collect();
         for i in ids {
