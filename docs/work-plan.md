@@ -48,6 +48,25 @@ the whole walk.
 - [ ] server8's next install: the read-ahead line with files in it, the
   stormd/stormport slow starts against 4.6/5.6 s
 
+## #743 — Golden objects on the apiserver for stormfn: golden create and dependency-file read (2026-11-25, P1)
+stormfn#62 (finding fc0dab903b52): stormfn sent its cluster bearer over http to the build node's :9090
+(`GET /api/v1/volumes/{v}/files`, `POST /api/v1/goldens`). The master's decision (2026-11-25): stormblock's
+Kubernetes API, never a node side channel. By the #655 pattern (management = CRDs + controllers): a
+`Golden` CRD in storage.storm.io/v1 (cluster-scoped, as Volume/Replication). stormfn creates one labelled
+`storm.io/node` with the build pod's node; that node's engine makes the golden (`goldens::make`, the same
+checks as the REST verb: in use 409, name, namespace) and reads `spec.files` (bounded: 16 files, 64 KiB a
+file, 256 KiB in all, absolute paths, no `..`) out of the **golden**, never the source; writes
+`status {phase, observedSpec, golden {name, volumeId, sha256, sizeBytes, existing}, files[], error}`.
+Acted on when `observedSpec` differs from spec or a `Making` was cut short; never twice for the same spec.
+RBAC: what stormfn already has (`goldens create`) plus `get` to read the status; the engine's ClusterRole
+gains goldens, goldens/status. The CRD's copy is stormcos's (an issue there).
+- [ ] `fs::files::read_file_bounded` (stat first: a big file never read)
+- [ ] `mgmt::kube_goldens`: spec parse/validate, the pass (from `kube_publish::pass`), the make on a task
+- [ ] deploy/crds.yaml: Golden CRD, the ClusterRole; docs (docs/kubernetes-objects or README), CHANGELOG
+- [ ] tests: integration over the stand-in apiserver (made, files, a bad path, over-size, in use, unlabelled,
+  not twice, a spec change makes again), unit (validation)
+- [ ] check.sh; stormcos issue (the CRD copy + RBAC), stormfn#62 told the contract
+
 ## #745 — check.sh: a vhost-user-blk VMM reconnecting at once was refused (2026-11-25, filed by sc-build)
 check.sh at 33c507a7 failed `read_only_is_enforced_and_a_vmm_can_reconnect_but_not_double_up` on both
 runs (`ECONNRESET` at its reconnect). `Conn::run` refused every accept before reading the old VMM's EOF.
