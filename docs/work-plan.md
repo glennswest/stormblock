@@ -40,9 +40,16 @@ naming it, looked up before anything is made; a malformed one `400`.
   docs/blobstore.md, README, CHANGELOG (691ef5cd, ef501327)
 - [x] check.sh ALL PASS on ef501327 (sc-build, 1157 s)
 
+## #740 — secret scan: the #735 entry above quoted the placeholder itself (2026-11-25, stormcentral#1679)
+gitleaks matched `docs/work-plan.md:44` at 0a5c2f0b: #735's own entry quoted the kubeadm example token
+with its key name. Not a credential. The entry now describes its shape instead; so does CHANGELOG's
+#735 line. No allowlist, no `.gitleaks.toml`.
+- [x] both reworded; `grep` finds the value nowhere in the tree
+- [ ] gitleaks 8.30.1 (default rules) over the tree on a build VM: no finding; the nightly scan closes #740
+
 ## #735 — secret scan: the forge-trust test's placeholder bootstrap token (2026-11-23, stormcentral#1679)
-gitleaks' `generic-api-key` matched `"bootstrap_token": "abcdef.0123456789abcdef"`
-five times in `tests/it/integration_forge.rs`: a placeholder in kubeadm's
+gitleaks' `generic-api-key` matched the test's `bootstrap_token` (kubeadm's documented
+example token, six lowercase characters, a dot, sixteen) five times in `tests/it/integration_forge.rs`: a placeholder in kubeadm's
 token shape, never a credential (the engine checks only one non-empty
 token). Changed the test rather than allowlisting: one `const BOOTSTRAP`
 with a plain placeholder, used everywhere; no `.gitleaks.toml`.

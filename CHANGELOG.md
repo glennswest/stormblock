@@ -4,6 +4,9 @@
 
 <!-- New unreleased changes go here -->
 
+### 2026-11-25
+- **docs:** #740 (stormcentral#1679): the work plan's and this changelog's #735 entries describe the kubeadm example token instead of quoting it, so gitleaks' `generic-api-key` no longer matches `docs/work-plan.md`; never a credential, nothing allowlisted.
+
 ### 2026-11-24
 - **fix:** #727: no rebuild, replacement or scrub starts while an array release holds the set: `hold_for_release` sets a `releasing` flag under a lifecycle mutex that `replace` (a failed slot rebuilding, a hot spare taken), `replace_proactively` and `start_scrub` check too, so the release's first check holds to its end. A spare a failure would take stays in the pool; `POST …/members/{slot}/replace` and `POST …/scrub` answer 409 meanwhile (`RaidError::Releasing`). A proactive replacement now blocks a release too. Were a rebuild running at the end anyway, the release answers 409 and keeps the set and its drives, stopped, where it removed them and answered success. Test: `raid::tests::nothing_that_writes_members_starts_while_a_release_holds_the_set`.
 - **fix:** #521: the eraser frees a batch's overwritten slots with no registry lock: their free entries written together (one write a table page, under the table's own page lock), each slot `freeing` only once its entry is on the device. It wrote them one slot at a time under the registry's write lock: pvetest3 (12.74) logged `the slab registry (write) was held 1.0-2.0s by the eraser` seven times in ten minutes, and `GET /volumes` (`generation=`) and `GET /slabs` (`account=`) waited 1.0-1.9 s behind it. `slab::EraseFinisher`. Test: `erase::tests::freeing_erased_slots_keeps_no_reader_waiting` (16 slots, 50 ms a write).
@@ -12,7 +15,7 @@
 - **feat:** #733 (stormblock-registry#241): the blob store as a source, by digest, read in place (no staging copy): a pallet member `"source": "blob", "digest": "sha256:<hex>"` (publish and recompose), an import's `"blob": "sha256:<hex>"` (raw/ISO, qcow2, sparse VMDK, OVA), an image-spec member's `blob = "sha256:<hex>"` (`POST /api/v1/images/build`). A digest not held is a `404` naming it before anything is made; the blob is held until the operation ends, so a concurrent `DELETE` frees nothing under it. `blobs::source::BlobSource`; the image decoders read an `image::decode::Input` (a file or a blob). `docs/blobstore.md`.
 
 ### 2026-11-23
-- **test:** #735 (stormcentral#1679): the forge-trust test's bootstrap token is one plain placeholder const (`BOOTSTRAP`), so gitleaks' `generic-api-key` no longer matches the kubeadm-shaped `abcdef.0123456789abcdef` it held five times; never a credential, nothing allowlisted.
+- **test:** #735 (stormcentral#1679): the forge-trust test's bootstrap token is one plain placeholder const (`BOOTSTRAP`), so gitleaks' `generic-api-key` no longer matches the kubeadm example token it held five times; never a credential, nothing allowlisted.
 
 ## [v24.47.0] — 2026-11-23
 
