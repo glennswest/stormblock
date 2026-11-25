@@ -180,7 +180,7 @@ failing link went `ok`, said recovered, and lost its baseline.
   check.sh ALL PASS on 4b2f35aa (1606/1606, carries dfdae2e8); v24.45.11;
   DONE, closed
 
-## #568 + #469 — dependency advisories: h2, tokio, rustls, rustls-webpki, webpki-roots (2026-11-25, P1)
+## #568 + #469 — dependency advisories: h2, tokio, rustls, rustls-webpki, webpki-roots (2026-11-25, P1) — DONE
 Locked: h2 0.4.19 (RUSTSEC-2026-0258, empty DATA frames queue unbounded: DoS on the API), tokio 1.53.1
 (RUSTSEC-2026-0386, `AsyncFd::new`; used once, `vhost_user_blk::serve_queue`, on a kick fd the queue's
 Arc<OwnedFd> keeps open), rustls 0.23.45 (-0346/-0347/-0348/-0349), rustls-webpki 0.103.15 (-0382),
@@ -191,7 +191,9 @@ webpki-roots 1.0.9 (-0381). No code change asked.
 - [x] check.sh at 4696a07f FAILED: clippy `-D warnings`, tokio 1.54 deprecates `AsyncFd::new` (the advisory's
   call). `vhost_user_blk::serve_queue` now `AsyncFd::register(kick.clone())`: the AsyncFd owns an Arc of the
   queue's OwnedFd, so the fd stays open and the same while registered
-- [ ] check.sh and ci-vhost-user-blk-verify.sh on the fix; CHANGELOG; close both
+- [x] check.sh at 0bc816ae ALL PASS (musl release, clippy -D warnings, nextest 1635/1635, runtime tests);
+  ci-vhost-user-blk-verify.sh ALL PASS (15 RESULT lines: two queues, write, read-back, read-only); CHANGELOG;
+  #568 and #469 closed. DONE
 
 ## #727 — a rebuild or scrub started during an array release (2026-11-24, P1) — DONE
 - [x] `RaidArray`: a `releasing` flag the hold sets under a lifecycle mutex (cleared if the hold is dropped
