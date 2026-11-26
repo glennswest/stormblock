@@ -31,6 +31,11 @@ Not here: stormcentral's `disk laid` stage not reading `install_state` off
 the formatting path (stormcentral's), the server8b/storm-84ae30 ghost Node
 (stormcos#1471), why `--wipe` did not wipe (to ask on the issue).
 
+DONE: 36606faa + 38045cc3 (clippy), check.sh ALL PASS (sc-build
+20261126-173913-38045cc3); the three tests by name on a fresh VM first
+(20261126-173442-36606faa). Closed; the on-metal proof is the next server8
+install on a build carrying it.
+
 ## #430 — a CA missing at start disables Kubernetes auth for the engine's life (2026-11-25, P1)
 
 `KubeAuth::from_config` read `ca_file` once and returned `None` on an error,
