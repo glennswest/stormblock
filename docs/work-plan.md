@@ -4,6 +4,33 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #753 — server8 install: the data-half flow-over gave up on the disk's own bulk slab (2026-11-26, P0)
+
+server8-1795709419 and -1795711740 (14.07-flowsdn): `no suitable destination
+slab` 17 times on `VolumeId(85e39fd7…)`, `extents that would not move`,
+install failed. Not the drive: the console's sda had no I/O error, and the
+retry failed on the same volume. `Flow-over: moving 3 slab(s)` with the
+appliance holding 2: the third was sda's own `stormblock-bulk` (#156, 8 MiB
+slots, laid on a data half ≥ 256 GiB). `FlowOver::local_slab_ids` named the
+twin's bulk slab but not the disk's, so the data-half sources ("every data
+slab but the destination and the locals") took it, quarantined it, and its
+8 MiB extents fit no 1 MiB slot of `stormblock-data` (`size_ok` →
+`NoDestination`). Only a kept data half with something on its bulk slab hits
+it; a fresh install's bulk slab is empty (pve passed). The `--wipe` retry kept
+the data half again ("data half kept"), so the wipe word never reached it.
+
+Plan (doing): `FlowOver.bulk_slab` (written by every lay path that has one) in
+`local_slab_ids`; `data_flow_sources`: never a slab on the data destination's
+drive (an older record, the resumed path), used by the quarantine, the
+flow-over, the seed and the test helper. `PlacementError::SlotSize` names both
+slabs and sizes; `FlowFailures`: the stall reason (console, install report,
+health) says each source, the first extent and why, not a count. Tests:
+`cli::tests::a_flow_over_never_takes_the_disks_own_bulk_slab_for_a_source`,
+`…a_flow_over_that_gives_up_names_what_would_not_move`.
+Not here: stormcentral's `disk laid` stage not reading `install_state` off
+the formatting path (stormcentral's), the server8b/storm-84ae30 ghost Node
+(stormcos#1471), why `--wipe` did not wipe (to ask on the issue).
+
 ## #430 — a CA missing at start disables Kubernetes auth for the engine's life (2026-11-25, P1)
 
 `KubeAuth::from_config` read `ca_file` once and returned `None` on an error,

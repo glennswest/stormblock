@@ -77,6 +77,9 @@ pub enum PlacementError {
     DomainCollision(SlabId),
     /// An I/O is using the slot right now (#239). Nothing moved; try again.
     Busy { slab_id: SlabId, slot_idx: u64 },
+    /// The source's slots are another size than the destination's (#156,
+    /// #753): an extent fits only a slot of its own size.
+    SlotSize { source: SlabId, size: u64, dest: SlabId, dest_size: u64 },
 }
 
 impl fmt::Display for PlacementError {
@@ -101,11 +104,30 @@ impl fmt::Display for PlacementError {
             PlacementError::Busy { slab_id, slot_idx } => {
                 write!(f, "slab {slab_id} slot {slot_idx} is in use by an I/O; not moved")
             }
+            PlacementError::SlotSize { source, size, dest, dest_size } => write!(
+                f,
+                "slab {source} has {} KiB slots and the destination slab {dest} {} KiB ones: \
+                 an extent fits only a slot of its own size",
+                size / 1024,
+                dest_size / 1024
+            ),
         }
     }
 }
 
 impl std::error::Error for PlacementError {}
+
+/// An extent of `source` (slots of `size`) that `dest` has no slot for (#753):
+/// both slabs and both sizes named, so a flow-over that gives up says why.
+fn slot_size_mismatch(
+    registry: &SlabRegistry,
+    source: SlabId,
+    size: u64,
+    dest: SlabId,
+) -> PlacementError {
+    let dest_size = registry.get(&dest).map(|s| s.slot_size()).unwrap_or(0);
+    PlacementError::SlotSize { source, size, dest, dest_size }
+}
 
 /// Result of migrating a single extent.
 pub struct MigrateExtentResult {
@@ -643,7 +665,7 @@ impl PlacementEngine {
                 // An extent fits only a slot of its size (#156).
                 let size = registry.get(&source_slab_id).map(|s| s.slot_size()).unwrap_or(0);
                 if !registry.size_ok(&id, size) {
-                    return Err(PlacementError::NoDestination);
+                    return Err(slot_size_mismatch(registry, source_slab_id, size, id));
                 }
                 id
             }
@@ -857,7 +879,7 @@ impl PlacementEngine {
             // An extent fits only a slot of its size (#156).
             let size = r.get(&old.slab_id).map(|s| s.slot_size()).unwrap_or(0);
             if !r.size_ok(&dest_id, size) {
-                return Err(PlacementError::NoDestination);
+                return Err(slot_size_mismatch(&r, old.slab_id, size, dest_id));
             }
             let slab = r.get_mut(&dest_id).ok_or(PlacementError::SlabNotFound(dest_id))?;
             let slot = slab
@@ -1222,8 +1244,12 @@ impl PlacementEngine {
             for i in copy {
                 let old = items[i].2;
                 let src_size = r.get(&old.slab_id).map(|s| s.slot_size()).unwrap_or(0);
-                if quarantined || !r.size_ok(&dest_id, src_size) {
+                if quarantined {
                     out[i] = Some(Err(PlacementError::NoDestination));
+                    continue;
+                }
+                if !r.size_ok(&dest_id, src_size) {
+                    out[i] = Some(Err(slot_size_mismatch(&r, old.slab_id, src_size, dest_id)));
                     continue;
                 }
                 let owner = match r.get(&old.slab_id) {
@@ -1489,7 +1515,7 @@ impl PlacementEngine {
             };
             match res {
                 Ok(_) => moved += 1,
-                Err(PlacementError::NoDestination) | Err(PlacementError::SlabFull) => skipped += 1,
+                Err(PlacementError::NoDestination | PlacementError::SlabFull | PlacementError::SlotSize { .. }) => skipped += 1,
                 Err(_) => failed += 1,
             }
         }

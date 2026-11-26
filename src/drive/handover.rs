@@ -71,6 +71,11 @@ pub struct FlowOver {
     /// not seed it before exporting; absent (an older record) means it did.
     #[serde(default)]
     pub data_flow: bool,
+    /// The local bulk slab (#156), laid beside `data_slab` on a data half of
+    /// 256 GiB or more: local, never a flow-over source (#753). Absent: none,
+    /// or an older record (the successor then knows it by its drive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk_slab: Option<String>,
     /// The data half's own drive, when the system half has one of its own
     /// (#402: an SSD for the system half, the HDD keeping the data). The
     /// successor opens it beside `disk`; `disk` is the system drive, where
@@ -112,6 +117,7 @@ impl FlowOver {
     /// never a source.
     pub fn local_slab_ids(&self) -> Vec<String> {
         let mut v = vec![self.system_slab.clone(), self.data_slab.clone()];
+        v.extend(self.bulk_slab.clone());
         if let Some(t) = &self.twin {
             v.push(t.system_slab.clone());
             v.push(t.data_slab.clone());
@@ -685,7 +691,7 @@ mod tests {
         mixed.slabs.push("iscsi://10.0.0.1:3260/iqn.x".into());
         assert!(!local_only_boot(&mixed), "any remote slab");
         let mut flowing = a_record();
-        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false, data_disk: None, twin: None, legs: Vec::new(), leg_disks: Vec::new() });
+        flowing.flow_over = Some(FlowOver { disk: "/dev/sda".into(), system_slab: "a".into(), data_slab: "b".into(), data_flow: false, bulk_slab: None, data_disk: None, twin: None, legs: Vec::new(), leg_disks: Vec::new() });
         assert!(!local_only_boot(&flowing), "the install boot itself");
         let mut installing = a_record();
         installing.install = Some(InstallTicket { boothost: "http://f".into(), host: "h".into(), volume: "v".into() });
@@ -747,6 +753,7 @@ mod tests {
             system_slab: "8aa6b985-3f4d-4130-99cb-154b56dcb68b".into(),
             data_slab: "f86ee673-57da-4aa5-961c-168c263de265".into(),
             data_flow: false,
+            bulk_slab: Some("0961bfce-0a7a-4fb7-825a-8381a097ba58".into()),
             data_disk: None,
             twin: None,
             legs: vec!["2c0c4f5e-6a2f-4c8e-9f57-3f1b7e0f9a11".into()],
@@ -758,11 +765,15 @@ mod tests {
         // The legs are never a source (#573).
         let f = rec.flow_over.as_ref().expect("a flow-over");
         assert!(f.local_slab_ids().contains(&"2c0c4f5e-6a2f-4c8e-9f57-3f1b7e0f9a11".to_string()));
+        // Nor is the disk's own bulk slab (#753): server8's 8 MiB extents were
+        // taken for the appliance's and could not move into 1 MiB slots.
+        assert!(f.local_slab_ids().contains(&"0961bfce-0a7a-4fb7-825a-8381a097ba58".to_string()));
         // A record with none says nothing of them, so an older engine reads it.
         let mut plain = a_record();
-        plain.flow_over = Some(FlowOver { legs: Vec::new(), leg_disks: Vec::new(), ..f.clone() });
+        plain.flow_over = Some(FlowOver { legs: Vec::new(), leg_disks: Vec::new(), bulk_slab: None, ..f.clone() });
         let text = String::from_utf8(serde_json::to_vec(&plain).expect("encodes")).expect("utf-8");
         assert!(!text.contains("legs"), "{text}");
+        assert!(!text.contains("bulk_slab"), "{text}");
     }
 
     #[test]

@@ -561,7 +561,8 @@ asks; clones keep their source's. A pool is role × tier × slot size, and an
 extent only ever lives in slots of its size. Sizes other than the node's
 default need metadata format 2. With format 2, an install lays the data half
 as a 1 MiB data slab (a quarter, at least 64 GiB) and an 8 MiB bulk slab
-(`stormblock-bulk`, last, growable) when it is 256 GiB or more.
+(`stormblock-bulk`, last, growable) when it is 256 GiB or more. The bulk slab
+is the node's own: an install's flow-over never takes it for a source (#753).
 
 **`[pressure]`** — `enabled` (`false`), `high_water_pct` (`80.0`),
 `check_interval_secs` (`60`), `min_slab_bytes` (1 GiB), `max_slabs` (`64`), and

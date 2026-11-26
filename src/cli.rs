@@ -6454,6 +6454,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 system_slab: system_id.0.to_string(),
                 data_slab: data_id.0.to_string(),
                 data_flow: true,
+                bulk_slab: bulk_id.map(|b| b.0.to_string()),
                 data_disk: None,
                 twin: None,
                 legs: Vec::new(),
@@ -6562,6 +6563,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             system_slab: system_id.0.to_string(),
             data_slab: data_id.0.to_string(),
             data_flow: false,
+            bulk_slab: bulk_id.map(|b| b.0.to_string()),
             data_disk: None,
             twin: None,
             legs: Vec::new(),
@@ -7221,6 +7223,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 system_slab: system_id.0.to_string(),
                 data_slab: data_id.0.to_string(),
                 data_flow: true,
+                bulk_slab: bulk_id.map(|b| b.0.to_string()),
                 data_disk: Some(data_disk.to_string()),
                 twin: None,
                 legs: Vec::new(),
@@ -7312,10 +7315,8 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
 
         let sources: Vec<crate::drive::slab::SlabId> = {
             let reg = mgr.registry().read().await;
-            reg.iter()
-                .filter(|(id, s)| s.is_data() && **id != dest)
-                .map(|(id, _)| *id)
-                .collect()
+            // Never the bulk slab laid beside `dest` (#753).
+            data_flow_sources(&reg, dest, &Default::default())
         };
         if sources.is_empty() {
             println!("Flow-over: no data slab to copy from; writes stay where they are");
@@ -7450,6 +7451,63 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
         dest: crate::drive::slab::SlabId,
         half: &str,
     ) -> String {
+        let said = FLOW_GAVE_UP_ON.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let base = flow_stall_base(reg, dest, half).await;
+        match said {
+            Some(what) => format!("{base}: {what}"),
+            None => base,
+        }
+    }
+
+    /// What the last flow-over that gave up could not move (#753), taken by
+    /// [`flow_stall_reason`].
+    static FLOW_GAVE_UP_ON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    /// The extents a flow-over could not move, by source and reason (#753).
+    #[derive(Default)]
+    pub(crate) struct FlowFailures {
+        /// (source, reason) → (failures, the first extent's `volume/index`).
+        by: std::collections::BTreeMap<(String, String), (u64, Option<String>)>,
+    }
+
+    impl FlowFailures {
+        pub(crate) fn add(&mut self, source: &str, reason: &str, extent: Option<String>) {
+            let e = self.by.entry((source.to_string(), reason.to_string())).or_insert((0, None));
+            e.0 += 1;
+            if e.1.is_none() {
+                e.1 = extent;
+            }
+        }
+
+        /// One line: each source and reason, most failures first, three at most.
+        pub(crate) fn said(&self) -> Option<String> {
+            let mut v: Vec<_> = self.by.iter().collect();
+            v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+            let n = v.len();
+            let mut parts: Vec<String> = v
+                .into_iter()
+                .take(3)
+                .map(|((src, why), (count, first))| match first {
+                    Some(x) => format!("{count} on {src}, first {x}: {why}"),
+                    None => format!("{count} on {src}: {why}"),
+                })
+                .collect();
+            if n > 3 {
+                parts.push(format!("and {} other reason(s)", n - 3));
+            }
+            (!parts.is_empty()).then(|| parts.join("; "))
+        }
+
+        fn publish(&self) {
+            *FLOW_GAVE_UP_ON.lock().unwrap_or_else(|e| e.into_inner()) = self.said();
+        }
+    }
+
+    async fn flow_stall_base(
+        reg: &crate::lockwatch::TrackedRwLock<crate::drive::slab_registry::SlabRegistry>,
+        dest: crate::drive::slab::SlabId,
+        half: &str,
+    ) -> String {
         let r = reg.read().await;
         match r.get(&dest) {
             Some(s) if s.free_slots() == 0 => format!(
@@ -7490,6 +7548,30 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             .collect()
     }
 
+    /// The data slabs a data-half flow-over empties into `dd` (#285): every
+    /// data slab but `dd`, the flow-over's own (`locals`), and any other slab
+    /// on `dd`'s drive (#753). That last is the disk's bulk slab (#156), its
+    /// 8 MiB extents fitting no 1 MiB slot of `dd`: an install over server8's
+    /// kept data half quarantined it as the appliance's and gave up on
+    /// `stormblock-bulk`'s first volume, every time. Named by the record since
+    /// #753; by its drive for one written before.
+    pub(crate) fn data_flow_sources(
+        reg: &crate::drive::slab_registry::SlabRegistry,
+        dd: crate::drive::slab::SlabId,
+        locals: &std::collections::HashSet<crate::drive::slab::SlabId>,
+    ) -> Vec<crate::drive::slab::SlabId> {
+        let dest_drive = reg.get(&dd).map(|s| s.device().drive_id().uuid);
+        reg.iter()
+            .filter(|(id, s)| {
+                s.is_data()
+                    && **id != dd
+                    && !locals.contains(id)
+                    && Some(s.device().drive_id().uuid) != dest_drive
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     pub(crate) async fn quarantine_flow_sources(
         mgr: &crate::volume::VolumeManager,
         flow: &crate::drive::handover::FlowOver,
@@ -7513,11 +7595,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 .map(|(id, _)| *id)
                 .collect();
             let data_sources: Vec<_> = match data_dest {
-                Some(dd) => reg
-                    .iter()
-                    .filter(|(id, s)| s.is_data() && **id != dd && !locals.contains(id))
-                    .map(|(id, _)| *id)
-                    .collect(),
+                Some(dd) => data_flow_sources(&reg, dd, &locals),
                 None => Vec::new(),
             };
             for s in sources.iter().chain(&data_sources) {
@@ -7770,6 +7848,9 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
         };
         let engine = crate::placement::PlacementEngine::new();
         let (mut moved, mut failed) = (0u64, 0u64);
+        // What would not move, by source and reason (#753): said when it gives
+        // up, so the report names them rather than counting them.
+        let mut why_failed = FlowFailures::default();
         // Looks that found the extent changed under them, in a row. An extent
         // that keeps changing is being written as fast as it can be looked at;
         // past this it counts as one that would not move.
@@ -7841,6 +7922,11 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
         for (i, &source) in sources.iter().enumerate() {
             later[i] = 0;
             let source_slot = registry.read().await.get(&source).map(|s| s.slot_size()).unwrap_or(1 << 20);
+            // The source as a report names it (#753): its id, drive and slots.
+            let source_said = match registry.read().await.get(&source) {
+                Some(s) => format!("slab {source} on {} ({} KiB slots)", s.device().id().path, s.slot_size() >> 10),
+                None => format!("slab {source}"),
+            };
             // Its path (#407): the MTU and what one command carries, in health
             // and said once per source, so a 1500 hop or an older target's
             // 128 KiB commands are seen where the rate is.
@@ -7907,11 +7993,13 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                             again = 0;
                             failed += 1;
                             tracing::error!("flow-over: extents on {source:?} keep changing under the move");
+                            why_failed.add(&source_said, "its extents keep changing under the move", None);
                             if failed > 16 {
                                 if unpersisted > 0 {
                                     flow_persist(&engine, registry, &persist, &mut spent, hold.is_none()).await;
                                 }
                                 give_up().await;
+                                why_failed.publish();
                                 return None;
                             }
                         }
@@ -8081,6 +8169,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                                 "flow-over: extent {vol:?}/{vext}: {e}; it stays on the appliance and is tried again \
                                  in the next pass ({failed} failure(s) of 16)"
                             );
+                            why_failed.add(&source_said, &e.to_string(), Some(format!("{}/{vext}", vol.0)));
                         }
                     }
                 }
@@ -8104,6 +8193,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
                 // the appliance.
                 if give_up_now {
                     give_up().await;
+                    why_failed.publish();
                     return None;
                 }
                 // Paced by the node's own I/O (#410): its latency while this
@@ -9028,7 +9118,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             let data: Option<(SlabId, Vec<SlabId>)> = match data_dest {
                 Some(dd) => {
                     let reg = reg_arc.read().await;
-                    Some((dd, reg.iter().filter(|(id, s)| s.is_data() && **id != dd && !locals.contains(id)).map(|(id, _)| *id).collect()))
+                    Some((dd, data_flow_sources(&reg, dd, &locals)))
                 }
                 None => None,
             };
@@ -11839,6 +11929,8 @@ async fn handle_boot_local(
                         data_slab: data.0.to_string(),
                         // What is left of either half (#285).
                         data_flow: true,
+                        // Known by its drive (#753).
+                        bulk_slab: None,
                         data_disk: None,
                         twin: None,
                         legs: Vec::new(),
@@ -12176,6 +12268,84 @@ async fn handle_migrate_boot(
 #[cfg(test)]
 mod tests {
     use super::note_no_intent;
+
+    /// #753: an install over a kept data half with a bulk slab (server8's
+    /// 512 GB P210) moves the appliance's data slab into the data slab and
+    /// leaves the disk's own bulk slab alone, whether the record names it or
+    /// (an older one) not. It was quarantined as the appliance's and its
+    /// 8 MiB extents fit no 1 MiB slot: "no suitable destination slab",
+    /// seventeen times, and the install failed.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_flow_over_never_takes_the_disks_own_bulk_slab_for_a_source() {
+        use crate::image::local::{lay_node_slabs, LocalLayout};
+        let disk = format!("emulated://p210-{}?size=600G", uuid::Uuid::new_v4().simple());
+        let disk = crate::drive::open_path(&disk, false).await.unwrap();
+        let mut layout = LocalLayout::for_drive(disk.capacity_bytes());
+        layout.bulk = true;
+        layout.slot_size = 1 << 20;
+        let local = lay_node_slabs(disk.clone(), &layout).await.unwrap();
+        let bulk = local.bulk.expect("a bulk slab");
+        let (sys, data, bulk_id) = (local.system.slab_id(), local.data.slab_id(), bulk.slab_id());
+        // The appliance's clone: its own drive, a system and a data slab.
+        let clone = format!("emulated://clone-{}?size=200G", uuid::Uuid::new_v4().simple());
+        let clone = crate::drive::open_path(&clone, false).await.unwrap();
+        let mut cl = LocalLayout::for_drive(clone.capacity_bytes());
+        cl.bulk = false;
+        cl.slot_size = 1 << 20;
+        let remote = lay_node_slabs(clone, &cl).await.unwrap();
+        let remote_data = remote.data.slab_id();
+
+        let mut reg = crate::drive::slab_registry::SlabRegistry::new();
+        reg.add(local.system);
+        reg.add(local.data);
+        reg.add(bulk);
+        reg.add(remote.system);
+        reg.add(remote.data);
+
+        let mut flow = crate::drive::handover::FlowOver {
+            disk: "/dev/sda".into(),
+            system_slab: sys.0.to_string(),
+            data_slab: data.0.to_string(),
+            data_flow: true,
+            bulk_slab: None,
+            data_disk: None,
+            twin: None,
+            legs: Vec::new(),
+            leg_disks: Vec::new(),
+        };
+        // An older record: the bulk slab known by its drive.
+        let sources = super::data_flow_sources(&reg, data, &super::flow_locals(&flow));
+        assert_eq!(sources, vec![remote_data], "the appliance's data slab alone");
+        // This release's: named.
+        flow.bulk_slab = Some(bulk_id.0.to_string());
+        let locals = super::flow_locals(&flow);
+        assert!(locals.contains(&bulk_id));
+        assert_eq!(super::data_flow_sources(&reg, data, &locals), vec![remote_data]);
+    }
+
+    /// #753: a flow-over that gives up names what would not move: the
+    /// source, its slots, the first extent and the reason, not a count.
+    #[test]
+    fn a_flow_over_that_gives_up_names_what_would_not_move() {
+        let (src, dest) = (
+            crate::drive::slab::SlabId(uuid::Uuid::new_v4()),
+            crate::drive::slab::SlabId(uuid::Uuid::new_v4()),
+        );
+        let e = crate::placement::PlacementError::SlotSize { source: src, size: 8 << 20, dest, dest_size: 1 << 20 };
+        let why = e.to_string();
+        assert!(why.contains("8192 KiB") && why.contains("1024 KiB"), "{why}");
+        let mut f = super::FlowFailures::default();
+        assert_eq!(f.said(), None);
+        let on = format!("slab {src} on /dev/sda4 (8192 KiB slots)");
+        for i in [0u64, 4, 16] {
+            f.add(&on, &why, Some(format!("85e39fd7/{i}")));
+        }
+        f.add("slab x on nvme-tcp://a", "read failed", Some("v/1".into()));
+        let said = f.said().unwrap();
+        assert!(said.starts_with(&format!("3 on {on}, first 85e39fd7/0: {why}")), "{said}");
+        assert!(said.contains("1 on slab x on nvme-tcp://a, first v/1: read failed"), "{said}");
+    }
 
     /// #623: the kept words are written 0600; nothing kept, nothing left.
     #[test]
@@ -14226,7 +14396,7 @@ file = "{state}"
             let reg = succ.registry().read().await;
             (
                 reg.iter().filter(|(id, s)| !s.is_data() && !locals.contains(id)).map(|(id, _)| *id).collect(),
-                reg.iter().filter(|(id, s)| s.is_data() && !locals.contains(id)).map(|(id, _)| *id).collect(),
+                super::data_flow_sources(&reg, data_dest, &locals),
             )
         };
         super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
