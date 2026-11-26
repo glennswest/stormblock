@@ -1528,7 +1528,9 @@ codegen unit, #209) and writes the tree the platform seals read-only:
   and CRL, the `[kernel]` client pair; every key read by the engine, a unit
   test), with the empty mount points the `00-stormblock` unit binds over
   (`etc/stormcert`, `srv/registry`, `data`, `run/stormblock`, `dev`, `proc`,
-  `sys`, `tmp`). x86_64 only. Placed in `system1`;
+  `sys`, `tmp`). x86_64 only. Placed in `system1`. `ci-golden.sh` runs the
+  recipe and checks the tree and its engine's TLS (`deploy/test/engine-tls.sh`),
+  the checks stormcos's stage made of it;
 - **`stormblock-data`** and **`stormblock-state`** — blanks in `data1`, the
   engine's `/data` and its persisted state.
 

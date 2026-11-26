@@ -48,6 +48,8 @@ The `stormblock` golden is built here (#755): `deploy/build-image.sh
 stormblock OUT` (`--profile dist`), run by stormcentral's component build via
 `deploy/build-golden.sh`; stormcos's stage copy goes once stormcentral's
 registry row is flipped to `tree` (stormcentral#1836).
+`sc-build 'bash ci-golden.sh'` runs the recipe and checks its tree (mount
+points, the dist binary, engine TLS on the golden's config).
 
 **Tests (#209, 2026-09-28).**
 - `tests/it/` is **one** in-process integration-test binary; each former file

@@ -23,6 +23,9 @@ sized by the platform from its content. x86_64 only. Added: static check,
 `--version` = Cargo.toml's, the copy read back, and a unit test that the
 shipped config's every key is read by the engine
 (`mgmt::config::golden_config_tests`).
+Also moved: stormcos's stage-build.sh checks of the golden (mount points,
+the dist binary byte for byte) and `deploy/test/engine-tls.sh`, as
+`ci-golden.sh` here.
 
 Not here: `stormblock-data`/`stormblock-state` (blanks, the platform's); the
 initramfs (stormcos builds it from stormblock's script beside the modules
