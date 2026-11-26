@@ -4,6 +4,35 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #755 — the stormblock golden built here: deploy/build-image.sh, stage mode retired (2026-11-26, stormcentral#1836)
+
+Owner: "we change in 1 repo and have to rebuild 21 is not acceptable". The
+`stormblock` golden's recipe was stormcos's `deploy/build-goldens.sh`
+("stormblock — the storage everything clones from", stormcos f7f7ccb lines
+4277-4351), run in stage mode on every stormcos commit. Moved here as
+`deploy/build-image.sh stormblock OUT`, the stormblock-registry#273 shape:
+`deploy/build-golden.sh` (the contract stormcentral's `tree` kind runs,
+`run_recipe`) execs it.
+
+What the stage did, copied: `cargo build --profile dist --locked --target
+x86_64-unknown-linux-musl` (the stage's `cargo_profile`: dist when defined),
+root package, default features; the tree `usr/bin/stormblock` 0755,
+`etc/stormblock/stormblock.toml` (the same text), empty `etc/stormcert
+srv/registry data dev proc sys run/stormblock tmp`. 48M ro in stage; a tree is
+sized by the platform from its content. x86_64 only. Added: static check,
+`--version` = Cargo.toml's, the copy read back, and a unit test that the
+shipped config's every key is read by the engine
+(`mgmt::config::golden_config_tests`).
+
+Not here: `stormblock-data`/`stormblock-state` (blanks, the platform's); the
+initramfs (stormcos builds it from stormblock's script beside the modules
+golden: stormmodules, stormcentral#1836 step 2). The flip (`component edit
+stormblock`, kind tree) is the master's; the stormcos deletion a follow-up
+issue there.
+
+Plan (doing): recipe + test + docs, push, `sc-build` the recipe (tree listing,
+config, sha) and `check.sh`, then hand over on stormcentral#1836.
+
 ## #753 — server8 install: the data-half flow-over gave up on the disk's own bulk slab (2026-11-26, P0)
 
 server8-1795709419 and -1795711740 (14.07-flowsdn): `no suitable destination

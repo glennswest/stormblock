@@ -2362,3 +2362,54 @@ mod registration_tests {
         assert!(e.contains("[registration] url"), "{e}");
     }
 }
+
+#[cfg(test)]
+mod golden_config_tests {
+    use super::*;
+
+    /// The config the `stormblock` golden ships (#755: its recipe is
+    /// `deploy/build-image.sh`, the heredoc between `<< 'CONF'` and `CONF`).
+    fn golden_config() -> &'static str {
+        let script = include_str!("../../deploy/build-image.sh");
+        let start = script.find("<< 'CONF'\n").expect("deploy/build-image.sh writes the config with << 'CONF'") + "<< 'CONF'\n".len();
+        let len = script[start..].find("\nCONF\n").expect("the config heredoc ends with CONF");
+        &script[start..start + len + 1]
+    }
+
+    /// Every key of every section the golden's config sets is in what the
+    /// engine reads back of it: the config has no `deny_unknown_fields`, so a
+    /// renamed or misspelt field would otherwise ship and be ignored on every
+    /// node.
+    fn keys_unread(file: &serde_json::Value, read: &serde_json::Value, at: &str, out: &mut Vec<String>) {
+        if let (Some(f), Some(r)) = (file.as_object(), read.as_object()) {
+            for (k, v) in f {
+                let path = if at.is_empty() { k.clone() } else { format!("{at}.{k}") };
+                match r.get(k) {
+                    None => out.push(path),
+                    Some(rv) => keys_unread(v, rv, &path, out),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_golden_config_is_one_the_engine_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stormblock.toml");
+        std::fs::write(&path, golden_config()).unwrap();
+        let cfg = StormBlockConfig::load(path.to_str().unwrap()).expect("the golden's config loads");
+        let file: serde_json::Value = toml::from_str(golden_config()).unwrap();
+        let read = serde_json::to_value(&cfg).unwrap();
+        let mut unread = Vec::new();
+        keys_unread(&file, &read, "", &mut unread);
+        assert!(unread.is_empty(), "keys the engine does not read: {unread:?}");
+        // What the node relies on, read as the engine reads it.
+        let m = &cfg.management;
+        assert_eq!(m.listen_addr, "0.0.0.0:9090");
+        assert_eq!(m.data_dir.as_deref(), Some("/data"));
+        assert_eq!(m.tls_mode.as_deref(), Some("optional"));
+        assert_eq!(m.boot_listen.as_deref(), Some("0.0.0.0:9089"));
+        assert_eq!(m.tls_admin_subjects, vec!["stormcentral".to_string()]);
+        assert_eq!(cfg.kernel.forge_ca.as_deref(), Some("/run/stormblock/forge/apiserver-ca.crt"));
+    }
+}
