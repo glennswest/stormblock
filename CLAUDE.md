@@ -44,8 +44,10 @@ sc-build 'cargo build --locked --profile dist --target x86_64-unknown-linux-musl
 sc-build 'cargo check --locked --features cluster'                   # the Raft layer, opt-in
 ```
 No RouterOS check: nothing ships for RouterOS (owner, 2026-09-28).
-The golden itself is built by stormcos's `deploy/build-goldens.sh` with
-`--release`, not `--profile dist`: stormcos#169.
+The `stormblock` golden is built here (#755): `deploy/build-image.sh
+stormblock OUT` (`--profile dist`), run by stormcentral's component build via
+`deploy/build-golden.sh`; stormcos's stage copy goes once stormcentral's
+registry row is flipped to `tree` (stormcentral#1836).
 
 **Tests (#209, 2026-09-28).**
 - `tests/it/` is **one** in-process integration-test binary; each former file

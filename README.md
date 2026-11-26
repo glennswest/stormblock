@@ -214,8 +214,8 @@ kernel as NVMe/TCP initiator, unprivileged, in QEMU (#210).
 
 **Build profiles.** `dev`/`test`: line tables only, no debug info for
 dependencies. `release`: thin LTO, 16 codegen units. `dist`: fat LTO, one
-codegen unit, meant for goldens — but the golden build (stormcos's
-`deploy/build-goldens.sh`, below) still uses `--release` (stormcos#169).
+codegen unit: what the `stormblock` golden ships, built by this repo's
+`deploy/build-image.sh` ("How it ships", #755).
 
 Tests that write files need `TMPDIR` inside the scratch tree
 (`mkdir -p tmp && export TMPDIR=$PWD/tmp`). `Cargo.lock` is committed and every
@@ -1511,27 +1511,37 @@ and runs from its slab as it is.
 
 ## How it ships
 
-stormblock is a **`special`** component in stormcentral's component registry
-(stormcentral's database since stormcentral#185; `components/stormcos.toml`
-there is only the seed): a bare binary plus `/etc/stormblock/stormblock.toml`, not a stormd service. It
-is staged with `stormcentral component stage`, which runs stormcos's
-`deploy/build-goldens.sh`. That builds `cargo build --release --locked
---target x86_64-unknown-linux-musl` (thin LTO since #209; the fat-LTO `dist`
-profile meant for goldens is not used yet, stormcos#169) and lays three goldens:
+The **`stormblock`** golden is built here (#755, stormcentral#1836: stage
+mode retired): `deploy/build-image.sh stormblock OUT`, which stormcentral's
+component build runs as a `tree` component (`deploy/build-golden.sh
+stormblock OUT`, which execs it) at the pushed commit on a fresh build VM. A
+push here builds this golden; once stormcentral's registry row says
+`tree` (stormcentral#1836), a stormcos commit builds nothing of stormblock's. Until 2026-11-26 the same recipe was stormcos's
+`deploy/build-goldens.sh`, staged with `stormcentral component stage`; it
+moved with its content unchanged. It builds `cargo build --profile dist
+--locked --target x86_64-unknown-linux-musl -p stormblock` (fat LTO, one
+codegen unit, #209) and writes the tree the platform seals read-only:
 
-- **`stormblock`** — read-only ext4, the binary at `/usr/bin/stormblock` and a
-  config with `listen_addr = "0.0.0.0:9090"`; placed in `system1`;
+- **`stormblock`** — `/usr/bin/stormblock` (static, its `--version` checked
+  against Cargo.toml, the copy read back) and `/etc/stormblock/stormblock.toml`
+  (`:9090` with TLS `optional`, the plain boot port `:9089`, forge's admin CA
+  and CRL, the `[kernel]` client pair; every key read by the engine, a unit
+  test), with the empty mount points the `00-stormblock` unit binds over
+  (`etc/stormcert`, `srv/registry`, `data`, `run/stormblock`, `dev`, `proc`,
+  `sys`, `tmp`). x86_64 only. Placed in `system1`;
 - **`stormblock-data`** and **`stormblock-state`** — blanks in `data1`, the
   engine's `/data` and its persisted state.
 
-The same build puts the binary in the initramfs (`/usr/sbin/stormblock`) and
-the fedora golden, and every service golden is written by `stormblock golden`.
+The blanks are the platform's. The initramfs (`/usr/sbin/stormblock`) is
+still built by stormcos beside the modules golden, from
+`scripts/build-stormblock-initramfs.sh`, and every service golden is written
+by `stormblock golden`.
 For running it outside stormcos: `systemd/stormblock-target.service` (the
 daemon as a storage target) and `systemd/95-stormblock-iouring.conf`.
 `systemd/stormblock-ublk.service` runs `boot-iscsi --ublk` as an early-boot
 unit; since #162 a run opens the slab it made before and keeps its volumes.
-There is no container image of the engine: it ships as goldens (stormcos's
-`build-goldens.sh`), and the stale `Dockerfile`s were removed (#196).
+There is no container image of the engine: it ships as goldens
+(`deploy/build-image.sh`), and the stale `Dockerfile`s were removed (#196).
 `Containerfile.iscsi-test` is an old external-iSCSI test image.
 `deploy/terragrunt/` makes test VMs on Proxmox and `deploy/m0/` is the M0
 baseline setup; `scripts/build-stormblock-initramfs.sh` builds the initramfs
