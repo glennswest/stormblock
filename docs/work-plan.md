@@ -19,6 +19,9 @@ holding the own target). auth.rs's `None` 401 says it means no apiserver is
 named. Test `integration_destructive::a_ca_written_after_the_start_…`.
 After this, the forge/trust PUT meets #555's 403 (RBAC; not this issue).
 
+DONE: be08eb02, check.sh ALL PASS (sc-build 20261126-041726-be08eb02); the new test
+by name on a fresh VM (nextest -E ca_written…: 4/4 with #557's worker test). Closed.
+
 ## #661 — speed games for slow-disk nodes, numbers first (2026-11-25, P1)
 
 Item 1's memory tier is #673's (it says it replaces it); here: the boot
