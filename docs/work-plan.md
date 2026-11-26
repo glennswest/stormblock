@@ -4,6 +4,21 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #430 — a CA missing at start disables Kubernetes auth for the engine's life (2026-11-25, P1)
+
+`KubeAuth::from_config` read `ca_file` once and returned `None` on an error,
+so a first boot that beat stormcert to `/etc/stormcert/ca.crt` refused every
+Kubernetes bearer with a 401 blaming the config until a restart (12.66
+pvetest1: forge's stormcert `PUT /forge/trust` 401 every 30 s).
+
+Plan (doing): the own apiserver's client built lazily (`kubeauth::Own`):
+tried at start, else at each review; meanwhile `Review::Unavailable` (503)
+naming the file; WARN once while waiting, INFO when read. The cluster record
+(#557) is followed as before (its cached result now says "own" rather than
+holding the own target). auth.rs's `None` 401 says it means no apiserver is
+named. Test `integration_destructive::a_ca_written_after_the_start_…`.
+After this, the forge/trust PUT meets #555's 403 (RBAC; not this issue).
+
 ## #661 — speed games for slow-disk nodes, numbers first (2026-11-25, P1)
 
 Item 1's memory tier is #673's (it says it replaces it); here: the boot

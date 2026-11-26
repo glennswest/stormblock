@@ -124,7 +124,13 @@ held in memory, and the node says so.
 stormconsole#82) is checked against the apiserver in `[management.kubernetes]`
 (`api_url`, `ca_file`, and `token_file` for the engine's own credential, which
 may create `tokenreviews` and `subjectaccessreviews`, as
-`system:auth-delegator` may):
+`system:auth-delegator` may). A `ca_file` that cannot be read yet (a first
+boot, before stormcert has written `/etc/stormcert/ca.crt`) is "not yet",
+never "off" (#430): a review meanwhile is a 503 naming the file, the file is
+read again at the next review, and Kubernetes auth comes up with no restart
+(one WARN while it waits, one INFO when it is read). Only a node that names
+no apiserver at all refuses a Kubernetes bearer with the 401
+`this node reviews no Kubernetes bearer`.
 
 1. **TokenReview:** who is it?
 2. **SubjectAccessReview** for that user. The group is `storage.storm.io`;

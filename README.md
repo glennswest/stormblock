@@ -1669,7 +1669,9 @@ On a cluster worker (#557, v23.23.0) there is no local apiserver: while
 stormcluster) sits beside the engine's token, bearers are reviewed at the
 cluster with the token it issued (`[management.kubernetes] cluster_record`,
 `$STORMBLOCK_KUBE_CLUSTER_RECORD`). Re-read at each review; absent means the
-node's own apiserver; unusable means no review (503). See `docs/auth.md`.
+node's own apiserver; unusable means no review (503). A `ca_file` not
+written yet is a 503 too, read again at the next review, so a first boot's
+race with stormcert needs no restart (#430). See `docs/auth.md`.
 
 ```toml
 [fabric]

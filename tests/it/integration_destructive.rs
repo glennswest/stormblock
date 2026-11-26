@@ -105,12 +105,16 @@ async fn node(audit_only: bool, kube: Option<String>) -> Node {
 }
 
 async fn node_following(audit_only: bool, kube: Option<String>, record: Option<&str>) -> Node {
+    node_kube(audit_only, kube.map(|u| KubeAuthConfig { api_url: u, cluster_record: record.map(str::to_string), ..Default::default() })).await
+}
+
+async fn node_kube(audit_only: bool, kube: Option<KubeAuthConfig>) -> Node {
     let dir = TempDir::new().unwrap();
     let mut config = StormBlockConfig::default();
     config.management.data_dir = Some(dir.path().to_string_lossy().to_string());
     config.management.api_token = Some(NODE.into());
     config.management.admin_token = Some(ADMIN.into());
-    config.management.kubernetes = kube.map(|u| KubeAuthConfig { api_url: u, cluster_record: record.map(str::to_string), ..Default::default() });
+    config.management.kubernetes = kube;
     let mut vm = VolumeManager::new(MIB);
     let dev = stormblock::drive::filedev::FileDevice::open_with_capacity(dir.path().join("pool.bin").to_str().unwrap(), 64 * MIB)
         .await
@@ -274,6 +278,68 @@ async fn a_kubernetes_bearer_is_reviewed_and_named_in_the_audit_log() {
     let m = node(false, None).await;
     let g3 = volume(&m, "g3", true).await;
     assert_eq!(call(&m, M::DELETE, &format!("/volumes/{g3}"), Some("alice-k8s"), None).await, 401);
+}
+
+/// A self-signed CA, only for its PEM to be read into a root store (#430).
+const TEST_CA: &str = "-----BEGIN CERTIFICATE-----
+MIIBjzCCATWgAwIBAgIUEMiFQkRFkzRpgA7bq8xrTnpLZUMwCgYIKoZIzj0EAwIw
+HDEaMBgGA1UEAwwRdGVzdC1hcGlzZXJ2ZXItY2EwIBcNMjYxMTI2MDQxNTU2WhgP
+MjEyNjExMDIwNDE1NTZaMBwxGjAYBgNVBAMMEXRlc3QtYXBpc2VydmVyLWNhMFkw
+EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEKeZ+Mir4gjacOi7cs5fGMinZAV76g7Yr
+YsbzwCWgf7lFFYurpAuMK21vJOe0ESU8+rWW94Z8Zn8OEOurEO4vT6NTMFEwHQYD
+VR0OBBYEFBXr+QHr71mIXR6cCIcISjf6gfT9MB8GA1UdIwQYMBaAFBXr+QHr71mI
+XR6cCIcISjf6gfT9MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIh
+AKEBJDcaBSe784a1S1PVkWCa/ChHLFUuXnjGxMmi1RZzAiA0Sk5S3gV5iMqvL9OQ
+mZcvsFx6j7t2o6WD+Szqg3PLgA==
+-----END CERTIFICATE-----
+";
+
+/// #430: on a first boot the engine starts before stormcert has written the
+/// apiserver's CA. That is "not yet": a bearer meanwhile gets a 503 naming
+/// the file (not a 401 blaming the config), and once the CA is written the
+/// same engine reviews it, with no restart. A CA written but not a
+/// certificate yet (half-written) is not yet either.
+#[tokio::test]
+async fn a_ca_written_after_the_start_brings_kubernetes_auth_up_without_a_restart() {
+    use reqwest::Method as M;
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let api = apiserver(asked.clone()).await;
+    let cadir = TempDir::new().unwrap();
+    let ca = cadir.path().join("ca.crt");
+    let n = node_kube(
+        false,
+        Some(KubeAuthConfig { api_url: api.clone(), ca_file: Some(ca.display().to_string()), ..Default::default() }),
+    )
+    .await;
+    assert!(n.state.kube_auth.is_some(), "a missing CA leaves Kubernetes auth configured");
+    let g = volume(&n, "g", true).await;
+
+    let (code, said) = call_text(&n, M::DELETE, &format!("/volumes/{g}"), Some("alice-k8s"), None).await;
+    assert_eq!(code, 503, "{said}");
+    assert!(said.contains(ca.to_str().unwrap()) && said.contains("not there yet"), "{said}");
+    assert!(!said.contains("[management.kubernetes]"), "the config is not blamed: {said}");
+    assert!(asked.lock().unwrap().is_empty(), "nothing was asked without the CA");
+
+    // Half-written: still not yet, and said so.
+    std::fs::write(&ca, "-----BEGIN CERTIFICATE-----\n").unwrap();
+    let (code, said) = call_text(&n, M::DELETE, &format!("/volumes/{g}"), Some("alice-k8s"), None).await;
+    assert_eq!(code, 503, "{said}");
+    assert!(said.contains("not usable yet"), "{said}");
+
+    // stormcert has written it: the same engine reviews the bearer.
+    std::fs::write(&ca, TEST_CA).unwrap();
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g}"), Some("bob-k8s"), None).await, 403, "reviewed: bob may not");
+    assert_eq!(call(&n, M::DELETE, &format!("/volumes/{g}"), Some("alice-k8s"), None).await, 204, "reviewed: alice may");
+    assert!(asked.lock().unwrap().iter().any(|b| b["kind"] == "TokenReview"));
+
+    // A CA that is there at the start is read at the start, as before.
+    let m = node_kube(
+        false,
+        Some(KubeAuthConfig { api_url: api, ca_file: Some(ca.display().to_string()), ..Default::default() }),
+    )
+    .await;
+    let g2 = volume(&m, "g2", true).await;
+    assert_eq!(call(&m, M::DELETE, &format!("/volumes/{g2}"), Some("alice-k8s"), None).await, 204);
 }
 
 /// stormcert reads a machine's attestation with its own ServiceAccount: a

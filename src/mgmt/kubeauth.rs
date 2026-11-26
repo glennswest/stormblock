@@ -29,6 +29,13 @@
 //! go back to this node's own apiserver. There and not usable, nothing is
 //! reviewed (503): falling back would ask an apiserver this node no longer
 //! belongs to.
+//!
+//! **The apiserver's CA may not be there yet (#430).** On a first boot the
+//! engine starts while stormcert is still writing `/etc/stormcert/ca.crt`.
+//! A CA that cannot be read is "not yet", never "off": a review meanwhile is
+//! a 503 that names the file, the file is read again at the next review, and
+//! Kubernetes auth comes up as soon as it is there, with no restart. One WARN
+//! while it waits, one INFO when it is read.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -63,8 +70,9 @@ pub enum Review {
 
 /// See the module documentation.
 pub struct KubeAuth {
-    /// This node's own apiserver, from the config.
-    own: Arc<Target>,
+    /// This node's own apiserver, from the config: built once its CA is read
+    /// (#430).
+    own: Own,
     /// See the module documentation (#557).
     record: Option<PathBuf>,
     followed: Mutex<Option<Followed>>,
@@ -72,6 +80,75 @@ pub struct KubeAuth {
     /// review is for one name when the role names resources (#216), and in
     /// one namespace when the volume is in one (#408).
     cache: Mutex<HashMap<(String, String, String, Option<String>, Option<String>), (Instant, Review)>>,
+}
+
+/// This node's own apiserver as the config names it, and its client once
+/// the CA could be read (#430).
+struct Own {
+    api_url: String,
+    ca: Option<String>,
+    token_file: Option<String>,
+    state: Mutex<OwnState>,
+}
+
+#[derive(Default)]
+struct OwnState {
+    built: Option<Arc<Target>>,
+    /// What was said while waiting, so it is said once and not per review.
+    said: Option<String>,
+}
+
+impl Own {
+    /// The client, built now if the CA has come; an error says what is
+    /// missing, and the next call tries again.
+    fn target(&self) -> Result<Arc<Target>, String> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = &st.built {
+            return Ok(t.clone());
+        }
+        match self.build() {
+            Ok(t) => {
+                let t = Arc::new(t);
+                if st.said.is_some() {
+                    tracing::info!(
+                        "kubernetes auth: the apiserver's CA {} is read: bearers are reviewed at {} now",
+                        self.ca.as_deref().unwrap_or(""),
+                        t.api_url
+                    );
+                }
+                st.built = Some(t.clone());
+                st.said = None;
+                Ok(t)
+            }
+            Err(e) => {
+                if st.said.as_deref() != Some(e.as_str()) {
+                    tracing::warn!("kubernetes auth: {e}; it is read again at the next review, and Kubernetes bearers get a 503 until then");
+                    st.said = Some(e.clone());
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn build(&self) -> Result<Target, String> {
+        let mut b = crate::http::Client::builder().timeout(Duration::from_secs(5));
+        if let Some(ca) = &self.ca {
+            match std::fs::read(ca) {
+                Ok(pem) => b = b.add_root_certificate_pem(pem),
+                Err(e) => return Err(format!("the apiserver's CA {ca} is not there yet ({e})")),
+            }
+        }
+        let client = b.build().map_err(|e| match &self.ca {
+            Some(ca) => format!("the apiserver's CA {ca} is not usable yet: {e}"),
+            None => e.to_string(),
+        })?;
+        Ok(Target { api_url: self.api_url.clone(), client, bearer: Bearer::File(self.token_file.clone()) })
+    }
+
+    /// The client, when it has been built.
+    fn built(&self) -> Option<Arc<Target>> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).built.clone()
+    }
 }
 
 /// An apiserver to ask, and the engine's bearer there.
@@ -120,7 +197,8 @@ impl Target {
 struct Followed {
     /// Modified, length, inode; `None` when there is no record.
     stamp: Option<(Option<std::time::SystemTime>, u64, u64)>,
-    target: Result<Arc<Target>, String>,
+    /// The cluster's apiserver; `None`: this node's own.
+    target: Result<Option<Arc<Target>>, String>,
 }
 
 /// What stormcluster writes (#557).
@@ -176,7 +254,8 @@ fn digest(token: &str) -> String {
 
 impl KubeAuth {
     /// From `[management.kubernetes]` and the environment; `None` when no
-    /// apiserver is named (Kubernetes bearers are then refused).
+    /// apiserver is named (Kubernetes bearers are then refused). A CA that
+    /// cannot be read yet is no `None` (#430): it is read at the first review.
     pub fn from_config(cfg: Option<&KubeAuthConfig>) -> Option<KubeAuth> {
         let env = |k: &str| non_empty(std::env::var(k).ok());
         let api_url = env("STORMBLOCK_KUBE_API").or_else(|| cfg.map(|c| c.api_url.clone()).and_then(|u| non_empty(Some(u))))?;
@@ -188,43 +267,42 @@ impl KubeAuth {
             .or_else(|| {
                 token_file.as_ref().and_then(|f| std::path::Path::new(f).parent()).map(|d| d.join("engine-cluster.json"))
             });
-        let mut b = crate::http::Client::builder().timeout(Duration::from_secs(5));
-        if let Some(ca) = ca {
-            match std::fs::read(&ca) {
-                Ok(pem) => b = b.add_root_certificate_pem(pem),
-                Err(e) => {
-                    tracing::error!("kubernetes auth: cannot read CA {ca}: {e} — Kubernetes bearers will be refused");
-                    return None;
-                }
-            }
-        }
-        let client = match b.build() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("kubernetes auth: {e} — Kubernetes bearers will be refused");
-                return None;
-            }
-        };
-        let own = Target {
+        let own = Own {
             api_url: api_url.trim_end_matches('/').to_string(),
-            client,
-            bearer: Bearer::File(token_file),
+            ca,
+            token_file,
+            state: Mutex::new(OwnState::default()),
         };
-        Some(KubeAuth { own: Arc::new(own), record, followed: Mutex::new(None), cache: Mutex::new(HashMap::new()) })
+        // Tried now, so a CA that is there is read at start as before, and
+        // one that is not is said at start (once, as a WARN).
+        let _ = own.target();
+        Some(KubeAuth { own, record, followed: Mutex::new(None), cache: Mutex::new(HashMap::new()) })
     }
 
     /// Whom a review asks now, as the record says.
     pub fn api_url(&self) -> String {
         match self.target() {
             Ok(t) => t.api_url.clone(),
-            Err(_) => self.record.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            Err(_) => match &self.record {
+                Some(p) if p.exists() => p.display().to_string(),
+                _ => self.own.api_url.clone(),
+            },
         }
     }
 
     /// The apiserver to ask: the cluster's while the record is there, else
     /// this node's. An error means nothing can be reviewed.
     fn target(&self) -> Result<Arc<Target>, String> {
-        let Some(path) = &self.record else { return Ok(self.own.clone()) };
+        match self.followed_target()? {
+            Some(t) => Ok(t),
+            None => self.own.target(),
+        }
+    }
+
+    /// The cluster's apiserver while the record is there; `None`: this
+    /// node's own.
+    fn followed_target(&self) -> Result<Option<Arc<Target>>, String> {
+        let Some(path) = &self.record else { return Ok(None) };
         use std::os::unix::fs::MetadataExt;
         let stamp = match std::fs::metadata(path) {
             Ok(m) => Some((m.modified().ok(), m.len(), m.ino())),
@@ -239,17 +317,18 @@ impl KubeAuth {
         }
         let first = followed.is_none();
         let target = match stamp {
-            None => Ok(self.own.clone()),
+            None => Ok(None),
             Some(_) => std::fs::read(path)
                 .map_err(|e| e.to_string())
                 .and_then(|b| target_of_record(&b))
-                .map(Arc::new)
+                .map(|t| Some(Arc::new(t)))
                 .map_err(|e| format!("{}: {e}", path.display())),
         };
         match &target {
             Err(e) => tracing::error!("kubernetes auth: no bearer can be reviewed: the cluster's record {e}"),
-            Ok(t) if !first || stamp.is_some() => tracing::info!("kubernetes auth: bearers are reviewed at {} now", t.api_url),
-            Ok(_) => {}
+            Ok(Some(t)) => tracing::info!("kubernetes auth: bearers are reviewed at {} now", t.api_url),
+            Ok(None) if !first => tracing::info!("kubernetes auth: bearers are reviewed at {} now", self.own.api_url),
+            Ok(None) => {}
         }
         *followed = Some(Followed { stamp, target: target.clone() });
         drop(followed);
@@ -264,7 +343,7 @@ impl KubeAuth {
     /// and the 503 says so rather than only naming 127.0.0.1:6443.
     fn why_own(&self, target: &Arc<Target>, why: String) -> String {
         match &self.record {
-            Some(path) if Arc::ptr_eq(target, &self.own) => format!(
+            Some(path) if self.own.built().is_some_and(|o| Arc::ptr_eq(target, &o)) => format!(
                 "{why} (asked this node's own apiserver: there is no cluster record at {}, which stormcluster writes \
                  when the node joins a cluster as a worker)",
                 path.display()

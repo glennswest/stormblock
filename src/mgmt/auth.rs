@@ -735,7 +735,11 @@ pub async fn require_token(
             return refuse(
                 rec,
                 StatusCode::UNAUTHORIZED,
-                "admin token required: this node reviews no Kubernetes bearer ([management.kubernetes] is not set)".into(),
+                // Only when no apiserver is named: a CA not written yet is a 503
+                // from the review (#430), never this.
+                "admin token required: this node reviews no Kubernetes bearer (no apiserver is named: \
+                 [management.kubernetes] api_url and $STORMBLOCK_KUBE_API are not set)"
+                    .into(),
             );
         };
         use super::kubeauth::Review;
