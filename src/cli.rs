@@ -7482,7 +7482,7 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
         /// One line: each source and reason, most failures first, three at most.
         pub(crate) fn said(&self) -> Option<String> {
             let mut v: Vec<_> = self.by.iter().collect();
-            v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+            v.sort_by_key(|e| std::cmp::Reverse(e.1 .0));
             let n = v.len();
             let mut parts: Vec<String> = v
                 .into_iter()
