@@ -4,7 +4,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
-## #755 — the stormblock golden built here: deploy/build-image.sh, stage mode retired (2026-11-26, stormcentral#1836)
+## #755 — the stormblock golden built here: deploy/build-image.sh, stage mode retired (2026-11-26, stormcentral#1836) — DONE
 
 Owner: "we change in 1 repo and have to rebuild 21 is not acceptable". The
 `stormblock` golden's recipe was stormcos's `deploy/build-goldens.sh`
@@ -33,8 +33,12 @@ golden: stormmodules, stormcentral#1836 step 2). The flip (`component edit
 stormblock`, kind tree) is the master's; the stormcos deletion a follow-up
 issue there.
 
-Plan (doing): recipe + test + docs, push, `sc-build` the recipe (tree listing,
-config, sha) and `check.sh`, then hand over on stormcentral#1836.
+Done (2026-11-26): `sc-build 'bash ci-golden.sh'` 20261126-213135-98e7e67f
+pass (tree as staged, dist binary 37,223,504 B sha 42c844bb…, engine-tls
+PASS, refusals exit 2); `sc-build 'sh check.sh'` 20261126-213134-98e7e67f
+ALL PASS at 98e7e67f (1654/1654 nextest). Flip handed to the master on
+stormcentral#1836; stormcos deletion is stormcos#1664 (after the flip).
+Closed.
 
 ## #753 — server8 install: the data-half flow-over gave up on the disk's own bulk slab (2026-11-26, P0)
 
