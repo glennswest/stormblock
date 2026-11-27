@@ -273,3 +273,100 @@ async fn a_node_pulls_its_kernels_gpu_image_from_forge_with_its_enrolled_certifi
     assert!(v["error"].as_str().unwrap().contains("not reachable"), "{v}");
     assert_eq!(node.volume_manager.lock().await.volume_ids().len(), before, "nothing half-made");
 }
+
+/// One HTTPS server for a test (#750): every request answered 200 with
+/// `body`, under the certificate `name` the CA in `pki` issued.
+async fn https_file_server(pki: &Path, name: &str, body: Vec<u8>) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let certs: Vec<_> = rustls_pemfile::certs(&mut std::io::Cursor::new(std::fs::read(pki.join(format!("{name}.crt"))).unwrap()))
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(std::fs::read(pki.join(format!("{name}.key"))).unwrap()))
+        .unwrap()
+        .unwrap();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cfg = rustls::ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key).unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = Arc::new(body);
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else { return };
+            let (acceptor, body) = (acceptor.clone(), body.clone());
+            tokio::spawn(async move {
+                let Ok(mut tls) = acceptor.accept(tcp).await else { return };
+                let mut req = Vec::new();
+                let mut b = [0u8; 4096];
+                while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match tls.read(&mut b).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => req.extend_from_slice(&b[..n]),
+                    }
+                }
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n", body.len());
+                let _ = tls.write_all(head.as_bytes()).await;
+                let _ = tls.write_all(&body).await;
+                let _ = tls.shutdown().await;
+            });
+        }
+    });
+    port
+}
+
+async fn import_url(state: &Arc<AppState>, name: &str, url: &str) -> stormblock::image::import::ImportStatus {
+    let spec: stormblock::image::import::ImportSpec =
+        serde_json::from_value(serde_json::json!({"name": name, "url": url, "format": "raw", "verify": false})).unwrap();
+    let st = state.imports.write().await.start(state.clone(), spec).expect("the import starts");
+    for _ in 0..600 {
+        let s = st.read().await.clone();
+        if matches!(s.state, stormblock::image::import::ImportState::Done | stormblock::image::import::ImportState::Failed) {
+            return s;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the import of {url} did not end");
+}
+
+/// #750 (vmcloud-image-operator#97: `GET https://127.0.0.1:5100/v2/media/…/blobs`
+/// `gave up after 8 attempt(s): client error (Connect)`): an import from an
+/// https URL whose certificate the node CA issued (the node's own registry)
+/// is fetched once `[management] tls_client_ca` names that CA.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_import_trusts_the_node_ca_for_the_nodes_own_registry() {
+    if !have_openssl() {
+        eprintln!("SKIP: needs the openssl CLI to make the certificates");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let pki: PathBuf = tmp.path().join("pki");
+    std::fs::create_dir_all(&pki).unwrap();
+    ca(&pki, "node-ca");
+    leaf(&pki, "node-ca", "registry", "serverAuth", "IP:127.0.0.1,DNS:localhost");
+    let data = content();
+    let port = https_file_server(&pki, "registry", data.clone()).await;
+    let url = format!("https://127.0.0.1:{port}/v2/media/fedora/blobs/sha256:28680fe5");
+
+    // The node CA named: fetched, written, the bytes as served. (Without
+    // it the built-in roots refuse the certificate, and the fetch is retried
+    // 8 times over ~70 s before it fails: 14.05's log, not repeated here.)
+    let mut c = StormBlockConfig::default();
+    c.management.data_dir = Some(tmp.path().join("node-data").display().to_string());
+    c.management.tls_client_ca = Some(pki.join("node-ca.crt").display().to_string());
+    let node = engine(tmp.path(), "node", c).await;
+    let s = import_url(&node, "fedora-44", &url).await;
+    assert_eq!(s.state, stormblock::image::import::ImportState::Done, "{s:?}");
+    let vm = node.volume_manager.lock().await;
+    let id = vm.find_volume("fedora-44").await.expect("the golden");
+    let dev = vm.get_volume(&id).unwrap();
+    let mut back = vec![0u8; data.len()];
+    dev.read(0, &mut back).await.unwrap();
+    assert!(back == data, "the imported bytes are the served ones");
+    drop(vm);
+
+    // A node CA file that holds no certificate is no CA, never a failure.
+    std::fs::write(pki.join("junk.crt"), b"not a certificate").unwrap();
+    assert!(stormblock::image::import::node_ca_pem(Some(pki.join("junk.crt").to_str().unwrap())).is_none());
+    assert!(stormblock::image::import::node_ca_pem(Some("/nonexistent/ca.crt")).is_none());
+    assert!(stormblock::image::import::node_ca_pem(None).is_none());
+}

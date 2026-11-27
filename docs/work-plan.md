@@ -4,6 +4,15 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #750 — an import from the node registry over https trusts the node CA (2026-11-27)
+
+`client_for` trusted webpki roots only, unless `ImportSpec.tls` (kernelopt's,
+`#[serde(skip)]`) was set. Now `ImportSpec.node_ca` (skip too), read by
+`Imports::start` from `[management] tls_client_ca` (the golden's config:
+`/etc/stormcert/ca.crt`), added beside the roots for every fetch. Only a
+file that parses to a certificate is taken, so a CA not there yet never fails
+an import that needs none.
+
 ## #754 — boot intent `fresh` (2026-11-27, stormbootx#262, P0 there) — DONE
 
 `BootIntent::Fresh`, `"fresh"`; `is_install()` where `Install` meant claim and

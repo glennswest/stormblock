@@ -2731,7 +2731,10 @@ stormblock golden --slab work.slab --from-volume work1 --out new.img --seal
   own UUID.
 
 On a running engine the same is `POST /api/v1/volumes/import` and
-`POST /api/v1/volumes/{id}/clone`.
+`POST /api/v1/volumes/{id}/clone`. An import's https `url` is verified against
+the built-in roots and the node CA, `[management] tls_client_ca` (#750): the
+node's own registry (`https://127.0.0.1:5100/v2/…/blobs`) signs with it. A CA
+file that is missing or holds no certificate is left out, never a failure.
 
 ### Reading a slab without attaching it
 

@@ -31,9 +31,23 @@ pub struct ClientTls {
     pub key: Vec<u8>,
 }
 
-/// The client an import fetches with.
+/// The node CA (PEM) as an import trusts it (#750): the file's bytes when
+/// they hold at least one certificate, else nothing, so a CA not there yet,
+/// or not one, never fails an import that did not need it.
+pub fn node_ca_pem(path: Option<&str>) -> Option<Vec<u8>> {
+    let pem = std::fs::read(path?).ok()?;
+    let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(&pem)).filter_map(Result::ok).count();
+    (certs > 0).then_some(pem)
+}
+
+/// The client an import fetches with: the built-in roots, the node CA (the
+/// node's own registry and peers sign with it, #750), and a caller's own
+/// CA and identity (#383).
 fn client_for(spec: &ImportSpec, timeout: std::time::Duration) -> Result<crate::http::Client, String> {
     let mut b = crate::http::Client::builder().timeout(timeout);
+    if let Some(ca) = &spec.node_ca {
+        b = b.add_root_certificate_pem(ca.clone());
+    }
     if let Some(t) = &spec.tls {
         if let Some(ca) = &t.ca {
             b = b.add_root_certificate_pem(ca.clone());
@@ -119,6 +133,11 @@ pub struct ImportSpec {
     /// with its enrolled certificate), never by a request.
     #[serde(skip)]
     pub tls: Option<ClientTls>,
+    /// The node CA, PEM (#750): `[management] tls_client_ca`, read by
+    /// [`Imports::start`], trusted beside the built-in roots. Set by the
+    /// engine, never by a request.
+    #[serde(skip)]
+    pub node_ca: Option<Vec<u8>>,
     /// Labels kept with who made it (#422): `storm.io/test-run`.
     #[serde(default)]
     pub labels: std::collections::BTreeMap<String, String>,
@@ -320,7 +339,10 @@ impl Imports {
 
     /// Start an import. Validation that can fail fast happens here; the
     /// long part runs behind the returned status.
-    pub fn start(&mut self, state: Arc<AppState>, spec: ImportSpec) -> Result<Arc<RwLock<ImportStatus>>, String> {
+    pub fn start(&mut self, state: Arc<AppState>, mut spec: ImportSpec) -> Result<Arc<RwLock<ImportStatus>>, String> {
+        if spec.node_ca.is_none() {
+            spec.node_ca = node_ca_pem(state.config.management.tls_client_ca.as_deref());
+        }
         if spec.name.trim().is_empty() {
             return Err("name must not be empty".into());
         }

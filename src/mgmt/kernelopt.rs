@@ -279,6 +279,7 @@ pub async fn start(state: &Arc<AppState>, req: Request) -> Result<Vec<Status>, (
             keep_download: false,
             verify: true,
             tls: Some(tls.clone()),
+            node_ca: None,
             labels: Default::default(),
             creator: None,
             namespace: None,
