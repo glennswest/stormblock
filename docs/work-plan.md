@@ -4,6 +4,20 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #757 — boot-helper rows demanded into the node registry every 10 s (2026-11-26, P1) — NOT IN THIS REPO
+
+Asked: the engine reconciles only the row kinds it runs. Read at 5f0c3c11:
+the engine never calls the node registry. No client call to `/v1/goldens`,
+`/v1/replicate` or `:5100`, and no registry URL in its config. Its only
+readers of release-manifest rows are `GET /api/v1/releases/…` (serving them)
+and `mgmt::kernelopt` (asked, `optional` + `image` + `kernel` all matching,
+from forge's engine, never the registry). sbregistry logs `as engine` for any
+caller that presents the engine's admin token (`auth.rs`,
+`Principal::superuser("engine")`), so the 10 s loop is another node process
+holding that token. Not found in stormpump, stormcos or sbregistry's own
+feed. stormupdate's `pre_pull` (`POST /v1/replicate`) runs once per upgrade,
+not every 10 s. Left open and said on #757: the owner decides where it goes.
+
 ## #756 — an install refused a drive whose system-half records do not read, and never reported (2026-11-26, P1) — DONE
 
 server7 14.09-flowsdn: `not installing over /dev/sda … the system half's
