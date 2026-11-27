@@ -46,6 +46,26 @@ pub enum Error {
     Local(String),
 }
 
+/// An error and every cause under it (#748): hyper-util says only `client
+/// error (Connect)`, and the reason, a certificate refused or a connection
+/// refused, is in its sources. `a: b: c`, a cause that repeats the one above
+/// it left out.
+pub fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut last = out.clone();
+    let mut src = e.source();
+    while let Some(c) = src {
+        let s = c.to_string();
+        if !s.is_empty() && !last.contains(&s) {
+            out.push_str(": ");
+            out.push_str(&s);
+        }
+        last = s;
+        src = c.source();
+    }
+    out
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -509,7 +529,7 @@ impl Client {
             let resp = tokio::time::timeout(deadline, self.inner.request(req))
                 .await
                 .map_err(|_| Error::Timeout(deadline))?
-                .map_err(|e| Error::Request(e.to_string()))?;
+                .map_err(|e| Error::Request(with_causes(&e)))?;
             let status = resp.status().as_u16();
             if !self.follow || !matches!(status, 301 | 302 | 303 | 307 | 308) {
                 return Ok((url, resp));
@@ -969,5 +989,36 @@ mod tests {
         assert!(matches!(err, Error::Request(_) | Error::Timeout(_)), "{err}");
         let err = client.post("not a url").json(&1).send().await.unwrap_err();
         assert!(matches!(err, Error::Url(_)), "{err}");
+    }
+
+    /// #748 (`client error (Connect)` and nothing more, for a certificate the
+    /// client did not trust): a failed connection says its causes.
+    #[tokio::test]
+    async fn a_failed_connection_says_why() {
+        let client = Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let err = client.post(format!("http://127.0.0.1:{port}/x")).json(&1).send().await.unwrap_err();
+        let said = err.to_string();
+        assert!(said.contains("client error (Connect)"), "{said}");
+        assert!(said.to_ascii_lowercase().contains("refused"), "the cause under Connect: {said}");
+    }
+
+    #[test]
+    fn causes_are_said_once_each() {
+        #[derive(Debug)]
+        struct E(&'static str, Option<Box<E>>);
+        impl std::fmt::Display for E {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for E {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1.as_deref().map(|e| e as _)
+            }
+        }
+        let e = E("client error (Connect)", Some(Box::new(E("invalid peer certificate: UnknownIssuer", Some(Box::new(E("UnknownIssuer", None)))))));
+        assert_eq!(with_causes(&e), "client error (Connect): invalid peer certificate: UnknownIssuer");
+        assert_eq!(with_causes(&E("plain", None)), "plain");
     }
 }
