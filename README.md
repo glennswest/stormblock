@@ -877,7 +877,13 @@ beacon stay where they were: [docs/storage-network.md](docs/storage-network.md).
   volume manager: held 41.2s by POST /api/v1/volumes/…/clone (req 39); 6
   waiting, …`). It never dumps threads or tasks on a timer (#365: on the Dell
   those dumps were the flood the log path dropped 21,191 lines of, the
-  holders among them). **Lock order (#571):** the `/v1` state and the ublk
+  holders among them). Every holder and waiter also says **where it took the
+  lock**, `file:line` (#752): a holder in no named activity is `task N` and
+  was nothing more (pvetest3: `held 5384.1s by task 528007 (write)`). A write
+  hold past 60 s is said once at ERROR, `lock: STUCK: …`, with that line and
+  the kernel stacks of the engine's threads in uninterruptible sleep (at most
+  8). It is not released: its holder is mid-change of a slot table and the
+  extent map. **Lock order (#571):** the `/v1` state and the ublk
   exports are taken before the volume manager, never under it; a task that
   does otherwise is said (`lock: the volume manager is held by … across taking
   the ublk exports`), and the Kubernetes-shaped projections hold the manager

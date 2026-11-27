@@ -27,12 +27,16 @@ use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::panic::Location;
 use std::time::{Duration, Instant};
 
 /// A hold or a wait longer than this is logged when it ends.
 pub const HOLD_LOG: Duration = Duration::from_secs(1);
 /// A hold longer than this is logged at WARN rather than INFO.
 pub const HOLD_WARN: Duration = Duration::from_secs(10);
+/// A write hold this long is stuck (#752): the watchdog says so at ERROR,
+/// once a hold, with where it was taken.
+pub const WRITE_STUCK: Duration = Duration::from_secs(60);
 
 /// What the current task is doing, for naming it as a lock holder.
 #[derive(Clone)]
@@ -197,6 +201,9 @@ struct Entry {
     write: bool,
     /// The tokio task that took it, for [`assert_not_held`].
     task: Option<tokio::task::Id>,
+    /// Where in the engine it was taken (#752): a holder in no named
+    /// activity is `task N` and nothing else without it.
+    at: &'static Location<'static>,
 }
 
 /// One lock's holders and waiters.
@@ -220,17 +227,22 @@ impl LockState {
         s
     }
 
-    fn wait(self: &Arc<Self>, write: bool) -> WaitMark {
-        let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write, task: tokio::task::try_id() };
+    fn wait(self: &Arc<Self>, write: bool, at: &'static Location<'static>) -> WaitMark {
+        let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write, task: tokio::task::try_id(), at };
         self.waiters.lock().unwrap_or_else(|p| p.into_inner()).push(e.clone());
         WaitMark { state: self.clone(), entry: e }
     }
 
-    fn hold(self: &Arc<Self>, write: bool) -> HoldMark {
-        let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write, task: tokio::task::try_id() };
+    fn hold(self: &Arc<Self>, write: bool, at: &'static Location<'static>) -> HoldMark {
+        let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write, task: tokio::task::try_id(), at };
         self.holders.lock().unwrap_or_else(|p| p.into_inner()).push(e.clone());
         HoldMark { state: self.clone(), entry: e }
     }
+}
+
+/// A call site as the lock lines say it: `src/volume/thin.rs:1806`.
+pub fn site(at: &Location<'_>) -> String {
+    format!("{}:{}", at.file(), at.line())
 }
 
 fn mode(write: bool, rw: bool) -> &'static str {
@@ -254,11 +266,12 @@ impl WaitMark {
         add_wait(waited);
         if waited >= HOLD_LOG {
             tracing::info!(
-                "lock: {} waited {:.1}s for the {}{}",
+                "lock: {} waited {:.1}s for the {}{} at {}",
                 self.entry.who,
                 waited.as_secs_f64(),
                 self.state.name,
-                mode(self.entry.write, rw)
+                mode(self.entry.write, rw),
+                site(self.entry.at)
             );
         }
     }
@@ -284,19 +297,21 @@ impl HoldMark {
         let held = self.entry.since.elapsed();
         if held >= HOLD_WARN {
             tracing::warn!(
-                "lock: the {}{} was held {:.1}s by {}",
+                "lock: the {}{} was held {:.1}s by {} at {}",
                 self.state.name,
                 mode(self.entry.write, rw),
                 held.as_secs_f64(),
-                self.entry.who
+                self.entry.who,
+                site(self.entry.at)
             );
         } else if held >= HOLD_LOG {
             tracing::info!(
-                "lock: the {}{} was held {:.1}s by {}",
+                "lock: the {}{} was held {:.1}s by {} at {}",
                 self.state.name,
                 mode(self.entry.write, rw),
                 held.as_secs_f64(),
-                self.entry.who
+                self.entry.who,
+                site(self.entry.at)
             );
         }
     }
@@ -345,25 +360,37 @@ impl<T> TrackedMutex<T> {
         Arc::try_unwrap(self.inner).ok().map(tokio::sync::Mutex::into_inner)
     }
 
-    pub async fn lock(&self) -> TrackedMutexGuard<'_, T> {
-        lock_order(self.state.name);
-        let wait = self.state.wait(true);
-        let guard = self.inner.lock().await;
-        wait.done(false);
-        TrackedMutexGuard { guard, hold: self.state.hold(true) }
+    /// Not an `async fn`, so the caller's line is known (#752):
+    /// `#[track_caller]` reaches through a plain function, not an async one.
+    #[track_caller]
+    pub fn lock(&self) -> impl Future<Output = TrackedMutexGuard<'_, T>> + '_ {
+        let at = Location::caller();
+        async move {
+            lock_order(self.state.name);
+            let wait = self.state.wait(true, at);
+            let guard = self.inner.lock().await;
+            wait.done(false);
+            TrackedMutexGuard { guard, hold: self.state.hold(true, at) }
+        }
     }
 
+    #[track_caller]
     pub fn try_lock(&self) -> Result<TrackedMutexGuard<'_, T>, tokio::sync::TryLockError> {
+        let at = Location::caller();
         let guard = self.inner.try_lock()?;
-        Ok(TrackedMutexGuard { guard, hold: self.state.hold(true) })
+        Ok(TrackedMutexGuard { guard, hold: self.state.hold(true, at) })
     }
 
-    pub async fn lock_owned(self: Arc<Self>) -> OwnedTrackedMutexGuard<T> {
-        lock_order(self.state.name);
-        let wait = self.state.wait(true);
-        let guard = self.inner.clone().lock_owned().await;
-        wait.done(false);
-        OwnedTrackedMutexGuard { guard, hold: self.state.hold(true) }
+    #[track_caller]
+    pub fn lock_owned(self: Arc<Self>) -> impl Future<Output = OwnedTrackedMutexGuard<T>> {
+        let at = Location::caller();
+        async move {
+            lock_order(self.state.name);
+            let wait = self.state.wait(true, at);
+            let guard = self.inner.clone().lock_owned().await;
+            wait.done(false);
+            OwnedTrackedMutexGuard { guard, hold: self.state.hold(true, at) }
+        }
     }
 }
 
@@ -429,28 +456,40 @@ impl<T> TrackedRwLock<T> {
         TrackedRwLock { inner: tokio::sync::RwLock::new(value), state: LockState::new(name_of::<T>()) }
     }
 
-    pub async fn read(&self) -> TrackedReadGuard<'_, T> {
-        let wait = self.state.wait(false);
-        let guard = self.inner.read().await;
-        wait.done(true);
-        TrackedReadGuard { guard, hold: self.state.hold(false) }
+    #[track_caller]
+    pub fn read(&self) -> impl Future<Output = TrackedReadGuard<'_, T>> + '_ {
+        let at = Location::caller();
+        async move {
+            let wait = self.state.wait(false, at);
+            let guard = self.inner.read().await;
+            wait.done(true);
+            TrackedReadGuard { guard, hold: self.state.hold(false, at) }
+        }
     }
 
-    pub async fn write(&self) -> TrackedWriteGuard<'_, T> {
-        let wait = self.state.wait(true);
-        let guard = self.inner.write().await;
-        wait.done(true);
-        TrackedWriteGuard { guard, hold: self.state.hold(true) }
+    #[track_caller]
+    pub fn write(&self) -> impl Future<Output = TrackedWriteGuard<'_, T>> + '_ {
+        let at = Location::caller();
+        async move {
+            let wait = self.state.wait(true, at);
+            let guard = self.inner.write().await;
+            wait.done(true);
+            TrackedWriteGuard { guard, hold: self.state.hold(true, at) }
+        }
     }
 
+    #[track_caller]
     pub fn try_read(&self) -> Result<TrackedReadGuard<'_, T>, tokio::sync::TryLockError> {
+        let at = Location::caller();
         let guard = self.inner.try_read()?;
-        Ok(TrackedReadGuard { guard, hold: self.state.hold(false) })
+        Ok(TrackedReadGuard { guard, hold: self.state.hold(false, at) })
     }
 
+    #[track_caller]
     pub fn try_write(&self) -> Result<TrackedWriteGuard<'_, T>, tokio::sync::TryLockError> {
+        let at = Location::caller();
         let guard = self.inner.try_write()?;
-        Ok(TrackedWriteGuard { guard, hold: self.state.hold(true) })
+        Ok(TrackedWriteGuard { guard, hold: self.state.hold(true, at) })
     }
 }
 
@@ -551,6 +590,11 @@ pub struct Party {
     pub who: Arc<str>,
     pub secs: f64,
     pub write: bool,
+    /// Where it was taken, `file:line` (#752).
+    pub at: String,
+    /// This hold or wait, apart from every other (the watchdog says a stuck
+    /// write once a hold).
+    pub id: u64,
 }
 
 /// One lock's holders and waiters right now, longest first.
@@ -572,7 +616,7 @@ pub fn snapshot() -> Vec<LockView> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .map(|e| Party { who: e.who.clone(), secs: e.since.elapsed().as_secs_f64(), write: e.write })
+            .map(|e| Party { who: e.who.clone(), secs: e.since.elapsed().as_secs_f64(), write: e.write, at: site(e.at), id: e.id })
             .collect();
         p.sort_by(|a, b| b.secs.total_cmp(&a.secs));
         p
@@ -580,6 +624,17 @@ pub fn snapshot() -> Vec<LockView> {
     states
         .iter()
         .map(|s| LockView { lock: s.name, holders: view(&s.holders), waiters: view(&s.waiters) })
+        .collect()
+}
+
+/// Write holds past [`WRITE_STUCK`] (#752): `(hold id, the lock's line)`,
+/// for the watchdog to say once each.
+pub fn stuck_writes(snap: &[LockView]) -> Vec<(u64, String)> {
+    snap.iter()
+        .filter_map(|v| {
+            let h = v.holders.iter().find(|h| h.write && h.secs >= WRITE_STUCK.as_secs_f64())?;
+            Some((h.id, line(v)))
+        })
         .collect()
 }
 
@@ -605,18 +660,21 @@ pub fn summary() -> String {
 /// waiting, the longest 40.1s (GET … (req 42))`.
 pub fn line(v: &LockView) -> String {
     let held = match v.holders.first() {
-        Some(h) if v.holders.len() == 1 => format!("held {:.1}s by {}{}", h.secs, h.who, if h.write { " (write)" } else { "" }),
+        Some(h) if v.holders.len() == 1 => {
+            format!("held {:.1}s by {}{} at {}", h.secs, h.who, if h.write { " (write)" } else { "" }, h.at)
+        }
         Some(h) => format!(
-            "held by {} ({} readers), the oldest {:.1}s by {}",
+            "held by {} ({} readers), the oldest {:.1}s by {} at {}",
             v.holders.len(),
             v.holders.iter().filter(|p| !p.write).count(),
             h.secs,
-            h.who
+            h.who,
+            h.at
         ),
         None => "free".to_string(),
     };
     let waiting = match v.waiters.first() {
-        Some(w) => format!("; {} waiting, the longest {:.1}s ({})", v.waiters.len(), w.secs, w.who),
+        Some(w) => format!("; {} waiting, the longest {:.1}s ({} at {})", v.waiters.len(), w.secs, w.who, w.at),
         None => String::new(),
     };
     format!("the {}: {held}{waiting}", v.lock)
@@ -706,6 +764,51 @@ mod tests {
         assert!(named("failing holder", halfway(&m)).await.is_err());
         assert!(m.try_lock().is_ok(), "free after an error");
         assert!(unclaimed());
+    }
+
+    struct SiteLock;
+
+    /// #752 (pvetest3: `held 5384.1s by task 528007 (write)`): a holder in
+    /// no named activity is still placed, by the line that took the lock;
+    /// a waiter too.
+    #[tokio::test]
+    async fn a_holder_is_placed_by_the_line_that_took_it() {
+        let l = Arc::new(TrackedRwLock::new(SiteLock));
+        let line_of_write = line!() + 1;
+        let g = l.write().await;
+        let v = snapshot().into_iter().find(|v| v.lock == name_of::<SiteLock>()).unwrap();
+        let here = format!("{}:{line_of_write}", file!());
+        assert_eq!(v.holders[0].at, here);
+        let said = line(&v);
+        assert!(said.contains(&format!("(write) at {here}")), "{said}");
+        let l2 = l.clone();
+        let waiter = tokio::spawn(async move {
+            let _r = l2.read().await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let v = snapshot().into_iter().find(|v| v.lock == name_of::<SiteLock>()).unwrap();
+        assert!(v.waiters[0].at.starts_with(file!()), "{:?}", v.waiters[0].at);
+        assert!(line(&v).contains("1 waiting") && line(&v).contains(" at src/lockwatch.rs:"), "{}", line(&v));
+        drop(g);
+        waiter.await.unwrap();
+        // A try_ and a Mutex say their caller too.
+        let m = TrackedMutex::new(SiteLock);
+        let at = format!("{}:{}", file!(), line!() + 1);
+        let _g = m.try_lock().unwrap();
+        let v = snapshot().into_iter().filter(|v| v.lock == name_of::<SiteLock>()).find(|v| !v.holders.is_empty()).unwrap();
+        assert_eq!(v.holders[0].at, at);
+    }
+
+    /// Only a write hold past [`WRITE_STUCK`] is stuck: a long read, or a
+    /// young write, is not.
+    #[test]
+    fn a_write_hold_past_the_bound_is_stuck() {
+        let p = |secs: f64, write: bool, id: u64| Party { who: "task 528007".into(), secs, write, at: "src/drive/slab.rs:1".into(), id };
+        let v = |holders| LockView { lock: "slab registry", holders, waiters: vec![p(5384.0, false, 9)] };
+        let stuck = stuck_writes(&[v(vec![p(5384.1, true, 7)]), v(vec![p(5000.0, false, 8)]), v(vec![p(30.0, true, 6)])]);
+        assert_eq!(stuck.len(), 1, "{stuck:?}");
+        assert_eq!(stuck[0].0, 7);
+        assert!(stuck[0].1.contains("held 5384.1s by task 528007 (write) at src/drive/slab.rs:1"), "{}", stuck[0].1);
     }
 
     #[tokio::test]

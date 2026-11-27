@@ -4,6 +4,28 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #752 — pvetest3: the slab registry held for write 90+ min by an unnamed task (2026-11-26)
+
+`held 5384.1s by task 528007 (write)`: the holder ran in no named activity,
+so lockwatch said only its tokio id. Read at 1170c958: under the registry's
+write the delete (`snapshot::delete_snapshot_with` → `dec_ref_batch_with`:
+table reads, the batch's table write, the discard) and every allocation
+(`take_slot_or_flush`: a device flush on a full slab, `commit_step`) await
+device I/O, so one I/O that never answers holds it for ever. Which one it
+was is the node's to say, and pvetest3 has been reinstalled.
+
+Plan (the issue's asks):
+1. Every tracked lock's holder and waiter carries where it was taken
+   (`#[track_caller]`, `file:line`), said on every lock line: `held 5384.1s
+   by task 528007 (write) at src/drive/slab.rs:…`.
+2. The watchdog: a write hold past 60 s is an ERROR, once a hold, with its
+   site and the kernel stacks of the threads in D state (what the I/O under
+   it waits on). Bounded: never a dump on a timer (#365).
+3. Not done: releasing a stuck holder, or failing its request. A write
+   holder is mid-change of a slot table and the extent map. Dropping it
+   leaves the two disagreeing, which is the corruption the durability rules
+   exist to prevent. The bound reports; it does not abandon.
+
 ## #757 — boot-helper rows demanded into the node registry every 10 s (2026-11-26, P1) — NOT IN THIS REPO
 
 Asked: the engine reconciles only the row kinds it runs. Read at 5f0c3c11:

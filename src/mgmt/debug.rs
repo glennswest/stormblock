@@ -506,6 +506,36 @@ pub fn threads_view(stacks: bool) -> String {
     out
 }
 
+/// The threads in uninterruptible sleep (`D`) and their kernel stacks (#752):
+/// what an I/O under a stuck lock waits on in the kernel. At most `max`
+/// threads, 16 lines of stack each; empty when none is in `D`.
+pub fn blocked_threads(max: usize) -> String {
+    let Ok(dir) = std::fs::read_dir("/proc/self/task") else { return String::new() };
+    let read = |tid: &str, f: &str| std::fs::read_to_string(format!("/proc/self/task/{tid}/{f}")).unwrap_or_default();
+    let mut tids: Vec<String> = dir.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    tids.sort_by_key(|t| t.parse::<u64>().unwrap_or(0));
+    let mut out = String::new();
+    let mut n = 0;
+    for tid in &tids {
+        let state = read(tid, "status").lines().find(|l| l.starts_with("State:")).map(|l| l.trim_start_matches("State:").trim().to_string()).unwrap_or_default();
+        if !state.starts_with('D') {
+            continue;
+        }
+        n += 1;
+        if n > max {
+            continue;
+        }
+        out.push_str(&format!("\n  {tid} {} [{state}] wchan={}", read(tid, "comm").trim(), read(tid, "wchan").trim()));
+        for l in read(tid, "stack").lines().take(16) {
+            out.push_str(&format!("\n      {l}"));
+        }
+    }
+    if n > max {
+        out.push_str(&format!("\n  … and {} more in D", n - max));
+    }
+    out
+}
+
 /// Every task of every registered runtime, with where it is parked.
 pub async fn task_dump(limit: Duration) -> String {
     // Off unless asked for (#368). On the Dell (11.98) a tokio worker
@@ -596,8 +626,27 @@ pub fn start(_state: Arc<AppState>) {
     let spawned = std::thread::Builder::new().name("api-watchdog".into()).spawn(move || {
         let mut starved_since: Option<Instant> = None;
         let mut last_ublk: Option<Instant> = None;
+        let mut said_stuck: std::collections::HashSet<u64> = Default::default();
         loop {
             std::thread::sleep(Duration::from_secs(2));
+            // A write hold past the bound (#752: pvetest3's slab registry, 90
+            // min by an unnamed task): said once a hold, at ERROR, with where
+            // it was taken and what the kernel's blocked threads wait on. It
+            // is not released: its holder is mid-change of a table and a map.
+            {
+                let stuck = crate::lockwatch::stuck_writes(&crate::lockwatch::snapshot());
+                said_stuck.retain(|id| stuck.iter().any(|(i, _)| i == id));
+                for (id, l) in stuck {
+                    if said_stuck.insert(id) {
+                        let blocked = blocked_threads(8);
+                        tracing::error!(
+                            "lock: STUCK: {l}: a write hold past {}s, everything behind it waits (#752); threads in D: {}",
+                            crate::lockwatch::WRITE_STUCK.as_secs(),
+                            if blocked.is_empty() { " none (the holder waits on no syscall: an await that is never woken)".to_string() } else { blocked }
+                        );
+                    }
+                }
+            }
             // A ublk device that has not answered a request (#337): said
             // every 30 s while it lasts, with its op and age, so a consumer
             // whose fsync never returns can be told it is below it.
