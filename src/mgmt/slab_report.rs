@@ -168,6 +168,76 @@ pub fn update_local_disk(state: &str, drive: Option<&str>, reason: Option<String
     });
 }
 
+/// A drive's identity as [`LocalDisk::identity`] spells it (#351):
+/// `wwn=..;serial=..;model=..`, the parts sysfs gave.
+pub fn identity_spec(id: &crate::drive::identity::Identity) -> String {
+    [("wwn", &id.wwn), ("serial", &id.serial), ("model", &id.model)]
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// [`update_local_disk`], with the drive's identity read now (#756): a
+/// verdict on a drive names it by serial, not only by a kernel name that
+/// changes from boot to boot.
+pub fn update_local_disk_named(state: &str, drive: &str, reason: Option<String>, from: &str) {
+    update_local_disk(state, Some(drive), reason, from);
+    let Some(id) = crate::drive::identity::of(drive).filter(|i| !i.is_empty()) else { return };
+    if let Some(mut note) = read_local_disk() {
+        note.identity = Some(identity_spec(&id));
+        write_local_disk(&note);
+    }
+}
+
+impl LocalDisk {
+    /// One part of [`identity`](Self::identity) (`serial`, `wwn`, `model`).
+    pub fn identity_part(&self, key: &str) -> Option<&str> {
+        self.identity
+            .as_deref()?
+            .split(';')
+            .filter_map(|kv| kv.split_once('='))
+            .find(|(k, _)| k.trim() == key)
+            .map(|(_, v)| v.trim())
+            .filter(|v| !v.is_empty())
+    }
+
+    /// The drive as the console names it (#756): `/dev/sda (serial S, model
+    /// M)`, the serial from the verdict's identity or, failing that, the
+    /// survey's row for the drive.
+    pub fn drive_named(&self) -> String {
+        let path = self.drive.as_deref().unwrap_or("?");
+        let short = path.trim_start_matches("/dev/");
+        let row = self.drives.iter().find(|d| {
+            let n = d["name"].as_str().or(d["path"].as_str()).unwrap_or("");
+            !n.is_empty() && n.trim_start_matches("/dev/") == short
+        });
+        let from_row = |k: &str| row.and_then(|r| r[k].as_str()).map(str::trim).filter(|v| !v.is_empty());
+        let serial = self.identity_part("serial").or_else(|| from_row("serial"));
+        let model = self.identity_part("model").or_else(|| from_row("model"));
+        match (serial, model) {
+            (Some(s), Some(m)) => format!("{path} (serial {s}, model {m})"),
+            (Some(s), None) => format!("{path} (serial {s})"),
+            _ => path.to_string(),
+        }
+    }
+
+    /// Why an install boot whose verdict this is cannot finish (#756): the
+    /// drive was refused or failed, so no disk was laid and nothing will
+    /// report the install. `None` for any other verdict.
+    pub fn install_failure(&self) -> Option<String> {
+        matches!(self.state.as_str(), "refused" | "failed").then(|| {
+            format!(
+                "the node's own drive {} was {}: {}; no disk was laid, the node runs from the appliance (#344, #756)",
+                self.drive_named(),
+                self.state,
+                self.reason.as_deref().unwrap_or("no reason recorded")
+            )
+        })
+    }
+}
+
 /// Write the verdict (atomically; a warning when it cannot be).
 pub fn write_local_disk(note: &LocalDisk) {
     let path = local_disk_path();
@@ -372,6 +442,50 @@ pub fn for_health(state: &crate::mgmt::AppState) -> Option<SlabReport> {
             Some(r)
         }
         None => cache.as_ref().map(|(_, r)| r.clone()),
+    }
+}
+
+#[cfg(test)]
+mod install_failure_tests {
+    use super::LocalDisk;
+
+    fn note(state: &str, identity: Option<&str>, drives: Vec<serde_json::Value>) -> LocalDisk {
+        LocalDisk {
+            state: state.into(),
+            drive: Some("/dev/sda".into()),
+            reason: Some("not installing over /dev/sda, its data half untouched: the data slab will not open".into()),
+            shelf: None,
+            identity: identity.map(str::to_string),
+            from: Some("boot-local".into()),
+            controllers: vec![],
+            drives,
+        }
+    }
+
+    /// #756 (server7 14.09): a drive refused or failed is an install that
+    /// cannot finish, said with the drive's serial; taken is not.
+    #[test]
+    fn a_refused_drive_is_a_failed_install_named_by_serial() {
+        let n = note("failed", Some("wwn=naa.5000;serial=WD-WCC4N1234;model=WDC WD10"), vec![]);
+        let why = n.install_failure().unwrap();
+        assert!(why.contains("/dev/sda (serial WD-WCC4N1234, model WDC WD10) was failed"), "{why}");
+        assert!(why.contains("the data slab will not open"), "{why}");
+        assert!(note("refused", None, vec![]).install_failure().is_some());
+        assert_eq!(note("taken", None, vec![]).install_failure(), None);
+        assert_eq!(note("none", None, vec![]).install_failure(), None);
+        // No identity on the verdict: the survey's row for the drive.
+        let rows = vec![
+            serde_json::json!({"name": "sdb", "serial": "OTHER"}),
+            serde_json::json!({"name": "sda", "serial": "S2R5NX0H", "model": "Samsung SSD"}),
+        ];
+        assert_eq!(note("failed", None, rows).drive_named(), "/dev/sda (serial S2R5NX0H, model Samsung SSD)");
+        assert_eq!(note("failed", None, vec![]).drive_named(), "/dev/sda");
+    }
+
+    #[test]
+    fn identity_spec_skips_what_sysfs_did_not_say() {
+        let id = crate::drive::identity::Identity { serial: "S1".into(), model: String::new(), wwn: "naa.1".into(), disk: "sda".into() };
+        assert_eq!(super::identity_spec(&id), "wwn=naa.1;serial=S1");
     }
 }
 

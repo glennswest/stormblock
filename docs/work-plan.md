@@ -4,6 +4,33 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #756 — an install refused a drive whose system-half records do not read, and never reported (2026-11-26, P1)
+
+server7 14.09-flowsdn: `not installing over /dev/sda … the system half's
+records do not read (metadata page 5 is named twice or past the region)`,
+then the installer ran from the appliance and posted nothing; stormcentral
+timed `disk laid` out at 30 min.
+
+The release side asked whether 14.x misreads 12.94's records (#580). It does
+not: the tree walk that says this (`MetaV2::mark_reachable`), the page
+decode and the region layout are unchanged since 06fbf9d5 (2026-10-05, #158);
+#580 changed only how entries read once the tree has (`document_of`,
+`map_of`). 12.94 and 14.x walk the same pages the same way: the tree on
+that drive names a page twice (two parents) or past the region.
+
+Plan:
+1. `install::plan_paired`: a data half that reads and system-half records
+   that do not → the plan goes on, `system_unreadable: Some(why)`; nothing of
+   the system half's own records is carried or dropped (they cannot be told),
+   what the data half names in the system half is carried as before. The
+   install says `system half re-laid: records unreadable (…)` (both install
+   paths).
+2. adopt-ublk: an install boot (ticket) whose drive was refused or failed
+   (`local-disk.json`) and that has no flow-over reports `failed` with the
+   reason to the appliance, so the gate ends in seconds.
+3. boot-local's failed verdict carries the drive's identity; the warnings
+   and the failed report name the drive by serial.
+
 ## #755 — the stormblock golden built here: deploy/build-image.sh, stage mode retired (2026-11-26, stormcentral#1836) — DONE
 
 Owner: "we change in 1 repo and have to rebuild 21 is not acceptable". The

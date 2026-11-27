@@ -1810,6 +1810,37 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
     Ok(doc)
 }
 
+/// Damage a store as server7's was (#756): a new root, one level up, that
+/// names the old root twice, under a newer superblock that checks. Every
+/// reader then refuses the store with `metadata page {root} is named twice or
+/// past the region`. Returns the page named twice. Tests only.
+#[cfg(test)]
+pub(crate) async fn name_a_page_twice(dev: Arc<dyn BlockDevice>, base: u64, size: u64) -> io::Result<u64> {
+    let mut s = MetaV2::open(dev.clone(), base, size).await?.ok_or_else(|| err("no store to damage".into()))?;
+    if s.root == EMPTY {
+        return Err(err("an empty store has no page to name twice".into()));
+    }
+    let old = s.root;
+    let level = match &*s.node(old).await? {
+        Node::Leaf(_) => 1,
+        Node::Internal { level, .. } => level + 1,
+    };
+    let at = s.layout.page_count - 1;
+    let node = Node::Internal { level, children: vec![(None, old), (Some(Key::new([0xFF; 16], 0, 0)), old)] };
+    dev.write(base + s.layout.page_off + at * PAGE, &node.encode()).await.map_err(dev_err)?;
+    let sb = Superblock {
+        gen: s.sb_gen + 1,
+        root: at,
+        log_start: s.log_start,
+        log_seq: s.next_seq,
+        layout: s.layout,
+        nonce: s.nonce,
+    };
+    dev.write(base + (sb.gen % 2) * PAGE, &sb.to_bytes()).await.map_err(dev_err)?;
+    dev.flush().await.map_err(dev_err)?;
+    Ok(old)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

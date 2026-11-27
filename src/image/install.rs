@@ -71,6 +71,25 @@ pub struct Plan {
     /// disk (#451): an earlier boot's appliance clone, its flow-over cut
     /// short. Each with the volumes that had extents on it and how many.
     pub missing: HashMap<SlabId, Vec<(String, usize)>>,
+    /// The system half's own records do not read (#756): why. The install
+    /// lays the system half again all the same (it is laid again on every
+    /// install, and what its records hold cannot be carried when they cannot
+    /// be read); the data half, whose records read, is kept. Nothing of the
+    /// system half's records is in `carry` or `dropped`.
+    pub system_unreadable: Option<String>,
+}
+
+impl Plan {
+    /// The console line for a system half laid again over records that do
+    /// not read (#756), `None` when they read.
+    pub fn system_relaid_line(&self, disk: &str) -> Option<String> {
+        self.system_unreadable.as_ref().map(|why| {
+            format!(
+                "Install: {disk}: system half re-laid: records unreadable ({why}); what the node made there, \
+                 if anything, cannot be told or carried; the data half's records read and it is kept (#756)"
+            )
+        })
+    }
 }
 
 /// What an install did with the node's data half, for the console, the
@@ -298,9 +317,24 @@ pub async fn plan_paired(
     // The system half: what laying it again would lose that the release does
     // not bring back.
     if let Some(sys) = system.as_ref().filter(|s| s.has_metadata_region()) {
+        // Records that do not read (#756: server7, `metadata page 5 is named
+        // twice`) are no reason to refuse the drive: the system half is laid
+        // again by every install, and what its records hold could not be
+        // carried anyway. The data half read above is what is kept.
         let doc = match crate::volume::metav2::read_slab(sys).await {
             Ok(d) => d,
-            Err(e) => anyhow::bail!("the system half's records do not read ({e}): what it holds cannot be told"),
+            Err(e) => {
+                return Ok(Plan {
+                    data_slab: data.slab_id(),
+                    bulk_slab: bulk.as_ref().map(|b| b.slab_id()),
+                    volumes,
+                    carry: carry_from_data,
+                    dropped: Vec::new(),
+                    release_strays,
+                    missing,
+                    system_unreadable: Some(e.to_string()),
+                })
+            }
         };
         // Owner (#349): an install drops old system volumes, never a partner's
         // or a user's. What the old release laid and this one does not name
@@ -328,6 +362,7 @@ pub async fn plan_paired(
             dropped,
             release_strays,
             missing,
+            system_unreadable: None,
         });
     }
     Ok(Plan {
@@ -338,6 +373,7 @@ pub async fn plan_paired(
         dropped: Vec::new(),
         release_strays,
         missing,
+        system_unreadable: None,
     })
 }
 

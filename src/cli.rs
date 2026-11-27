@@ -6304,6 +6304,10 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             for d in &plan.dropped {
                 println!("Install: {d} — the old release's, not in this one: dropped with the system half (#349)");
             }
+            if let Some(line) = plan.system_relaid_line(disk) {
+                println!("{line}");
+                tracing::warn!("{line}");
+            }
             // Said once a slab, not once an extent at every restore (#451).
             for (slab, held) in &plan.missing {
                 let extents: usize = held.iter().map(|(_, n)| n).sum();
@@ -7130,6 +7134,10 @@ async fn run_local_boot(disk: &str, sources: &[String]) -> anyhow::Result<bool> 
             }
             for d in &p.dropped {
                 println!("Install: {d} — the old release's, not in this one: dropped with the system half (#349)");
+            }
+            if let Some(line) = p.system_relaid_line(old_system.as_ref().map(|(_, n)| *n).unwrap_or(data_disk)) {
+                println!("{line}");
+                tracing::warn!("{line}");
             }
             plan = Some(p);
         } else if let Some(what) = data_slab_on(data_disk).await? {
@@ -10153,7 +10161,7 @@ async fn handle_adopt_ublk(
         if matches!(note.state.as_str(), "refused" | "failed") {
             eprintln!(
                 "WARNING: adopt: this node runs from the appliance; its own drive {} was {}: {} (#344)",
-                note.drive.as_deref().unwrap_or("?"),
+                note.drive_named(),
                 note.state,
                 note.reason.as_deref().unwrap_or("no reason recorded")
             );
@@ -10426,6 +10434,26 @@ async fn handle_adopt_ublk(
         if let Some(flow) = record.as_ref().and_then(|r| r.flow_over.clone()) {
             spawn_flow_over(&state, flow, local_boot, install);
         } else {
+            // An install boot whose drive was refused (#756): no disk was
+            // laid and no flow-over will report, so the install is reported
+            // failed now, with the drive and why, and the installer has its
+            // answer in seconds, not at a timeout. The intent stays install.
+            if !crate::boot_mode::diagnostic() {
+                let ticket = crate::drive::handover::InstallTicket::read(std::path::Path::new(
+                    crate::drive::handover::INSTALL_TICKET_PATH,
+                ));
+                let why = crate::mgmt::slab_report::read_local_disk().and_then(|n| n.install_failure());
+                if let (Some(t), Some(why)) = (ticket, why) {
+                    println!("Install: FAILED: {why}");
+                    let _ = crate::install_progress::append(
+                        std::path::Path::new(crate::install_progress::RUN),
+                        "stage", "failed", "failed", &why, crate::install_progress::now(),
+                    );
+                    tokio::spawn(async move {
+                        report_install_stage(&t, "failed", Some(&why)).await;
+                    });
+                }
+            }
             // No flow-over to wait for: the goldens here are this disk's
             // (#384); any that came with a digest and were never read
             // against it are, now.
@@ -11825,7 +11853,8 @@ async fn handle_boot_local(
                 println!("Flow-over: the node boots from the appliance, unaffected.");
                 eprintln!("WARNING: this node runs from the appliance: {disk} could not be taken: {e} (#344)");
                 tracing::warn!("flow-over disabled for {disk}: {e}");
-                crate::mgmt::slab_report::update_local_disk("failed", Some(disk), Some(e.to_string()), "boot-local");
+                // By serial too (#756): the kernel's name is this boot's.
+                crate::mgmt::slab_report::update_local_disk_named("failed", disk, Some(e.to_string()), "boot-local");
             }
         }
     }
@@ -13754,6 +13783,97 @@ file = "{state}"
         let h = crate::image::local::release_held(&l, &i).await;
         assert!(matches!(h, crate::image::local::ReleaseHeld::Held { .. }), "N+1 held: {h:?}");
         assert_eq!(std::fs::read(&extra).unwrap(), extra_bytes, "the second drive");
+    }
+
+    /// #756 (server7, 14.09-flowsdn): the node's system half holds records
+    /// that do not read (`metadata page 5 is named twice`), its data half
+    /// records that do. The install no longer refuses the drive: it lays the
+    /// system half again, as every install does, says so, and keeps every
+    /// byte of the data half under its id. A data half that does not read
+    /// still refuses (the rule of #311 is about the data).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_install_relays_a_system_half_whose_records_do_not_read() {
+        let _serial = crate::testlock::flow().await; // #585: process-wide state, one test at a time
+        use crate::drive::slab::SlabRole;
+        let Some(mkfs) = mkfs_ext4() else {
+            eprintln!("SKIP: needs e2fsprogs mkfs.ext4");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, _image_n, image_n1, _n_svc, n1_svc, _n1_logs) = release_fixture(mkfs, &dir).await;
+
+        let (mut node, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
+        let pvc = node
+            .create_volume_with("pvc-default-db", 16 * MIB, crate::volume::CreateOptions::default().in_role(SlabRole::Data))
+            .await
+            .unwrap();
+        let pvc_bytes: Vec<u8> = (0..16 * MIB as usize).map(|i| (i % 239) as u8 ^ 0x3C).collect();
+        {
+            let v = node.get_volume(&pvc).unwrap();
+            v.write(0, &pvc_bytes).await.unwrap();
+            v.flush().await.unwrap();
+        }
+        node.persist().await;
+        drop(node);
+
+        // The system half's tree names a page twice, as server7's did.
+        let dev = super::open_storage(&disk).await.unwrap();
+        {
+            let (_, _, system) = crate::image::install::halves_split(&dev, None).await.unwrap();
+            let system = system.expect("the node's system slab opens");
+            let (mdev, off, size) = system.metadata_region().expect("a v2 metadata region");
+            let page = crate::volume::metav2::name_a_page_twice(mdev, off, size).await.unwrap();
+            let e = crate::volume::metav2::read_slab(&system).await.expect_err("the damaged records refuse");
+            assert!(e.to_string().contains(&format!("metadata page {page} is named twice")), "{e}");
+        }
+        let release: std::collections::HashSet<String> = ["svc", "logs", "state"].iter().map(|s| s.to_string()).collect();
+        let plan = crate::image::install::plan(&dev, &release).await.expect("a readable data half is planned (#756)");
+        let why = plan.system_unreadable.clone().expect("the plan says the system half's records do not read");
+        assert!(why.contains("is named twice"), "{why}");
+        assert!(plan.dropped.is_empty(), "nothing of unreadable records is dropped by name: {:?}", plan.dropped);
+        assert!(plan.volumes.iter().any(|(id, _, _)| *id == pvc), "the PVC is the data half's: {:?}", plan.volumes);
+        let line = plan.system_relaid_line("/dev/sda").unwrap();
+        assert!(line.contains("system half re-laid: records unreadable (") && line.contains("named twice"), "{line}");
+        drop(dev);
+
+        // The install, as boot-local runs it.
+        let claim = dir.path().join("claim-11.91.raw").display().to_string();
+        std::fs::copy(&image_n1, &claim).unwrap();
+        let (mut mgr, _) = super::open_slabs_resuming(std::slice::from_ref(&claim), None, true).await.unwrap();
+        let (flow, report) = super::take_local_disk_for(&mut mgr, &disk, "hot", false, Some("stormpump"))
+            .await
+            .expect("an install over unreadable system-half records lays the system half again (#756)");
+        let flow = flow.expect("the system half laid again");
+        report.expect("the data half kept");
+        assert_eq!(mgr.find_volume("pvc-default-db").await, Some(pvc), "the PVC, by its id");
+        assert_eq!(volume_bytes(&mgr, "pvc-default-db").await.unwrap(), pvc_bytes, "the PVC's bytes");
+        super::quarantine_flow_sources(&mgr, &flow).await;
+        drop(mgr);
+
+        // The laid system half reads again, and after the flow-over the disk
+        // alone holds the release and the node's data.
+        let (succ, _) = super::open_slabs_resuming(&[claim.clone(), flow.disk.clone()], None, true).await.unwrap();
+        let (sys_dest, data_dest) = (
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.system_slab).unwrap()),
+            crate::drive::slab::SlabId(uuid::Uuid::parse_str(&flow.data_slab).unwrap()),
+        );
+        let (sys_src, data_src): (Vec<_>, Vec<_>) = {
+            let reg = succ.registry().read().await;
+            (
+                reg.iter().filter(|(id, s)| !s.is_data() && **id != sys_dest).map(|(id, _)| *id).collect(),
+                reg.iter().filter(|(id, s)| s.is_data() && **id != data_dest).map(|(id, _)| *id).collect(),
+            )
+        };
+        super::flow_slabs(succ.gem(), succ.registry(), &sys_src, sys_dest, || succ.persist(), None, 0).await;
+        super::flow_slabs(succ.gem(), succ.registry(), &data_src, data_dest, || succ.persist(), None, 0).await;
+        succ.persist().await;
+        drop(succ);
+        let (alone, _) = super::open_slabs_resuming(std::slice::from_ref(&disk), None, false).await.unwrap();
+        assert_eq!(volume_bytes(&alone, "pvc-default-db").await.unwrap(), pvc_bytes, "from the disk alone: the PVC");
+        assert_eq!(volume_bytes(&alone, "svc").await.unwrap()[..n1_svc.len()], n1_svc[..], "from the disk alone: svc, N+1's");
+        let dev = super::open_storage(&disk).await.unwrap();
+        let (_, _, system) = crate::image::install::halves_split(&dev, None).await.unwrap();
+        crate::volume::metav2::read_slab(&system.unwrap()).await.expect("the system half laid again reads");
     }
 
     /// #244: a disk that holds the release by id but whose root will not

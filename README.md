@@ -2865,7 +2865,18 @@ At an install, the system half's volumes the new release does not name
 The console says `carried into the data half` or `dropped with the system
 half` for each, and the install report lists `carried`. A data half without
 room, or a carried volume with parity in the system half, stops the install
-before anything moves. The origin is carried in format v2's volume header,
+before anything moves.
+
+**System-half records that do not read are no refusal (#756).** When the data
+half's records read and the system half's do not (server7: `metadata page 5
+is named twice or past the region`), the install lays the system half again,
+as every install does, and says `system half re-laid: records unreadable
+(…)`. Nothing is carried or dropped from records that cannot be read; what
+the data half's own records name in the system half is still carried. A data
+half whose records do not read still stops the install. An install boot whose
+drive is refused or failed (`/run/stormblock/local-disk.json`) and has no
+flow-over reports `failed` to the appliance at once, with the drive by
+serial and the reason; the intent stays `install`. The origin is carried in format v2's volume header,
 after the fields older engines read, so they skip it. Format v1 records none.
 
 Every slab this engine formats reserves a region for that record — `slab
