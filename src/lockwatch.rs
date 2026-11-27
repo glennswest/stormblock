@@ -233,6 +233,54 @@ impl LockState {
         WaitMark { state: self.clone(), entry: e }
     }
 
+    /// Whether the current task already holds this lock (#752): asking for
+    /// it again waits on itself. A write held, or a write asked for, never
+    /// ends (`Some((true, …))`); a read under a read waits only once a
+    /// writer queues between them (`Some((false, …))`). The message names
+    /// both call sites.
+    fn reentry(&self, write: bool, at: &'static Location<'static>) -> Option<(bool, String)> {
+        let me = tokio::task::try_id()?;
+        let holders = self.holders.lock().unwrap_or_else(|p| p.into_inner());
+        let mine = holders.iter().find(|e| e.task == Some(me))?;
+        let certain = mine.write || write;
+        Some((
+            certain,
+            format!(
+                "lock: DEADLOCK: {} asks for the {}{} at {} while it holds it{} since {} ({:.1}s ago){} (#752)",
+                mine.who,
+                self.name,
+                if write { " (write)" } else { " (read)" },
+                site(at),
+                if mine.write { " (write)" } else { " (read)" },
+                site(mine.at),
+                mine.since.elapsed().as_secs_f64(),
+                if certain { ": it waits on itself, and everything behind it on it" } else { ": it waits on itself once a writer queues" }
+            ),
+        ))
+    }
+
+    /// [`reentry`](Self::reentry), said once a call site: ERROR (a certain
+    /// one, and a panic with `STORMBLOCK_LOCK_ASSERT=1`, so a test that
+    /// reaches one fails at the line) or WARN.
+    fn check_reentry(&self, write: bool, at: &'static Location<'static>) {
+        let Some((certain, msg)) = self.reentry(write, at) else { return };
+        let set = |v: &str| std::env::var_os(v).as_deref() == Some(std::ffi::OsStr::new("1"));
+        if certain && (set("STORMBLOCK_LOCK_ASSERT") || set("STORMBLOCK_LOCK_REENTRY_ASSERT")) {
+            panic!("{msg}");
+        }
+        // Once a pair of sites: a read under a read on the I/O path would
+        // otherwise be a line an I/O.
+        static SAID: OnceLock<StdMutex<std::collections::HashSet<(&'static str, u32, &'static str)>>> = OnceLock::new();
+        if !SAID.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner()).insert((at.file(), at.line(), self.name)) {
+            return;
+        }
+        if certain {
+            tracing::error!("{msg}");
+        } else {
+            tracing::warn!("{msg}");
+        }
+    }
+
     fn hold(self: &Arc<Self>, write: bool, at: &'static Location<'static>) -> HoldMark {
         let e = Entry { id: NEXT.fetch_add(1, Ordering::Relaxed), who: current_name(), since: Instant::now(), write, task: tokio::task::try_id(), at };
         self.holders.lock().unwrap_or_else(|p| p.into_inner()).push(e.clone());
@@ -367,6 +415,7 @@ impl<T> TrackedMutex<T> {
         let at = Location::caller();
         async move {
             lock_order(self.state.name);
+            self.state.check_reentry(true, at);
             let wait = self.state.wait(true, at);
             let guard = self.inner.lock().await;
             wait.done(false);
@@ -386,6 +435,7 @@ impl<T> TrackedMutex<T> {
         let at = Location::caller();
         async move {
             lock_order(self.state.name);
+            self.state.check_reentry(true, at);
             let wait = self.state.wait(true, at);
             let guard = self.inner.clone().lock_owned().await;
             wait.done(false);
@@ -460,6 +510,7 @@ impl<T> TrackedRwLock<T> {
     pub fn read(&self) -> impl Future<Output = TrackedReadGuard<'_, T>> + '_ {
         let at = Location::caller();
         async move {
+            self.state.check_reentry(false, at);
             let wait = self.state.wait(false, at);
             let guard = self.inner.read().await;
             wait.done(true);
@@ -471,6 +522,7 @@ impl<T> TrackedRwLock<T> {
     pub fn write(&self) -> impl Future<Output = TrackedWriteGuard<'_, T>> + '_ {
         let at = Location::caller();
         async move {
+            self.state.check_reentry(true, at);
             let wait = self.state.wait(true, at);
             let guard = self.inner.write().await;
             wait.done(true);
@@ -797,6 +849,32 @@ mod tests {
         let _g = m.try_lock().unwrap();
         let v = snapshot().into_iter().filter(|v| v.lock == name_of::<SiteLock>()).find(|v| !v.holders.is_empty()).unwrap();
         assert_eq!(v.holders[0].at, at);
+    }
+
+    struct ReentryLock;
+
+    /// #752: a task that asks again for a lock it holds is said, with both
+    /// sites: certain under a write, possible for a read under a read; never
+    /// for another task, nor once the guard is gone.
+    #[tokio::test]
+    async fn a_task_asking_again_for_a_lock_it_holds_is_said_with_both_sites() {
+        let l = Arc::new(TrackedRwLock::new(ReentryLock));
+        let here = Location::caller();
+        let g = named("the eraser", l.write()).await;
+        let (certain, msg) = named("the eraser", async { l.state.reentry(false, here) }).await.expect("held by this task");
+        assert!(certain, "a read under its own write never ends");
+        assert!(msg.contains("DEADLOCK: the eraser asks for the") && msg.contains("(read) at src/lockwatch.rs:"), "{msg}");
+        assert!(msg.contains("while it holds it (write) since src/lockwatch.rs:"), "{msg}");
+        // Another task holds nothing: no reentry.
+        let l2 = l.clone();
+        assert!(tokio::spawn(async move { l2.state.reentry(true, Location::caller()) }).await.unwrap().is_none());
+        drop(g);
+        assert!(l.state.reentry(true, here).is_none(), "nothing held once the guard drops");
+        let r = l.read().await;
+        let (certain, msg) = l.state.reentry(false, here).unwrap();
+        assert!(!certain && msg.contains("once a writer queues"), "{msg}");
+        assert!(l.state.reentry(true, here).unwrap().0, "a write under its own read never ends");
+        drop(r);
     }
 
     /// Only a write hold past [`WRITE_STUCK`] is stuck: a long read, or a
