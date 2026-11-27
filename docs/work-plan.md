@@ -4,7 +4,7 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
-## #756 — an install refused a drive whose system-half records do not read, and never reported (2026-11-26, P1)
+## #756 — an install refused a drive whose system-half records do not read, and never reported (2026-11-26, P1) — DONE
 
 server7 14.09-flowsdn: `not installing over /dev/sda … the system half's
 records do not read (metadata page 5 is named twice or past the region)`,
@@ -33,7 +33,8 @@ Plan:
 
 Done in 9527281f. The gate side: stormcentral reads forge's `install.state:
 failed` only on a formatting install (`if formats` in testhosts.rs), noted on
-stormcentral#1327, which asks for exactly that.
+stormcentral#1327, which asks for exactly that. check.sh ALL PASS at 73893910
+(1657 nextest tests passed, clippy, musl release build, initramfs and runtime tests).
 
 ## #755 — the stormblock golden built here: deploy/build-image.sh, stage mode retired (2026-11-26, stormcentral#1836) — DONE
 
