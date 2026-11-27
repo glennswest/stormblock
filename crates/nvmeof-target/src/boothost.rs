@@ -47,6 +47,9 @@ pub enum Intent {
     Install,
     Local,
     Auto,
+    /// An install over drives the boot agent wiped first (stormblock#754):
+    /// `install` to the claim, reset to `local` once laid.
+    Fresh,
 }
 
 impl Intent {
@@ -55,6 +58,7 @@ impl Intent {
             Intent::Install => "install",
             Intent::Local => "local",
             Intent::Auto => "auto",
+            Intent::Fresh => "fresh",
         }
     }
 
@@ -63,6 +67,7 @@ impl Intent {
             "install" => Some(Intent::Install),
             "local" => Some(Intent::Local),
             "auto" => Some(Intent::Auto),
+            "fresh" => Some(Intent::Fresh),
             _ => None,
         }
     }
@@ -318,7 +323,8 @@ async fn claim(
             "host_nqns": [c.host_nqn],
         },
         "host": {"name": host, "claimed_as": name, "provisional": provisional, "mac": mac},
-        "intent": intent.as_str(),
+        "intent": if intent == Intent::Fresh { "install" } else { intent.as_str() },
+        "fresh": intent == Intent::Fresh,
         "volume": {"id": volume, "name": format!("boothost-{host}"), "size_bytes": b.target.image().blocks()
             * b.target.image().block_size() as u64, "sealed": false, "access": "rw"},
     });
@@ -341,7 +347,7 @@ async fn installed(State(b): State<Arc<Boothost>>, Path(name): Path<String>, Jso
         return error(StatusCode::CONFLICT, format!("{} is not a claim of {name}", body.volume));
     }
     let stage = body.stage.unwrap_or_else(|| "laid".into());
-    if stage == "laid" && rec.intent == Intent::Install {
+    if stage == "laid" && matches!(rec.intent, Intent::Install | Intent::Fresh) {
         rec.intent = Intent::Local;
     }
     rec.installed = Some(stage.clone());
@@ -412,6 +418,14 @@ async fn command_done(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// stormblock#754: `fresh` parses and is said as itself.
+    #[test]
+    fn fresh_is_an_intent_of_its_own() {
+        assert_eq!(Intent::parse(" Fresh "), Some(Intent::Fresh));
+        assert_eq!(Intent::Fresh.as_str(), "fresh");
+        assert_eq!(Intent::parse("reinstall"), None);
+    }
 
     #[test]
     fn macs_are_one_spelling() {

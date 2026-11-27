@@ -1498,7 +1498,10 @@ async fn claim_boothost(
     let host_secret = state.synonyms.write().await.mint_host_secret(tag);
     // What the override makes of this boot (#354): `local` or `recovery` in
     // place of the intent, reported done by the boot's last claim.
-    let mut intent_word = intent.as_str().to_string();
+    // `fresh` is `install` to the installer (#754): the boot agent has
+    // wiped by now, and an initramfs before it writes no install ticket for
+    // a word it does not know. `fresh: true` says which it was.
+    let mut intent_word = if intent == BootIntent::Fresh { "install".to_string() } else { intent.as_str().to_string() };
     if let Some(o) = ov.as_ref().filter(|o| o.action == "local" || o.action == "recovery") {
         intent_word = o.action.clone();
         if from_initramfs {
@@ -1510,6 +1513,7 @@ async fn claim_boothost(
     let install_config = crate::mgmt::install_config::for_claim(&state, tag);
     let out = json!({
         "intent": intent_word,
+        "fresh": intent == BootIntent::Fresh,
         "override": ov,
         "host_secret": host_secret,
         // Where that secret is used (#524): the management API, whichever
@@ -1793,7 +1797,7 @@ async fn override_install(state: &Arc<AppState>, tag: &str, o: &crate::mgmt::boo
         }
     }
     let intent = store.host(tag).map(|h| h.intent).unwrap_or_default();
-    if intent != BootIntent::Install {
+    if !intent.is_install() {
         store.set_intent(tag, BootIntent::Install).map_err(|e| e.to_string())?;
     }
     Ok(())

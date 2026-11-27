@@ -4,6 +4,15 @@ Moved out of CLAUDE.md on 2026-11-12: at 486 KB it filled the session's context 
 
 
 
+## #754 — boot intent `fresh` (2026-11-27, stormbootx#262, P0 there)
+
+`BootIntent::Fresh`, `"fresh"`; `is_install()` where `Install` meant claim and
+install (note_install_claim, install_done/failed/step, set_intent's reset).
+The claim reply says `install` with `fresh: true`: the initramfs's
+`note_install_ticket` writes a ticket for `install` only before this, so a new
+forge serving `fresh` to an old initramfs would install nothing. Also
+stormboot-serve's `Intent`. Laid → `local`.
+
 ## #752 — pvetest3: the slab registry held for write 90+ min by an unnamed task (2026-11-26)
 
 `held 5384.1s by task 528007 (write)`: the holder ran in no named activity,

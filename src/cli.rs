@@ -10804,7 +10804,8 @@ fn note_install_ticket(base: &str, reply: &serde_json::Value) {
     let intent = stated.unwrap_or("auto");
     eprintln!("boot-claim: intent {intent}{}", if stated.is_none() { " (none stated)" } else { "" });
     note_no_intent(std::path::Path::new(crate::drive::handover::NO_INTENT_PATH), base, stated.is_none());
-    let ticket = (intent == "install")
+    // `fresh` (#754) is an install whose drives the boot agent wiped first.
+    let ticket = (intent == "install" || intent == "fresh")
         .then(|| {
             let host = reply.get("host")?.get("name")?.as_str()?;
             let volume = reply.get("volume")?.get("id")?.as_str()?;

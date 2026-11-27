@@ -434,10 +434,11 @@ reads *before* it claims:
 | `auto` (never set) | claims and boots the image | |
 | `install` | claims and boots; the initramfs installs over the local disk: its system half laid again, its data half kept (#311), or a fresh layout on a disk with no data slab | once the flow-over is done and the disk boots on its own, the node reports it laid and the intent becomes `local`; the first boot off the disk reports it booted (#220) |
 | `local` | boots the local disk at once: no claim, no clone | |
+| `fresh` (#754, stormbootx#262) | wipes the drives the install takes (never its own boot media), then claims as for `install` | `install` in every other way: the claim reply says `intent: install` with `fresh: true` (an initramfs before this writes no ticket for a word it does not know), failures are recorded, and once laid the intent becomes `local`, so a reboot never wipes twice. An older stormbootx reads `fresh` as `auto`: it claims and wipes nothing |
 
 ```
 GET  /api/v1/synonyms/boothost/<name>/intent      → {host, intent, updated_at}   open
-PUT  /api/v1/synonyms/boothost/<name>/intent      {"intent": "install"|"local"|"auto"}  admin token
+PUT  /api/v1/synonyms/boothost/<name>/intent      {"intent": "install"|"fresh"|"local"|"auto"}  admin token
 PUT  /api/v1/synonyms/boothost/<name>/install-config   the YAML (#459)       admin token
 PUT  /api/v1/volumes/{id}/secret        {"secret": true} (#74, one way)        admin token
 GET  /api/v1/synonyms/boothost/<name>/install-config   the YAML              admin token (it carries secrets)

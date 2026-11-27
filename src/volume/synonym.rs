@@ -317,6 +317,13 @@ pub enum BootIntent {
     Install,
     /// Boot the local disk at once: no claim, no clone.
     Local,
+    /// An install over drives wiped first (#754, stormbootx#262, for
+    /// stormcentral#1823's fresh install): the boot agent wipes the drives
+    /// the install takes, never its own boot media, then claims as for
+    /// `install`. To the engine it is `install` in every other way: the
+    /// claim, the install's reports, and the reset to `local` once laid, so
+    /// a reboot never wipes twice.
+    Fresh,
 }
 
 impl BootIntent {
@@ -324,11 +331,18 @@ impl BootIntent {
         *self == BootIntent::Auto
     }
 
+    /// Claim and install (#754): `install`, or `fresh` (the same after the
+    /// boot agent's wipe).
+    pub fn is_install(&self) -> bool {
+        matches!(self, BootIntent::Install | BootIntent::Fresh)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             BootIntent::Auto => "auto",
             BootIntent::Install => "install",
             BootIntent::Local => "local",
+            BootIntent::Fresh => "fresh",
         }
     }
 }
@@ -340,7 +354,8 @@ impl std::str::FromStr for BootIntent {
             "auto" => Ok(BootIntent::Auto),
             "install" => Ok(BootIntent::Install),
             "local" => Ok(BootIntent::Local),
-            other => Err(format!("intent {other:?}: expected install, local or auto")),
+            "fresh" => Ok(BootIntent::Fresh),
+            other => Err(format!("intent {other:?}: expected install, fresh, local or auto")),
         }
     }
 }
@@ -1156,7 +1171,7 @@ impl SynonymStore {
         h.install_claim = None;
         // A new install request starts over: the last one's progress no
         // longer answers for this machine (#220).
-        if intent == BootIntent::Install {
+        if intent.is_install() {
             h.install = None;
             h.install_failure = None;
             h.install_step = None;
@@ -1263,7 +1278,7 @@ impl SynonymStore {
     /// that clone is the install whose completion resets it. The later of
     /// the firmware's and the initramfs's claims is the one that installs.
     pub fn note_install_claim(&mut self, host: &str, clone: VolumeId) {
-        if let Some(h) = self.hosts.get_mut(host).filter(|h| h.intent == BootIntent::Install) {
+        if let Some(h) = self.hosts.get_mut(host).filter(|h| h.intent.is_install()) {
             h.install_claim = Some(clone);
             self.persist();
         }
@@ -1275,7 +1290,7 @@ impl SynonymStore {
     /// an install that began before the request, or one made up.
     pub fn install_done(&mut self, name: &str, clone: VolumeId) -> Result<(Host, InstallDone), SynonymError> {
         let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
-        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent == BootIntent::Install) else {
+        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent.is_install()) else {
             let h = self.host(&host).unwrap_or_default();
             return Ok((h, InstallDone::NotRequested));
         };
@@ -1306,7 +1321,7 @@ impl SynonymStore {
     /// requested. Reported again: the later reason is kept.
     pub fn install_failed(&mut self, name: &str, clone: VolumeId, reason: &str) -> Result<(Host, InstallDone), SynonymError> {
         let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
-        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent == BootIntent::Install) else {
+        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent.is_install()) else {
             let h = self.host(&host).unwrap_or_default();
             return Ok((h, InstallDone::NotRequested));
         };
@@ -1333,7 +1348,7 @@ impl SynonymStore {
     /// intent stays `install`. `NotRequested` when no install is asked.
     pub fn install_step(&mut self, name: &str, clone: VolumeId, stage: &str, detail: &str) -> Result<(Host, InstallDone), SynonymError> {
         let host = self.host_of(name).ok_or_else(|| SynonymError::NotFound(key(BOOTHOST_NS, name)))?;
-        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent == BootIntent::Install) else {
+        let Some(h) = self.hosts.get_mut(&host).filter(|h| h.intent.is_install()) else {
             let h = self.host(&host).unwrap_or_default();
             return Ok((h, InstallDone::NotRequested));
         };
@@ -1770,6 +1785,41 @@ mod tests {
         // Asked again: the old report does not answer for the new request.
         s.set_intent("server1", BootIntent::Install).unwrap();
         assert!(s.install_done("server1", initramfs).is_err());
+    }
+
+    /// #754 (stormbootx#262): `fresh` is stored and served as itself, and is
+    /// `install` in all else: the claim is the install's, a failure is
+    /// recorded, a new request starts over, and the report of the disk laid
+    /// sets it back to `local`, so a reboot never wipes twice.
+    #[test]
+    fn fresh_is_an_install_that_goes_back_to_local_once_laid() {
+        for (w, want) in [("fresh", BootIntent::Fresh), (" FRESH ", BootIntent::Fresh)] {
+            assert_eq!(w.parse::<BootIntent>().unwrap(), want);
+        }
+        assert_eq!(BootIntent::Fresh.as_str(), "fresh");
+        assert!(BootIntent::Fresh.is_install() && BootIntent::Install.is_install());
+        assert!(!BootIntent::Local.is_install() && !BootIntent::Auto.is_install());
+        assert_eq!(serde_json::to_value(BootIntent::Fresh).unwrap(), serde_json::json!("fresh"));
+        let e = "reinstall".parse::<BootIntent>().unwrap_err();
+        assert!(e.contains("fresh"), "{e}");
+
+        let mut s = SynonymStore::in_memory();
+        s.create(BOOTHOST_NS, "server7", Target::Volume { id: vol() }, None, None).unwrap();
+        let (clone, again) = (vol(), vol());
+        assert_eq!(s.set_intent("server7", BootIntent::Fresh).unwrap().intent, BootIntent::Fresh);
+        s.note_install_claim("server7", clone);
+        assert_eq!(s.host("server7").unwrap().install_claim, Some(clone), "the claim is the install's");
+        // A failure is the install's too, and leaves the intent fresh.
+        let (h, out) = s.install_failed("server7", clone, "the drive was refused").unwrap();
+        assert_eq!((h.intent, out), (BootIntent::Fresh, InstallDone::Reset));
+        assert_eq!(h.install_json().unwrap()["state"], "failed");
+        // Asked again: the old failure no longer answers for this machine.
+        s.set_intent("server7", BootIntent::Fresh).unwrap();
+        assert!(s.host("server7").unwrap().install_failure.is_none());
+        s.note_install_claim("server7", again);
+        let (h, done) = s.install_done("server7", again).unwrap();
+        assert_eq!((h.intent, done, h.install_claim), (BootIntent::Local, InstallDone::Reset, None), "laid: local, never wiped again");
+        assert_eq!(s.install_done("server7", again).unwrap().1, InstallDone::NotRequested);
     }
 
     /// #220: laid when the successor reports, booted when the first boot off

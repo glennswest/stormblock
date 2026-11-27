@@ -1505,6 +1505,25 @@ async fn a_boot_intent_is_read_open_set_by_the_admin_and_install_is_one_shot() {
         .send().await.unwrap().json().await.unwrap();
     assert_eq!(h["intent"], "local");
     assert_eq!(h["install"]["state"], "booted");
+
+    // #754 (stormbootx#262): `fresh`, set by the admin, is served as itself
+    // to the boot agent (which wipes on it); the claim tells the installer
+    // `install` with `fresh: true`; laid, it goes back to local, so a reboot
+    // never wipes twice.
+    let r = put(Some("adm"), serde_json::json!({"intent": "fresh"})).await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<serde_json::Value>().await.unwrap()["intent"], "fresh");
+    let v = intent(&client, &base, "ac1f6b8aa79c").await.1;
+    assert_eq!(v["intent"], "fresh", "{v}");
+    assert!(v.get("install").is_none(), "a new request starts over: {v}");
+    let fresh = boot_claim(&client, &base, "server1").await;
+    assert_eq!((fresh["intent"].as_str(), fresh["fresh"].as_bool()), (Some("install"), Some(true)), "{fresh}");
+    let r = installed(&fresh["volume"]["id"]).await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert_eq!((v["intent"].as_str(), v["reset"].as_bool(), v["install"]["state"].as_str()), (Some("local"), Some(true), Some("laid")), "{v}");
+    let again = boot_claim(&client, &base, "server1").await;
+    assert_eq!((again["intent"].as_str(), again["fresh"].as_bool()), (Some("local"), Some(false)), "{again}");
     assert_eq!(intent(&client, &base, "nobody").await.0, 404);
     let r = client.get(format!("{base}/api/v1/synonyms/images/server1/intent")).bearer_auth("tok").send().await.unwrap();
     assert_eq!(r.status(), 404);
