@@ -26,6 +26,10 @@ Plan (the issue's asks):
    leaves the two disagreeing, which is the corruption the durability rules
    exist to prevent. The bound reports; it does not abandon.
 
+1 and 2 in 165a3c08; check.sh ALL PASS there (1659 tests). Left open: the
+cause of the 90 min hold, from the next `lock: STUCK:` line (its site and
+the D-state stacks).
+
 ## #757 — boot-helper rows demanded into the node registry every 10 s (2026-11-26, P1) — NOT IN THIS REPO
 
 Asked: the engine reconciles only the row kinds it runs. Read at 5f0c3c11:
