@@ -1816,9 +1816,9 @@ pub fn document_of(entries: Vec<(Key, Vec<u8>)>) -> io::Result<VolumeMetadata> {
 /// past the region`. Returns the page named twice. Tests only.
 #[cfg(test)]
 pub(crate) async fn name_a_page_twice(dev: Arc<dyn BlockDevice>, base: u64, size: u64) -> io::Result<u64> {
-    let mut s = MetaV2::open(dev.clone(), base, size).await?.ok_or_else(|| err("no store to damage".into()))?;
+    let mut s = MetaV2::open(dev.clone(), base, size).await?.ok_or_else(|| err("no store to damage"))?;
     if s.root == EMPTY {
-        return Err(err("an empty store has no page to name twice".into()));
+        return Err(err("an empty store has no page to name twice"));
     }
     let old = s.root;
     let level = match &*s.node(old).await? {

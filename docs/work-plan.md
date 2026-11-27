@@ -31,6 +31,10 @@ Plan:
 3. boot-local's failed verdict carries the drive's identity; the warnings
    and the failed report name the drive by serial.
 
+Done in 9527281f. The gate side: stormcentral reads forge's `install.state:
+failed` only on a formatting install (`if formats` in testhosts.rs), noted on
+stormcentral#1327, which asks for exactly that.
+
 ## #755 — the stormblock golden built here: deploy/build-image.sh, stage mode retired (2026-11-26, stormcentral#1836) — DONE
 
 Owner: "we change in 1 repo and have to rebuild 21 is not acceptable". The
